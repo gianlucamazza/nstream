@@ -1,0 +1,32 @@
+# Maintainer: Gianluca Mazza <info@gianlucamazza.it>
+
+pkgname=nstream
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/Real-Debrid + mpv)"
+arch=('any')
+url="https://github.com/gianlucamazza/nstream"
+license=('MIT')
+depends=('python' 'mpv' 'fzf')
+optdepends=('fuzzel: GUI launcher prompt'
+            'foot: terminal used by the GUI launcher')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
+install="$pkgname.install"
+source=("$pkgname-$pkgver.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+
+  install -Dm755 nstream-fuzzel "$pkgdir/usr/bin/nstream-fuzzel"
+  install -Dm644 nstream.desktop "$pkgdir/usr/share/applications/nstream.desktop"
+  install -Dm644 config.example.json "$pkgdir/usr/share/nstream/config.example.json"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
