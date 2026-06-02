@@ -3,11 +3,28 @@ name = "nstream"
 description = "Native Stremio-like client: Cinemeta + Torrentio (Real-Debrid) + mpv."
 readme = "README.md"
 requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Gianluca Mazza", email = "info@gianlucamazza.it" }]
+keywords = ["stremio", "torrentio", "real-debrid", "mpv", "streaming", "fzf"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Multimedia :: Video",
+]
 dynamic = ["version"]
 dependencies = []
 
 [project.scripts]
 nstream = "nstream.cli:_entry"
+
+[project.urls]
+Homepage = "https://github.com/gianlucamazza/nstream"
+Repository = "https://github.com/gianlucamazza/nstream"
+Issues = "https://github.com/gianlucamazza/nstream/issues"
 
 [build-system]
 requires = ["hatchling"]

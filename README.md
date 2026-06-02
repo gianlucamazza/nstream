@@ -29,13 +29,17 @@ Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, plus `fuzz
 
 ## Install
 
-```sh
-./install.sh
-```
+| Method | Command | Notes |
+|--------|---------|-------|
+| Arch repo | `sudo pacman -Syu nstream` | from the `[gianluca]` personal repo |
+| Arch (local) | `cd packaging && makepkg -si` | builds from the tagged source tarball |
+| PyPI | `pipx install nstream` | or `pip install --user nstream` |
+| From source (dev) | `./install.sh` | `uv tool install` → `~/.local/bin/nstream` |
 
-Installs the CLI with `uv tool install` (entry point → `~/.local/bin/nstream`), drops the
-`nstream-fuzzel` helper and desktop entry, and creates `~/.config/nstream/config.json`
-from the example if absent.
+The Arch package installs `nstream` + `nstream-fuzzel` to `/usr/bin`, the desktop entry, and
+`config.example.json` under `/usr/share/nstream/`. It does **not** touch `$HOME`: after install,
+create your config (see below). `./install.sh` instead bootstraps `~/.config/nstream/config.json`
+from the example automatically.
 
 ## Develop
 

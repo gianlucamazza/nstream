@@ -8,3 +8,9 @@ __pycache__/
 .venv/
 dist/
 .ruff_cache/
+
+# Arch packaging build artifacts
+packaging/pkg/
+packaging/src/
+packaging/*.pkg.tar.zst
+packaging/*.tar.gz
