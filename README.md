@@ -67,7 +67,15 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   `/manifest.json` in your Torrentio addon URL). Get your Real-Debrid API token at
   <https://real-debrid.com/apitoken>.
 - `opensubtitles`: base URL of the OpenSubtitles v3 addon (default shown).
-- `subtitle_langs`: preferred subtitle languages, in order (used to sort the picker).
+- `subtitle_langs`: preferred subtitle languages, in order. Used to sort/auto-pick subtitles
+  and passed to mpv as `--slang` (non-overriding).
+- `audio_langs`: preferred audio languages, in order (default `["ita","eng"]`). Passed to mpv as
+  `--alang` so your language is auto-selected when the file has multiple audio tracks — injected
+  only if you haven't set `alang` yourself. `--subs-with-matching-audio=no` is also added so
+  subtitles aren't forced on when the audio is already in your language.
+- `addons`: extra Stremio addon manifest URLs (e.g. another stream or subtitle provider). Streams
+  and subtitles are aggregated across the built-in providers plus these. Manage them from the
+  settings menu.
 - `history_enabled`: keep a watch history for resume / continue-watching (`true` by default).
 - `hwdec`: mpv hardware decoding mode (default `auto-safe`). nstream passes `--hwdec=<value>`
   **only if** you haven't already set `hwdec` in `~/.config/mpv/mpv.conf` or in `mpv_args` —
@@ -106,19 +114,30 @@ nstream --sub-lang eng ...  # force the auto-picked subtitle language
 nstream --browse            # browse the Popular catalog (movies + series)
 nstream --browse nuovi      # browse New; also: popolari, top
 nstream -c                  # continue watching from history (resumes + keeps bingeing)
+nstream --settings          # open the settings menu (also: ⚙ entry in the startup menu)
 nstream --no-autoplay ...   # don't show the next-episode overlay
 nstream --no-history ...    # don't record this session
 ```
 
 From Hyprland: launch **nstream** in fuzzel → type a title → pick in the fzf TUI.
 
+## Settings
+
+`nstream --settings` (or the **⚙ Impostazioni** entry in the startup menu) opens a native fzf
+menu to edit languages, autoplay, hardware decoding, history, the Real-Debrid token (entered
+masked, never printed), and **Stremio addons** — add/remove extra manifest URLs to aggregate more
+stream/subtitle/catalog providers alongside the built-in Cinemeta/Torrentio/OpenSubtitles. On
+first run, if no config exists, nstream prompts for the Real-Debrid token and writes one.
+
 ## Files
 
 | Path | Role |
 |------|------|
 | `src/nstream/cli.py` | argparse entry point, fzf/mpv orchestration, subtitles, resume |
-| `src/nstream/api.py` | Cinemeta/Torrentio/OpenSubtitles HTTP with retry/backoff |
-| `src/nstream/config.py` | config + state path (XDG) + payload types |
+| `src/nstream/api.py` | addon resource dispatch (search/catalog/streams/subtitles) with retry/backoff |
+| `src/nstream/addons.py` | Stremio addon-protocol client (manifests, dispatch, cache) |
+| `src/nstream/settings.py` | native fzf settings menu (config + addons) |
+| `src/nstream/config.py` | config load/save (XDG, atomic 0600) + payload types |
 | `src/nstream/state.py` | watch-history persistence (resume / continue-watching) |
 | `src/nstream/nstream.lua` | mpv overlay for the next-episode countdown (loaded via `--script`) |
 | `nstream-fuzzel` | fuzzel prompt → opens the TUI in foot |

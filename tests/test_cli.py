@@ -152,17 +152,57 @@ def test_play_movie_no_script_no_advance(stub_mpv):
 
 
 def test_play_hwdec_injected_when_configured(stub_mpv, monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has_hwdec", lambda: False)
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
     cfg = Config(torrentio_base="tb", hwdec="auto-safe", mpv_args=[])
     cli.play(cfg, "Movie", "http://u")
     assert "--hwdec=auto-safe" in _FakePopen.last_args
 
 
 def test_play_hwdec_not_injected_when_user_set(stub_mpv, monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has_hwdec", lambda: True)
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: opt == "hwdec")
     cfg = Config(torrentio_base="tb", hwdec="auto-safe")
     cli.play(cfg, "Movie", "http://u")
     assert not any(a.startswith("--hwdec") for a in _FakePopen.last_args)
+
+
+# --- language preference (--alang/--slang) ---------------------------------
+
+
+def test_lang_defaults_injected(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], subtitle_langs=["ita", "eng"])
+    flags = cli._lang_defaults(cfg)
+    assert "--alang=ita,eng" in flags
+    assert "--slang=ita,eng" in flags
+    assert "--subs-with-matching-audio=no" in flags
+
+
+def test_lang_defaults_not_when_user_set_in_mpv_args(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_args=["--alang=fre"])
+    flags = cli._lang_defaults(cfg)
+    assert not any(f.startswith("--alang") for f in flags)
+    assert any(f.startswith("--slang") for f in flags)  # slang still injected
+
+
+def test_lang_defaults_not_when_in_mpv_conf(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: opt == "slang")
+    cfg = Config(torrentio_base="tb")
+    flags = cli._lang_defaults(cfg)
+    assert any(f.startswith("--alang") for f in flags)
+    assert not any(f.startswith("--slang") for f in flags)
+
+
+def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
+    """Regression: a stream with an empty name must not raise IndexError."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": ""}])
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
+    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    rc, advance = cli._play_video(
+        cfg, "movie", "tt1", "Movie", opts, auto=True, next_label=None, on_save=None
+    )
+    assert (rc, advance) == (0, False)
 
 
 # --- binge loop (_play_series) ---------------------------------------------

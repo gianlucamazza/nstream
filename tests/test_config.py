@@ -87,3 +87,47 @@ def test_autoplay_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     write_config(tmp_path, {"torrentio_base": "tb", "autoplay": False})
     assert config.load().autoplay is False
+
+
+def test_audio_langs_and_addons_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb"})
+    cfg = config.load()
+    assert cfg.audio_langs == ["ita", "eng"]
+    assert cfg.addons == []
+
+
+def test_audio_langs_and_addons_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(
+        tmp_path,
+        {"torrentio_base": "tb", "audio_langs": ["jpn"], "addons": ["https://x/manifest.json"]},
+    )
+    cfg = config.load()
+    assert cfg.audio_langs == ["jpn"]
+    assert cfg.addons == ["https://x/manifest.json"]
+
+
+def test_save_merges_and_preserves_unknown_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb", "custom": "keep"})
+    config.save({"audio_langs": ["jpn", "eng"]})
+    raw = json.loads((tmp_path / "nstream" / "config.json").read_text())
+    assert raw["custom"] == "keep"  # unknown key preserved
+    assert raw["audio_langs"] == ["jpn", "eng"]
+    assert raw["torrentio_base"] == "tb"
+
+
+def test_save_chmod_600(tmp_path, monkeypatch):
+    import stat
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.save({"torrentio_base": "tb"})
+    mode = stat.S_IMODE((tmp_path / "nstream" / "config.json").stat().st_mode)
+    assert mode == 0o600
+
+
+def test_save_no_leftover_tmp(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config.save({"torrentio_base": "tb"})
+    assert list((tmp_path / "nstream").glob(".config-*.tmp")) == []
