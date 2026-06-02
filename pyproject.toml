@@ -34,7 +34,11 @@ build-backend = "hatchling.build"
 path = "src/nstream/__init__.py"
 
 [dependency-groups]
-dev = ["ruff", "ty"]
+dev = ["ruff", "ty", "pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [tool.ruff]
 line-length = 100
@@ -42,6 +46,10 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally exercise private helpers and use terse stub signatures.
+"tests/*" = ["E501"]
 
 [tool.ty.environment]
 root = ["./src"]
