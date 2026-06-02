@@ -3,6 +3,8 @@
   "cinemeta": "https://v3-cinemeta.strem.io",
   "opensubtitles": "https://opensubtitles-v3.strem.io",
   "subtitle_langs": ["ita", "eng"],
+  "audio_langs": ["ita", "eng"],
+  "addons": [],
   "history_enabled": true,
   "hwdec": "auto-safe",
   "autoplay": true,
