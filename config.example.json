@@ -5,5 +5,7 @@
   "subtitle_langs": ["ita", "eng"],
   "history_enabled": true,
   "hwdec": "auto-safe",
+  "autoplay": true,
+  "autoplay_lead": 15,
   "mpv_args": []
 }
