@@ -13,7 +13,8 @@ Replicates the core Stremio flow:
 5. Play the chosen stream in **mpv** (Real-Debrid resolves it to a direct link).
 
 Watch progress is tracked over mpv's IPC socket, so **resume** and a
-**continue-watching** menu work across sessions.
+**continue-watching** menu work across sessions. For series, a Netflix-style
+**next-episode overlay** appears near the end and auto-advances the binge.
 
 ## Why
 
@@ -46,10 +47,11 @@ from the example automatically.
 ```sh
 uvx ruff check . && uvx ruff format --check .   # lint + format
 uvx ty check                                    # type check
+uv run pytest                                    # unit tests
 uv run nstream "the matrix"                      # run from source
 ```
 
-Runtime stays stdlib-only; `ruff`/`ty` are dev-group tools.
+Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 
 ## Config — `~/.config/nstream/config.json`
 
@@ -70,22 +72,42 @@ Runtime stays stdlib-only; `ruff`/`ty` are dev-group tools.
 - `hwdec`: mpv hardware decoding mode (default `auto-safe`). nstream passes `--hwdec=<value>`
   **only if** you haven't already set `hwdec` in `~/.config/mpv/mpv.conf` or in `mpv_args` —
   your own mpv config always wins. Set `""` to disable the injection entirely.
+- `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
+  default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
+  **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
+  picked automatically per episode.
+- `autoplay_lead`: seconds before the end of an episode at which the overlay appears (default `15`).
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
 
 The file holds your RD token, so it is created `chmod 600` and git-ignored.
 Watch history lives separately in `~/.local/state/nstream/history.json` (no secrets).
 
+## Security & limitations
+
+- **Real-Debrid token.** It lives only in `config.json` (`chmod 600`). The Torrentio
+  playback URL embeds the token by design (same as Stremio), so it is passed to `mpv` on
+  its command line — visible to your own user via `/proc`, but nstream never prints it, never
+  writes it to a log, and never persists it elsewhere. nstream also runs mpv with
+  `--no-resume-playback` (nstream owns resume), and mpv's default
+  `--write-filename-in-watch-later-config=no` keeps the URL out of `watch_later` files.
+- **Autoplay overlay.** If you set `--end` in `mpv_args`, the overlay won't appear (mpv still
+  reports the full media duration). With `keep-open=yes` the auto-advance still fires, via the
+  `time-pos`/`end-file` path.
+
 ## Usage
 
 ```sh
-nstream "the matrix"      # search, pick with fzf, play
-nstream                   # continue-watching menu (if any), else prompts for a query
-nstream --play "dune"     # auto-pick the top stream, skip the stream menu
-nstream --subs "dune"     # also pick subtitles (OpenSubtitles) before playing
-nstream --browse          # browse the Popular catalog (movies + series)
-nstream --browse nuovi    # browse New; also: popolari, top
-nstream -c                # continue watching from history
-nstream --no-history ...  # don't record this session
+nstream "the matrix"        # search, pick with fzf, play
+nstream                     # continue-watching menu (if any), else prompts for a query
+nstream --play "dune"       # auto-pick the top stream, skip the stream menu
+nstream --subs "dune"       # auto-pick subtitles in your preferred language
+nstream --sub-menu "dune"   # pick subtitles by hand (fzf)
+nstream --sub-lang eng ...  # force the auto-picked subtitle language
+nstream --browse            # browse the Popular catalog (movies + series)
+nstream --browse nuovi      # browse New; also: popolari, top
+nstream -c                  # continue watching from history (resumes + keeps bingeing)
+nstream --no-autoplay ...   # don't show the next-episode overlay
+nstream --no-history ...    # don't record this session
 ```
 
 From Hyprland: launch **nstream** in fuzzel → type a title → pick in the fzf TUI.
@@ -98,6 +120,7 @@ From Hyprland: launch **nstream** in fuzzel → type a title → pick in the fzf
 | `src/nstream/api.py` | Cinemeta/Torrentio/OpenSubtitles HTTP with retry/backoff |
 | `src/nstream/config.py` | config + state path (XDG) + payload types |
 | `src/nstream/state.py` | watch-history persistence (resume / continue-watching) |
+| `src/nstream/nstream.lua` | mpv overlay for the next-episode countdown (loaded via `--script`) |
 | `nstream-fuzzel` | fuzzel prompt → opens the TUI in foot |
 | `nstream.desktop` | app launcher entry |
 | `pyproject.toml` | metadata, entry point, ruff/ty config |

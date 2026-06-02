@@ -14,3 +14,4 @@ packaging/pkg/
 packaging/src/
 packaging/*.pkg.tar.zst
 packaging/*.tar.gz
+packaging/*.sig
