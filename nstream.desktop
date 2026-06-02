@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=nstream
+Comment=Native Stremio-like client (Cinemeta + Torrentio + Real-Debrid + mpv)
+Icon=multimedia-video-player
+Terminal=false
+Exec=nstream-fuzzel
+Type=Application
+Categories=AudioVideo;Video;Player;
+Keywords=stream;movie;series;film;serie;torrentio;

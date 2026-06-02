@@ -1,0 +1,8 @@
+{
+  "torrentio_base": "sort=qualitysize|realdebrid=YOUR_REALDEBRID_API_TOKEN",
+  "cinemeta": "https://v3-cinemeta.strem.io",
+  "opensubtitles": "https://opensubtitles-v3.strem.io",
+  "subtitle_langs": ["ita", "eng"],
+  "history_enabled": true,
+  "mpv_args": []
+}

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fuzzel-driven entry for nstream: prompt for a title, then run the fzf TUI in foot.
+set -euo pipefail
+q=$(: | fuzzel --dmenu --prompt "guarda> " --lines 0) || exit 0
+[ -n "$q" ] || exit 0
+exec foot -T nstream nstream "$q"
