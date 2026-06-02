@@ -1,0 +1,10 @@
+# Never commit the real config: it contains the Real-Debrid API token
+config.json
+*.local.json
+
+# Python / build
+__pycache__/
+*.pyc
+.venv/
+dist/
+.ruff_cache/
