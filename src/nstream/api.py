@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import random
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import addons
 from .config import Config, Meta, Stream, Subtitle, Video
 
 UA = "Mozilla/5.0 nstream"
@@ -64,42 +66,99 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
     raise NetworkError(f"{what}: rete non raggiungibile dopo {retries + 1} tentativi") from last_exc
 
 
+def _dedup(items: list, key) -> list:
+    seen: set = set()
+    out: list = []
+    for it in items:
+        k = key(it)
+        if k not in seen:
+            seen.add(k)
+            out.append(it)
+    return out
+
+
 def search(cfg: Config, query: str) -> list[Meta]:
-    metas: list[Meta] = []
     q = urllib.parse.quote(query)
-    for typ in ("movie", "series"):
-        url = f"{cfg.cinemeta}/catalog/{typ}/top/search={q}.json"
-        metas.extend(http_get_json(url, what=f"ricerca {typ}").get("metas", []))
-    return metas
+    metas: list[Meta] = []
+    for addon in addons.effective_addons(cfg):
+        for typ in ("movie", "series"):
+            if not addons.serves(addon, "catalog", typ):
+                continue
+            url = f"{addon.base}/catalog/{typ}/top/search={q}.json"
+            try:
+                metas.extend(
+                    http_get_json(url, what=f"ricerca {typ} ({addon.name})").get("metas", [])
+                )
+            except NetworkError:
+                continue
+    return _dedup(metas, lambda m: m.get("id") or id(m))
 
 
 def catalog(
     cfg: Config, typ: str, cat: str = "top", *, genre: str | None = None, skip: int = 0
 ) -> list[Meta]:
-    # Cinemeta extras are path segments, not query params: /catalog/{typ}/{cat}/genre=X/skip=N.json
+    # Stremio extras are path segments, not query params: /catalog/{typ}/{cat}/genre=X/skip=N.json
     extras = ""
     if genre:
         extras += f"/genre={urllib.parse.quote(genre)}"
     if skip:
         extras += f"/skip={skip}"
-    url = f"{cfg.cinemeta}/catalog/{typ}/{cat}{extras}.json"
-    return http_get_json(url, what="catalogo").get("metas", [])
+    metas: list[Meta] = []
+    for addon in addons.effective_addons(cfg):
+        if not addons.serves(addon, "catalog", typ):
+            continue
+        # Built-in Cinemeta has these catalogs; a user addon must declare them.
+        if not addon.builtin and (typ, cat) not in addon.catalogs:
+            continue
+        url = f"{addon.base}/catalog/{typ}/{cat}{extras}.json"
+        try:
+            metas.extend(http_get_json(url, what=f"catalogo ({addon.name})").get("metas", []))
+        except NetworkError:
+            continue
+    return _dedup(metas, lambda m: m.get("id") or id(m))
 
 
 def episodes(cfg: Config, series_id: str) -> list[Video]:
-    data = http_get_json(f"{cfg.cinemeta}/meta/series/{series_id}.json", what="episodi")
-    vids: list[Video] = [v for v in data.get("meta", {}).get("videos", []) if v.get("season")]
-    vids.sort(key=lambda v: (v.get("season", 0), v.get("episode", 0)))
-    return vids
+    for addon in addons.effective_addons(cfg):
+        if not addons.serves(addon, "meta", "series", series_id):
+            continue
+        try:
+            data = http_get_json(
+                f"{addon.base}/meta/series/{series_id}.json", what=f"episodi ({addon.name})"
+            )
+        except NetworkError:
+            continue
+        vids: list[Video] = [v for v in data.get("meta", {}).get("videos", []) if v.get("season")]
+        if vids:
+            vids.sort(key=lambda v: (v.get("season", 0), v.get("episode", 0)))
+            return vids
+    return []
 
 
 def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
-    # NB: this URL embeds the Real-Debrid token — keep it out of error messages.
-    base = urllib.parse.quote(cfg.torrentio_base, safe="=|")
-    url = f"https://torrentio.strem.fun/{base}/stream/{typ}/{video_id}.json"
-    return http_get_json(url, what="stream").get("streams", [])
+    out: list[Stream] = []
+    for addon in addons.effective_addons(cfg):
+        if not addons.serves(addon, "stream", typ, video_id):
+            continue
+        # NB: a stream addon's base may embed the Real-Debrid token — `what` uses the
+        # addon name, never the URL, so errors never leak it.
+        url = f"{addon.base}/stream/{typ}/{video_id}.json"
+        try:
+            out.extend(http_get_json(url, what=f"stream ({addon.name})").get("streams", []))
+        except NetworkError as e:
+            print(f"nstream: {e}", file=sys.stderr)
+            continue
+    return _dedup(out, lambda s: s.get("url") or id(s))
 
 
 def subtitles(cfg: Config, typ: str, video_id: str) -> list[Subtitle]:
-    url = f"{cfg.opensubtitles}/subtitles/{typ}/{video_id}.json"
-    return http_get_json(url, what="sottotitoli").get("subtitles", [])
+    out: list[Subtitle] = []
+    for addon in addons.effective_addons(cfg):
+        if not addons.serves(addon, "subtitles", typ, video_id):
+            continue
+        url = f"{addon.base}/subtitles/{typ}/{video_id}.json"
+        try:
+            out.extend(http_get_json(url, what=f"sottotitoli ({addon.name})").get("subtitles", []))
+        except NetworkError:
+            continue
+    return _dedup(out, lambda s: s.get("url") or s.get("id") or id(s))
