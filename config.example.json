@@ -4,5 +4,6 @@
   "opensubtitles": "https://opensubtitles-v3.strem.io",
   "subtitle_langs": ["ita", "eng"],
   "history_enabled": true,
+  "hwdec": "auto-safe",
   "mpv_args": []
 }

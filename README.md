@@ -67,6 +67,9 @@ Runtime stays stdlib-only; `ruff`/`ty` are dev-group tools.
 - `opensubtitles`: base URL of the OpenSubtitles v3 addon (default shown).
 - `subtitle_langs`: preferred subtitle languages, in order (used to sort the picker).
 - `history_enabled`: keep a watch history for resume / continue-watching (`true` by default).
+- `hwdec`: mpv hardware decoding mode (default `auto-safe`). nstream passes `--hwdec=<value>`
+  **only if** you haven't already set `hwdec` in `~/.config/mpv/mpv.conf` or in `mpv_args` —
+  your own mpv config always wins. Set `""` to disable the injection entirely.
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
 
 The file holds your RD token, so it is created `chmod 600` and git-ignored.
