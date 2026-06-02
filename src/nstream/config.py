@@ -71,6 +71,10 @@ class Config:
     # mpv hardware decoding, injected only if the user hasn't set hwdec themselves
     # (in mpv.conf or mpv_args). Empty string disables the injection.
     hwdec: str = "auto-safe"
+    # Autoplay the next episode of a series via the in-video overlay.
+    autoplay: bool = True
+    # Seconds before the end of an episode at which the overlay appears.
+    autoplay_lead: int = 15
     mpv_args: list[str] = field(default_factory=list)
 
 
@@ -101,6 +105,13 @@ def load() -> Config:
     # Absent → default; explicit "", false or null → disabled.
     hwdec_raw = raw.get("hwdec", Config.hwdec)
     hwdec = str(hwdec_raw) if hwdec_raw else ""
+    try:
+        autoplay_lead = int(raw.get("autoplay_lead", Config.autoplay_lead))
+    except (TypeError, ValueError):
+        autoplay_lead = Config.autoplay_lead
+    # Clamp to a sane range: 0 would show the overlay only in the last half second,
+    # huge values would keep it on screen the whole time.
+    autoplay_lead = max(1, min(autoplay_lead, 120))
     return Config(
         torrentio_base=base,
         cinemeta=raw.get("cinemeta", Config.cinemeta),
@@ -108,5 +119,7 @@ def load() -> Config:
         subtitle_langs=list(raw.get("subtitle_langs", ["ita", "eng"])),
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,
+        autoplay=bool(raw.get("autoplay", Config.autoplay)),
+        autoplay_lead=autoplay_lead,
         mpv_args=list(raw.get("mpv_args", [])),
     )

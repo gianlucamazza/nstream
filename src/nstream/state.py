@@ -7,14 +7,45 @@ file yields an empty history so playback is never blocked by state errors.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
+import time
 
-from .config import Config, HistoryEntry, state_path
+from .config import Config, HistoryEntry, Video, state_path
 
 # Past this fraction of the runtime a title counts as watched and drops out of
 # the continue-watching list.
 WATCHED_THRESHOLD = 0.9
+
+
+def make_entry(
+    video_id: str,
+    title: str,
+    typ: str,
+    pos: float,
+    dur: float,
+    *,
+    series_id: str = "",
+    video: Video | None = None,
+    season: int = 0,
+    episode: int = 0,
+) -> HistoryEntry:
+    """Build a HistoryEntry, filling series fields from `video` when given."""
+    entry: HistoryEntry = {
+        "video_id": video_id,
+        "title": title,
+        "type": typ,
+        "position": pos,
+        "duration": dur,
+        "ts": time.time(),
+    }
+    if typ == "series":
+        entry["series_id"] = series_id
+        entry["season"] = video.get("season", 0) if video is not None else season
+        entry["episode"] = video.get("episode", 0) if video is not None else episode
+    return entry
 
 
 def load_history(cfg: Config) -> dict[str, HistoryEntry]:
@@ -46,10 +77,18 @@ def save_entry(cfg: Config, entry: HistoryEntry) -> None:
 
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(history, ensure_ascii=False))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    # Unique temp name so concurrent nstream processes don't clobber each other's
+    # write before the atomic replace.
+    fd, tmp = tempfile.mkstemp(prefix=".history-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def recent(cfg: Config, limit: int = 30) -> list[HistoryEntry]:

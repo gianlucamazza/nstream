@@ -15,12 +15,25 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
+from importlib import resources
 
 from . import __version__, api, state
 from .config import Config, ConfigError, HistoryEntry, Meta, Stream, Subtitle, Video, load
 
 # --browse keyword → Cinemeta catalog id.
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
+
+
+@dataclass(frozen=True)
+class PlayOpts:
+    """Per-invocation playback preferences threaded through the flow."""
+
+    auto: bool  # auto-pick the top stream (skip the stream menu)
+    sub_mode: str | None  # None = no subs, "auto" = pick preferred lang, "menu" = fzf
+    sub_lang: str | None  # force this language for sub_mode="auto"
+    history: bool  # record/resume watch history
+    autoplay: bool  # offer the next-episode overlay for series
 
 
 def fzf[T](items: list[tuple[str, T]], prompt: str) -> T | None:
@@ -64,10 +77,26 @@ def history_label(e: HistoryEntry) -> str:
     return f"{title}{pct}"
 
 
+def display_title(name: str, video: Video | None) -> str:
+    """The media title shown by mpv (OSC, window, taskbar)."""
+    if video is None:
+        return name
+    label = f"{name} · S{video.get('season', 0):02d}E{video.get('episode', 0):02d}"
+    epname = video.get("name")
+    return f"{label} · {epname}" if epname else label
+
+
+def _fmt_time(sec: float) -> str:
+    total = int(sec)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 # --- subtitles ------------------------------------------------------------
 
 
-def _download_subtitle(sub: Subtitle) -> str | None:
+def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
     url = sub.get("url")
     if not url:
         return None
@@ -81,13 +110,22 @@ def _download_subtitle(sub: Subtitle) -> str | None:
     if url.endswith(".gz") or raw[:2] == b"\x1f\x8b":
         with contextlib.suppress(OSError):
             raw = gzip.decompress(raw)
-    fd, path = tempfile.mkstemp(prefix=f"nstream-{sub.get('lang', 'sub')}-", suffix=".srt")
+    # Written into the per-play temp dir so it is cleaned up with everything else.
+    fd, path = tempfile.mkstemp(prefix=f"{sub.get('lang', 'sub')}-", suffix=".srt", dir=work_dir)
     with os.fdopen(fd, "wb") as f:
         f.write(raw)
     return path
 
 
-def pick_subtitles(cfg: Config, typ: str, video_id: str) -> tuple[str, ...]:
+def pick_subtitles(
+    cfg: Config,
+    typ: str,
+    video_id: str,
+    work_dir: str,
+    *,
+    mode: str = "auto",
+    lang: str | None = None,
+) -> tuple[str, ...]:
     try:
         subs = api.subtitles(cfg, typ, video_id)
     except api.NetworkError as e:
@@ -96,20 +134,31 @@ def pick_subtitles(cfg: Config, typ: str, video_id: str) -> tuple[str, ...]:
     if not subs:
         print("nstream: nessun sottotitolo", file=sys.stderr)
         return ()
-    pref = {lang: i for i, lang in enumerate(cfg.subtitle_langs)}
+    langs = [lang] if lang else cfg.subtitle_langs
+    pref = {code: i for i, code in enumerate(langs)}
     subs.sort(key=lambda s: pref.get(s.get("lang", ""), len(pref)))
-    items = [(f"{s.get('lang', '?'):5s} {s.get('id', '')}", s) for s in subs]
-    chosen = fzf(items, "sottotitolo> ")
+    if mode == "menu":
+        items = [(f"{s.get('lang', '?'):5s} {s.get('id', '')}", s) for s in subs]
+        chosen = fzf(items, "sottotitolo> ")
+    else:  # auto: take the best preferred-language track, else skip silently
+        chosen = subs[0] if subs[0].get("lang", "") in pref else None
+        if chosen is None:
+            print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
     if not chosen:
         return ()
-    path = _download_subtitle(chosen)
+    path = _download_subtitle(chosen, work_dir)
     return (path,) if path else ()
 
 
 # --- playback + position tracking ----------------------------------------
 
 
-def _track_position(sock_path: str, holder: dict[str, float], proc: subprocess.Popen) -> None:
+def _track_position(
+    sock_path: str,
+    holder: dict[str, float],
+    proc: subprocess.Popen,
+    resume_msg: str | None = None,
+) -> None:
     """Observe mpv's time-pos/duration over the IPC socket; record the last values."""
     sock: socket.socket | None = None
     for _ in range(50):
@@ -127,9 +176,21 @@ def _track_position(sock_path: str, holder: dict[str, float], proc: subprocess.P
     try:
         for cid, prop in ((1, "time-pos"), (2, "duration")):
             sock.sendall(f'{{"command":["observe_property",{cid},"{prop}"]}}\n'.encode())
+        if resume_msg:
+            payload = json.dumps({"command": ["show-text", resume_msg, 4000]})
+            sock.sendall(payload.encode() + b"\n")
+        # Time out recv so we notice mpv exiting promptly and the thread joins
+        # cleanly — otherwise a blocked recv could outlive mpv and lose the last
+        # observed position.
+        sock.settimeout(0.5)
         buf = b""
         while True:
-            chunk = sock.recv(4096)
+            try:
+                chunk = sock.recv(4096)
+            except TimeoutError:
+                if proc.poll() is not None:
+                    break
+                continue
             if not chunk:
                 break
             buf += chunk
@@ -189,45 +250,75 @@ def play(
     *,
     start: float | None = None,
     sub_paths: tuple[str, ...] = (),
-) -> tuple[float, float]:
+    next_label: str | None = None,
+    resume_msg: str | None = None,
+    work_dir: str | None = None,
+) -> tuple[float, float, bool]:
+    """Play `url` in mpv. Returns (position, duration, advance) where `advance`
+    is True when the next-episode overlay asked to continue to the next episode.
+
+    `work_dir` holds the IPC socket and overlay files; when omitted a private
+    temp dir is created and removed here (the caller passes one to share it with
+    downloaded subtitles)."""
     holder = {"position": 0.0, "duration": 0.0}
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-    sock_path = os.path.join(runtime, f"nstream-mpv-{os.getpid()}.sock")
-    # Defaults come before mpv_args so explicit user flags win.
-    args = ["mpv", f"--force-media-title={title}", *_hwdec_defaults(cfg), *cfg.mpv_args]
-    if start and start > 1:
-        args.append(f"--start={start:.0f}")
-    args += [f"--sub-file={p}" for p in sub_paths]
-    args += [f"--input-ipc-server={sock_path}", url]
-    try:
-        proc = subprocess.Popen(args)
-    except FileNotFoundError:
-        print("nstream: mpv non trovato", file=sys.stderr)
-        return (0.0, 0.0)
-    tracker = threading.Thread(target=_track_position, args=(sock_path, holder, proc), daemon=True)
-    tracker.start()
-    proc.wait()
-    tracker.join(timeout=1.0)
-    with contextlib.suppress(OSError):
-        os.unlink(sock_path)
-    return (holder["position"], holder["duration"])
+    with contextlib.ExitStack() as stack:
+        if work_dir is None:
+            runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+            work_dir = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime)
+            )
+        sock_path = os.path.join(work_dir, "mpv.sock")
+        signal_path = os.path.join(work_dir, "signal")
+        info_path = os.path.join(work_dir, "info")
+        # Defaults come before mpv_args so explicit user flags win. nstream is the
+        # single source of truth for resume (via --start over IPC), so
+        # --no-resume-playback stops mpv's own watch-later from doing a second,
+        # conflicting seek.
+        args = [
+            "mpv",
+            f"--force-media-title={title}",
+            "--no-resume-playback",
+            *_hwdec_defaults(cfg),
+            *cfg.mpv_args,
+        ]
+        if start and start > 1:
+            args.append(f"--start={start:.0f}")
+        args += [f"--sub-file={p}" for p in sub_paths]
+        args.append(f"--input-ipc-server={sock_path}")
+
+        if next_label:
+            with open(info_path, "w", encoding="utf-8") as f:
+                f.write(next_label + "\n")
+            # --script-opts-append is non-destructive: it won't clobber a user's
+            # own script-opts set for other scripts.
+            lua = stack.enter_context(resources.as_file(resources.files("nstream") / "nstream.lua"))
+            args += [
+                f"--script={lua}",
+                f"--script-opts-append=nstream-info={info_path}",
+                f"--script-opts-append=nstream-signal={signal_path}",
+                f"--script-opts-append=nstream-lead={cfg.autoplay_lead}",
+            ]
+        args.append(url)
+        try:
+            proc = subprocess.Popen(args)
+        except FileNotFoundError:
+            print("nstream: mpv non trovato", file=sys.stderr)
+            return (0.0, 0.0, False)
+        tracker = threading.Thread(
+            target=_track_position, args=(sock_path, holder, proc, resume_msg), daemon=True
+        )
+        tracker.start()
+        proc.wait()
+        tracker.join(timeout=2.0)
+        advance = False
+        if next_label:
+            with contextlib.suppress(OSError), open(signal_path, encoding="utf-8") as f:
+                advance = f.read().strip() == "next"
+
+    return (holder["position"], holder["duration"], advance)
 
 
 # --- flow ----------------------------------------------------------------
-
-
-def resolve_video_id(cfg: Config, meta: Meta) -> tuple[str, Video | None] | None:
-    if meta.get("type") != "series":
-        return (meta["id"], None)
-    vids = api.episodes(cfg, meta["id"])
-    items = [
-        (f"S{v.get('season', 0):02d}E{v.get('episode', 0):02d}  {v.get('name', '')}", v)
-        for v in vids
-    ]
-    video = fzf(items, "episodio> ")
-    if not video:
-        return None
-    return (video["id"], video)
 
 
 def _play_video(
@@ -235,109 +326,171 @@ def _play_video(
     typ: str,
     video_id: str,
     title: str,
+    opts: PlayOpts,
     *,
     auto: bool,
-    subs: bool,
-    history: bool,
+    next_label: str | None,
     on_save: Callable[[float, float], None] | None,
-) -> int:
+) -> tuple[int, bool]:
+    """Resolve streams for one video, play it, persist progress. Returns (rc, advance).
+
+    `auto` overrides `opts.auto` for this single video: the binge loop forces it
+    True from the second episode on, so use `auto` (not `opts.auto`) here."""
     results = api.streams(cfg, typ, video_id)
     if not results:
         print("nstream: nessuno stream disponibile", file=sys.stderr)
-        return 1
+        return (1, False)
     chosen = results[0] if auto else fzf([(stream_label(s), s) for s in results], "stream> ")
     if not chosen:
-        return 0
+        return (0, False)
 
-    sub_paths = pick_subtitles(cfg, typ, video_id) if subs else ()
-    start = state.load_history(cfg).get(video_id, {}).get("position") if history else None
-    print(f"▶ {title} — {(chosen.get('name') or '').splitlines()[0]}", file=sys.stderr)
-    pos, dur = play(cfg, title, chosen["url"], start=start, sub_paths=sub_paths)
-    if history and on_save and pos > 0:
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
+        sub_paths = (
+            pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
+            if opts.sub_mode
+            else ()
+        )
+        start = state.load_history(cfg).get(video_id, {}).get("position") if opts.history else None
+        resume_msg = f"⏵ Ripresa da {_fmt_time(start)}" if start and start > 1 else None
+        print(f"▶ {title} — {(chosen.get('name') or '').splitlines()[0]}", file=sys.stderr)
+        pos, dur, advance = play(
+            cfg, title, chosen["url"],
+            start=start, sub_paths=sub_paths, next_label=next_label,
+            resume_msg=resume_msg, work_dir=work_dir,
+        )  # fmt: skip
+    if opts.history and on_save and pos > 0:
         on_save(pos, dur)
+    return (0, advance)
+
+
+def _play_series(
+    cfg: Config, series_id: str, name: str, eps: list[Video], start_video: Video, opts: PlayOpts
+) -> int:
+    """Play a series from `start_video`, auto-advancing through the overlay."""
+    idx = next((i for i, v in enumerate(eps) if v.get("id") == start_video.get("id")), None)
+    if idx is None:
+        return 0
+    auto = opts.auto  # the first episode honours --play; binge episodes auto-pick
+    while 0 <= idx < len(eps):
+        video = eps[idx]
+        video_id = video["id"]
+        nxt = eps[idx + 1] if idx + 1 < len(eps) else None
+        next_label = display_title(name, nxt) if (opts.autoplay and nxt is not None) else None
+
+        def on_save(pos: float, dur: float, vid: str = video_id, v: Video = video) -> None:
+            state.save_entry(
+                cfg, state.make_entry(vid, name, "series", pos, dur, series_id=series_id, video=v)
+            )
+
+        rc, advance = _play_video(
+            cfg, "series", video_id, display_title(name, video), opts,
+            auto=auto, next_label=next_label, on_save=on_save,
+        )  # fmt: skip
+        if rc != 0:
+            return rc
+        if not advance or nxt is None:
+            return 0
+        idx += 1
+        auto = True
+        print(f"▶ Carico {display_title(name, eps[idx])}…", file=sys.stderr)
     return 0
 
 
-def play_meta(cfg: Config, meta: Meta, *, auto: bool, subs: bool, history: bool) -> int:
-    resolved = resolve_video_id(cfg, meta)
-    if not resolved:
-        return 0
-    video_id, video = resolved
+def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> int:
     typ = meta.get("type", "movie")
+    name = meta.get("name", "nstream")
+    if typ != "series":
+        movie_id = meta["id"]
+
+        def on_save(pos: float, dur: float) -> None:
+            state.save_entry(cfg, state.make_entry(movie_id, name, typ, pos, dur))
+
+        rc, _ = _play_video(
+            cfg, typ, movie_id, display_title(name, None), opts,
+            auto=opts.auto, next_label=None, on_save=on_save,
+        )  # fmt: skip
+        return rc
+
+    eps = api.episodes(cfg, meta["id"])
+    if not eps:
+        print("nstream: nessun episodio", file=sys.stderr)
+        return 1
+    items = [
+        (f"S{v.get('season', 0):02d}E{v.get('episode', 0):02d}  {v.get('name', '')}", v)
+        for v in eps
+    ]
+    start_video = fzf(items, "episodio> ")
+    if not start_video:
+        return 0
+    return _play_series(cfg, meta["id"], name, eps, start_video, opts)
+
+
+def _entry_video(entry: HistoryEntry) -> Video | None:
+    if entry.get("type") != "series":
+        return None
+    return {"season": entry.get("season", 0), "episode": entry.get("episode", 0)}
+
+
+def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> int:
+    typ = entry.get("type", "movie")
+    name = entry.get("title", "nstream")
+    series_id = entry.get("series_id", "")
+    # Resume a series and keep bingeing the rest of the season.
+    if typ == "series" and series_id and opts.autoplay:
+        eps = api.episodes(cfg, series_id)
+        cur = next((v for v in eps if v.get("id") == entry["video_id"]), None)
+        if cur is not None:
+            return _play_series(cfg, series_id, name, eps, cur, opts)
+
+    video_id = entry["video_id"]
 
     def on_save(pos: float, dur: float) -> None:
-        entry: HistoryEntry = {
-            "video_id": video_id,
-            "title": meta.get("name", "?"),
-            "type": typ,
-            "position": pos,
-            "duration": dur,
-            "ts": time.time(),
-        }
-        if video is not None:
-            entry["series_id"] = meta.get("id", "")
-            entry["season"] = video.get("season", 0)
-            entry["episode"] = video.get("episode", 0)
-        state.save_entry(cfg, entry)
+        state.save_entry(
+            cfg,
+            state.make_entry(
+                video_id,
+                name,
+                typ,
+                pos,
+                dur,
+                series_id=series_id,
+                season=entry.get("season", 0),
+                episode=entry.get("episode", 0),
+            ),  # fmt: skip
+        )
 
-    return _play_video(
-        cfg, typ, video_id, meta.get("name", "nstream"),
-        auto=auto, subs=subs, history=history, on_save=on_save,
+    rc, _ = _play_video(
+        cfg, typ, video_id, display_title(name, _entry_video(entry)), opts,
+        auto=opts.auto, next_label=None, on_save=on_save,
     )  # fmt: skip
+    return rc
 
 
-def play_history(cfg: Config, entry: HistoryEntry, *, auto: bool, subs: bool) -> int:
-    def on_save(pos: float, dur: float) -> None:
-        updated: HistoryEntry = {
-            "video_id": entry["video_id"],
-            "title": entry.get("title", "?"),
-            "type": entry.get("type", "movie"),
-            "position": pos,
-            "duration": dur,
-            "ts": time.time(),
-        }
-        if entry.get("type") == "series":
-            updated["series_id"] = entry.get("series_id", "")
-            updated["season"] = entry.get("season", 0)
-            updated["episode"] = entry.get("episode", 0)
-        state.save_entry(cfg, updated)
-
-    return _play_video(
-        cfg, entry.get("type", "movie"), entry["video_id"], entry.get("title", "nstream"),
-        auto=auto, subs=subs, history=True, on_save=on_save,
-    )  # fmt: skip
-
-
-def _pick_meta(
-    items: list[tuple[str, Meta]], cfg: Config, *, auto: bool, subs: bool, history: bool
-) -> int:
+def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> int:
     meta = fzf(items, "titolo> ")
     if not meta:
         return 0
-    return play_meta(cfg, meta, auto=auto, subs=subs, history=history)
+    return play_meta(cfg, meta, opts)
 
 
-def run_search(cfg: Config, query: str, *, auto: bool, subs: bool, history: bool) -> int:
+def run_search(cfg: Config, query: str, opts: PlayOpts) -> int:
     metas = api.search(cfg, query)
     if not metas:
         print("nstream: nessun risultato", file=sys.stderr)
         return 1
-    return _pick_meta(
-        [(meta_label(m), m) for m in metas], cfg, auto=auto, subs=subs, history=history
-    )
+    return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
-def run_browse(cfg: Config, cat: str, *, auto: bool, subs: bool, history: bool) -> int:
+def run_browse(cfg: Config, cat: str, opts: PlayOpts) -> int:
     metas = api.catalog(cfg, "movie", cat) + api.catalog(cfg, "series", cat)
     if not metas:
         print("nstream: catalogo vuoto", file=sys.stderr)
         return 1
-    return _pick_meta(
-        [(meta_label(m), m) for m in metas], cfg, auto=auto, subs=subs, history=history
-    )
+    return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
-def run_continue(cfg: Config, *, auto: bool, subs: bool, allow_search: bool = False) -> int | None:
+def run_continue(cfg: Config, opts: PlayOpts, *, allow_search: bool = False) -> int | None:
     """Play from history. Returns None only if the user picks 'cerca…'."""
     entries = state.recent(cfg)
     if not entries:
@@ -348,35 +501,40 @@ def run_continue(cfg: Config, *, auto: bool, subs: bool, allow_search: bool = Fa
     if allow_search:
         items.append(("↳ cerca…", None))
     chosen = fzf(items, "continua> ")
-    if allow_search and chosen is None:
-        # Distinguish 'picked search' (sentinel None value) from 'aborted fzf'.
-        # fzf returns the sentinel's value (None) for the search row; an abort
-        # also yields None, so treat both as 'fall through to search'.
-        return None
     if chosen is None:
-        return 0
-    return play_history(cfg, chosen, auto=auto, subs=subs)
+        # 'picked search' (sentinel None) and 'aborted fzf' both yield None;
+        # when search is allowed, fall through to it, otherwise treat as abort.
+        return None if allow_search else 0
+    return play_history(cfg, chosen, opts)
 
 
-def _dispatch(cfg: Config, args: argparse.Namespace, history: bool) -> int:
+def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     if args.cont:
-        return run_continue(cfg, auto=args.play, subs=args.subs) or 0
+        return run_continue(cfg, opts) or 0
     if args.browse:
-        return run_browse(
-            cfg, CAT_MAP[args.browse], auto=args.play, subs=args.subs, history=history
-        )
+        return run_browse(cfg, CAT_MAP[args.browse], opts)
 
     query = " ".join(args.query)
     if not query:
-        if history and state.recent(cfg):
-            result = run_continue(cfg, auto=args.play, subs=args.subs, allow_search=True)
+        if opts.history and state.recent(cfg):
+            result = run_continue(cfg, opts, allow_search=True)
             if result is not None:
                 return result
         query = input("cerca> ").strip()
         if not query:
             print("nstream: nessuna query", file=sys.stderr)
             return 2
-    return run_search(cfg, query, auto=args.play, subs=args.subs, history=history)
+    return run_search(cfg, query, opts)
+
+
+def _sub_options(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    if args.sub_lang:
+        return ("auto", args.sub_lang)
+    if args.sub_menu:
+        return ("menu", None)
+    if args.subs:
+        return ("auto", None)
+    return (None, None)
 
 
 def main() -> int:
@@ -386,7 +544,11 @@ def main() -> int:
     )
     parser.add_argument("query", nargs="*", help="titolo da cercare (altrimenti chiede)")
     parser.add_argument("--play", action="store_true", help="riproduci subito il primo stream")
-    parser.add_argument("--subs", action="store_true", help="scegli i sottotitoli (OpenSubtitles)")
+    parser.add_argument(
+        "--subs", action="store_true", help="sottotitoli automatici nella lingua preferita"
+    )
+    parser.add_argument("--sub-menu", action="store_true", help="scegli i sottotitoli a mano (fzf)")
+    parser.add_argument("--sub-lang", metavar="CODE", help="lingua sottotitoli da auto-scegliere")
     parser.add_argument(
         "--browse", nargs="?", const="popolari", choices=list(CAT_MAP),
         help="sfoglia un catalogo Cinemeta invece di cercare (default: popolari)",
@@ -396,6 +558,9 @@ def main() -> int:
         help="riprendi dalla cronologia (continua a guardare)",
     )  # fmt: skip
     parser.add_argument("--no-history", action="store_true", help="non salvare la cronologia")
+    parser.add_argument(
+        "--no-autoplay", action="store_true", help="non proporre il prossimo episodio"
+    )
     parser.add_argument("--version", action="version", version=f"nstream {__version__}")
     args = parser.parse_args()
 
@@ -405,9 +570,16 @@ def main() -> int:
         print(f"nstream: {e}", file=sys.stderr)
         return 2
 
-    history = cfg.history_enabled and not args.no_history
+    sub_mode, sub_lang = _sub_options(args)
+    opts = PlayOpts(
+        auto=args.play,
+        sub_mode=sub_mode,
+        sub_lang=sub_lang,
+        history=cfg.history_enabled and not args.no_history,
+        autoplay=cfg.autoplay and not args.no_autoplay,
+    )
     try:
-        return _dispatch(cfg, args, history)
+        return _dispatch(cfg, args, opts)
     except api.NetworkError as e:
         print(f"nstream: {e}", file=sys.stderr)
         return 1
