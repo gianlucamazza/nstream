@@ -68,6 +68,9 @@ class Config:
     opensubtitles: str = "https://opensubtitles-v3.strem.io"
     subtitle_langs: list[str] = field(default_factory=lambda: ["ita", "eng"])
     history_enabled: bool = True
+    # mpv hardware decoding, injected only if the user hasn't set hwdec themselves
+    # (in mpv.conf or mpv_args). Empty string disables the injection.
+    hwdec: str = "auto-safe"
     mpv_args: list[str] = field(default_factory=list)
 
 
@@ -95,11 +98,15 @@ def load() -> Config:
     base = raw.get("torrentio_base")
     if not base:
         raise ConfigError(f"'torrentio_base' assente in {path}")
+    # Absent → default; explicit "", false or null → disabled.
+    hwdec_raw = raw.get("hwdec", Config.hwdec)
+    hwdec = str(hwdec_raw) if hwdec_raw else ""
     return Config(
         torrentio_base=base,
         cinemeta=raw.get("cinemeta", Config.cinemeta),
         opensubtitles=raw.get("opensubtitles", Config.opensubtitles),
         subtitle_langs=list(raw.get("subtitle_langs", ["ita", "eng"])),
         history_enabled=bool(raw.get("history_enabled", True)),
+        hwdec=hwdec,
         mpv_args=list(raw.get("mpv_args", [])),
     )

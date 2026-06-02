@@ -153,6 +153,35 @@ def _track_position(sock_path: str, holder: dict[str, float], proc: subprocess.P
         sock.close()
 
 
+def _mpv_conf_has_hwdec() -> bool:
+    """True if the user's mpv.conf already sets `hwdec` (so we must not override it)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    candidates = (
+        os.path.join(base, "mpv", "mpv.conf"),
+        os.path.expanduser("~/.mpv/mpv.conf"),
+    )
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            s = line.strip()
+            if s and not s.startswith("#") and s.split("=", 1)[0].strip() == "hwdec":
+                return True
+    return False
+
+
+def _hwdec_defaults(cfg: Config) -> list[str]:
+    """Inject mpv hardware decoding only if the user hasn't chosen it elsewhere."""
+    if not cfg.hwdec:
+        return []
+    if any(a.startswith("--hwdec") for a in cfg.mpv_args) or _mpv_conf_has_hwdec():
+        return []
+    return [f"--hwdec={cfg.hwdec}"]
+
+
 def play(
     cfg: Config,
     title: str,
@@ -164,7 +193,8 @@ def play(
     holder = {"position": 0.0, "duration": 0.0}
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     sock_path = os.path.join(runtime, f"nstream-mpv-{os.getpid()}.sock")
-    args = ["mpv", f"--force-media-title={title}", *cfg.mpv_args]
+    # Defaults come before mpv_args so explicit user flags win.
+    args = ["mpv", f"--force-media-title={title}", *_hwdec_defaults(cfg), *cfg.mpv_args]
     if start and start > 1:
         args.append(f"--start={start:.0f}")
     args += [f"--sub-file={p}" for p in sub_paths]
