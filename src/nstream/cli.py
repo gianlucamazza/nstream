@@ -17,9 +17,20 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import resources
+from typing import cast
 
-from . import __version__, api, state
-from .config import Config, ConfigError, HistoryEntry, Meta, Stream, Subtitle, Video, load
+from . import __version__, api, settings, state
+from .config import (
+    Config,
+    ConfigError,
+    HistoryEntry,
+    Meta,
+    Stream,
+    Subtitle,
+    Video,
+    config_path,
+    load,
+)
 
 # --browse keyword → Cinemeta catalog id.
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
@@ -214,8 +225,8 @@ def _track_position(
         sock.close()
 
 
-def _mpv_conf_has_hwdec() -> bool:
-    """True if the user's mpv.conf already sets `hwdec` (so we must not override it)."""
+def _mpv_conf_has(option: str) -> bool:
+    """True if the user's mpv.conf already sets `option` (so we must not override it)."""
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
     candidates = (
         os.path.join(base, "mpv", "mpv.conf"),
@@ -229,18 +240,35 @@ def _mpv_conf_has_hwdec() -> bool:
             continue
         for line in lines:
             s = line.strip()
-            if s and not s.startswith("#") and s.split("=", 1)[0].strip() == "hwdec":
+            if s and not s.startswith("#") and s.split("=", 1)[0].strip() == option:
                 return True
     return False
 
 
+def _user_overrides(cfg: Config, option: str) -> bool:
+    """True if the user already sets `option` via mpv_args or mpv.conf."""
+    return any(a.startswith(f"--{option}") for a in cfg.mpv_args) or _mpv_conf_has(option)
+
+
 def _hwdec_defaults(cfg: Config) -> list[str]:
     """Inject mpv hardware decoding only if the user hasn't chosen it elsewhere."""
-    if not cfg.hwdec:
-        return []
-    if any(a.startswith("--hwdec") for a in cfg.mpv_args) or _mpv_conf_has_hwdec():
+    if not cfg.hwdec or _user_overrides(cfg, "hwdec"):
         return []
     return [f"--hwdec={cfg.hwdec}"]
+
+
+def _lang_defaults(cfg: Config) -> list[str]:
+    """Prefer the user's languages for audio/subtitle track selection, without
+    overriding any alang/slang the user already set. `--subs-with-matching-audio=no`
+    means: don't force subtitles on when the audio is already in your language."""
+    flags = []
+    if cfg.audio_langs and not _user_overrides(cfg, "alang"):
+        flags.append("--alang=" + ",".join(cfg.audio_langs))
+    if cfg.subtitle_langs and not _user_overrides(cfg, "slang"):
+        flags.append("--slang=" + ",".join(cfg.subtitle_langs))
+        if not _user_overrides(cfg, "subs-with-matching-audio"):
+            flags.append("--subs-with-matching-audio=no")
+    return flags
 
 
 def play(
@@ -279,6 +307,7 @@ def play(
             f"--force-media-title={title}",
             "--no-resume-playback",
             *_hwdec_defaults(cfg),
+            *_lang_defaults(cfg),
             *cfg.mpv_args,
         ]
         if start and start > 1:
@@ -353,7 +382,8 @@ def _play_video(
         )
         start = state.load_history(cfg).get(video_id, {}).get("position") if opts.history else None
         resume_msg = f"⏵ Ripresa da {_fmt_time(start)}" if start and start > 1 else None
-        print(f"▶ {title} — {(chosen.get('name') or '').splitlines()[0]}", file=sys.stderr)
+        name_line = next(iter((chosen.get("name") or "").splitlines()), "")
+        print(f"▶ {title} — {name_line}", file=sys.stderr)
         pos, dur, advance = play(
             cfg, title, chosen["url"],
             start=start, sub_paths=sub_paths, next_label=next_label,
@@ -490,6 +520,10 @@ def run_browse(cfg: Config, cat: str, opts: PlayOpts) -> int:
     return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
+_SEARCH = object()  # sentinel: user picked "cerca…"
+_SETTINGS = object()  # sentinel: user picked "Impostazioni"
+
+
 def run_continue(cfg: Config, opts: PlayOpts, *, allow_search: bool = False) -> int | None:
     """Play from history. Returns None only if the user picks 'cerca…'."""
     entries = state.recent(cfg)
@@ -497,15 +531,18 @@ def run_continue(cfg: Config, opts: PlayOpts, *, allow_search: bool = False) -> 
         if not allow_search:
             print("nstream: cronologia vuota", file=sys.stderr)
         return None if allow_search else 0
-    items: list[tuple[str, HistoryEntry | None]] = [(history_label(e), e) for e in entries]
+    items: list[tuple[str, object]] = [(history_label(e), e) for e in entries]
     if allow_search:
-        items.append(("↳ cerca…", None))
+        items.append(("⚙ Impostazioni", _SETTINGS))
+        items.append(("↳ cerca…", _SEARCH))
     chosen = fzf(items, "continua> ")
-    if chosen is None:
-        # 'picked search' (sentinel None) and 'aborted fzf' both yield None;
-        # when search is allowed, fall through to it, otherwise treat as abort.
+    if chosen is None or chosen is _SEARCH:
+        # Aborted fzf or 'cerca…': fall through to search when allowed.
         return None if allow_search else 0
-    return play_history(cfg, chosen, opts)
+    if chosen is _SETTINGS:
+        settings.run_settings(load())
+        return run_continue(load(), opts, allow_search=True)
+    return play_history(cfg, cast(HistoryEntry, chosen), opts)
 
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
@@ -537,6 +574,17 @@ def _sub_options(args: argparse.Namespace) -> tuple[str | None, str | None]:
     return (None, None)
 
 
+def _ensure_config() -> Config:
+    """Load config, running first-run onboarding if it's missing."""
+    try:
+        return load()
+    except ConfigError:
+        if not config_path().exists():
+            settings.onboard()  # prompts for the RD token, writes a minimal config
+            return load()
+        raise
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="nstream",
@@ -561,14 +609,19 @@ def main() -> int:
     parser.add_argument(
         "--no-autoplay", action="store_true", help="non proporre il prossimo episodio"
     )
+    parser.add_argument("--settings", action="store_true", help="apri il menu impostazioni")
     parser.add_argument("--version", action="version", version=f"nstream {__version__}")
     args = parser.parse_args()
 
     try:
-        cfg = load()
+        cfg = _ensure_config()
     except ConfigError as e:
         print(f"nstream: {e}", file=sys.stderr)
         return 2
+
+    if args.settings:
+        settings.run_settings(cfg)
+        return 0
 
     sub_mode, sub_lang = _sub_options(args)
     opts = PlayOpts(
