@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
@@ -67,6 +69,11 @@ class Config:
     cinemeta: str = "https://v3-cinemeta.strem.io"
     opensubtitles: str = "https://opensubtitles-v3.strem.io"
     subtitle_langs: list[str] = field(default_factory=lambda: ["ita", "eng"])
+    # Preferred audio languages for mpv track auto-selection (--alang), in order.
+    audio_langs: list[str] = field(default_factory=lambda: ["ita", "eng"])
+    # Extra Stremio addon manifest URLs (beyond the built-in Cinemeta/Torrentio/
+    # OpenSubtitles), aggregated for streams/subtitles/catalogs.
+    addons: list[str] = field(default_factory=list)
     history_enabled: bool = True
     # mpv hardware decoding, injected only if the user hasn't set hwdec themselves
     # (in mpv.conf or mpv_args). Empty string disables the injection.
@@ -117,9 +124,39 @@ def load() -> Config:
         cinemeta=raw.get("cinemeta", Config.cinemeta),
         opensubtitles=raw.get("opensubtitles", Config.opensubtitles),
         subtitle_langs=list(raw.get("subtitle_langs", ["ita", "eng"])),
+        audio_langs=list(raw.get("audio_langs", ["ita", "eng"])),
+        addons=list(raw.get("addons", [])),
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=autoplay_lead,
         mpv_args=list(raw.get("mpv_args", [])),
     )
+
+
+def load_raw() -> dict:
+    """Return the raw config dict, or {} if the file is missing/corrupt."""
+    try:
+        data = json.loads(config_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save(updates: dict) -> None:
+    """Merge `updates` into the on-disk config and rewrite it atomically (0600),
+    preserving keys nstream doesn't model. The file holds the RD token."""
+    data = load_raw()
+    data.update(updates)
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
