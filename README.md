@@ -25,7 +25,8 @@ mpv setup.
 
 ## Requirements
 
-Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, plus `foot` for the
+Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, `ffmpeg` (its `ffprobe`
+powers the pre-play track menu; nstream degrades gracefully without it), plus `foot` for the
 desktop launcher. Install/dev: `uv`. All native.
 
 ## Install
@@ -138,6 +139,12 @@ From Hyprland: launch **nstream** from your app launcher → it opens a **home m
 (continue-watching · 🔍 search · 🔥 popular · 🆕 new · ⭐ top · ⚙ settings). All UI lives in the
 TUI; the launcher only opens it. ESC steps back one level; after a title plays (or has no
 sources) you return to the list rather than the app quitting.
+
+Before each interactive playback a **pre-play screen** (`▶ Avvia · 🔊 Audio · 💬 Sottotitoli`) lets
+you pick the exact embedded audio/subtitle track (probed with `ffprobe`, mapped to mpv `--aid`/`--sid`)
+or external OpenSubtitles. `▶ Avvia` is the default (one Enter starts with the auto language
+preference). It's skipped with `--play` and on auto-advancing binge episodes; without `ffprobe` it
+falls back silently to mpv's defaults.
 
 ## Settings
 

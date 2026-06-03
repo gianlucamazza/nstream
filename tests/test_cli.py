@@ -151,6 +151,24 @@ def test_play_movie_no_script_no_advance(stub_mpv):
     assert adv is False
 
 
+def test_play_aid_sid_injected(stub_mpv):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    cli.play(cfg, "Movie", "http://u", audio_id=2, sub_id=3)
+    assert "--aid=2" in _FakePopen.last_args and "--sid=3" in _FakePopen.last_args
+
+
+def test_play_sid_no_disables_subs(stub_mpv):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    cli.play(cfg, "Movie", "http://u", sub_id="no")
+    assert "--sid=no" in _FakePopen.last_args
+
+
+def test_play_no_aid_sid_by_default(stub_mpv):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    cli.play(cfg, "Movie", "http://u")
+    assert not any(a.startswith(("--aid", "--sid")) for a in _FakePopen.last_args)
+
+
 def test_play_hwdec_injected_when_configured(stub_mpv, monkeypatch):
     # No mpv.conf hwdec; concrete nstream value → injected as-is.
     monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: None)
@@ -467,3 +485,98 @@ def test_fzf_passes_header_to_argv(monkeypatch):
     cli.fzf([("a", 1), ("b", 2)], "p> ", header="avviso")
     assert "--header" in captured["cmd"]
     assert "avviso" in captured["cmd"]
+
+
+# --- pre-play audio/subtitle track menu ------------------------------------
+
+from nstream.tracks import Track, Tracks  # noqa: E402
+
+_TR = Tracks(
+    audio=[Track(id=1, lang="eng", codec="aac"), Track(id=2, lang="ita", codec="eac3")],
+    subs=[Track(id=1, lang="eng", codec="subrip")],
+)
+
+
+def _seq_fzf(monkeypatch, returns):
+    """Stub cli.fzf to return successive scripted values across calls."""
+    it = iter(returns)
+    monkeypatch.setattr(cli, "fzf", lambda *a, **k: next(it))
+
+
+def test_choose_tracks_empty_when_no_probe(monkeypatch):
+    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: Tracks())
+    assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, None, ())
+
+
+def test_choose_tracks_pick_audio_then_play(monkeypatch):
+    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: _TR)
+    # main: pick Audio → submenu: pick track id 2 → main: pick ▶ Avvia
+    captured = {}
+
+    def fzf(items, prompt, *, header=None):
+        captured["last"] = items
+        if prompt == "riproduzione> " and "play" not in captured:
+            captured["play"] = False
+            return items[1][1]  # 🔊 Audio
+        if prompt == "audio> ":
+            return items[2][1]  # track id 2 (after "automatico")
+        return items[0][1]  # ▶ Avvia
+
+    monkeypatch.setattr(cli, "fzf", fzf)
+    assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (2, None, ())
+
+
+def test_choose_tracks_esc_returns_none(monkeypatch):
+    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: _TR)
+    _seq_fzf(monkeypatch, [None])  # ESC on the main screen
+    assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") is None
+
+
+def test_choose_tracks_subs_none(monkeypatch):
+    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: _TR)
+
+    def fzf(items, prompt, *, header=None):
+        if prompt == "riproduzione> " and not hasattr(fzf, "seen"):
+            fzf.seen = True
+            return items[2][1]  # 💬 Sottotitoli
+        if prompt == "sottotitoli> ":
+            return items[0][1]  # "nessuno" → "no"
+        return items[0][1]  # ▶ Avvia
+
+    monkeypatch.setattr(cli, "fzf", fzf)
+    assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, "no", ())
+
+
+def test_play_video_auto_skips_track_menu(monkeypatch):
+    """--play / binge (auto=True) must NOT open the pre-play track menu."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, False))
+
+    def boom(*a, **k):
+        raise AssertionError("choose_tracks must not be called when auto")
+
+    monkeypatch.setattr(cli, "choose_tracks", boom)
+    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    notice, _ = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+    )
+    assert notice is None
+
+
+def test_play_video_interactive_calls_track_menu(monkeypatch):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (2, 1, ()))
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "play",
+        lambda *a, **k: (
+            seen.update(aid=k.get("audio_id"), sid=k.get("sub_id")) or (0.0, 0.0, False)
+        ),
+    )
+    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    cli._play_video(cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None)
+    assert seen == {"aid": 2, "sid": 1}
