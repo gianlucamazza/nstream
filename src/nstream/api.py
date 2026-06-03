@@ -8,8 +8,11 @@ Real-Debrid token embedded in Torrentio URLs is never leaked to logs.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
+import hashlib
 import json
+import os
 import random
 import threading
 import time
@@ -18,8 +21,9 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-from . import addons, log
+from . import addons, log, util
 from .config import Config, Meta, Stream, Subtitle, Video
 
 _log = log.get_logger("api")
@@ -237,6 +241,34 @@ def meta(cfg: Config, typ: str, video_id: str) -> dict:
         if obj:
             return obj
     return {}
+
+
+def _meta_disk_path(typ: str, video_id: str) -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    h = hashlib.sha256(f"{typ}:{video_id}".encode()).hexdigest()
+    return Path(base) / "nstream" / "meta" / f"{h}.json"
+
+
+def meta_cached_disk(cfg: Config, typ: str, video_id: str) -> dict:
+    """`meta()` with an on-disk TTL cache. The preview subcommand spawns a fresh process
+    per focused row, so the in-process cache never helps there; persisting meta (which is
+    token-free, unlike streams) gives instant hits across processes. Best-effort: a cache
+    miss or write failure just falls through to a normal fetch."""
+    path = _meta_disk_path(typ, video_id)
+    cached = util.load_json(path, {})
+    ts = cached.get("ts")
+    obj = cached.get("meta")
+    if isinstance(ts, int | float) and time.time() - ts < _META_TTL and isinstance(obj, dict):
+        return obj
+    fresh = meta(cfg, typ, video_id)
+    if fresh:
+        with contextlib.suppress(OSError):
+            util.atomic_write(
+                path,
+                lambda f: json.dump({"ts": time.time(), "meta": fresh}, f, ensure_ascii=False),
+                prefix=".meta-",
+            )
+    return fresh
 
 
 def episodes(cfg: Config, series_id: str) -> list[Video]:

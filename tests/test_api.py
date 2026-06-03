@@ -110,6 +110,25 @@ def test_episodes_returns_first_with_videos(monkeypatch):
     assert [(v["season"], v["episode"]) for v in vids] == [(1, 1), (1, 2)]  # sorted
 
 
+def test_meta_cached_disk_persists_and_hits(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(api, "meta", lambda cfg, typ, vid: calls.append(vid) or {"name": "X"})
+    first = api.meta_cached_disk(CFG, "movie", "tt9")
+    second = api.meta_cached_disk(CFG, "movie", "tt9")
+    assert first == second == {"name": "X"}
+    assert calls == ["tt9"]  # second call served from disk, no re-fetch
+
+
+def test_meta_cached_disk_empty_not_cached(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    monkeypatch.setattr(api, "meta", lambda cfg, typ, vid: calls.append(vid) or {})
+    api.meta_cached_disk(CFG, "movie", "tt9")
+    api.meta_cached_disk(CFG, "movie", "tt9")
+    assert calls == ["tt9", "tt9"]  # empty result isn't persisted → re-fetched
+
+
 # --- gzip, browse, cache (Fase 1p) -----------------------------------------
 
 import gzip as _gzip  # noqa: E402

@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import __version__, api, log, quality, settings, state, tracks
+from . import __version__, api, log, preview, quality, settings, state, tracks
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
 from .config import (
@@ -788,6 +788,11 @@ def _ensure_config() -> Config:
 
 
 def main() -> int:
+    # Hidden fast path: fzf invokes `nstream __preview …` per focused row. Handle it
+    # before argparse (it must stay lightweight and not collide with the query positional).
+    if sys.argv[1:2] == ["__preview"]:
+        return preview.run_preview(sys.argv[2:])
+
     parser = argparse.ArgumentParser(
         prog="nstream",
         description="Native Stremio-like client (Cinemeta + Torrentio + Real-Debrid + mpv).",
