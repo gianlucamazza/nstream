@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from typing import cast
 
-from . import __version__, api, quality, settings, state
+from . import __version__, api, quality, settings, state, tracks
 from .config import (
     Config,
     ConfigError,
@@ -187,6 +187,86 @@ def pick_subtitles(
         return ()
     path = _download_subtitle(chosen, work_dir)
     return (path,) if path else ()
+
+
+# --- pre-play audio/subtitle track menu ----------------------------------
+
+
+def track_label(t: tracks.Track) -> str:
+    parts = [t.lang or "und"]
+    if t.codec:
+        parts.append(t.codec)
+    if t.channels:
+        parts.append(f"{t.channels}ch")
+    if t.title:
+        parts.append(f'"{t.title}"')
+    return " · ".join(parts)
+
+
+def _audio_summary(aid: int | None, tr: tracks.Tracks) -> str:
+    if aid is None:
+        return "automatico (lingua preferita)"
+    t = next((a for a in tr.audio if a.id == aid), None)
+    return track_label(t) if t else f"traccia {aid}"
+
+
+def _sub_summary(sid: int | str | None, sub_paths: tuple[str, ...], tr: tracks.Tracks) -> str:
+    if sub_paths:
+        return "OpenSubtitles (esterni)"
+    if sid in (None, "no"):
+        return "nessuno"
+    t = next((s for s in tr.subs if s.id == sid), None)
+    return track_label(t) if t else f"traccia {sid}"
+
+
+def choose_tracks(
+    cfg: Config, url: str, typ: str, video_id: str, work_dir: str
+) -> tuple[int | None, str | int | None, tuple[str, ...]] | None:
+    """Pre-play menu to pick the audio/subtitle track from those actually in the file
+    (probed with ffprobe). Returns (audio_id, sub_id, sub_paths), or None if the user
+    backs out (ESC). With ffprobe unavailable, skips silently to mpv's defaults."""
+    tr = tracks.probe_tracks(url)
+    if tr.empty():
+        print("nstream: tracce non sondabili (ffprobe assente?), uso i default", file=sys.stderr)
+        return (None, None, ())
+
+    aid: int | None = None
+    sid: int | str | None = None
+    sub_paths: tuple[str, ...] = ()
+    # Sentinels: fzf returns None for ESC, so "automatic" can't be a None *value*.
+    _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
+    while True:
+        items: list[tuple[str, object]] = [
+            ("▶ Avvia", _PLAY),
+            (f"🔊 Audio: {_audio_summary(aid, tr)}", _AUDIO),
+            (f"💬 Sottotitoli: {_sub_summary(sid, sub_paths, tr)}", _SUBS),
+        ]
+        chosen = fzf(items, "riproduzione> ")
+        if chosen is None:
+            return None
+        if chosen is _PLAY:
+            return (aid, sid, sub_paths)
+        if chosen is _AUDIO:
+            opts: list[tuple[str, object]] = [("automatico (lingua preferita)", _AUTO)]
+            opts += [(track_label(a), a.id) for a in tr.audio]
+            pick = fzf(opts, "audio> ")
+            if pick is _AUTO:
+                aid = None
+            elif pick is not None:
+                aid = cast(int, pick)
+        else:  # _SUBS
+            sopts: list[tuple[str, object]] = [("nessuno", "no")]
+            sopts += [(track_label(s), s.id) for s in tr.subs]
+            sopts.append(("OpenSubtitles… (esterni)", _OPENSUBS))
+            pick = fzf(sopts, "sottotitoli> ")
+            if pick is None:
+                continue
+            if pick is _OPENSUBS:
+                got = pick_subtitles(cfg, typ, video_id, work_dir, mode="menu")
+                if got:
+                    sub_paths, sid = got, None
+            else:
+                sid, sub_paths = cast("str | int", pick), ()
 
 
 # --- playback + position tracking ----------------------------------------
@@ -364,6 +444,8 @@ def play(
     *,
     start: float | None = None,
     sub_paths: tuple[str, ...] = (),
+    audio_id: int | None = None,
+    sub_id: int | str | None = None,
     next_label: str | None = None,
     resume_msg: str | None = None,
     work_dir: str | None = None,
@@ -400,6 +482,11 @@ def play(
         if start and start > 1:
             args.append(f"--start={start:.0f}")
         args += [f"--sub-file={p}" for p in sub_paths]
+        # Explicit per-play track choices win over the language-preference defaults.
+        if audio_id is not None:
+            args.append(f"--aid={audio_id}")
+        if sub_id is not None:
+            args.append(f"--sid={sub_id}")
         args.append(f"--input-ipc-server={sock_path}")
 
         if next_label:
@@ -529,19 +616,28 @@ def _play_video(
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
-        sub_paths = (
-            pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
-            if opts.sub_mode
-            else ()
-        )
+        audio_id: int | None = None
+        sub_id: str | int | None = None
+        if auto:
+            # --play / binge: no pre-play menu, use the language-preference defaults.
+            sub_paths = (
+                pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
+                if opts.sub_mode
+                else ()
+            )
+        else:
+            sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
+            if sel is None:
+                return (None, False)  # backed out → return to the list
+            audio_id, sub_id, sub_paths = sel
         start = _resume_position(cfg, video_id) if opts.history else None
         resume_msg = f"⏵ Ripresa da {_fmt_time(start)}" if start and start > 1 else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
         print(f"▶ {title} — {name_line}", file=sys.stderr)
         pos, dur, advance = play(
             cfg, title, chosen["url"],
-            start=start, sub_paths=sub_paths, next_label=next_label,
-            resume_msg=resume_msg, work_dir=work_dir,
+            start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
+            next_label=next_label, resume_msg=resume_msg, work_dir=work_dir,
         )  # fmt: skip
     # Only persist a resume we can reason about: a real duration is needed for the
     # watched/near-end logic, otherwise the entry would stick forever.
