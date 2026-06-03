@@ -49,20 +49,24 @@ class PlayOpts:
     autoplay: bool  # offer the next-episode overlay for series
 
 
-def fzf[T](items: list[tuple[str, T]], prompt: str) -> T | None:
-    """Pick one of (label, value) pairs via fzf. Returns the value or None."""
+def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None) -> T | None:
+    """Pick one of (label, value) pairs via fzf. Returns the value or None.
+
+    `header` shows a transient notice above the list (e.g. why a title couldn't
+    play) — it survives the menu reopening, unlike a stderr line that scrolls away.
+    A single item is returned directly only when there's nothing to announce."""
     if not items:
         return None
-    if len(items) == 1:
+    if len(items) == 1 and header is None:
         return items[0][1]
     # Hidden leading index lets labels repeat without ambiguity.
     lines = "".join(f"{i}\t{label}\n" for i, (label, _) in enumerate(items))
+    cmd = ["fzf", "--prompt", prompt, "--with-nth", "2..",
+           "--delimiter", "\t", "--no-sort", "--reverse", "--height", "80%"]  # fmt: skip
+    if header:
+        cmd += ["--header", header]
     try:
-        proc = subprocess.run(
-            ["fzf", "--prompt", prompt, "--with-nth", "2..",
-             "--delimiter", "\t", "--no-sort", "--reverse", "--height", "80%"],
-            input=lines, capture_output=True, text=True,
-        )  # fmt: skip
+        proc = subprocess.run(cmd, input=lines, capture_output=True, text=True)
     except FileNotFoundError:
         print("nstream: fzf non trovato", file=sys.stderr)
         return None
@@ -464,18 +468,22 @@ def _play_video(
     auto: bool,
     next_label: str | None,
     on_save: Callable[[float, float], None] | None,
-) -> tuple[int, bool]:
-    """Resolve streams for one video, play it, persist progress. Returns (rc, advance).
+) -> tuple[str | None, bool]:
+    """Resolve streams for one video, play it, persist progress. Returns
+    (notice, advance): `notice` is a user-facing message to surface (no streams /
+    not released yet) or None on success or a cancelled stream menu; `advance` is
+    True when the next-episode overlay asked to continue.
 
     `auto` overrides `opts.auto` for this single video: the binge loop forces it
     True from the second episode on, so use `auto` (not `opts.auto`) here."""
     results = api.streams(cfg, typ, video_id)
     if not results:
-        print(f"nstream: {_no_streams_message(cfg, typ, video_id, title)}", file=sys.stderr)
-        return (1, False)
+        notice = _no_streams_message(cfg, typ, video_id, title)
+        print(f"nstream: {notice}", file=sys.stderr)
+        return (notice, False)
     chosen = _pick_stream(cfg, results, auto=auto)
     if not chosen:
-        return (0, False)
+        return (None, False)
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
@@ -497,16 +505,17 @@ def _play_video(
     # watched/near-end logic, otherwise the entry would stick forever.
     if opts.history and on_save and pos > 0 and dur > 0:
         on_save(pos, dur)
-    return (0, advance)
+    return (None, advance)
 
 
 def _play_series(
     cfg: Config, series_id: str, name: str, eps: list[Video], start_video: Video, opts: PlayOpts
-) -> int:
-    """Play a series from `start_video`, auto-advancing through the overlay."""
+) -> str | None:
+    """Play a series from `start_video`, auto-advancing through the overlay.
+    Returns a notice (e.g. an episode with no streams) to surface, or None."""
     idx = next((i for i, v in enumerate(eps) if v.get("id") == start_video.get("id")), None)
     if idx is None:
-        return 0
+        return None
     auto = opts.auto  # the first episode honours --play; binge episodes auto-pick
     while 0 <= idx < len(eps):
         video = eps[idx]
@@ -519,21 +528,22 @@ def _play_series(
                 cfg, state.make_entry(vid, name, "series", pos, dur, series_id=series_id, video=v)
             )
 
-        rc, advance = _play_video(
+        notice, advance = _play_video(
             cfg, "series", video_id, display_title(name, video), opts,
             auto=auto, next_label=next_label, on_save=on_save,
         )  # fmt: skip
-        if rc != 0:
-            return rc
+        if notice:
+            return notice
         if not advance or nxt is None:
-            return 0
+            return None
         idx += 1
         auto = True
         print(f"▶ Carico {display_title(name, eps[idx])}…", file=sys.stderr)
-    return 0
+    return None
 
 
-def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> int:
+def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
+    """Play a title; returns a notice to show above the list, or None."""
     typ = meta.get("type", "movie")
     name = meta.get("name", "nstream")
     if typ != "series":
@@ -542,24 +552,26 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> int:
         def on_save(pos: float, dur: float) -> None:
             state.save_entry(cfg, state.make_entry(movie_id, name, typ, pos, dur))
 
-        rc, _ = _play_video(
+        notice, _ = _play_video(
             cfg, typ, movie_id, display_title(name, None), opts,
             auto=opts.auto, next_label=None, on_save=on_save,
         )  # fmt: skip
-        return rc
+        return notice
 
     eps = api.episodes(cfg, meta["id"])
     if not eps:
-        print("nstream: nessun episodio", file=sys.stderr)
-        return 1
+        return f"nessun episodio per «{name}»"
     items = [
         (f"S{v.get('season', 0):02d}E{v.get('episode', 0):02d}  {v.get('name', '')}", v)
         for v in eps
     ]
-    start_video = fzf(items, "episodio> ")
-    if not start_video:
-        return 0
-    return _play_series(cfg, meta["id"], name, eps, start_video, opts)
+    # Loop the episode picker so finishing/backing out returns here, not to the list.
+    header: str | None = None
+    while True:
+        start_video = fzf(items, "episodio> ", header=header)
+        if not start_video:
+            return None
+        header = _play_series(cfg, meta["id"], name, eps, start_video, opts)
 
 
 def _entry_video(entry: HistoryEntry) -> Video | None:
@@ -568,7 +580,8 @@ def _entry_video(entry: HistoryEntry) -> Video | None:
     return {"season": entry.get("season", 0), "episode": entry.get("episode", 0)}
 
 
-def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> int:
+def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None:
+    """Resume from a history entry; returns a notice to show, or None."""
     typ = entry.get("type", "movie")
     name = entry.get("title", "nstream")
     series_id = entry.get("series_id", "")
@@ -596,18 +609,22 @@ def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> int:
             ),  # fmt: skip
         )
 
-    rc, _ = _play_video(
+    notice, _ = _play_video(
         cfg, typ, video_id, display_title(name, _entry_video(entry)), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
     )  # fmt: skip
-    return rc
+    return notice
 
 
 def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> int:
-    meta = fzf(items, "titolo> ")
-    if not meta:
-        return 0
-    return play_meta(cfg, meta, opts)
+    """Loop the title list: play a pick, then return here. ESC leaves to the caller
+    (HOME or the shell). A notice from playback is shown as the fzf header next time."""
+    header: str | None = None
+    while True:
+        meta = fzf(items, "titolo> ", header=header)
+        if not meta:
+            return 0
+        header = play_meta(cfg, meta, opts)
 
 
 def run_search(cfg: Config, query: str, opts: PlayOpts) -> int:
@@ -626,50 +643,75 @@ def run_browse(cfg: Config, cat: str, opts: PlayOpts) -> int:
     return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
-_SEARCH = object()  # sentinel: user picked "cerca…"
-_SETTINGS = object()  # sentinel: user picked "Impostazioni"
-
-
-def run_continue(cfg: Config, opts: PlayOpts, *, allow_search: bool = False) -> int | None:
-    """Play from history. Returns None only if the user picks 'cerca…'."""
+def run_continue(cfg: Config, opts: PlayOpts) -> int:
+    """`-c`: resume from history, returning to the list after each play (ESC exits)."""
     entries = state.recent(cfg)
     if not entries:
-        if not allow_search:
-            print("nstream: cronologia vuota", file=sys.stderr)
-        return None if allow_search else 0
+        print("nstream: cronologia vuota", file=sys.stderr)
+        return 0
+    header: str | None = None
     while True:
-        items: list[tuple[str, object]] = [(history_label(e), e) for e in entries]
-        if allow_search:
-            items.append(("⚙ Impostazioni", _SETTINGS))
-            items.append(("↳ cerca…", _SEARCH))
-        chosen = fzf(items, "continua> ")
-        if chosen is None or chosen is _SEARCH:
-            # Aborted fzf or 'cerca…': fall through to search when allowed.
-            return None if allow_search else 0
-        if chosen is _SETTINGS:
-            settings.run_settings(load())
-            entries = state.recent(load())  # reflect any change, then re-show
+        items = [(history_label(e), e) for e in entries]
+        chosen = fzf(items, "continua> ", header=header)
+        if chosen is None:
+            return 0
+        header = play_history(cfg, chosen, opts)
+        entries = state.recent(cfg)  # reflect updated positions, then re-show
+
+
+# Home-menu action kinds (the value half of an fzf item; history entries are dicts).
+_SEARCH = "search"
+_BROWSE = "browse"
+_SETTINGS = "settings"
+
+
+def run_home(cfg: Config, opts: PlayOpts) -> int:
+    """The TUI home: continue-watching + search + browse + settings, in one menu.
+    Loops until the user backs out (ESC). This is the rich entry surface — the
+    desktop/fuzzel launcher only opens it; no UI logic lives in fuzzel."""
+    header: str | None = None
+    while True:
+        items: list[tuple[str, object]] = []
+        if opts.history:
+            items += [(history_label(e), e) for e in state.recent(cfg)]
+        items += [
+            ("🔍  Cerca…", (_SEARCH, "")),
+            ("🔥  Popolari", (_BROWSE, "popolari")),
+            ("🆕  Novità", (_BROWSE, "nuovi")),
+            ("⭐  Top IMDb", (_BROWSE, "top")),
+            ("⚙   Impostazioni", (_SETTINGS, "")),
+        ]
+        chosen = fzf(items, "nstream> ", header=header)
+        header = None
+        if chosen is None:
+            return 0
+        if not isinstance(chosen, tuple):  # a continue-watching entry
+            header = play_history(cfg, cast(HistoryEntry, chosen), opts)
             continue
-        return play_history(cfg, cast(HistoryEntry, chosen), opts)
+        kind, value = chosen
+        if kind == _SEARCH:
+            try:
+                query = input("cerca> ").strip()
+            except EOFError:
+                return 0
+            if query:
+                run_search(cfg, query, opts)
+        elif kind == _BROWSE:
+            run_browse(cfg, CAT_MAP[cast(str, value)], opts)
+        elif kind == _SETTINGS:
+            settings.run_settings(cfg)
+            cfg = load()  # pick up any change for the next loop
 
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     if args.cont:
-        return run_continue(cfg, opts) or 0
+        return run_continue(cfg, opts)
     if args.browse:
         return run_browse(cfg, CAT_MAP[args.browse], opts)
-
     query = " ".join(args.query)
-    if not query:
-        if opts.history and state.recent(cfg):
-            result = run_continue(cfg, opts, allow_search=True)
-            if result is not None:
-                return result
-        query = input("cerca> ").strip()
-        if not query:
-            print("nstream: nessuna query", file=sys.stderr)
-            return 2
-    return run_search(cfg, query, opts)
+    if query:
+        return run_search(cfg, query, opts)
+    return run_home(cfg, opts)
 
 
 def _sub_options(args: argparse.Namespace) -> tuple[str | None, str | None]:

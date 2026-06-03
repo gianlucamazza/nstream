@@ -25,8 +25,8 @@ mpv setup.
 
 ## Requirements
 
-Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, plus `fuzzel` +
-`foot` for the GUI launcher. Install/dev: `uv`. All native.
+Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, plus `foot` for the
+desktop launcher. Install/dev: `uv`. All native.
 
 ## Install
 
@@ -130,7 +130,10 @@ nstream --no-autoplay ...   # don't show the next-episode overlay
 nstream --no-history ...    # don't record this session
 ```
 
-From Hyprland: launch **nstream** in fuzzel → type a title → pick in the fzf TUI.
+From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
+(continue-watching · 🔍 search · 🔥 popular · 🆕 new · ⭐ top · ⚙ settings). All UI lives in the
+TUI; the launcher only opens it. ESC steps back one level; after a title plays (or has no
+sources) you return to the list rather than the app quitting.
 
 ## Settings
 
@@ -152,7 +155,7 @@ first run, if no config exists, nstream prompts for the Real-Debrid token and wr
 | `src/nstream/config.py` | config load/save (XDG, atomic 0600) + payload types |
 | `src/nstream/state.py` | watch-history persistence (resume / continue-watching) |
 | `src/nstream/nstream.lua` | mpv overlay for the next-episode countdown (loaded via `--script`) |
-| `nstream-fuzzel` | fuzzel prompt → opens the TUI in foot |
+| `nstream-fuzzel` | thin launcher → opens the TUI home menu in foot |
 | `nstream.desktop` | app launcher entry |
 | `pyproject.toml` | metadata, entry point, ruff/ty config |
 | `config.example.json` | config template (no token) |
