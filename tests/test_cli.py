@@ -284,10 +284,23 @@ def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": ""}])
     monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
     opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
-    rc, advance = cli._play_video(
+    notice, advance = cli._play_video(
         cfg, "movie", "tt1", "Movie", opts, auto=True, next_label=None, on_save=None
     )
-    assert (rc, advance) == (0, False)
+    assert (notice, advance) == (None, False)
+
+
+def test_play_video_no_streams_returns_notice(monkeypatch):
+    """No streams → return a user-facing notice (surfaced as the menu header)."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [])
+    monkeypatch.setattr(cli.api, "meta", lambda *a, **k: {})  # released unknown → generic
+    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    notice, advance = cli._play_video(
+        cfg, "movie", "tt1", "Dune 3", opts, auto=True, next_label=None, on_save=None
+    )
+    assert advance is False
+    assert notice and "Dune 3" in notice
 
 
 # --- binge loop (_play_series) ---------------------------------------------
@@ -305,7 +318,7 @@ def _stub_play_video(monkeypatch, advance_until):
         calls.append({"video_id": video_id, "auto": auto, "next_label": next_label})
         idx = len(calls)  # 1-based
         # Mimic real play(): advancing requires the overlay, which requires a next_label.
-        return (0, next_label is not None and idx < advance_until)
+        return (None, next_label is not None and idx < advance_until)
 
     monkeypatch.setattr(cli, "_play_video", fake)
     return calls
@@ -315,8 +328,7 @@ def test_binge_advances_then_stops(monkeypatch):
     eps = _episodes(4)
     calls = _stub_play_video(monkeypatch, advance_until=3)  # advance after ep1, ep2
     opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=True)
-    rc = cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
-    assert rc == 0
+    assert cli._play_series(CFG, "tt", "Show", eps, eps[0], opts) is None
     assert [c["video_id"] for c in calls] == ["tt:1", "tt:2", "tt:3"]
     # first episode honours opts.auto (False); binge episodes force auto=True
     assert [c["auto"] for c in calls] == [False, True, True]
@@ -346,3 +358,80 @@ def test_binge_starts_from_chosen_episode(monkeypatch):
     opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=True)
     cli._play_series(CFG, "tt", "Show", eps, eps[2], opts)  # start at E3
     assert [c["video_id"] for c in calls] == ["tt:3", "tt:4"]
+
+
+def test_binge_stops_and_propagates_notice(monkeypatch):
+    """An episode with no streams stops the binge and surfaces its notice."""
+    eps = _episodes(3)
+
+    def fake(*a, **k):
+        return ("nessuno stream disponibile per «E1»", False)
+
+    monkeypatch.setattr(cli, "_play_video", fake)
+    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=True)
+    notice = cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
+    assert notice == "nessuno stream disponibile per «E1»"
+
+
+# --- navigation: back-to-list + home menu ----------------------------------
+
+
+def _fzf_script(returns):
+    """A stub fzf that yields `returns` in order and records the headers it saw."""
+    seen = {"headers": [], "i": 0}
+
+    def fake(items, prompt, *, header=None):
+        seen["headers"].append(header)
+        val = returns[seen["i"]]
+        seen["i"] += 1
+        return val
+
+    return fake, seen
+
+
+def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
+    """_pick_meta replays the list after a pick (back-to-list) and shows the
+    playback notice as the next header; ESC (None) leaves with rc 0."""
+    items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
+    fake_fzf, seen = _fzf_script([items[0][1], None])  # pick once, then ESC
+    monkeypatch.setattr(cli, "fzf", fake_fzf)
+    monkeypatch.setattr(cli, "play_meta", lambda *a, **k: "non ancora disponibile")
+    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    assert cli._pick_meta(items, CFG, opts) == 0
+    # First render has no header; after the pick the notice is threaded through.
+    assert seen["headers"] == [None, "non ancora disponibile"]
+
+
+def test_run_home_dispatches_actions(monkeypatch):
+    """Home menu routes search/browse/settings then exits on ESC."""
+    actions = [(cli._SEARCH, ""), (cli._BROWSE, "popolari"), (cli._SETTINGS, ""), None]
+    fake_fzf, _ = _fzf_script(actions)
+    monkeypatch.setattr(cli, "fzf", fake_fzf)
+    monkeypatch.setattr(cli, "input", lambda *a: "matrix", raising=False)
+    called = {"search": 0, "browse": [], "settings": 0}
+    monkeypatch.setattr(cli, "run_search", lambda c, q, o: called.__setitem__("search", q))
+    monkeypatch.setattr(cli, "run_browse", lambda c, cat, o: called["browse"].append(cat))
+    monkeypatch.setattr(cli.settings, "run_settings", lambda c: called.__setitem__("settings", 1))
+    monkeypatch.setattr(cli, "load", lambda: CFG)
+    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    assert cli.run_home(CFG, opts) == 0
+    assert called["search"] == "matrix"
+    assert called["browse"] == [cli.CAT_MAP["popolari"]]
+    assert called["settings"] == 1
+
+
+def test_fzf_passes_header_to_argv(monkeypatch):
+    captured = {}
+
+    class _Proc:
+        returncode = 0
+        stdout = "0\tlabel\n"
+
+    def fake_run(cmd, **k):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    cli.fzf([("a", 1), ("b", 2)], "p> ", header="avviso")
+    assert "--header" in captured["cmd"]
+    assert "avviso" in captured["cmd"]
