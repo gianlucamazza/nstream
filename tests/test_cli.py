@@ -14,6 +14,15 @@ from nstream import cli
 from nstream.config import Config, Video
 
 
+def test_main_preview_dispatch(monkeypatch):
+    # `nstream __preview …` is handled before argparse and forwarded to preview.run_preview.
+    seen = {}
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", "__preview", "title", "movie", "tt1"])
+    monkeypatch.setattr(cli.preview, "run_preview", lambda argv: (seen.update(argv=argv), 0)[1])
+    assert cli.main() == 0
+    assert seen["argv"] == ["title", "movie", "tt1"]
+
+
 def test_display_title_movie():
     assert cli.display_title("Dune", None) == "Dune"
 
