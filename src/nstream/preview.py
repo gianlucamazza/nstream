@@ -27,9 +27,10 @@ _CHAFA_TIMEOUT = 5.0
 
 def run_preview(argv: list[str]) -> int:
     """Entry for `__preview`. argv is `title <typ> <id>` or `episode <series_id> <s> <e>`.
-    Always returns 0."""
+    fzf passes the row field as a single shell-quoted arg, so re-split on whitespace (the
+    tokens never contain spaces). Always returns 0."""
     with contextlib.suppress(Exception):
-        out = _render(argv)
+        out = _render(" ".join(argv).split())
         if out:
             print(out)
     return 0
