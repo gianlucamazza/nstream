@@ -79,8 +79,16 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   and passed to mpv as `--slang` (non-overriding).
 - `audio_langs`: preferred audio languages, in order (default `["ita","eng"]`). Passed to mpv as
   `--alang` so your language is auto-selected when the file has multiple audio tracks — injected
-  only if you haven't set `alang` yourself. `--subs-with-matching-audio=no` is also added so
-  subtitles aren't forced on when the audio is already in your language.
+  only if you haven't set `alang` yourself. The **first** entry is the *primary* language and the
+  rest are acceptable fallbacks (see `primary_lang`).
+- `primary_lang`: your native language (default `""` = first of `audio_langs`). It drives two
+  guards on the auto-pick (local mpv): (1) a release whose name only says **"Dual"/"MULTI"** is
+  *not* trusted to contain it — that token can be any pair (e.g. Latino+Eng), so nstream confirms
+  the real tracks with `ffprobe` (reading the track `title`, e.g. `Italian`, when the language tag
+  is `und`); (2) if the chosen file has no primary-language audio, nstream first tries the next-best
+  sources for one that does, and otherwise plays the best fallback (e.g. English) **with
+  primary-language subtitles turned on automatically** — so you're never left watching a foreign dub
+  with no safety net. Releases that explicitly name a preferred language outrank bare "Dual" ones.
 - `addons`: extra Stremio addon manifest URLs (e.g. another stream or subtitle provider). Streams
   and subtitles are aggregated across the built-in providers plus these. Manage them from the
   settings menu.
@@ -148,6 +156,35 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 - `max_streams`: how many streams the menu shows before a `↓ mostra tutti` entry reveals the rest
   and the `⚠` excluded ones (default `20`; `0` = no cap).
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
+- `playback_backend`: how streams are played (default `"local"`).
+  - `"debrid"`: Torrentio returns ready debrid URLs (needs a provider key in `torrentio_base`),
+    resolved instantly — the classic path.
+  - `"local"`: query Torrentio **token-less** (drops the debrid segment) to get pure-torrent
+    results, and stream them peer-to-peer through a local **TorrServer** instance nstream drives —
+    no paid service. Set it from the settings menu (it warns if TorrServer isn't installed).
+- `engine_port`: TorrServer HTTP port (default `8090`). nstream reuses a server already listening
+  there, otherwise spawns one (and stops only the instance it spawned, never yours).
+- `engine_cache_mb`: TorrServer in-memory read-ahead cache, in MB (default `256`).
+- `engine_download_dir`: where TorrServer keeps torrent data (default `""` →
+  `$XDG_CACHE_HOME/nstream/torrents`).
+- `p2p_ack`: set to `true` once you've acknowledged the one-time P2P privacy notice (see below); it
+  isn't shown again.
+
+### Playback backend: debrid or local P2P
+
+By default nstream needs no paid service: with `playback_backend = "local"` it streams torrents
+peer-to-peer via **TorrServer** — an external single-binary HTTP torrent server (like `mpv`/`fzf`,
+user-installed, never bundled; on Arch: `yay -S torrserver-bin`). nstream finds a running instance
+or spawns one on `engine_port`, adds the torrent by infoHash, waits for the initial read-ahead
+buffer, then hands mpv/`catt` a plain `http://…/stream?…` URL — the *same contract* as a debrid URL,
+so resume, casting and series auto-advance are unchanged. The stream host is the machine's LAN IP so
+a Chromecast can reach it too. If TorrServer isn't installed, nstream says so and you can switch to a
+debrid provider in the settings. Prefer instant, hands-off playback and already pay for a debrid
+service? Set `playback_backend = "debrid"`.
+
+> **P2P privacy.** Local streaming joins the torrent swarm, so your IP is visible to peers (as with
+> any torrent client). nstream shows this notice once and records `p2p_ack`. Consider a VPN if that's
+> a concern. Debrid playback does **not** expose your IP to peers.
 
 The file holds your debrid key, so it is created `chmod 600` and git-ignored.
 Watch history lives separately in `~/.local/state/nstream/history.json` (no secrets).

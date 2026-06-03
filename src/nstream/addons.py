@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import api, util
-from .config import Config
+from .config import DEBRID_PROVIDERS, Config
 
 CACHE_TTL = 86400  # re-fetch a user addon's manifest at most once a day
 
@@ -115,7 +115,13 @@ def load_addon(manifest_url: str, *, use_cache: bool = True) -> Addon | None:
 
 
 def torrentio_base(cfg: Config) -> str:
-    return "https://torrentio.strem.fun/" + urllib.parse.quote(cfg.torrentio_base, safe="=|")
+    base = cfg.torrentio_base
+    # Local backend streams torrents itself, so query Torrentio token-less: dropping the
+    # debrid segment makes it return pure-torrent results (infoHash) instead of debrid urls.
+    if cfg.playback_backend == "local":
+        segs = [s for s in base.split("|") if s and s.split("=", 1)[0] not in DEBRID_PROVIDERS]
+        base = "|".join(segs) or "sort=qualitysize"
+    return "https://torrentio.strem.fun/" + urllib.parse.quote(base, safe="=|")
 
 
 def _builtins(cfg: Config) -> list[Addon]:

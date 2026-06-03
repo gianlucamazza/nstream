@@ -14,7 +14,7 @@ import shlex
 import sys
 import tempfile
 
-from . import addons, config, languages, picker, ui, util
+from . import addons, config, engine, languages, picker, ui, util
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -142,6 +142,13 @@ def _token_status(cfg: Config) -> str:
         if m and m.group(1):
             return f"✓ {name} (••••)"
     return "✗ assente"
+
+
+def _backend_status(cfg: Config) -> str:
+    if cfg.playback_backend == "debrid":
+        return "debrid (premium)"
+    health = "TorrServer ✓" if engine.installed() else "TorrServer ✗ (installalo)"
+    return f"P2P locale · {health}"
 
 
 def _with_token(base: str, token: str, provider: str = "realdebrid") -> str:
@@ -313,6 +320,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "auto = sixel/half-blocks se il terminale li supporta; off = nessuna immagine.",
         ),
         (
+            "playback_backend",
+            "Backend riproduzione",
+            "backend",
+            _backend_status(cfg),
+            "P2P locale (gratis, via TorrServer) o debrid (premium, stream cached istantanei).",
+        ),
+        (
             "torrentio_base",
             "Token debrid",
             "token",
@@ -388,6 +402,25 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         )
         if i is not None:
             config.save({"cast_device": "" if i == 0 else choices[i]})
+    elif kind == "backend":
+        choices = ["P2P locale (gratis)", "debrid (premium)"]
+        i = _fzf_select(
+            choices, prompt="backend> ", header="Sorgente di riproduzione · ESC: annulla"
+        )
+        if i is None:
+            return
+        if i == 0:
+            config.save({"playback_backend": "local"})
+            if not engine.installed():
+                print(
+                    f"nstream: {engine.BINARY} non installato — "
+                    "installalo (es. `yay -S torrserver-bin`) per lo streaming P2P",
+                    file=sys.stderr,
+                )
+        else:
+            config.save({"playback_backend": "debrid"})
+            if _token_status(cfg).startswith("✗"):
+                print("nstream: imposta un token debrid qui sotto per usarlo", file=sys.stderr)
     elif kind == "token":
         i = _fzf_select([name for _, name in _PROVIDERS], prompt="provider> ")
         if i is None:
@@ -448,20 +481,39 @@ def _add_addon(cfg: Config) -> None:
 
 
 def onboard() -> None:
-    """First-run: pick a debrid provider and write a minimal config with its key."""
-    print("Primo avvio nstream — configura il tuo provider debrid.", file=sys.stderr)
+    """First-run: pick the playback backend. Local P2P (free, default) needs no key and
+    writes a token-less config; debrid (premium) asks for a provider + API key as before."""
+    print("Primo avvio nstream — scegli come riprodurre.", file=sys.stderr)
     i = _fzf_select(
+        ["P2P locale — gratis, nessuna chiave (consigliato)", "Debrid — premium, serve una chiave"],
+        prompt="backend> ",
+        header="P2P locale streama i torrent in locale; il debrid usa stream cached a pagamento",
+    )
+    if i == 0 or i is None:  # default to local (also when ESC: no paid signup required)
+        config.save({"playback_backend": "local"})
+        if not engine.installed():
+            print(
+                f"nstream: per lo streaming P2P installa {engine.BINARY} "
+                "(es. `yay -S torrserver-bin`).",
+                file=sys.stderr,
+            )
+        return
+    j = _fzf_select(
         [name for _, name in _PROVIDERS],
         prompt="provider> ",
         header="Scegli il debrid (poi inserisci la chiave API dal suo sito)",
     )
-    if i is None:
-        raise config.ConfigError("nessun provider scelto")
-    provider_key, provider_name = _PROVIDERS[i]
+    if j is None:
+        config.save({"playback_backend": "local"})  # backed out → safe free default
+        return
+    provider_key, provider_name = _PROVIDERS[j]
     try:
         token = getpass.getpass(f"Chiave {provider_name} (nascosta): ").strip()
     except EOFError:
         token = ""
     if not token:
-        raise config.ConfigError("chiave non fornita")
-    config.save({"torrentio_base": _with_token("", token, provider_key)})
+        config.save({"playback_backend": "local"})  # no key → fall back to free local
+        return
+    config.save(
+        {"torrentio_base": _with_token("", token, provider_key), "playback_backend": "debrid"}
+    )
