@@ -153,6 +153,8 @@ def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
         tags.append("HDR")
     if info.source:
         tags.append(info.source)
+    if info.audio:
+        tags.append(info.audio.upper())
     if info.languages:
         tags.append("/".join(sorted(info.languages)))
     if info.size_gb:
@@ -648,6 +650,9 @@ def cast(
         launch += ["-t", str(int(start))]
     if sub_paths:  # catt takes a single subtitle file
         launch += ["-s", sub_paths[0]]
+    dest = device or "Chromecast"
+    # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
+    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
     try:
         proc = subprocess.run(launch, capture_output=True, text=True)
     except FileNotFoundError:
@@ -658,11 +663,11 @@ def cast(
         print("nstream: cast non riuscito", file=sys.stderr)
         return (0.0, 0.0, False)
 
-    dest = device or "Chromecast"
     print(f"📺 {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
     holder = {"position": 0.0, "duration": 0.0}
     started = False
     finished = False
+    warned_vol = False
     idle = 0  # consecutive polls without progress before playback ever starts
     try:
         while True:
@@ -685,6 +690,13 @@ def cast(
                 holder["position"] = pos
             if dur > 0:
                 holder["duration"] = dur
+            # A device left at volume 0 plays silently — explain it once.
+            if not warned_vol and not info.get("volume_muted") and info.get("volume_level") == 0:
+                warned_vol = True
+                print(
+                    "nstream: volume del Chromecast a 0 — alza col telecomando o 'catt volume N'",
+                    file=sys.stderr,
+                )
             if pstate in ("PLAYING", "PAUSED", "BUFFERING") or pos > 0:
                 started = True
                 idle = 0
@@ -726,14 +738,19 @@ def _no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str
     return f"nessuno stream disponibile per «{title}»"
 
 
-def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | None:
+def _pick_stream(
+    cfg: Config, results: list[Stream], *, auto: bool, cast: bool = False
+) -> Stream | None:
     """Rank and curate streams, then auto-pick the best or show an fzf menu (top N
-    playable + a 'show all' entry that reveals the rest and the excluded ones ⚠)."""
+    playable + a 'show all' entry that reveals the rest and the excluded ones ⚠).
+
+    When `cast`, rank against the Chromecast receiver's profile (not the laptop GPU)
+    and demote streams whose audio it can't decode (TrueHD/DTS/DTS-HD → silent)."""
     if not cfg.hw_filter:
         ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in results]
         return results[0] if auto else fzf(ranked, "stream> ")
 
-    caps = quality.detect_caps()
+    caps = quality.cast_caps() if cast else quality.detect_caps()
     playable, excluded = quality.rank_streams(
         results, caps,
         max_resolution=cfg.max_resolution,
@@ -744,6 +761,7 @@ def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | 
         exclude_camrip=cfg.exclude_camrip,
         min_seeders=cfg.min_seeders,
         dedup=cfg.dedup,
+        cast_audio=cast,
     )  # fmt: skip
     if excluded:
         reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
@@ -754,7 +772,12 @@ def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | 
     if auto:
         if playable:
             return playable[0].stream
-        print("nstream: nessuno stream supportato dall'hardware", file=sys.stderr)
+        msg = (
+            "nessuno stream compatibile col Chromecast (prova Tab o --local)"
+            if cast
+            else "nessuno stream supportato dall'hardware"
+        )
+        print(f"nstream: {msg}", file=sys.stderr)
         return None
 
     def _full() -> Stream | None:
@@ -816,7 +839,7 @@ def _play_video(
         notice = _no_streams_message(cfg, typ, video_id, title)
         print(f"nstream: {notice}", file=sys.stderr)
         return (notice, False)
-    chosen = _pick_stream(cfg, results, auto=auto)
+    chosen = _pick_stream(cfg, results, auto=auto, cast=opts.cast)
     if not chosen:
         return (None, False)
 

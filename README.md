@@ -95,7 +95,12 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   `--cast` flag forces casting for one run; `--local` forces mpv even when this is on. Casting keeps
   full parity — resume, continue-watching and series auto-advance work by polling `catt info`. The
   embedded-track menu is mpv-only, so in cast mode subtitles are sent as an external file (when you
-  pass `--subs`/`--sub-lang`) and the rest is left to the receiver.
+  pass `--subs`/`--sub-lang`) and the rest is left to the receiver. Stream selection is **Cast-aware**:
+  it ranks against the Chromecast's decode profile (H.264/HEVC/VP9 up to 4K; AV1 and 8K dropped to
+  the ⚠ section) and demotes releases whose audio the Default Media Receiver can't decode —
+  **TrueHD/DTS/DTS-HD** (which would play silently) — preferring AC3/E-AC3/AAC. Press Tab to pick a
+  demoted release anyway. If the TV is silent, also check the Cast volume isn't at 0 (`catt volume N`
+  or the remote); nstream warns when it sees a zero volume.
 - `cast_device`: pin the Chromecast name for `catt -d` (default `""`). Empty resolves the device
   per-LAN via `cast-resolve` (fails loud on ambiguity rather than casting to the wrong screen),
   then falls back to catt's own default.

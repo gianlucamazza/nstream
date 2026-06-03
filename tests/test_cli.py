@@ -703,6 +703,30 @@ def test_pick_stream_auto_picks_best(monkeypatch):
     assert cli._pick_stream(cfg, [{"url": "x"}], auto=True) is playable[0].stream
 
 
+def test_pick_stream_cast_uses_cast_caps_and_audio(monkeypatch):
+    """In cast mode rank against the Chromecast profile (not the laptop GPU) and pass
+    cast_audio=True so the receiver-incompatible audio is filtered."""
+    cfg = Config(torrentio_base="tb")
+
+    def boom(*a, **k):
+        raise AssertionError("detect_caps (GPU) must not be used when casting")
+
+    monkeypatch.setattr(cli.quality, "detect_caps", boom)
+    sentinel = cli.quality.Caps()
+    monkeypatch.setattr(cli.quality, "cast_caps", lambda: sentinel)
+    seen = {}
+    playable = _ranked(2)
+
+    def fake_rank(streams, caps, **k):
+        seen["caps"] = caps
+        seen["cast_audio"] = k.get("cast_audio")
+        return (playable, [])
+
+    monkeypatch.setattr(cli.quality, "rank_streams", fake_rank)
+    assert cli._pick_stream(cfg, [{"url": "x"}], auto=True, cast=True) is playable[0].stream
+    assert seen["caps"] is sentinel and seen["cast_audio"] is True
+
+
 def test_play_video_auto_skips_track_menu(monkeypatch):
     """--play / binge (auto=True) must NOT open the pre-play track menu."""
     cfg = Config(torrentio_base="tb", hwdec="")
@@ -870,6 +894,41 @@ def test_cast_gives_up_if_never_starts(monkeypatch):
     assert cli.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
     info_polls = sum(1 for c in calls if "info" in c)
     assert info_polls == cli._CAST_GIVEUP
+
+
+def test_cast_prints_preparing_before_launch(monkeypatch, capsys):
+    _cast_run(monkeypatch, info_seq=[{"player_state": "IDLE"}])
+    cli.cast(CFG, "Dune", "http://u", device="TV")
+    assert "preparo il cast" in capsys.readouterr().err
+
+
+def test_cast_warns_on_zero_volume(monkeypatch, capsys):
+    _cast_run(
+        monkeypatch,
+        info_seq=[
+            {"player_state": "PLAYING", "current_time": 5.0, "duration": 100.0, "volume_level": 0},
+            {"player_state": "IDLE", "duration": 100.0},
+        ],
+    )
+    cli.cast(CFG, "Dune", "http://u", device="TV")
+    assert "volume del Chromecast a 0" in capsys.readouterr().err
+
+
+def test_cast_no_volume_warning_when_audible(monkeypatch, capsys):
+    _cast_run(
+        monkeypatch,
+        info_seq=[
+            {
+                "player_state": "PLAYING",
+                "current_time": 5.0,
+                "duration": 100.0,
+                "volume_level": 0.4,
+            },
+            {"player_state": "IDLE", "duration": 100.0},
+        ],
+    )
+    cli.cast(CFG, "Dune", "http://u", device="TV")
+    assert "volume del Chromecast a 0" not in capsys.readouterr().err
 
 
 def test_play_video_cast_branch_no_track_menu(monkeypatch):

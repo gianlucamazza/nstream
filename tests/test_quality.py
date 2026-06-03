@@ -266,3 +266,86 @@ def test_allow_dv5_keeps_dvp5():
 def test_unlimited_resolution_keeps_8k():
     playable, excluded = _rank([S_8K], max_resolution=0)
     assert len(playable) == 1 and not excluded
+
+
+# --- audio codec + cast compatibility --------------------------------------
+
+S_REMUX_TRUEHD: Stream = {
+    "name": "[RD+] Torrentio\n4k",
+    "title": "Movie.2160p.UHD.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-GRP\n👤 20 💾 60.0 GB ⚙️ x",
+}
+S_WEBDL_EAC3: Stream = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Movie.2160p.WEB-DL.HEVC.DDP5.1-GRP\n👤 10 💾 9.0 GB ⚙️ x",
+}
+S_AC3: Stream = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Movie.1080p.BluRay.x264.AC3-GRP\n👤 50 💾 8.0 GB ⚙️ x",
+}
+S_DTSHD: Stream = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Movie.1080p.BluRay.x264.DTS-HD.MA.5.1-GRP\n👤 5 💾 12.0 GB ⚙️ x",
+}
+
+
+S_BDREMUX_UNTAGGED: Stream = {
+    "name": "[RD+] Torrentio\n4k",
+    "title": "The.Matrix.1999.4K.HDR.2160p.BDRemux.Ita.Eng.x265-NAHOM\n👤 15 💾 40.0 GB ⚙️ x",
+}
+
+
+def test_parse_bdremux_is_remux():
+    # "BDRemux" (no separator) must still be recognised as a remux source.
+    assert quality.parse_stream(S_BDREMUX_UNTAGGED).source == "remux"
+
+
+def test_reason_cast_audio_demotes_untagged_remux():
+    info = quality.parse_stream(S_BDREMUX_UNTAGGED)
+    assert info.audio == ""  # no audio token in the title
+    assert quality.unsupported_reason(info, quality.cast_caps(), 2160, cast_audio=True) == (
+        "audio remux"
+    )
+    # but a non-cast rank keeps it (mpv decodes lossless locally)
+    assert quality.unsupported_reason(info, quality.cast_caps(), 2160) is None
+
+
+def test_parse_audio_codecs():
+    assert quality.parse_stream(S_REMUX_TRUEHD).audio == "truehd"  # TrueHD beats AC3 token
+    assert quality.parse_stream(S_WEBDL_EAC3).audio == "eac3"
+    assert quality.parse_stream(S_AC3).audio == "ac3"
+    assert quality.parse_stream(S_DTSHD).audio == "dtshd"
+    assert quality.parse_stream({"title": "Movie.1080p.AAC-X"}).audio == "aac"
+    assert quality.parse_stream(S_WEBDL_4K).audio == ""  # untagged audio
+
+
+def test_cast_caps_profile():
+    caps = quality.cast_caps()
+    assert "av1" not in caps.codecs
+    assert {"h264", "hevc", "hevc10", "vp9"} <= caps.codecs
+    assert caps.max_resolution == 2160
+
+
+def test_reason_cast_audio_excludes_lossless():
+    for s in (S_REMUX_TRUEHD, S_DTSHD):
+        info = quality.parse_stream(s)
+        r = quality.unsupported_reason(info, quality.cast_caps(), 2160, cast_audio=True)
+        assert r and r.startswith("audio ")
+    # compatible / unknown audio passes
+    for s in (S_WEBDL_EAC3, S_AC3, S_WEBDL_4K):
+        info = quality.parse_stream(s)
+        assert quality.unsupported_reason(info, quality.cast_caps(), 2160, cast_audio=True) is None
+
+
+def test_rank_cast_audio_demotes_lossless():
+    playable, excluded = quality.rank_streams(
+        [S_REMUX_TRUEHD, S_WEBDL_EAC3], quality.cast_caps(),
+        max_resolution=2160, allow_software=False, allow_dv5=False, cast_audio=True,
+    )  # fmt: skip
+    assert [r.stream for r in playable] == [S_WEBDL_EAC3]
+    assert len(excluded) == 1 and excluded[0].stream is S_REMUX_TRUEHD
+
+
+def test_rank_no_cast_audio_keeps_lossless():
+    # Without cast_audio the TrueHD remux stays playable (local mpv decodes it).
+    playable, _ = _rank([S_REMUX_TRUEHD])
+    assert len(playable) == 1
