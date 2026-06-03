@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 nstream is a native, terminal-first Stremio alternative: no Electron, no embedded browser,
 no Node server. Pure Python 3.13+ stdlib (zero runtime dependencies) orchestrating external
-CLIs (`fzf`, `mpv`, `ffprobe`, `catt`) over Stremio addon HTTP APIs. Entry point is
+CLIs (`fzf`, `mpv`, `ffprobe`, `catt`, `chafa`) over Stremio addon HTTP APIs. Entry point is
 `nstream.cli:_entry` (`src/nstream/cli.py`).
 
 Pipeline: search/browse (Cinemeta) → pick title/episode (fzf) → optional subtitle pick
@@ -32,17 +32,38 @@ Each `src/nstream/<mod>.py` has a matching `tests/test_<mod>.py`.
 ## Architecture
 
 Modules in `src/nstream/`:
-- `cli.py` — orchestrator: argparse, fzf pickers, mpv/cast launch, resume, series auto-advance.
-- `api.py` — HTTP addon dispatch with retry/backoff, gzip, concurrent aggregation
-  (`ThreadPoolExecutor`, ≤8 workers), 600s in-process metadata cache (streams/subs NOT cached).
+- `cli.py` — orchestrator: argparse, TUI flow, resume, series auto-advance, `--explain`/`__preview` commands.
+- `api.py` — HTTP addon dispatch (retry/backoff, gzip, `ThreadPoolExecutor` ≤8); 600s in-process
+  metadata cache **plus** an on-disk metadata cache (`meta_cached_disk`, `$XDG_CACHE_HOME/nstream/meta/`);
+  streams/subs NOT cached.
 - `addons.py` — Stremio addon protocol client + manifest registry/cache.
 - `quality.py` — stream parsing + hardware-aware ranking (GPU caps via `vainfo`, cached).
-- `config.py` — XDG config load/save (atomic temp+replace), typed schema.
+- `player.py` — local mpv playback: launch, position tracking over the IPC socket, and the
+  `*_defaults` helpers (hwdec/quiet/lang) that decide what to inject without overriding the user.
+  **Imports nothing from `cli`** (no cycle).
+- `caster.py` — Chromecast playback via `catt`: `resolve_device()`, `cast()`, status poll, in-cast
+  audio switch. Imports the picker from `picker`, not `cli`.
+- `picker.py` — shared fzf pickers (TUI flow + cast menus); imports only `util`+`ui`. `fzf`/`fzf_key`.
+- `preview.py` — body of the hidden `nstream __preview` subcommand: poster thumbnail (via `chafa`)
+  + metadata card in the fzf preview pane. Best-effort, **never prints stream URLs**.
+- `ui.py` — TUI design system: capability detection, palette/glyph set/fzf theme, progress bars,
+  layout breakpoints. Near the top of the import graph; must never import `api`/`picker`/`cli`/`quality`/`caster`.
+- `explain.py` — diagnostic renderer for `--explain`: reconstructs the auto-pick decision with the
+  same primitives the player uses. Read-only.
+- `languages.py` — **single source of truth** for languages (release tokens, flags, display names);
+  formerly three hand-synced maps. Leaf module (imports nothing from nstream).
+- `config.py` — XDG config load/save (atomic temp+replace), typed schema (incl. `posters`, `nerd_font`).
 - `state.py` — watch history (resume / continue-watching).
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
-- `settings.py` — fzf-based settings menu (RD token, addons, hwdec…).
+- `settings.py` — fzf-based settings menu (debrid token, addons, hwdec…), `scan_devices()`.
 - `log.py` — rotating file log + crash capture + secret redaction.
+- `util.py` — low-level helpers: atomic write, best-effort JSON load, subprocess launch. Top of the
+  import graph, stdlib-only.
 - `nstream.lua` — mpv overlay (resume toast + next-episode card).
+
+**Import-graph discipline:** `util`/`ui`/`languages` sit at the top (little or no internal imports),
+`cli` orchestrates at the bottom; `player`/`caster`/`picker` never import `cli`. This is the recurring
+constraint that explains where logic lives — preserve it when moving code.
 
 ### Debrid: provider-agnostic
 The debrid token is embedded in the Torrentio base URL — `cfg.torrentio_base` is
@@ -54,9 +75,10 @@ keep it provider-agnostic** — don't special-case RealDebrid.
 
 ### Casting (Chromecast via catt)
 - Discovery: `settings.py:scan_devices()` runs `catt scan` → `(name, ip)` pairs.
-- Resolution: `cli.py:_resolve_device()` honors `cfg.cast_device` only if present on the
+- Resolution: `caster.py:resolve_device()` honors `cfg.cast_device` only if present on the
   current LAN; otherwise re-discovers. Stored/resolved **by IP** (robust to mDNS flakiness).
-- Playback: `catt cast <url> [-d ip] [-t start] [-s subs]`, polled via `catt info -j` every 15s.
+- Playback: `caster.py:cast()` runs `catt cast <url> [-d ip] [-t start] [-s subs]`, polled via
+  `catt info -j` every 15s.
 - In-cast audio switch ('a'): re-casts the same title with a different dub via already-fetched streams.
 - Cast ranking ignores the language filter (show all dubs) but avoids Cast-incompatible
   audio (TrueHD/DTS-HD/DTS → would be silent).
@@ -66,16 +88,24 @@ Per-play temp dir under `$XDG_RUNTIME_DIR/nstream-*/` holds the mpv IPC socket, 
 file, subtitle files, and the next-episode label.
 - Resume: passed as `--start=<seconds>` (nstream is the sole source of truth;
   `--no-resume-playback` blocks mpv's own watch-later).
-- Position tracking: daemon thread reads `time-pos`/`duration` over `--input-ipc-server`.
+- Position tracking: `player.py` daemon thread reads `time-pos`/`duration` over `--input-ipc-server`.
 - Overlay (`nstream.lua`) signals back by writing to the signal file: `"next"` (next episode)
   or `"cast"` (in-player Alt-C move-to-TV → nstream re-resolves a device and casts from current position).
 - Track choices passed as `--aid`/`--sid`/`--sub-file`; `--alang`/`--slang` injected unless user-set.
 
 ### Hardware-aware decode
 `quality.py` caches `vainfo` output to `$XDG_CACHE_HOME/nstream/vainfo.json`.
-`cli.py:_hwdec_defaults()` upgrades the ambiguous `auto`-family hwdec to the GPU's real
-method (e.g. vaapi) so mpv doesn't probe unsupported paths. A concrete method in `mpv.conf`
-is always respected.
+`player.py:_hwdec_defaults()` upgrades the ambiguous `auto`-family hwdec to the GPU's real
+method (e.g. vaapi, via `quality.preferred_hwdec(quality.detect_caps())`) so mpv doesn't probe
+unsupported paths. A concrete method in `mpv.conf` is always respected.
+
+### TUI preview & `--explain`
+- `--explain <query>` (`cli.py:run_explain` → `explain.py`) reconstructs and prints WHY a stream/audio
+  was auto-picked, using the same primitives as playback (`quality.rank_streams`/`score_components`,
+  `player._lang_defaults`, `tracks.probe_tracks`). Read-only — it never plays.
+- fzf preview pane: fzf spawns `nstream __preview` per focused row (`preview.py`), rendering a poster
+  thumbnail via `chafa` + a metadata card. Gated by `cfg.posters` and the terminal's image-protocol
+  support; any failure degrades to a minimal card. Only meta is rendered — no stream URL can leak.
 
 ### Logging & secrets
 `log.py` writes `$XDG_STATE_HOME/nstream/nstream.log` (rotating, 512 KB × 3). `_entry()`
@@ -95,5 +125,5 @@ the `what=` addon-name string in errors; `addons.py` caches manifests keyed by U
 ## Config & paths
 - Config: `$XDG_CONFIG_HOME/nstream/config.json` (chmod 600; template `config.example.json`).
 - History: `$XDG_STATE_HOME/nstream/history.json`.
-- Caches: `$XDG_CACHE_HOME/nstream/` (`manifests.json`, `vainfo.json`).
-- Runtime deps: `mpv`, `fzf` (required); `ffmpeg`/`ffprobe`, `catt`, `vainfo`, `foot` (optional).
+- Caches: `$XDG_CACHE_HOME/nstream/` (`manifests.json`, `vainfo.json`, `meta/` disk metadata, `posters/` thumbnails).
+- Runtime deps: `mpv`, `fzf` (required); `ffmpeg`/`ffprobe`, `catt`, `vainfo`, `chafa`, `foot` (optional).

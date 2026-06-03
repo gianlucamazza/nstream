@@ -9,7 +9,7 @@ status, the auto-pick, and the audio tracks mpv would choose. Read-only: it neve
 
 from __future__ import annotations
 
-from . import player, quality, tracks
+from . import languages, player, quality, tracks
 from .config import Config, Stream
 
 
@@ -125,9 +125,11 @@ def explain_audio(cfg: Config, pick: quality.RankedStream | None) -> str:
 
 def _mpv_audio_choice(audio: list[tracks.Track], audio_langs: list[str]) -> tracks.Track | None:
     """The track mpv's --alang would pick: first track in the first preferred language
-    that's present. None when no preferred language matches (mpv then uses its default)."""
+    that's present. None when no preferred language matches (mpv then uses its default).
+    Tags are normalised so a 2-letter container tag (`it`) matches a 3-letter pref (`ita`)."""
     for lang in audio_langs:
+        want = languages.normalize(lang)
         for t in audio:
-            if t.lang == lang:
+            if languages.normalize(t.lang) == want:
                 return t
     return None

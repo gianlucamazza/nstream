@@ -16,7 +16,19 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import __version__, api, explain, log, preview, quality, settings, state, tracks, ui
+from . import (
+    __version__,
+    api,
+    explain,
+    languages,
+    log,
+    preview,
+    quality,
+    settings,
+    state,
+    tracks,
+    ui,
+)
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
 from .config import (
@@ -402,6 +414,23 @@ def _resume_position(cfg: Config, video_id: str) -> float | None:
     return start
 
 
+def _audio_langs_of(cfg: Config, chosen: Stream) -> set[str] | None:
+    """The audio languages actually in `chosen`, as canonical codes — for the auto-play
+    guard. Best-effort: returns None when it can't tell (no preference set, or ffprobe
+    missing/empty), so the caller never blocks playback on a probe failure. Skips the
+    ffprobe entirely when the release is already tagged with a preferred language."""
+    pref = set(cfg.audio_langs)
+    if not pref:
+        return None
+    tagged = quality.parse_stream(chosen).languages
+    if "multi" in tagged or (tagged & pref):
+        return pref  # trust the tag for the common well-tagged case (no probe)
+    tr = tracks.probe_tracks(chosen.get("url") or "")
+    if tr.empty():
+        return None  # unverifiable → don't block
+    return {code for t in tr.audio if (code := languages.normalize(t.lang))}
+
+
 def _play_video(
     cfg: Config,
     typ: str,
@@ -412,6 +441,7 @@ def _play_video(
     auto: bool,
     next_label: str | None,
     on_save: Callable[[float, float], None] | None,
+    reselect_on_wrong_audio: bool = True,
 ) -> tuple[str | None, bool]:
     """Resolve streams for one video, play it, persist progress. Returns
     (notice, advance): `notice` is a user-facing message to surface (no streams /
@@ -431,6 +461,24 @@ def _play_video(
     chosen = _pick_stream(cfg, results, auto=auto, cast=opts.cast)
     if not chosen:
         return (None, False)
+
+    # Auto-play language guard (local mpv only): the auto-pick can be a file with no audio
+    # in a preferred language (an untagged/mistagged foreign leak). Verify with ffprobe and,
+    # rather than letting mpv silently fall back to the wrong dub, warn and (when interactive)
+    # let the user pick another source. Cast keeps its own language UX.
+    if auto and not opts.cast:
+        avail = _audio_langs_of(cfg, chosen)
+        if avail is not None and not (set(cfg.audio_langs) & avail):
+            have = "/".join(sorted(avail)) or "?"
+            print(
+                f"nstream: nessuna traccia audio {','.join(cfg.audio_langs)} (disponibili: {have})",
+                file=sys.stderr,
+            )
+            if reselect_on_wrong_audio:
+                auto = False  # let choose_tracks give track control on the manual pick
+                chosen = _pick_stream(cfg, results, auto=False, cast=opts.cast)
+                if not chosen:
+                    return (None, False)
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
@@ -573,6 +621,7 @@ def _play_series(
     if idx is None:
         return None
     auto = opts.auto  # the first episode honours --play; binge episodes auto-pick
+    binge = False  # True once we're auto-advancing unattended (no blocking reselection)
     while 0 <= idx < len(eps):
         video = eps[idx]
         video_id = video["id"]
@@ -587,6 +636,7 @@ def _play_series(
         notice, advance = _play_video(
             cfg, "series", video_id, display_title(name, video), opts,
             auto=auto, next_label=next_label, on_save=on_save,
+            reselect_on_wrong_audio=not binge,  # binge advances warn-and-proceed, don't block
         )  # fmt: skip
         if notice:
             return notice
@@ -594,6 +644,7 @@ def _play_series(
             return None
         idx += 1
         auto = True
+        binge = True
         print(f"▶ Carico {display_title(name, eps[idx])}…", file=sys.stderr)
     return None
 

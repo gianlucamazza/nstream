@@ -26,3 +26,19 @@ def test_registry_covers_historical_languages():
     # The eight languages that predate the registry must still be present (regression).
     for code in ("ita", "eng", "fra", "spa", "deu", "rus", "por", "multi"):
         assert code in languages.by_code
+
+
+def test_normalize_aliases_tokens_and_names():
+    assert languages.normalize("it") == "ita"  # ISO-639-1
+    assert languages.normalize("EN") == "eng"  # case-insensitive
+    assert languages.normalize("eng") == "eng"  # canonical
+    assert languages.normalize("italian") == "ita"  # token
+    assert languages.normalize("Español") == "spa"  # native name
+    assert languages.normalize("ger") == "deu"  # 639-2/B alias
+    assert languages.normalize(" fr ") == "fra"  # trimmed
+    assert languages.normalize("xx") is None
+    assert languages.normalize("") is None
+
+
+def test_lat_token_maps_to_spanish():
+    assert languages.normalize("LAT") == "spa"  # Latino releases

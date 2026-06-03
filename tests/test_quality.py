@@ -419,6 +419,15 @@ def test_parse_new_language_jpn():
     assert "jpn" in quality.parse_stream({"title": "Anime.2024.1080p.JPN.x264"}).languages
 
 
+def test_lat_tagged_spanish_and_demoted():
+    # A "LAT" (Latino) release is now tagged spa and demoted by lang_filter for ita/eng.
+    lat: Stream = {"name": "[RD+] x\n1080p", "title": "El diablo viste a la moda 2 LAT.mp4"}
+    assert "spa" in quality.parse_stream(lat).languages
+    spec = FilterSpec(audio_langs=("ita", "eng"), lang_filter=True)
+    playable, excluded = quality.rank_streams([lat], _CAPS_HW, spec)
+    assert not playable and any("lingua spa" in (r.reason or "") for r in excluded)
+
+
 def test_parse_dcprip_and_tscr_are_camrip():
     # Cinema leaks (DCP rip, HD-TeleSync-Screener) must be classed as camrip, not unknown.
     assert quality.parse_stream({"title": "Movie 2026 1080p DCPRip x264"}).source == "dcp"

@@ -22,36 +22,61 @@ class Language:
     name: str  # native display name
     tokens: tuple[str, ...]  # release-name tokens (word-boundary matched, case-insensitive)
     flags: tuple[str, ...] = ()  # flag emoji Torrentio may prepend
+    aliases: tuple[str, ...] = ()  # equivalent codes (ISO-639-1 + 639-2/B) for tag matching
     selectable: bool = True  # offered in the preference picker (False for `multi`)
 
 
 LANGUAGES: tuple[Language, ...] = (
-    Language("ita", "Italiano", ("ITA", "ITALIAN", "ITALIANO"), ("🇮🇹",)),
-    Language("eng", "English", ("ENG", "ENGLISH"), ("🇬🇧", "🇺🇸")),
-    Language("fra", "Français", ("FRA", "FRENCH", "TRUEFRENCH", "VFF", "VFQ", "VOSTFR"), ("🇫🇷",)),
-    Language("spa", "Español", ("SPA", "ESP", "SPANISH", "CASTELLANO", "LATINO"), ("🇪🇸",)),
-    Language("deu", "Deutsch", ("GER", "GERMAN", "DEU"), ("🇩🇪",)),
-    Language("rus", "Русский", ("RUS", "RUSSIAN"), ("🇷🇺",)),
-    Language("por", "Português", ("POR", "PORTUGUESE", "DUBLADO", "LEGENDADO"), ("🇵🇹", "🇧🇷")),
-    Language("jpn", "日本語", ("JPN", "JAP", "JAPANESE"), ("🇯🇵",)),
-    Language("kor", "한국어", ("KOR", "KOREAN"), ("🇰🇷",)),
-    Language("zho", "中文", ("ZHO", "CHI", "CHINESE", "MANDARIN", "CANTONESE"), ("🇨🇳",)),
-    Language("nld", "Nederlands", ("NLD", "DUT", "DUTCH"), ("🇳🇱",)),
-    Language("pol", "Polski", ("POL", "POLISH"), ("🇵🇱",)),
-    Language("hin", "हिन्दी", ("HIN", "HINDI"), ("🇮🇳",)),
-    Language("ara", "العربية", ("ARA", "ARABIC"), ("🇸🇦",)),
+    Language("ita", "Italiano", ("ITA", "ITALIAN", "ITALIANO"), ("🇮🇹",), ("it",)),
+    Language("eng", "English", ("ENG", "ENGLISH"), ("🇬🇧", "🇺🇸"), ("en",)),
     Language(
-        "multi", "Multi", ("MULTI", "MULTILANG", "MULTI-LANG", "DUAL", "DUALAUDIO"), (), False
+        "fra",
+        "Français",
+        ("FRA", "FRENCH", "TRUEFRENCH", "VFF", "VFQ", "VOSTFR"),
+        ("🇫🇷",),
+        ("fr", "fre"),
+    ),  # noqa: E501
+    Language(
+        "spa", "Español", ("SPA", "ESP", "SPANISH", "CASTELLANO", "LATINO", "LAT"), ("🇪🇸",), ("es",)
+    ),  # noqa: E501
+    Language("deu", "Deutsch", ("GER", "GERMAN", "DEU"), ("🇩🇪",), ("de", "ger")),
+    Language("rus", "Русский", ("RUS", "RUSSIAN"), ("🇷🇺",), ("ru",)),
+    Language(
+        "por", "Português", ("POR", "PORTUGUESE", "DUBLADO", "LEGENDADO"), ("🇵🇹", "🇧🇷"), ("pt",)
+    ),  # noqa: E501
+    Language("jpn", "日本語", ("JPN", "JAP", "JAPANESE"), ("🇯🇵",), ("ja", "jp")),
+    Language("kor", "한국어", ("KOR", "KOREAN"), ("🇰🇷",), ("ko",)),
+    Language("zho", "中文", ("ZHO", "CHI", "CHINESE", "MANDARIN", "CANTONESE"), ("🇨🇳",), ("zh",)),
+    Language("nld", "Nederlands", ("NLD", "DUT", "DUTCH"), ("🇳🇱",), ("nl",)),
+    Language("pol", "Polski", ("POL", "POLISH"), ("🇵🇱",), ("pl",)),
+    Language("hin", "हिन्दी", ("HIN", "HINDI"), ("🇮🇳",), ("hi",)),
+    Language("ara", "العربية", ("ARA", "ARABIC"), ("🇸🇦",), ("ar",)),
+    Language(
+        "multi", "Multi", ("MULTI", "MULTILANG", "MULTI-LANG", "DUAL", "DUALAUDIO"), (), (), False
     ),
 )
 
 by_code: dict[str, Language] = {lang.code: lang for lang in LANGUAGES}
+
+# Any tag form (canonical code, alias, release token, native/English name) → canonical code.
+_NORMALIZE: dict[str, str] = {
+    form.lower(): lang.code
+    for lang in LANGUAGES
+    for form in (lang.code, lang.name, *lang.aliases, *lang.tokens)
+}
 
 
 def name(code: str) -> str:
     """Display name for a code, falling back to the upper-cased code if unknown."""
     lang = by_code.get(code)
     return lang.name if lang else code.upper()
+
+
+def normalize(tag: str) -> str | None:
+    """Map any language tag (ISO-639-1/2, release token, or name) to the canonical code,
+    or None if unknown. Used to match ffprobe track tags (often 2-letter, e.g. `it`/`en`)
+    against the 3-letter codes stored in config."""
+    return _NORMALIZE.get(tag.strip().lower()) if tag else None
 
 
 def selectable() -> list[Language]:

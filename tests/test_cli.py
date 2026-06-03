@@ -11,7 +11,7 @@ import argparse
 import pytest
 
 from nstream import cli
-from nstream.config import Config, HistoryEntry, Meta, Video
+from nstream.config import Config, HistoryEntry, Meta, Stream, Video
 
 
 def test_main_preview_dispatch(monkeypatch):
@@ -21,6 +21,77 @@ def test_main_preview_dispatch(monkeypatch):
     monkeypatch.setattr(cli.preview, "run_preview", lambda argv: (seen.update(argv=argv), 0)[1])
     assert cli.main() == 0
     assert seen["argv"] == ["title", "movie", "tt1"]
+
+
+def _gopts(*, auto=True, cast=False):
+    return cli.PlayOpts(
+        auto=auto, cast=cast, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+
+
+def test_audio_langs_of_trusts_preferred_tag(monkeypatch):
+    def boom(url):
+        raise AssertionError("ffprobe should be skipped for a preferred-tagged release")
+
+    monkeypatch.setattr(cli.tracks, "probe_tracks", boom)
+    s: Stream = {"url": "u", "title": "Movie.2024.1080p.ITA.ENG.x264-GRP"}
+    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=["ita"]), s) == {"ita"}
+
+
+def test_audio_langs_of_probes_untagged(monkeypatch):
+    monkeypatch.setattr(
+        cli.tracks, "probe_tracks", lambda url: cli.tracks.Tracks(audio=[cli.tracks.Track(1, "es")])
+    )
+    s: Stream = {"url": "u", "title": "Some.Movie.2024.1080p.x264-GRP"}  # untagged
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    assert cli._audio_langs_of(cfg, s) == {"spa"}  # "es" → spa via the registry
+
+
+def test_audio_langs_of_unverifiable_returns_none(monkeypatch):
+    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda url: cli.tracks.Tracks())
+    s: Stream = {"url": "u", "title": "Some.Movie.2024.1080p.x264-GRP"}
+    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=["ita"]), s) is None
+
+
+def test_audio_langs_of_no_preference_returns_none():
+    s: Stream = {"url": "u", "title": "x"}
+    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=[]), s) is None
+
+
+def test_play_video_guard_reselects_on_wrong_audio(monkeypatch, capsys):
+    foreign: Stream = {"url": "u1", "name": "x\n1080p"}
+    chosen2: Stream = {"url": "u2", "name": "y\n1080p"}
+    picks = iter([foreign, chosen2])
+    monkeypatch.setattr(cli.api, "streams", lambda *a: [foreign, chosen2])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: next(picks))
+    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"spa"})  # no ita/eng
+    got = {}
+    monkeypatch.setattr(
+        cli, "_play_on_mpv", lambda cfg, chosen, work_dir, **k: got.update(c=chosen) or (1.0, 2.0, False)
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
+    cli._play_video(cfg, "movie", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None)
+    assert got["c"] is chosen2  # reselected after the warning
+    assert "nessuna traccia audio ita,eng" in capsys.readouterr().err
+
+
+def test_play_video_guard_binge_warns_and_proceeds(monkeypatch, capsys):
+    foreign: Stream = {"url": "u1", "name": "x\n1080p"}
+    calls = []
+    monkeypatch.setattr(cli.api, "streams", lambda *a: [foreign])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: (calls.append(1), foreign)[1])
+    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"spa"})
+    got = {}
+    monkeypatch.setattr(
+        cli, "_play_on_mpv", lambda cfg, chosen, work_dir, **k: got.update(c=chosen) or (1.0, 2.0, False)
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
+    cli._play_video(
+        cfg, "series", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None,
+        reselect_on_wrong_audio=False,
+    )  # fmt: skip
+    assert got["c"] is foreign and len(calls) == 1  # proceeded, no reselection
+    assert "nessuna traccia audio" in capsys.readouterr().err
 
 
 def test_run_explain_movie(monkeypatch, capsys):
@@ -294,7 +365,9 @@ def _stub_play_video(monkeypatch, advance_until):
     """Record each call; return advance=True while index < advance_until."""
     calls = []
 
-    def fake(cfg, typ, video_id, title, opts, *, auto, next_label, on_save):
+    def fake(
+        cfg, typ, video_id, title, opts, *, auto, next_label, on_save, reselect_on_wrong_audio=True
+    ):
         calls.append({"video_id": video_id, "auto": auto, "next_label": next_label})
         idx = len(calls)  # 1-based
         # Mimic real play(): advancing requires the overlay, which requires a next_label.
