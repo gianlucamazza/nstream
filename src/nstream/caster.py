@@ -18,7 +18,7 @@ import time
 import tty
 from collections.abc import Callable
 
-from . import log, settings
+from . import languages, log, settings
 from .config import Config
 from .picker import fzf
 
@@ -95,19 +95,6 @@ def _cast_progress(info: dict) -> tuple[float, float, str]:
     return (pos, dur, state)
 
 
-# ISO code → display name for the cast audio-language picker.
-_LANG_NAMES = {
-    "ita": "Italiano",
-    "eng": "English",
-    "fra": "Français",
-    "spa": "Español",
-    "deu": "Deutsch",
-    "rus": "Русский",
-    "por": "Português",
-    "multi": "Multi",
-}
-
-
 @contextlib.contextmanager
 def _cbreak(stream):
     """Put a TTY into cbreak so single keypresses arrive without Enter, restoring
@@ -148,11 +135,11 @@ def _switch_cast_audio(
     """Re-cast a release in the chosen audio language from the current position.
     The Chromecast plays the file's default track, so this picks a differently-dubbed
     release rather than switching tracks in place (best-effort, single-dub friendly)."""
-    items = [(_LANG_NAMES.get(lang, lang.upper()), lang) for lang in langs]
+    items = [(languages.name(lang), lang) for lang in langs]
     lang = fzf(items, "audio> ")
     if lang is None:  # ESC → keep the current cast
         return
-    print(f"📺 cambio audio: {_LANG_NAMES.get(lang, lang)}…", file=sys.stderr)
+    print(f"📺 cambio audio: {languages.name(lang)}…", file=sys.stderr)
     new = resolve_lang(lang)
     if not new:
         print(f"nstream: nessuno stream {lang} compatibile col Chromecast", file=sys.stderr)

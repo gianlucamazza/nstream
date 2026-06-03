@@ -146,3 +146,33 @@ def fzf_key[T](
     return _run_fzf(
         items, prompt, header=header, expect=expect, preview_args=_map_preview(items, preview)
     )
+
+
+def fzf_multi[T](
+    items: list[tuple[str, T]],
+    prompt: str,
+    *,
+    header: str | None = None,
+) -> list[T] | None:
+    """Multi-select picker: Tab toggles a row's mark, Enter confirms. Returns the marked
+    values in display order, or None on ESC / empty result / missing binary. (With nothing
+    marked, fzf returns the focused row — callers treat that the same as 'no change'.)"""
+    if not items:
+        return None
+    lines = "".join(f"{i}\t{label}\n" for i, (label, _) in enumerate(items))
+    cmd = ["fzf", "--prompt", prompt, "--with-nth", "2..",
+           "--delimiter", "\t", "--no-sort", "--reverse", "--cycle",
+           "--multi", "--bind", "tab:toggle+down,shift-tab:toggle+up",
+           *_theme_args()]  # fmt: skip
+    if header:
+        cmd += ["--header", header]
+    proc = util.run_cmd(cmd, input=lines)
+    if proc is None:
+        print("nstream: fzf non trovato", file=sys.stderr)
+        return None
+    if proc.returncode != 0:  # ESC / Ctrl-C / no match
+        return None
+    chosen = [
+        items[int(line.split("\t", 1)[0])][1] for line in proc.stdout.splitlines() if line.strip()
+    ]
+    return chosen or None

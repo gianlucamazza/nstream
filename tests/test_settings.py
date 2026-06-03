@@ -92,7 +92,7 @@ def test_mpv_quiet_in_items():
 def test_items_render_current_values():
     cfg = Config(torrentio_base="sort=x|realdebrid=T", audio_langs=["jpn"], autoplay=False)
     by_key = {it[0]: it for it in settings._items(cfg)}
-    assert by_key["audio_langs"][3] == "jpn"
+    assert by_key["audio_langs"][3] == "日本語"  # rendered via the language registry name
     assert by_key["autoplay"][3] == "off"
     assert by_key["torrentio_base"][3] == "✓ RealDebrid (••••)"
 
@@ -168,11 +168,34 @@ def test_edit_int_empty_no_save(monkeypatch):
     assert saved == []
 
 
-def test_edit_list_parses_csv(monkeypatch):
+def test_edit_langs_saves_multiselect(monkeypatch):
     saved = _capture_save(monkeypatch)
-    monkeypatch.setattr(settings, "_ask", lambda *a: " ita , eng ,")
-    settings._edit(RD, "audio_langs", "list", "Audio")
-    assert saved == [{"audio_langs": ["ita", "eng"]}]
+    # fzf_multi returns the marked codes in display order; they're saved verbatim.
+    monkeypatch.setattr(settings.picker, "fzf_multi", lambda items, prompt, **k: ["eng", "ita"])
+    settings._edit(RD, "audio_langs", "langs", "Audio")
+    assert saved == [{"audio_langs": ["eng", "ita"]}]
+
+
+def test_edit_langs_empty_is_noop(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    monkeypatch.setattr(settings.picker, "fzf_multi", lambda items, prompt, **k: None)  # ESC
+    settings._edit(RD, "audio_langs", "langs", "Audio")
+    assert saved == []  # nothing marked → preferences untouched
+
+
+def test_pick_languages_lists_current_first(monkeypatch):
+    captured = {}
+
+    def fake_multi(items, prompt, **k):
+        captured["codes"] = [code for _, code in items]
+        return None
+
+    monkeypatch.setattr(settings.picker, "fzf_multi", fake_multi)
+    settings._pick_languages(["eng"], "Audio")
+    # the already-selected code leads, the rest follow in registry order
+    assert captured["codes"][0] == "eng"
+    assert "jpn" in captured["codes"]  # extended registry is offered
+    assert "multi" not in captured["codes"]  # the multi attribute isn't selectable
 
 
 def test_edit_enum_hwdec_sets_value(monkeypatch):
