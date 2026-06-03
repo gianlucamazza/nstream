@@ -49,6 +49,14 @@ class PlayOpts:
     autoplay: bool  # offer the next-episode overlay for series
 
 
+def _clear() -> None:
+    """Wipe the terminal (screen + scrollback) so menus and mpv output never pile up.
+    No-op when stdout isn't a TTY (tests, pipes) so non-interactive runs stay clean."""
+    if sys.stdout.isatty():
+        sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")
+        sys.stdout.flush()
+
+
 def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None) -> T | None:
     """Pick one of (label, value) pairs via fzf. Returns the value or None.
 
@@ -61,8 +69,10 @@ def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None
         return items[0][1]
     # Hidden leading index lets labels repeat without ambiguity.
     lines = "".join(f"{i}\t{label}\n" for i, (label, _) in enumerate(items))
+    # No --height → fzf takes the full alternate screen and restores the terminal on
+    # exit, so menus never pile up in the scrollback (clean TUI). --cycle wraps nav.
     cmd = ["fzf", "--prompt", prompt, "--with-nth", "2..",
-           "--delimiter", "\t", "--no-sort", "--reverse", "--height", "80%"]  # fmt: skip
+           "--delimiter", "\t", "--no-sort", "--reverse", "--cycle"]  # fmt: skip
     if header:
         cmd += ["--header", header]
     try:
@@ -639,6 +649,7 @@ def _play_video(
             start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
             next_label=next_label, resume_msg=resume_msg, work_dir=work_dir,
         )  # fmt: skip
+    _clear()  # drop mpv's exit frame/logs before returning to the menu
     # Only persist a resume we can reason about: a real duration is needed for the
     # watched/near-end logic, otherwise the entry would stick forever.
     if opts.history and on_save and pos > 0 and dur > 0:
@@ -842,6 +853,7 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
+    _clear()  # start the interactive session on a clean screen (drop launcher banner)
     if args.cont:
         return run_continue(cfg, opts)
     if args.browse:
