@@ -1,4 +1,8 @@
-"""Unit tests for cli pure helpers and the play() arg/signal contract."""
+"""Unit tests for cli orchestration: pickers, the play-flow wiring, and navigation.
+
+Low-level playback/cast/picker units live in test_player.py, test_caster.py and
+test_picker.py; here we exercise cli's coordination, mocking play/cast/_resolve_device
+(re-exported from those modules) as cli globals."""
 
 from __future__ import annotations
 
@@ -95,72 +99,7 @@ def test_pick_subtitles_none_available(monkeypatch, tmp_path):
     assert cli.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="auto") == ()
 
 
-# --- play() arg + signal contract -----------------------------------------
-
-
-class _FakePopen:
-    """Captures argv and simulates the Lua script writing the advance signal."""
-
-    last_args: list[str] = []
-
-    def __init__(self, args, *a, **k):
-        type(self).last_args = args
-        for x in args:
-            if x.startswith("--script-opts-append=nstream-signal="):
-                with open(x.split("=", 2)[2], "w") as f:
-                    f.write("next\n")
-
-    def wait(self):
-        return 0
-
-    def poll(self):
-        return 0
-
-
-@pytest.fixture
-def stub_mpv(monkeypatch):
-    monkeypatch.setattr(cli.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(cli, "_track_position", lambda *a, **k: None)
-
-
-def test_play_series_loads_script_and_advances(stub_mpv):
-    cfg = Config(torrentio_base="tb", hwdec="", autoplay_lead=12)
-    pos, dur, adv = cli.play(cfg, "Show · S01E02", "http://u", start=42, next_label="Show · S01E03")
-    args = _FakePopen.last_args
-    assert "--force-media-title=Show · S01E02" in args
-    assert "--start=42" in args
-    assert "--no-resume-playback" in args
-    assert not any("write-filename" in a for a in args)
-    assert any(a.startswith("--script=") and a.endswith("nstream.lua") for a in args)
-    assert "--script-opts-append=nstream-lead=12" in args
-    assert "--script-opts-append=nstream-resume=42" in args  # resume toast via the script
-    assert adv == "next"  # play() now returns the signal string
-
-
-def test_play_movie_loads_script_no_card_no_advance(stub_mpv):
-    # The overlay script is always loaded (single on-screen renderer), but with no
-    # next_label there's no card/signal opt and nothing can ask to advance.
-    cfg = Config(torrentio_base="tb", hwdec="")
-    pos, dur, adv = cli.play(cfg, "Movie", "http://u", next_label=None)
-    args = _FakePopen.last_args
-    assert any(a.startswith("--script=") and a.endswith("nstream.lua") for a in args)
-    assert not any(a.startswith("--script-opts-append=nstream-info=") for a in args)
-    assert not any(a.startswith("--script-opts-append=nstream-signal=") for a in args)
-    assert adv == ""  # no card / no cast key → empty signal
-
-
-def test_play_movie_resume_passes_script_opt(stub_mpv):
-    cfg = Config(torrentio_base="tb", hwdec="")
-    cli.play(cfg, "Movie", "http://u", start=100)
-    assert "--script-opts-append=nstream-resume=100" in _FakePopen.last_args
-
-
-def test_play_no_resume_opt_when_fresh(stub_mpv):
-    cfg = Config(torrentio_base="tb", hwdec="")
-    cli.play(cfg, "Movie", "http://u")
-    assert not any(
-        a.startswith("--script-opts-append=nstream-resume=") for a in _FakePopen.last_args
-    )
+# --- terminal clear --------------------------------------------------------
 
 
 def test_clear_noop_without_tty(monkeypatch, capsys):
@@ -175,96 +114,7 @@ def test_clear_emits_escape_on_tty(monkeypatch, capsys):
     assert "\x1b[2J" in capsys.readouterr().out
 
 
-def test_play_aid_sid_injected(stub_mpv):
-    cfg = Config(torrentio_base="tb", hwdec="")
-    cli.play(cfg, "Movie", "http://u", audio_id=2, sub_id=3)
-    assert "--aid=2" in _FakePopen.last_args and "--sid=3" in _FakePopen.last_args
-
-
-def test_play_sid_no_disables_subs(stub_mpv):
-    cfg = Config(torrentio_base="tb", hwdec="")
-    cli.play(cfg, "Movie", "http://u", sub_id="no")
-    assert "--sid=no" in _FakePopen.last_args
-
-
-def test_play_no_aid_sid_by_default(stub_mpv):
-    cfg = Config(torrentio_base="tb", hwdec="")
-    cli.play(cfg, "Movie", "http://u")
-    assert not any(a.startswith(("--aid", "--sid")) for a in _FakePopen.last_args)
-
-
-def test_play_hwdec_injected_when_configured(stub_mpv, monkeypatch):
-    # No mpv.conf hwdec; concrete nstream value → injected as-is.
-    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: None)
-    cfg = Config(torrentio_base="tb", hwdec="vaapi", mpv_args=[])
-    cli.play(cfg, "Movie", "http://u")
-    assert "--hwdec=vaapi" in _FakePopen.last_args
-
-
-def test_play_hwdec_not_injected_when_user_set(stub_mpv, monkeypatch):
-    # A concrete method in mpv.conf is respected, nothing injected.
-    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "vaapi" if opt == "hwdec" else None)
-    cfg = Config(torrentio_base="tb", hwdec="auto-safe")
-    cli.play(cfg, "Movie", "http://u")
-    assert not any(a.startswith("--hwdec") for a in _FakePopen.last_args)
-
-
-# --- hwdec auto→vaapi upgrade (_hwdec_defaults) -----------------------------
-
-
-def test_hwdec_auto_upgraded_to_detected(monkeypatch):
-    """mpv.conf auto-safe + VAAPI detected → nstream pins --hwdec=vaapi (CLI wins)."""
-    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "auto-safe" if opt == "hwdec" else None)
-    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps(vaapi=True))
-    monkeypatch.setattr(cli.quality, "preferred_hwdec", lambda caps: "vaapi")
-    assert cli._hwdec_defaults(Config(torrentio_base="tb", hwdec="auto-safe")) == ["--hwdec=vaapi"]
-
-
-def test_hwdec_auto_no_detection_defers_to_conf(monkeypatch):
-    """auto in mpv.conf but no GPU detected → leave mpv.conf in charge."""
-    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "auto-safe" if opt == "hwdec" else None)
-    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps(vaapi=False))
-    monkeypatch.setattr(cli.quality, "preferred_hwdec", lambda caps: None)
-    assert cli._hwdec_defaults(Config(torrentio_base="tb", hwdec="auto-safe")) == []
-
-
-def test_hwdec_mpv_args_override_defers(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "auto-safe")
-    cfg = Config(torrentio_base="tb", hwdec="auto-safe", mpv_args=["--hwdec=foo"])
-    assert cli._hwdec_defaults(cfg) == []
-
-
-def test_hwdec_disabled_when_empty(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: None)
-    assert cli._hwdec_defaults(Config(torrentio_base="tb", hwdec="")) == []
-
-
-# --- language preference (--alang/--slang) ---------------------------------
-
-
-def test_lang_defaults_injected(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], subtitle_langs=["ita", "eng"])
-    flags = cli._lang_defaults(cfg)
-    assert "--alang=ita,eng" in flags
-    assert "--slang=ita,eng" in flags
-    assert "--subs-with-matching-audio=no" in flags
-
-
-def test_lang_defaults_not_when_user_set_in_mpv_args(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
-    cfg = Config(torrentio_base="tb", mpv_args=["--alang=fre"])
-    flags = cli._lang_defaults(cfg)
-    assert not any(f.startswith("--alang") for f in flags)
-    assert any(f.startswith("--slang") for f in flags)  # slang still injected
-
-
-def test_lang_defaults_not_when_in_mpv_conf(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: opt == "slang")
-    cfg = Config(torrentio_base="tb")
-    flags = cli._lang_defaults(cfg)
-    assert any(f.startswith("--alang") for f in flags)
-    assert not any(f.startswith("--slang") for f in flags)
+# --- release date + labels -------------------------------------------------
 
 
 def test_future_release_parsing():
@@ -294,25 +144,6 @@ def test_meta_label_upcoming_future_year():
 def test_meta_label_no_hint_past_year():
     label = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2000"})
     assert "in uscita" not in label
-
-
-def test_quiet_defaults_injected(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
-    cfg = Config(torrentio_base="tb", mpv_quiet=True)
-    flags = cli._quiet_defaults(cfg)
-    assert flags and flags[0].startswith("--msg-level=")
-
-
-def test_quiet_defaults_off(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
-    cfg = Config(torrentio_base="tb", mpv_quiet=False)
-    assert cli._quiet_defaults(cfg) == []
-
-
-def test_quiet_defaults_not_when_user_sets_msg_level(monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: opt == "msg-level")
-    cfg = Config(torrentio_base="tb", mpv_quiet=True)
-    assert cli._quiet_defaults(cfg) == []
 
 
 # --- resume / near-end (keep-open) -----------------------------------------
@@ -537,65 +368,6 @@ def test_run_home_dispatches_actions(monkeypatch):
     assert called["settings"] == 1
 
 
-def test_fzf_passes_header_to_argv(monkeypatch):
-    captured = {}
-
-    class _Proc:
-        returncode = 0
-        stdout = "0\tlabel\n"
-
-    def fake_run(cmd, **k):
-        captured["cmd"] = cmd
-        return _Proc()
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    cli.fzf([("a", 1), ("b", 2)], "p> ", header="avviso")
-    assert "--header" in captured["cmd"]
-    assert "avviso" in captured["cmd"]
-
-
-def _stub_fzf_proc(monkeypatch, *, returncode=0, stdout=""):
-    captured = {}
-
-    class _Proc:
-        pass
-
-    _Proc.returncode = returncode
-    _Proc.stdout = stdout
-
-    def fake_run(cmd, **k):
-        captured["cmd"] = cmd
-        return _Proc()
-
-    monkeypatch.setattr(cli.subprocess, "run", fake_run)
-    return captured
-
-
-def test_fzf_key_enter(monkeypatch):
-    # --expect prints an empty first line for Enter, then the selection.
-    cap = _stub_fzf_proc(monkeypatch, stdout="\n1\tb\n")
-    out = cli.fzf_key([("a", 10), ("b", 20)], "p> ")
-    assert out == ("", 20)
-    assert "--expect" in cap["cmd"] and "tab,alt-c" in cap["cmd"]
-
-
-def test_fzf_key_tab(monkeypatch):
-    _stub_fzf_proc(monkeypatch, stdout="tab\n0\ta\n")
-    assert cli.fzf_key([("a", 10), ("b", 20)], "p> ") == ("tab", 10)
-
-
-def test_fzf_key_esc_returns_none(monkeypatch):
-    _stub_fzf_proc(monkeypatch, returncode=130, stdout="")
-    assert cli.fzf_key([("a", 10), ("b", 20)], "p> ") is None
-
-
-def test_fzf_key_single_item_still_launches(monkeypatch):
-    # With expect set, even a one-item list opens fzf so Tab stays reachable.
-    cap = _stub_fzf_proc(monkeypatch, stdout="tab\n0\ta\n")
-    assert cli.fzf_key([("a", 10)], "p> ") == ("tab", 10)
-    assert "fzf" in cap["cmd"]
-
-
 def test_pick_hint_reflects_default(monkeypatch):
     auto = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
@@ -667,6 +439,9 @@ def test_choose_tracks_subs_none(monkeypatch):
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, "no", ())
 
 
+# --- stream ranking + curation (_pick_stream) ------------------------------
+
+
 def _ranked(n, *, reason=None):
     from nstream.quality import RankedStream, StreamInfo
 
@@ -730,6 +505,9 @@ def test_pick_stream_cast_uses_cast_caps_and_audio(monkeypatch):
     assert seen["caps"] is sentinel and seen["cast_audio"] is True
 
 
+# --- _play_video flow wiring -----------------------------------------------
+
+
 def test_play_video_auto_skips_track_menu(monkeypatch):
     """--play / binge (auto=True) must NOT open the pre-play track menu."""
     cfg = Config(torrentio_base="tb", hwdec="")
@@ -767,187 +545,6 @@ def test_play_video_interactive_calls_track_menu(monkeypatch):
     )
     cli._play_video(cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None)
     assert seen == {"aid": 2, "sid": 1}
-
-
-# --- cast (Chromecast via catt) --------------------------------------------
-
-
-def _scan(devs):
-    return lambda: list(devs)  # devs: [(name, ip)]
-
-
-def test_resolve_device_pref_present_returns_ip(monkeypatch):
-    monkeypatch.setattr(
-        cli.settings, "scan_devices", _scan([("Salotto", "192.168.1.5"), ("Camera", "192.168.1.6")])
-    )
-    cfg = Config(torrentio_base="tb", cast_device="Salotto")
-    assert cli._resolve_device(cfg) == "192.168.1.5"  # preferred name → its current IP
-
-
-def test_resolve_device_pref_absent_rediscovers(monkeypatch):
-    # Pinned name not on this LAN (network changed) → re-discover, don't return it stale.
-    monkeypatch.setattr(cli.settings, "scan_devices", _scan([("Camera", "192.168.1.6")]))
-    cfg = Config(torrentio_base="tb", cast_device="Salotto")
-    assert cli._resolve_device(cfg) == "192.168.1.6"
-
-
-def test_resolve_device_single_auto_ip(monkeypatch):
-    monkeypatch.setattr(cli.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
-    assert cli._resolve_device(Config(torrentio_base="tb")) == "10.0.0.9"
-
-
-def test_resolve_device_multiple_prompts_ip(monkeypatch):
-    monkeypatch.setattr(
-        cli.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
-    )
-    monkeypatch.setattr(cli, "fzf", lambda items, prompt: "10.0.0.2")
-    assert cli._resolve_device(Config(torrentio_base="tb")) == "10.0.0.2"
-
-
-def test_resolve_device_choose_forces_picker_by_name(monkeypatch):
-    monkeypatch.setattr(cli.settings, "scan_devices", _scan([("TV1", "10.0.0.1")]))
-    seen = {}
-
-    def fk(items, prompt):
-        seen["items"] = items
-        return "10.0.0.1"
-
-    monkeypatch.setattr(cli, "fzf", fk)
-    assert cli._resolve_device(Config(torrentio_base="tb"), choose=True) == "10.0.0.1"
-    assert seen["items"] == [("TV1", "10.0.0.1")]  # label=name, value=ip
-
-
-def test_resolve_device_none_raises(monkeypatch):
-    # Empty scan → trust it (no fall-through to a stale cast-resolve default).
-    monkeypatch.setattr(cli.settings, "scan_devices", _scan([]))
-    with pytest.raises(cli.CastUnavailable):
-        cli._resolve_device(Config(torrentio_base="tb"))
-
-
-def _cast_run(monkeypatch, *, launch_rc=0, info_seq=()):
-    """Stub subprocess.run for cast(): the first call is `catt cast` (returns
-    launch_rc), subsequent `catt ... info -j` calls yield info_seq JSON in order.
-    Records every argv. time.sleep is neutralised."""
-    import json as _json
-
-    calls = []
-    seq = list(info_seq)
-
-    class _P:
-        def __init__(self, rc, out=""):
-            self.returncode = rc
-            self.stdout = out
-            self.stderr = ""
-
-    def fake(cmd, **k):
-        calls.append(cmd)
-        if "cast" in cmd:
-            return _P(launch_rc)
-        if "info" in cmd:
-            if seq:
-                item = seq.pop(0)
-                return _P(0, _json.dumps(item)) if item is not None else _P(1)
-            return _P(1)  # device idle/unreachable
-        return _P(0)
-
-    monkeypatch.setattr(cli.subprocess, "run", fake)
-    monkeypatch.setattr(cli.time, "sleep", lambda *_: None)
-    return calls
-
-
-def test_cast_builds_command_with_seek_and_sub(monkeypatch):
-    calls = _cast_run(
-        monkeypatch,
-        info_seq=[
-            {"player_state": "PLAYING", "current_time": 1.0, "duration": 100.0},
-            {"player_state": "IDLE", "duration": 100.0},  # ended → exits cleanly
-        ],
-    )
-    cli.cast(
-        CFG, "Dune", "http://u",
-        device="TV", start=125.0, sub_paths=("/tmp/x.srt",), next_label=None,
-    )  # fmt: skip
-    launch = calls[0]
-    assert launch[:2] == ["catt", "-d"] and launch[2] == "TV"
-    assert "cast" in launch and "http://u" in launch
-    assert "-t" in launch and "125" in launch
-    assert "-s" in launch and "/tmp/x.srt" in launch
-
-
-def test_cast_tracks_position_and_advances_on_finish(monkeypatch):
-    _cast_run(
-        monkeypatch,
-        info_seq=[
-            {"player_state": "PLAYING", "current_time": 10.0, "duration": 100.0},
-            {"player_state": "PLAYING", "current_time": 99.0, "duration": 100.0},
-            {"player_state": "IDLE", "duration": 100.0},
-        ],
-    )
-    pos, dur, advance = cli.cast(CFG, "Show E1", "http://u", device="TV", next_label="Show E2")
-    assert (pos, dur) == (99.0, 100.0)
-    assert advance is True  # ended past _CAST_DONE with a next episode queued
-
-
-def test_cast_no_advance_on_early_stop(monkeypatch):
-    _cast_run(
-        monkeypatch,
-        info_seq=[
-            {"player_state": "PLAYING", "current_time": 20.0, "duration": 100.0},
-            {"player_state": "IDLE", "duration": 100.0},  # stopped at 20% → not finished
-        ],
-    )
-    pos, dur, advance = cli.cast(CFG, "Show E1", "http://u", device="TV", next_label="Show E2")
-    assert (pos, dur) == (20.0, 100.0)
-    assert advance is False
-
-
-def test_cast_launch_failure_returns_zero(monkeypatch):
-    _cast_run(monkeypatch, launch_rc=1)
-    assert cli.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
-
-
-def test_cast_gives_up_if_never_starts(monkeypatch):
-    # Receiver stays idle/unreachable forever → bail after _CAST_GIVEUP polls,
-    # never loops indefinitely.
-    calls = _cast_run(monkeypatch, info_seq=[])  # every info poll fails
-    assert cli.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
-    info_polls = sum(1 for c in calls if "info" in c)
-    assert info_polls == cli._CAST_GIVEUP
-
-
-def test_cast_prints_preparing_before_launch(monkeypatch, capsys):
-    _cast_run(monkeypatch, info_seq=[{"player_state": "IDLE"}])
-    cli.cast(CFG, "Dune", "http://u", device="TV")
-    assert "preparo il cast" in capsys.readouterr().err
-
-
-def test_cast_warns_on_zero_volume(monkeypatch, capsys):
-    _cast_run(
-        monkeypatch,
-        info_seq=[
-            {"player_state": "PLAYING", "current_time": 5.0, "duration": 100.0, "volume_level": 0},
-            {"player_state": "IDLE", "duration": 100.0},
-        ],
-    )
-    cli.cast(CFG, "Dune", "http://u", device="TV")
-    assert "volume del Chromecast a 0" in capsys.readouterr().err
-
-
-def test_cast_no_volume_warning_when_audible(monkeypatch, capsys):
-    _cast_run(
-        monkeypatch,
-        info_seq=[
-            {
-                "player_state": "PLAYING",
-                "current_time": 5.0,
-                "duration": 100.0,
-                "volume_level": 0.4,
-            },
-            {"player_state": "IDLE", "duration": 100.0},
-        ],
-    )
-    cli.cast(CFG, "Dune", "http://u", device="TV")
-    assert "volume del Chromecast a 0" not in capsys.readouterr().err
 
 
 def test_play_video_cast_branch_no_track_menu(monkeypatch):
@@ -1003,7 +600,33 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     assert seen.get("local") is True and advance is False
 
 
-# --- cast audio-language switch (Fase 1q) -----------------------------------
+def test_play_video_local_to_cast_on_signal(monkeypatch):
+    """Alt-C in mpv (play() returns 'cast') re-casts from the current position."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
+    monkeypatch.setattr(cli.shutil, "which", lambda _x: "/usr/bin/catt")
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (55.0, 100.0, "cast"))
+    monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "cast",
+        lambda *a, **k: (
+            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False)
+        ),
+    )
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
+    )
+    assert seen == {"start": 55.0, "device": "TV"} and advance is False
+
+
+# --- cast stream selection (language switch) --------------------------------
 
 from nstream.config import Stream as _Stream  # noqa: E402
 
@@ -1024,14 +647,6 @@ _S_ENG_WEBDL: _Stream = {
 }
 
 
-def test_poll_wait_non_tty_sleeps(monkeypatch):
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
-    slept = []
-    monkeypatch.setattr(cli.time, "sleep", lambda t: slept.append(t))
-    assert cli._poll_wait(15.0) is None
-    assert slept == [15.0]
-
-
 def test_cast_languages_lists_compatible(monkeypatch):
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
     langs = cli._cast_languages(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
@@ -1047,50 +662,7 @@ def test_cast_resolver_picks_compatible_release(monkeypatch):
     assert resolve("ger") is None
 
 
-def test_cast_hotkey_switches_audio(monkeypatch):
-    calls = _cast_run(
-        monkeypatch,
-        info_seq=[
-            {"player_state": "PLAYING", "current_time": 30.0, "duration": 100.0},
-            {"player_state": "PLAYING", "current_time": 35.0, "duration": 100.0},
-            {"player_state": "IDLE", "duration": 100.0},
-        ],
-    )
-    keys = iter(["a", None, None, None, None])
-    monkeypatch.setattr(cli, "_poll_wait", lambda _t: next(keys, None))
-    monkeypatch.setattr(cli, "fzf", lambda items, prompt: "eng")
-    cli.cast(
-        CFG, "Film", "http://ita",
-        device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: "http://eng",
-    )  # fmt: skip
-    recasts = [c for c in calls if "cast" in c and "http://eng" in c]
-    assert recasts and "-t" in recasts[0]  # re-cast the eng url with a seek
-
-
-def test_cast_hotkey_esc_keeps_current(monkeypatch):
-    calls = _cast_run(monkeypatch, info_seq=[{"player_state": "IDLE"}])
-    keys = iter(["a", None, None, None, None])
-    monkeypatch.setattr(cli, "_poll_wait", lambda _t: next(keys, None))
-    monkeypatch.setattr(cli, "fzf", lambda items, prompt: None)  # ESC
-    resolved = []
-    cli.cast(
-        CFG, "Film", "http://ita",
-        device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: resolved.append(lang),
-    )  # fmt: skip
-    assert resolved == []  # ESC → resolver never called, no re-cast
-    assert not [c for c in calls if "cast" in c and c.count("cast") and "-t" in c]
-
-
-# --- device discovery + picker + in-player cast (Fase 1s) -------------------
-
-
-def test_resolve_device_cancel_raises(monkeypatch):
-    monkeypatch.setattr(
-        cli.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
-    )
-    monkeypatch.setattr(cli, "fzf", lambda items, prompt: None)
-    with pytest.raises(cli.CastUnavailable):
-        cli._resolve_device(Config(torrentio_base="tb"))
+# --- leaf-list keys (Tab / Alt-C) ------------------------------------------
 
 
 def test_apply_key_alt_c_casts():
@@ -1116,29 +688,3 @@ def test_pick_meta_alt_c_sets_cast(monkeypatch):
     )
     cli._pick_meta(items, CFG, opts)
     assert seen == {"cast": True, "choose": True}
-
-
-def test_play_video_local_to_cast_on_signal(monkeypatch):
-    """Alt-C in mpv (play() returns 'cast') re-casts from the current position."""
-    cfg = Config(torrentio_base="tb", hwdec="")
-    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
-    monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
-    monkeypatch.setattr(cli.shutil, "which", lambda _x: "/usr/bin/catt")
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (55.0, 100.0, "cast"))
-    monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
-    seen = {}
-    monkeypatch.setattr(
-        cli,
-        "cast",
-        lambda *a, **k: (
-            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False)
-        ),
-    )
-    opts = cli.PlayOpts(
-        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
-    )
-    notice, advance = cli._play_video(
-        cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
-    )
-    assert seen == {"start": 55.0, "device": "TV"} and advance is False

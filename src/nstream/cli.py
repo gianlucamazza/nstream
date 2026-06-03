@@ -5,27 +5,20 @@ from __future__ import annotations
 import argparse
 import contextlib
 import gzip
-import json
 import os
 import re
-import select
 import shutil
-import socket
-import subprocess
 import sys
 import tempfile
-import termios
-import threading
-import time
-import tty
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from importlib import resources
 from typing import cast as typecast
 
 from . import __version__, api, log, quality, settings, state, tracks
+from .caster import CastUnavailable, cast
+from .caster import resolve_device as _resolve_device
 from .config import (
     Config,
     ConfigError,
@@ -37,6 +30,8 @@ from .config import (
     config_path,
     load,
 )
+from .picker import fzf, fzf_key
+from .player import play
 
 # --browse keyword → Cinemeta catalog id.
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
@@ -63,73 +58,6 @@ def _clear() -> None:
     if sys.stdout.isatty():
         sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")
         sys.stdout.flush()
-
-
-def _run_fzf[T](
-    items: list[tuple[str, T]],
-    prompt: str,
-    *,
-    header: str | None = None,
-    expect: tuple[str, ...] = (),
-) -> tuple[str, T] | None:
-    """Core fzf picker. Returns (key, value): `key` is "" for Enter or one of
-    `expect` (e.g. "tab") when that key was pressed; None on ESC/no match.
-
-    With `expect`, fzf prints the pressed key as the first stdout line (empty for
-    Enter) before the selection, so the single-item shortcut is skipped to keep the
-    alternate key reachable."""
-    if not items:
-        return None
-    if len(items) == 1 and header is None and not expect:
-        return ("", items[0][1])
-    # Hidden leading index lets labels repeat without ambiguity.
-    lines = "".join(f"{i}\t{label}\n" for i, (label, _) in enumerate(items))
-    # No --height → fzf takes the full alternate screen and restores the terminal on
-    # exit, so menus never pile up in the scrollback (clean TUI). --cycle wraps nav.
-    cmd = ["fzf", "--prompt", prompt, "--with-nth", "2..",
-           "--delimiter", "\t", "--no-sort", "--reverse", "--cycle"]  # fmt: skip
-    if header:
-        cmd += ["--header", header]
-    if expect:
-        cmd += ["--expect", ",".join(expect)]
-    try:
-        proc = subprocess.run(cmd, input=lines, capture_output=True, text=True)
-    except FileNotFoundError:
-        print("nstream: fzf non trovato", file=sys.stderr)
-        return None
-    if proc.returncode != 0:  # ESC / Ctrl-C / no match
-        return None
-    out = proc.stdout
-    key = ""
-    if expect:  # first line is the pressed key (empty = Enter)
-        key, _, out = out.partition("\n")
-        key = key.strip()
-    out = out.strip()
-    if not out:
-        return None
-    return (key, items[int(out.split("\t", 1)[0])][1])
-
-
-def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None) -> T | None:
-    """Pick one of (label, value) pairs via fzf. Returns the value or None.
-
-    `header` shows a transient notice above the list (e.g. why a title couldn't
-    play) — it survives the menu reopening, unlike a stderr line that scrolls away.
-    A single item is returned directly only when there's nothing to announce."""
-    chosen = _run_fzf(items, prompt, header=header)
-    return chosen[1] if chosen else None
-
-
-def fzf_key[T](
-    items: list[tuple[str, T]],
-    prompt: str,
-    *,
-    header: str | None = None,
-    expect: tuple[str, ...] = ("tab", "alt-c"),
-) -> tuple[str, T] | None:
-    """Like `fzf` but also reports which key selected the item — used by the leaf
-    title/continue lists where Tab flips auto ↔ manual playback for that pick."""
-    return _run_fzf(items, prompt, header=header, expect=expect)
 
 
 def meta_label(m: Meta) -> str:
@@ -325,501 +253,6 @@ def choose_tracks(
                 sid, sub_paths = typecast("str | int", pick), ()
 
 
-# --- playback + position tracking ----------------------------------------
-
-
-def _track_position(
-    sock_path: str,
-    holder: dict[str, float],
-    proc: subprocess.Popen,
-) -> None:
-    """Observe mpv's time-pos/duration over the IPC socket; record the last values."""
-    sock: socket.socket | None = None
-    for _ in range(50):
-        if proc.poll() is not None:
-            return
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.connect(sock_path)
-            break
-        except OSError:
-            sock = None
-            time.sleep(0.1)
-    if sock is None:
-        return
-    try:
-        for cid, prop in ((1, "time-pos"), (2, "duration")):
-            sock.sendall(f'{{"command":["observe_property",{cid},"{prop}"]}}\n'.encode())
-        # Time out recv so we notice mpv exiting promptly and the thread joins
-        # cleanly — otherwise a blocked recv could outlive mpv and lose the last
-        # observed position.
-        sock.settimeout(0.5)
-        buf = b""
-        while True:
-            try:
-                chunk = sock.recv(4096)
-            except TimeoutError:
-                if proc.poll() is not None:
-                    break
-                continue
-            if not chunk:
-                break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if msg.get("event") == "property-change" and msg.get("data") is not None:
-                    name = msg.get("name")
-                    if name in ("time-pos", "duration"):
-                        holder["position" if name == "time-pos" else "duration"] = float(
-                            msg["data"]
-                        )
-    except OSError:
-        pass
-    finally:
-        sock.close()
-
-
-def _mpv_conf_has(option: str) -> bool:
-    """True if the user's mpv.conf already sets `option` (so we must not override it)."""
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    candidates = (
-        os.path.join(base, "mpv", "mpv.conf"),
-        os.path.expanduser("~/.mpv/mpv.conf"),
-    )
-    for path in candidates:
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
-            continue
-        for line in lines:
-            s = line.strip()
-            if s and not s.startswith("#") and s.split("=", 1)[0].strip() == option:
-                return True
-    return False
-
-
-def _mpv_conf_get(option: str) -> str | None:
-    """The value the user's mpv.conf sets for `option`, or None if unset.
-    Quotes are stripped so `hwdec="auto"` and `hwdec=auto` read the same."""
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    candidates = (
-        os.path.join(base, "mpv", "mpv.conf"),
-        os.path.expanduser("~/.mpv/mpv.conf"),
-    )
-    for path in candidates:
-        try:
-            with open(path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except OSError:
-            continue
-        for line in lines:
-            s = line.strip()
-            if s and not s.startswith("#") and "=" in s:
-                key, _, val = s.partition("=")
-                if key.strip() == option:
-                    return val.strip().strip("'\"")
-    return None
-
-
-def _user_overrides(cfg: Config, option: str) -> bool:
-    """True if the user already sets `option` via mpv_args or mpv.conf."""
-    return any(a.startswith(f"--{option}") for a in cfg.mpv_args) or _mpv_conf_has(option)
-
-
-# mpv's "auto" hwdec family: ambiguous choices that probe several methods. On a
-# vulkan render context mpv 0.41+ prefers (experimental, often unsupported) Vulkan
-# decode and then CUDA before VAAPI — noisy and software-bound on Intel iGPUs.
-_AUTO_HWDEC = {"auto", "auto-safe", "auto-copy", "auto-safe-copy"}
-
-
-def _hwdec_defaults(cfg: Config) -> list[str]:
-    """Choose mpv's hwdec, upgrading the ambiguous `auto` family to the GPU's real
-    method (VAAPI, detected) so mpv doesn't probe unsupported Vulkan decode / missing
-    CUDA. An explicit `--hwdec` in mpv_args, or a concrete method in mpv.conf, is
-    always respected; nstream's CLI flag overrides mpv.conf only to pin `auto`→vaapi."""
-    if any(a.startswith("--hwdec") for a in cfg.mpv_args):
-        return []  # explicit per-app override → defer entirely
-    conf = _mpv_conf_get("hwdec")
-    method = conf if conf is not None else cfg.hwdec
-    if not method:
-        return []  # decoding left to mpv defaults / explicitly disabled
-    if method in _AUTO_HWDEC:
-        detected = quality.preferred_hwdec(quality.detect_caps())
-        if detected:
-            return [f"--hwdec={detected}"]
-        return [] if conf is not None else [f"--hwdec={method}"]
-    # Concrete method: respect mpv.conf as-is; inject only nstream's own config value.
-    return [] if conf is not None else [f"--hwdec={method}"]
-
-
-# mpv log modules that spam the terminal of a media frontend (track list +
-# decoder/demuxer/driver warnings). cplayer=warn drops the track list while the
-# progress status line (a separate mechanism) survives; the rest hide ffmpeg/mkv
-# warnings. Real errors (level error/fatal) still print.
-_QUIET_MSG_LEVEL = (
-    "cplayer=warn,ffmpeg=error,ffmpeg/video=error,ffmpeg/audio=error,mkv=error,ad=error,vd=error"  # noqa: E501
-)
-
-
-def _quiet_defaults(cfg: Config) -> list[str]:
-    """Quieten mpv's console unless the user manages msg-level themselves."""
-    if not cfg.mpv_quiet or _user_overrides(cfg, "msg-level"):
-        return []
-    return [f"--msg-level={_QUIET_MSG_LEVEL}"]
-
-
-def _lang_defaults(cfg: Config) -> list[str]:
-    """Prefer the user's languages for audio/subtitle track selection, without
-    overriding any alang/slang the user already set. `--subs-with-matching-audio=no`
-    means: don't force subtitles on when the audio is already in your language."""
-    flags = []
-    if cfg.audio_langs and not _user_overrides(cfg, "alang"):
-        flags.append("--alang=" + ",".join(cfg.audio_langs))
-    if cfg.subtitle_langs and not _user_overrides(cfg, "slang"):
-        flags.append("--slang=" + ",".join(cfg.subtitle_langs))
-        if not _user_overrides(cfg, "subs-with-matching-audio"):
-            flags.append("--subs-with-matching-audio=no")
-    return flags
-
-
-def play(
-    cfg: Config,
-    title: str,
-    url: str,
-    *,
-    start: float | None = None,
-    sub_paths: tuple[str, ...] = (),
-    audio_id: int | None = None,
-    sub_id: int | str | None = None,
-    next_label: str | None = None,
-    cast_enabled: bool = False,
-    work_dir: str | None = None,
-) -> tuple[float, float, str]:
-    """Play `url` in mpv. Returns (position, duration, signal) where `signal` is
-    "next" when the next-episode overlay asked to continue, "cast" when the user hit
-    the in-player "send to TV" key (Alt-C), or "" otherwise.
-
-    `work_dir` holds the IPC socket and overlay files; when omitted a private
-    temp dir is created and removed here (the caller passes one to share it with
-    downloaded subtitles). `cast_enabled` binds Alt-C in mpv to move playback to the TV."""
-    holder = {"position": 0.0, "duration": 0.0}
-    with contextlib.ExitStack() as stack:
-        if work_dir is None:
-            runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-            work_dir = stack.enter_context(
-                tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime)
-            )
-        sock_path = os.path.join(work_dir, "mpv.sock")
-        signal_path = os.path.join(work_dir, "signal")
-        info_path = os.path.join(work_dir, "info")
-        # Defaults come before mpv_args so explicit user flags win. nstream is the
-        # single source of truth for resume (via --start over IPC), so
-        # --no-resume-playback stops mpv's own watch-later from doing a second,
-        # conflicting seek.
-        args = [
-            "mpv",
-            f"--force-media-title={title}",
-            "--no-resume-playback",
-            *_quiet_defaults(cfg),
-            *_hwdec_defaults(cfg),
-            *_lang_defaults(cfg),
-            *cfg.mpv_args,
-        ]
-        if start and start > 1:
-            args.append(f"--start={start:.0f}")
-        args += [f"--sub-file={p}" for p in sub_paths]
-        # Explicit per-play track choices win over the language-preference defaults.
-        if audio_id is not None:
-            args.append(f"--aid={audio_id}")
-        if sub_id is not None:
-            args.append(f"--sid={sub_id}")
-        args.append(f"--input-ipc-server={sock_path}")
-
-        # The overlay script is the single renderer for both the resume toast and the
-        # next-episode card, so load it always (it's additive — it never touches the
-        # user's mpv.conf). --script-opts-append is non-destructive: it won't clobber
-        # a user's own script-opts set for other scripts.
-        lua = stack.enter_context(resources.as_file(resources.files("nstream") / "nstream.lua"))
-        args.append(f"--script={lua}")
-        if start and start > 1:
-            args.append(f"--script-opts-append=nstream-resume={start:.0f}")
-        # The next-episode card and the in-player "send to TV" key both report back via
-        # the same signal file. Pass it whenever either feature is active.
-        if next_label:
-            with open(info_path, "w", encoding="utf-8") as f:
-                f.write(next_label + "\n")
-            args += [
-                f"--script-opts-append=nstream-info={info_path}",
-                f"--script-opts-append=nstream-lead={cfg.autoplay_lead}",
-            ]
-        if next_label or cast_enabled:
-            args.append(f"--script-opts-append=nstream-signal={signal_path}")
-        if cast_enabled:
-            args.append("--script-opts-append=nstream-cast=yes")
-        args.append(url)
-        try:
-            proc = subprocess.Popen(args)
-        except FileNotFoundError:
-            print("nstream: mpv non trovato", file=sys.stderr)
-            return (0.0, 0.0, "")
-        tracker = threading.Thread(
-            target=_track_position, args=(sock_path, holder, proc), daemon=True
-        )
-        tracker.start()
-        proc.wait()
-        tracker.join(timeout=2.0)
-        signal = ""
-        if next_label or cast_enabled:
-            with contextlib.suppress(OSError), open(signal_path, encoding="utf-8") as f:
-                signal = f.read().strip()
-
-    return (holder["position"], holder["duration"], signal)
-
-
-# --- cast (Chromecast via catt) ------------------------------------------
-
-
-class CastUnavailable(Exception):
-    """Raised when no Chromecast can be resolved (ambiguous / none / absent)."""
-
-
-# How often to poll `catt info -j` while casting (resume tracking + end detection).
-# Each poll spawns a `catt` process (new castv2 connection), so keep it coarse: 15s
-# costs ~240 polls over a 2h film and resume granularity of ≤15s is plenty.
-_CAST_POLL = 15.0
-# Fraction of the runtime past which a stop counts as "finished" (→ binge advance).
-_CAST_DONE = 0.97
-# Give up if the cast never starts playing within this many polls (~60s): the device
-# may be unreachable or the receiver refused the media — don't poll forever.
-_CAST_GIVEUP = 4
-
-
-def _resolve_device(cfg: Config, *, choose: bool = False) -> str:
-    """Resolve the value for `catt -d` — an **IP** from a fresh `catt scan`, so casting
-    is robust to mDNS name-resolution flakiness after a network change. A configured
-    `cast_device` (a stable *name*) is honoured only when present on the current LAN,
-    else we re-discover. One device → use it; several (or `choose`) → pick by name (cast
-    by IP). Raises CastUnavailable when the scan finds nothing reachable / the user
-    cancels (the caller then falls back to local mpv)."""
-    devices = settings.scan_devices()  # [(name, ip)] on the *current* LAN
-    by_name = dict(devices)
-    # A saved preference is honoured only if that device is actually on this LAN —
-    # so after a network change a stale name doesn't pin us to an absent device.
-    if cfg.cast_device and not choose:
-        ip = by_name.get(cfg.cast_device)
-        if ip:
-            return ip
-        _log.info("device preferito '%s' non in rete → ridiscovery", cfg.cast_device)
-    if not devices:
-        # Trust the fresh scan: nothing here now (TV off, or a different network). We
-        # deliberately don't fall back to cast-resolve, which returns a configured
-        # default regardless of presence — that would cast to an absent device. The
-        # caller degrades to local playback instead.
-        raise CastUnavailable("nessun Chromecast in rete")
-    if len(devices) == 1 and not choose:
-        return devices[0][1]  # the IP
-    # Several devices (or an explicit choice): pick by name, cast by IP.
-    chosen = fzf([(name, ip) for name, ip in devices], "dispositivo> ")
-    if chosen is None:
-        raise CastUnavailable("scelta dispositivo annullata")
-    return chosen
-
-
-def _cast_progress(info: dict) -> tuple[float, float, str]:
-    """Extract (position, duration, player_state) from `catt info -j` JSON,
-    tolerating the field set varying with the receiver/app."""
-    state = str(info.get("player_state") or "")
-    try:
-        dur = float(info.get("duration") or 0.0)
-    except (TypeError, ValueError):
-        dur = 0.0
-    pos = 0.0
-    cur = info.get("current_time")
-    rem = info.get("remaining")
-    prog = info.get("progress")
-    try:
-        if cur is not None:
-            pos = float(cur)
-        elif rem is not None and dur:
-            pos = max(0.0, dur - float(rem))
-        elif prog is not None and dur:
-            pos = dur * float(prog) / 100.0
-    except (TypeError, ValueError):
-        pos = 0.0
-    return (pos, dur, state)
-
-
-# ISO code → display name for the cast audio-language picker.
-_LANG_NAMES = {
-    "ita": "Italiano",
-    "eng": "English",
-    "fra": "Français",
-    "spa": "Español",
-    "deu": "Deutsch",
-    "rus": "Русский",
-    "por": "Português",
-    "multi": "Multi",
-}
-
-
-@contextlib.contextmanager
-def _cbreak(stream):
-    """Put a TTY into cbreak so single keypresses arrive without Enter, restoring
-    the original attributes on exit (even on error). No-op for non-TTY streams.
-    cbreak keeps ISIG enabled, so Ctrl-C still raises KeyboardInterrupt."""
-    if not stream.isatty():
-        yield
-        return
-    fd = stream.fileno()
-    saved = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        yield
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-
-
-def _poll_wait(timeout: float) -> str | None:
-    """Wait up to `timeout` for a single keypress on stdin; return the char or None.
-    On a non-interactive stdin it just sleeps (same effect as the old time.sleep)."""
-    if not sys.stdin.isatty():
-        time.sleep(timeout)
-        return None
-    with _cbreak(sys.stdin):
-        ready, _, _ = select.select([sys.stdin], [], [], timeout)
-        if ready:
-            return sys.stdin.read(1)
-    return None
-
-
-def _switch_cast_audio(
-    base: list[str],
-    langs: tuple[str, ...],
-    resolve_lang: Callable[[str], str | None],
-    pos: float,
-    dest: str,
-) -> None:
-    """Re-cast a release in the chosen audio language from the current position.
-    The Chromecast plays the file's default track, so this picks a differently-dubbed
-    release rather than switching tracks in place (best-effort, single-dub friendly)."""
-    items = [(_LANG_NAMES.get(lang, lang.upper()), lang) for lang in langs]
-    lang = fzf(items, "audio> ")
-    if lang is None:  # ESC → keep the current cast
-        return
-    print(f"📺 cambio audio: {_LANG_NAMES.get(lang, lang)}…", file=sys.stderr)
-    new = resolve_lang(lang)
-    if not new:
-        print(f"nstream: nessuno stream {lang} compatibile col Chromecast", file=sys.stderr)
-        return
-    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run([*base, "cast", new, "-t", str(int(pos))], capture_output=True, text=True)
-
-
-def cast(
-    cfg: Config,
-    title: str,
-    url: str,
-    *,
-    device: str | None,
-    start: float | None = None,
-    sub_paths: tuple[str, ...] = (),
-    next_label: str | None = None,
-    langs: tuple[str, ...] = (),
-    resolve_lang: Callable[[str], str | None] | None = None,
-) -> tuple[float, float, bool]:
-    """Cast `url` to a Chromecast via `catt`, then poll its status so resume and
-    series auto-advance work just like the mpv path. Returns (position, duration,
-    advance) — same contract as `play()`.
-
-    `advance` is True only when a next episode is queued (`next_label`) and playback
-    reached the end (so a manual stop mid-episode doesn't binge ahead)."""
-    base = ["catt", *(["-d", device] if device else [])]
-    launch = [*base, "cast", url]
-    if start and start > 1:
-        launch += ["-t", str(int(start))]
-    if sub_paths:  # catt takes a single subtitle file
-        launch += ["-s", sub_paths[0]]
-    dest = device or "Chromecast"
-    _log.debug("catt launch: %s", " ".join(launch))  # token redacted by the log filter
-    # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
-    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
-    try:
-        proc = subprocess.run(launch, capture_output=True, text=True)
-    except FileNotFoundError:
-        print("nstream: catt non trovato", file=sys.stderr)
-        return (0.0, 0.0, False)
-    if proc.returncode != 0:
-        # catt prints the cause (e.g. device unreachable); never echo the URL/token.
-        _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
-        print("nstream: cast non riuscito", file=sys.stderr)
-        return (0.0, 0.0, False)
-
-    can_switch = bool(langs) and resolve_lang is not None
-    hint = "a: lingua audio · Ctrl-C: stop" if can_switch else "Ctrl-C per smettere di seguire"
-    print(f"📺 {title} → {dest}  ({hint})", file=sys.stderr)
-    holder = {"position": 0.0, "duration": 0.0}
-    started = False
-    finished = False
-    warned_vol = False
-    idle = 0  # consecutive polls without progress before playback ever starts
-    try:
-        while True:
-            if _poll_wait(_CAST_POLL) == "a" and can_switch:
-                _switch_cast_audio(base, langs, resolve_lang, holder["position"], dest)
-                started, finished, idle = False, False, 0  # new media re-buffers
-                continue
-            res = subprocess.run([*base, "info", "-j"], capture_output=True, text=True)
-            info = None
-            if res.returncode == 0:
-                with contextlib.suppress(json.JSONDecodeError):
-                    info = json.loads(res.stdout or "{}")
-            if info is None:  # device idle/unreachable or unparseable status
-                if started:
-                    break  # went away after playing → ended
-                idle += 1
-                if idle >= _CAST_GIVEUP:
-                    print("nstream: il cast non è partito", file=sys.stderr)
-                    break
-                continue
-            pos, dur, pstate = _cast_progress(info)
-            if pos > 0:
-                holder["position"] = pos
-            if dur > 0:
-                holder["duration"] = dur
-            # A device left at volume 0 plays silently — explain it once.
-            if not warned_vol and not info.get("volume_muted") and info.get("volume_level") == 0:
-                warned_vol = True
-                print(
-                    "nstream: volume del Chromecast a 0 — alza col telecomando o 'catt volume N'",
-                    file=sys.stderr,
-                )
-            if pstate in ("PLAYING", "PAUSED", "BUFFERING") or pos > 0:
-                started = True
-                idle = 0
-            elif started and pstate in ("IDLE", "UNKNOWN", ""):
-                d = holder["duration"]
-                finished = bool(d) and holder["position"] >= d * _CAST_DONE
-                break
-            else:  # not started yet, receiver idle → wait, but not forever
-                idle += 1
-                if idle >= _CAST_GIVEUP:
-                    print("nstream: il cast non è partito", file=sys.stderr)
-                    break
-    except KeyboardInterrupt:
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run([*base, "stop"], capture_output=True, text=True)
-    advance = bool(next_label) and finished
-    return (holder["position"], holder["duration"], advance)
-
-
 # --- flow ----------------------------------------------------------------
 
 
@@ -975,77 +408,130 @@ def _play_video(
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
         # Resolve the cast device up front; if none is reachable on this LAN, degrade
         # gracefully to local mpv instead of failing (network may have changed).
-        use_cast = opts.cast
-        device: str | None = None
-        if use_cast:
-            try:
-                device = _resolve_device(cfg, choose=opts.cast_choose)
-            except CastUnavailable as e:
-                print(f"nstream: {e} — riproduco in locale", file=sys.stderr)
-                _log.info("nessun Chromecast → fallback locale")
-                use_cast = False
-        if use_cast:
-            # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV
-            # as an external file when requested, otherwise the receiver picks its own.
-            sub_paths = (
-                pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
-                if opts.sub_mode
-                else ()
-            )
-            # Offer an in-cast audio-language switch (re-cast a differently-dubbed
-            # release from the current position) when more than one language is
-            # available; resolver closes over `results` so no extra fetch is needed.
-            cast_langs = _cast_languages(cfg, results)
-            _log.info("cast '%s' → %s", title, device)
+        device = _resolve_cast_device(cfg, opts) if opts.cast else None
+        if device is not None:
             print(f"▶ {title} — {name_line}", file=sys.stderr)
-            pos, dur, advance = cast(
-                cfg, title, chosen["url"],
-                device=device, start=start, sub_paths=sub_paths, next_label=next_label,
-                langs=cast_langs if len(cast_langs) > 1 else (),
-                resolve_lang=_cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
+            pos, dur, advance = _play_on_cast(
+                cfg, results, chosen, work_dir, device,
+                typ=typ, video_id=video_id, title=title, opts=opts,
+                start=start, next_label=next_label,
             )  # fmt: skip
         else:
-            audio_id: int | None = None
-            sub_id: str | int | None = None
-            if auto:
-                # --play / binge: no pre-play menu, use the language-preference defaults.
-                sub_paths = (
-                    pick_subtitles(
-                        cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang
-                    )
-                    if opts.sub_mode
-                    else ()
-                )
-            else:
-                sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
-                if sel is None:
-                    return (None, False)  # backed out → return to the list
-                audio_id, sub_id, sub_paths = sel
             print(f"▶ {title} — {name_line}", file=sys.stderr)
-            cast_ok = shutil.which("catt") is not None  # enable in-player Alt-C → TV
-            pos, dur, signal = play(
-                cfg, title, chosen["url"],
-                start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
-                next_label=next_label, cast_enabled=cast_ok, work_dir=work_dir,
+            res = _play_on_mpv(
+                cfg, chosen, work_dir,
+                typ=typ, video_id=video_id, title=title, opts=opts,
+                start=start, next_label=next_label, auto=auto,
             )  # fmt: skip
-            if signal == "cast":
-                # Alt-C in mpv: move this playback to the TV from the current position.
-                try:
-                    device = _resolve_device(cfg, choose=True)
-                except CastUnavailable as e:
-                    print(f"nstream: {e}", file=sys.stderr)
-                    advance = False
-                else:
-                    pos, dur, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
-                    advance = False
-            else:
-                advance = signal == "next"
+            if res is None:
+                return (None, False)  # backed out of the track menu → return to the list
+            pos, dur, advance = res
     _clear()  # drop mpv's exit frame/logs before returning to the menu
     # Only persist a resume we can reason about: a real duration is needed for the
     # watched/near-end logic, otherwise the entry would stick forever.
     if opts.history and on_save and pos > 0 and dur > 0:
         on_save(pos, dur)
     return (None, advance)
+
+
+def _resolve_cast_device(cfg: Config, opts: PlayOpts) -> str | None:
+    """Resolve a Chromecast for this play, or None to fall back to local mpv when the
+    LAN has no reachable device (e.g. after a network change)."""
+    try:
+        return _resolve_device(cfg, choose=opts.cast_choose)
+    except CastUnavailable as e:
+        print(f"nstream: {e} — riproduco in locale", file=sys.stderr)
+        _log.info("nessun Chromecast → fallback locale")
+        return None
+
+
+def _auto_subs(
+    cfg: Config, typ: str, video_id: str, work_dir: str, opts: PlayOpts
+) -> tuple[str, ...]:
+    """Subtitle files for the no-menu paths (cast / --play / binge): the preferred-
+    language OpenSubtitles track when subtitles were requested, else none."""
+    if not opts.sub_mode:
+        return ()
+    return pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
+
+
+def _play_on_cast(
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    work_dir: str,
+    device: str,
+    *,
+    typ: str,
+    video_id: str,
+    title: str,
+    opts: PlayOpts,
+    start: float | None,
+    next_label: str | None,
+) -> tuple[float, float, bool]:
+    """Cast the chosen stream. Offers an in-cast audio-language switch (re-cast a
+    differently-dubbed release from the current position) when more than one language
+    is available; the resolver closes over `results` so no extra fetch is needed."""
+    # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV as an
+    # external file when requested, otherwise the receiver picks its own.
+    sub_paths = _auto_subs(cfg, typ, video_id, work_dir, opts)
+    cast_langs = _cast_languages(cfg, results)
+    _log.info("cast '%s' → %s", title, device)
+    return cast(
+        cfg, title, chosen["url"],
+        device=device, start=start, sub_paths=sub_paths, next_label=next_label,
+        langs=cast_langs if len(cast_langs) > 1 else (),
+        resolve_lang=_cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
+    )  # fmt: skip
+
+
+def _play_on_mpv(
+    cfg: Config,
+    chosen: Stream,
+    work_dir: str,
+    *,
+    typ: str,
+    video_id: str,
+    title: str,
+    opts: PlayOpts,
+    start: float | None,
+    next_label: str | None,
+    auto: bool,
+) -> tuple[float, float, bool] | None:
+    """Play locally in mpv. Returns (pos, dur, advance), or None if the user backed
+    out of the pre-play track menu (so the caller returns to the list)."""
+    audio_id: int | None = None
+    sub_id: str | int | None = None
+    if auto:
+        sub_paths = _auto_subs(cfg, typ, video_id, work_dir, opts)
+    else:
+        sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
+        if sel is None:
+            return None
+        audio_id, sub_id, sub_paths = sel
+    cast_ok = shutil.which("catt") is not None  # enable in-player Alt-C → TV
+    pos, dur, signal = play(
+        cfg, title, chosen["url"],
+        start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
+        next_label=next_label, cast_enabled=cast_ok, work_dir=work_dir,
+    )  # fmt: skip
+    if signal == "cast":  # Alt-C in mpv: move this playback to the TV from `pos`
+        return _move_to_cast(cfg, title, chosen, pos, dur)
+    return (pos, dur, signal == "next")
+
+
+def _move_to_cast(
+    cfg: Config, title: str, chosen: Stream, pos: float, dur: float
+) -> tuple[float, float, bool]:
+    """Hand the running mpv position over to a Chromecast (in-player Alt-C). Keeps the
+    local pos/dur if no device resolves. Never auto-advances (the user is switching)."""
+    try:
+        device = _resolve_device(cfg, choose=True)
+    except CastUnavailable as e:
+        print(f"nstream: {e}", file=sys.stderr)
+        return (pos, dur, False)
+    pos, dur, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
+    return (pos, dur, False)
 
 
 def _play_series(
