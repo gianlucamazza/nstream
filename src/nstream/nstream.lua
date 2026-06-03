@@ -1,19 +1,22 @@
--- nstream next-episode overlay.
+-- nstream on-screen overlay (single renderer for both in-player cards).
 --
 -- Loaded by nstream via `--script` (additive — never touches the user's mpv.conf).
--- Near the end of an episode it shows a Netflix-style card with a countdown and
--- lets the user jump to the next episode now (ENTER) or dismiss it (ESC). The
--- decision is handed back to nstream through a tiny signal file, since the Lua
--- script and nstream run in separate processes.
+-- It draws two things in the same minimal ASS style (bottom-right):
+--   * a brief "resume" toast at file start, when resuming mid-playback;
+--   * near the end of an episode, a compact next-episode card with a countdown
+--     that lets the user jump to the next episode now (ENTER) or dismiss it (ESC).
+-- The advance decision is handed back to nstream through a tiny signal file, since
+-- the Lua script and nstream run in separate processes.
 --
 -- script-opts (read_options prefix "nstream"):
 --   nstream-info=<path>    file whose first line is the next-episode label
 --   nstream-signal=<path>  file this script writes "next" to when advancing
---   nstream-lead=<sec>     how many seconds before the end to show the overlay
+--   nstream-lead=<sec>     how many seconds before the end to show the card
+--   nstream-resume=<sec>   resume position; when >1 the resume toast is shown
 
 local options = require 'mp.options'
 
-local opts = { info = "", signal = "", lead = 15 }
+local opts = { info = "", signal = "", lead = 15, resume = 0 }
 options.read_options(opts, "nstream")
 
 local function read_first_line(path)
@@ -26,6 +29,16 @@ local function read_first_line(path)
 end
 
 local next_label = read_first_line(opts.info) or "Prossimo episodio"
+
+-- Mirror nstream's Python _fmt_time: H:MM:SS, or M:SS under an hour.
+local function fmt_time(s)
+    s = math.floor(s)
+    local h = math.floor(s / 3600)
+    local m = math.floor((s % 3600) / 60)
+    local sec = s % 60
+    if h > 0 then return string.format("%d:%02d:%02d", h, m, sec) end
+    return string.format("%d:%02d", m, sec)
+end
 
 -- Escape text for an ASS event, the same way mpv's own bundled scripts do:
 -- a trailing zero-width BOM after each backslash stops libass from reading the
@@ -95,14 +108,27 @@ local function show(secs)
     bind_keys()
     if secs == shown_secs then return end
     shown_secs = secs
+    -- Compact two-line card: episode label + countdown and key hints.
+    -- \194\183 = "·", \226\143\142 = "⏎" (escaped to keep this source ASCII-only).
     overlay.data = string.format(
-        "{\\an3\\bord2\\shad1\\3c&H000000&\\1c&HFFFFFF&\\fs30}\226\150\182 Prossimo episodio\\N"
-        .. "{\\fs22\\1c&H9BE6B0&}%s\\N"
-        .. "{\\fs20\\1c&HFFFFFF&}tra %d s\\N"
-        .. "{\\fs15\\1c&HBFBFBF&}[Enter] ora   [Esc] annulla",
+        "{\\an3\\bord2\\shad1\\3c&H000000&\\1c&H9BE6B0&\\fs24}%s\\N"
+        .. "{\\fs17\\1c&HBFBFBF&}tra %d s \194\183 \226\143\142 ora \194\183 esc",
         ass_escape(next_label), secs)
     overlay:update()
 end
+
+-- Resume toast: shown briefly at file start, in the same style as the card.
+-- \226\143\181 = "⏵".
+mp.register_event("file-loaded", function()
+    if not opts.resume or opts.resume <= 1 then return end
+    overlay.data = string.format(
+        "{\\an3\\bord2\\shad1\\3c&H000000&\\1c&HFFFFFF&\\fs24}\226\143\181 Ripresa da %s",
+        fmt_time(opts.resume))
+    overlay:update()
+    mp.add_timeout(4, function()
+        if not active then overlay:remove() end
+    end)
+end)
 
 mp.observe_property("duration", "number", function(_, val)
     duration = val
