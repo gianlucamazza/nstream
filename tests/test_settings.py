@@ -36,9 +36,23 @@ def test_items_cover_all_settings():
         "autoplay_lead",
         "hwdec",
         "history_enabled",
+        "mpv_quiet",
         "torrentio_base",
         "__addons__",
     ]
+
+
+def test_ask_returns_empty_on_eof(monkeypatch):
+    def boom(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", boom)
+    assert settings._ask("x> ") == ""
+
+
+def test_mpv_quiet_in_items():
+    keys = [it[0] for it in settings._items(Config(torrentio_base="sort=x|realdebrid=T"))]
+    assert "mpv_quiet" in keys
 
 
 def test_items_render_current_values():

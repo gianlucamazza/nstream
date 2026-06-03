@@ -193,6 +193,62 @@ def test_lang_defaults_not_when_in_mpv_conf(monkeypatch):
     assert not any(f.startswith("--slang") for f in flags)
 
 
+def test_quiet_defaults_injected(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_quiet=True)
+    flags = cli._quiet_defaults(cfg)
+    assert flags and flags[0].startswith("--msg-level=")
+
+
+def test_quiet_defaults_off(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_quiet=False)
+    assert cli._quiet_defaults(cfg) == []
+
+
+def test_quiet_defaults_not_when_user_sets_msg_level(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: opt == "msg-level")
+    cfg = Config(torrentio_base="tb", mpv_quiet=True)
+    assert cli._quiet_defaults(cfg) == []
+
+
+# --- resume / near-end (keep-open) -----------------------------------------
+
+
+def test_resume_position_skips_finished(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    cfg = Config(torrentio_base="tb")
+    # finished entry (near end) → no resume
+    cli.state.save_entry(cfg, {"video_id": "v1", "position": 100.0, "duration": 100.0, "ts": 1.0})
+    assert cli._resume_position(cfg, "v1") is None
+
+
+def test_resume_position_returns_and_clamps(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    cfg = Config(torrentio_base="tb")
+    cli.state.save_entry(cfg, {"video_id": "v2", "position": 500.0, "duration": 10000.0, "ts": 1.0})
+    assert cli._resume_position(cfg, "v2") == 500.0  # 5%, far from end → resume
+
+
+def test_resume_position_none_without_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert cli._resume_position(Config(torrentio_base="tb"), "missing") is None
+
+
+def test_play_video_no_save_when_duration_zero(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 0.0, False))  # duration unobserved
+    saved = []
+    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=True, autoplay=False)
+    cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None,
+        on_save=lambda p, d: saved.append((p, d)),
+    )  # fmt: skip
+    assert saved == []  # nothing persisted without a real duration
+
+
 def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
     """Regression: a stream with an empty name must not raise IndexError."""
     cfg = Config(torrentio_base="tb", hwdec="")

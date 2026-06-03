@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from nstream import addons
 from nstream.config import Config
 
@@ -90,6 +92,26 @@ def test_load_addon_unreachable_returns_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr(addons.api, "http_get_json", boom)
     assert addons.load_addon("https://c/manifest.json") is None
+
+
+def test_parse_manifest_guards_non_dict():
+    # A corrupt/partial cache payload must not crash the whole flow.
+    a = addons._parse_manifest("https://d/manifest.json", cast("dict", "not a dict"))
+    assert a.resources == {}
+    assert a.base == "https://d"
+
+
+def test_load_addon_uses_single_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    seen = {}
+
+    def fake_get(url, *, what="", retries=3):
+        seen["retries"] = retries
+        return {"name": "X", "resources": ["stream"]}
+
+    monkeypatch.setattr(addons.api, "http_get_json", fake_get)
+    addons.load_addon("https://x/manifest.json", use_cache=False)
+    assert seen["retries"] == 1
 
 
 def test_cache_file_has_no_token(tmp_path, monkeypatch):

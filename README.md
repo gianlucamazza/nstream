@@ -85,6 +85,9 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
   picked automatically per episode.
 - `autoplay_lead`: seconds before the end of an episode at which the overlay appears (default `15`).
+- `mpv_quiet`: hide mpv's track list and decoder/driver warnings, keeping the progress line and
+  real errors (`true` by default). Injected as `--msg-level` only if you haven't set `msg-level`
+  in `mpv.conf`/`mpv_args`. Toggle it from the settings menu.
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
 
 The file holds your RD token, so it is created `chmod 600` and git-ignored.
