@@ -163,6 +163,21 @@ def clear_caps_cache() -> None:
         _cache_path().unlink()
 
 
+_active: Caps | None = None
+
+
+def set_active_caps(caps: Caps) -> None:
+    """Pin the caps resolved (with config) once per run, so the picker and label builders
+    share them without re-detecting (and without thrashing the cfg-aware disk cache)."""
+    global _active
+    _active = caps
+
+
+def active_caps() -> Caps:
+    """The caps pinned by `set_active_caps`, or a config-less detection as a fallback."""
+    return _active if _active is not None else detect_caps()
+
+
 # --- glyphs -----------------------------------------------------------------
 
 
