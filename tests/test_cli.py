@@ -11,7 +11,7 @@ import argparse
 import pytest
 
 from nstream import cli
-from nstream.config import Config, Video
+from nstream.config import Config, HistoryEntry, Meta, Video
 
 
 def test_main_preview_dispatch(monkeypatch):
@@ -156,39 +156,38 @@ def test_meta_label_no_hint_past_year():
 
 
 def test_meta_label_has_type_glyph():
-    movie = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2000"})
-    series = cli.meta_label({"type": "series", "name": "Y", "releaseInfo": "2000"})
+    movie = cli.meta_label(Meta(type="movie", name="X", releaseInfo="2000"))
+    series = cli.meta_label(Meta(type="series", name="Y", releaseInfo="2000"))
     assert cli.ui.PORTABLE.movie in movie  # portable default in tests (no Nerd Font)
     assert cli.ui.PORTABLE.series in series
 
 
 def test_episode_label_format():
-    label = cli.episode_label({"season": 1, "episode": 3, "name": "Pilot"})
+    label = cli.episode_label(Video(season=1, episode=3, name="Pilot"))
     assert "S01E03" in label and "Pilot" in label
 
 
 def test_history_label_has_progress_bar():
-    e = {"title": "Dune", "type": "movie", "position": 50.0, "duration": 100.0}
+    e = HistoryEntry(title="Dune", type="movie", position=50.0, duration=100.0)
     label = cli.history_label(e)
     assert "50%" in label
     assert "█" in label  # progress bar rendered
 
 
 def test_history_label_no_bar_without_duration():
-    label = cli.history_label({"title": "Dune", "type": "movie", "duration": 0.0})
+    label = cli.history_label(HistoryEntry(title="Dune", type="movie", duration=0.0))
     assert "%" not in label and "█" not in label
 
 
 def test_meta_preview_token():
-    assert cli._meta_preview({"id": "tt1", "type": "movie"}) == "title movie tt1"
-    assert cli._meta_preview({"type": "movie"}) is None  # no id → no preview
+    assert cli._meta_preview(Meta(id="tt1", type="movie")) == "title movie tt1"
+    assert cli._meta_preview(Meta(type="movie")) is None  # no id → no preview
 
 
 def test_entry_preview_token():
-    series = {"type": "series", "series_id": "tt9", "season": 2, "episode": 5, "video_id": "v"}
+    series = HistoryEntry(type="series", series_id="tt9", season=2, episode=5, video_id="v")
     assert cli._entry_preview(series) == "episode tt9 2 5"
-    movie = {"type": "movie", "video_id": "tt3"}
-    assert cli._entry_preview(movie) == "title movie tt3"
+    assert cli._entry_preview(HistoryEntry(type="movie", video_id="tt3")) == "title movie tt3"
 
 
 # --- resume / near-end (keep-open) -----------------------------------------

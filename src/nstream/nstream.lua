@@ -52,6 +52,21 @@ local function ass_escape(s)
     return s
 end
 
+-- Design-system palette, in ASS &HBBGGRR& (note: ASS is BGR, not RGB).
+-- Mirrors nstream's ui.py: accent = Netflix red #e50914, bright text, dim grey, amber.
+local C_ACCENT = "&H1409E5&" -- #e50914
+local C_TEXT = "&HF5F5F5&" -- #f5f5f5
+local C_DIM = "&HBFBFBF&"
+local C_WARN = "&H0FC4F1&" -- #f1c40f (amber)
+local C_BORDER = "&H000000&"
+
+-- Countdown colour shifts as the deadline approaches (white -> amber -> red).
+local function count_color(secs)
+    if secs <= 2 then return C_ACCENT end
+    if secs <= 5 then return C_WARN end
+    return C_TEXT
+end
+
 local overlay = mp.create_osd_overlay("ass-events")
 local duration = nil
 local active = false
@@ -109,12 +124,14 @@ local function show(secs)
     bind_keys()
     if secs == shown_secs then return end
     shown_secs = secs
-    -- Compact two-line card: episode label + countdown and key hints.
-    -- \194\183 = "·", \226\143\142 = "⏎" (escaped to keep this source ASCII-only).
+    -- Compact two-line card: a bold accent title (▶ + episode label) and a countdown
+    -- line whose seconds colour-shift as the deadline nears, with key hints.
+    -- \226\150\182 = "▶", \194\183 = "·", \226\143\142 = "⏎" (escaped to keep this ASCII-only).
     overlay.data = string.format(
-        "{\\an3\\bord2\\shad1\\3c&H000000&\\1c&H9BE6B0&\\fs24}%s\\N"
-        .. "{\\fs17\\1c&HBFBFBF&}tra %d s \194\183 \226\143\142 ora \194\183 esc",
-        ass_escape(next_label), secs)
+        "{\\an3\\bord2\\shad1\\3c%s\\1c%s\\b1\\fs26}\226\150\182 %s\\N"
+        .. "{\\b0\\fs17\\1c%s}tra {\\1c%s}%d s{\\1c%s} \194\183 \226\143\142 ora \194\183 esc",
+        C_BORDER, C_ACCENT, ass_escape(next_label),
+        C_DIM, count_color(secs), secs, C_DIM)
     overlay:update()
 end
 
@@ -122,9 +139,10 @@ end
 -- \226\143\181 = "⏵".
 mp.register_event("file-loaded", function()
     if not opts.resume or opts.resume <= 1 then return end
+    -- \226\143\181 = "⏵" (accent), label in bright text — same chrome as the card.
     overlay.data = string.format(
-        "{\\an3\\bord2\\shad1\\3c&H000000&\\1c&HFFFFFF&\\fs24}\226\143\181 Ripresa da %s",
-        fmt_time(opts.resume))
+        "{\\an3\\bord2\\shad1\\3c%s\\fs24\\1c%s}\226\143\181 {\\1c%s}Ripresa da %s",
+        C_BORDER, C_ACCENT, C_TEXT, fmt_time(opts.resume))
     overlay:update()
     mp.add_timeout(4, function()
         if not active then overlay:remove() end
