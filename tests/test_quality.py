@@ -349,3 +349,12 @@ def test_rank_no_cast_audio_keeps_lossless():
     # Without cast_audio the TrueHD remux stays playable (local mpv decodes it).
     playable, _ = _rank([S_REMUX_TRUEHD])
     assert len(playable) == 1
+
+
+def test_cached_marker_provider_agnostic():
+    # Torrentio marks instant streams per-debrid: [RD+]/[AD+]/[PM+]/[TB+]/[Putio+].
+    for mark in ("[RD+]", "[AD+]", "[PM+]", "[TB+]", "[Putio+]"):
+        assert quality.parse_stream({"name": f"{mark} Torrentio\n1080p"}).cached is True
+    # Non-cached / no marker → not cached.
+    assert quality.parse_stream({"name": "[RD download]\n1080p"}).cached is False
+    assert quality.parse_stream({"name": "Torrentio\n1080p"}).cached is False

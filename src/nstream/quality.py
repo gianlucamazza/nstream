@@ -119,6 +119,11 @@ _AUDIO_PATTERNS = (
 # Audio the Chromecast Default Media Receiver cannot decode (silent video).
 _CAST_LOSSLESS = frozenset({"truehd", "dtshd", "dts"})
 
+# Torrentio marks an instantly-available (cached) debrid stream with a per-provider
+# prefix: [RD+] (RealDebrid), [AD+], [PM+], [TB+], [Putio+]… ("+" = cached, vs
+# "[RD download]"). Provider-agnostic so any debrid's cached streams are detected.
+_CACHED_RE = re.compile(r"\[[A-Za-z]{2,6}\+\]")
+
 
 def _parse_languages(text: str) -> frozenset[str]:
     found = {code for code, pat in _LANG_RE.items() if pat.search(text)}
@@ -169,7 +174,7 @@ def parse_stream(stream: Stream) -> StreamInfo:
         dv_profile=dv_profile,
         size_gb=size_gb,
         seeders=seeders,
-        cached="[RD+]" in (stream.get("name") or ""),
+        cached=bool(_CACHED_RE.search(stream.get("name") or "")),
         languages=_parse_languages(text),
         source=_parse_source(text),
         audio=_parse_audio(text),

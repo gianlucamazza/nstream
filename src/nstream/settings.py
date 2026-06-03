@@ -76,15 +76,39 @@ def _ask(prompt: str) -> str:
         return ""
 
 
+# Debrid providers Torrentio supports (config-string key, display name), RD first.
+# The whole `torrentio_base` is passed to Torrentio as-is, so switching provider is
+# just swapping this key — stream resolution already works for any of them.
+_PROVIDERS: list[tuple[str, str]] = [
+    ("realdebrid", "RealDebrid"),
+    ("alldebrid", "AllDebrid"),
+    ("premiumize", "Premiumize"),
+    ("torbox", "TorBox"),
+    ("debridlink", "Debrid-Link"),
+    ("easydebrid", "EasyDebrid"),
+    ("offcloud", "Offcloud"),
+    ("putio", "Put.io"),
+]
+_PROVIDER_KEYS = {k for k, _ in _PROVIDERS}
+
+
 def _token_status(cfg: Config) -> str:
-    m = re.search(r"realdebrid=([^|]*)", cfg.torrentio_base)
-    return "✓ impostato (••••)" if (m and m.group(1)) else "✗ assente"
+    for key, name in _PROVIDERS:
+        m = re.search(rf"(?:^|\|){re.escape(key)}=([^|]*)", cfg.torrentio_base)
+        if m and m.group(1):
+            return f"✓ {name} (••••)"
+    return "✗ assente"
 
 
-def _with_token(base: str, token: str) -> str:
-    if "realdebrid=" in base:
-        return re.sub(r"realdebrid=[^|]*", f"realdebrid={token}", base)
-    return f"sort=qualitysize|realdebrid={token}"
+def _with_token(base: str, token: str, provider: str = "realdebrid") -> str:
+    """Set `provider`'s token in the Torrentio config string, dropping any other
+    debrid provider segment (Torrentio expects one) and keeping sort/other options.
+    Seeds `sort=qualitysize` when the base has none."""
+    segs = [s for s in base.split("|") if s and s.split("=", 1)[0] not in _PROVIDER_KEYS]
+    if not any(s.startswith("sort=") for s in segs):
+        segs.insert(0, "sort=qualitysize")
+    segs.append(f"{provider}={token}")
+    return "|".join(segs)
 
 
 def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
@@ -218,10 +242,10 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
         ),
         (
             "torrentio_base",
-            "Token Real-Debrid",
+            "Token debrid",
             "token",
             _token_status(cfg),
-            "Token RD nel config (chmod 600, mai loggato). Input mascherato.",
+            "Provider debrid Torrentio (RealDebrid/AllDebrid/TorBox/…) + chiave. Mai loggato.",
         ),
         (
             "__addons__",
@@ -281,10 +305,14 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         if i is not None:
             config.save({key: MAXRES_CHOICES[i][1]})
     elif kind == "token":
-        token = getpass.getpass("Token Real-Debrid (nascosto): ").strip()
+        i = _fzf_select([name for _, name in _PROVIDERS], prompt="provider> ")
+        if i is None:
+            return
+        provider_key, provider_name = _PROVIDERS[i]
+        token = getpass.getpass(f"Chiave {provider_name} (nascosta): ").strip()
         if token:
-            config.save({"torrentio_base": _with_token(cfg.torrentio_base, token)})
-            print("nstream: token aggiornato", file=sys.stderr)
+            config.save({"torrentio_base": _with_token(cfg.torrentio_base, token, provider_key)})
+            print(f"nstream: token {provider_name} aggiornato", file=sys.stderr)
 
 
 # --- addons submenu ------------------------------------------------------
@@ -336,13 +364,20 @@ def _add_addon(cfg: Config) -> None:
 
 
 def onboard() -> None:
-    """First-run: prompt for the Real-Debrid token and write a minimal config."""
-    print("Primo avvio nstream — configura il token Real-Debrid.", file=sys.stderr)
-    print("Ottienilo su https://real-debrid.com/apitoken", file=sys.stderr)
+    """First-run: pick a debrid provider and write a minimal config with its key."""
+    print("Primo avvio nstream — configura il tuo provider debrid.", file=sys.stderr)
+    i = _fzf_select(
+        [name for _, name in _PROVIDERS],
+        prompt="provider> ",
+        header="Scegli il debrid (poi inserisci la chiave API dal suo sito)",
+    )
+    if i is None:
+        raise config.ConfigError("nessun provider scelto")
+    provider_key, provider_name = _PROVIDERS[i]
     try:
-        token = getpass.getpass("Token Real-Debrid (nascosto): ").strip()
+        token = getpass.getpass(f"Chiave {provider_name} (nascosta): ").strip()
     except EOFError:
         token = ""
     if not token:
-        raise config.ConfigError("token non fornito")
-    config.save({"torrentio_base": f"sort=qualitysize|realdebrid={token}"})
+        raise config.ConfigError("chiave non fornita")
+    config.save({"torrentio_base": _with_token("", token, provider_key)})
