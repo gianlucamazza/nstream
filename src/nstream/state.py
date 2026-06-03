@@ -58,9 +58,19 @@ def load_history(cfg: Config) -> dict[str, HistoryEntry]:
     return data if isinstance(data, dict) else {}
 
 
+# Within this many seconds of the end a title counts as finished, even if the
+# fraction is below WATCHED_THRESHOLD (e.g. padded duration / long credits, or
+# mpv paused at EOF with keep-open=yes).
+END_TAIL_SECONDS = 60.0
+
+
 def _watched(entry: HistoryEntry) -> bool:
     duration = entry.get("duration") or 0.0
-    return duration > 0 and (entry.get("position") or 0.0) / duration > WATCHED_THRESHOLD
+    if duration <= 0:
+        return False
+    position = entry.get("position") or 0.0
+    tail = min(END_TAIL_SECONDS, 0.05 * duration)  # relative, so short clips aren't mislabelled
+    return position / duration > WATCHED_THRESHOLD or position >= duration - tail
 
 
 def save_entry(cfg: Config, entry: HistoryEntry) -> None:

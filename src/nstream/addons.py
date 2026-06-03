@@ -76,6 +76,8 @@ def _base_of(manifest_url: str) -> str:
 
 
 def _parse_manifest(manifest_url: str, data: dict) -> Addon:
+    if not isinstance(data, dict):  # guard against a corrupt/partial cache entry
+        data = {}
     m_types = data.get("types", [])
     m_idp = data.get("idPrefixes", [])
     resources: dict[str, dict] = {}
@@ -106,7 +108,8 @@ def load_addon(manifest_url: str, *, use_cache: bool = True) -> Addon | None:
     if entry and (time.time() - entry.get("ts", 0)) < CACHE_TTL:
         return _parse_manifest(manifest_url, entry["manifest"])
     try:
-        data = api.http_get_json(manifest_url, what="manifest addon")
+        # One try only: a dead user addon must not stall the flow for ~60s.
+        data = api.http_get_json(manifest_url, what="manifest addon", retries=1)
     except api.NetworkError:
         # Fall back to a stale copy rather than dropping the addon entirely.
         return _parse_manifest(manifest_url, entry["manifest"]) if entry else None

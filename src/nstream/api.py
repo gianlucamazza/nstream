@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import random
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -145,8 +144,9 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
         url = f"{addon.base}/stream/{typ}/{video_id}.json"
         try:
             out.extend(http_get_json(url, what=f"stream ({addon.name})").get("streams", []))
-        except NetworkError as e:
-            print(f"nstream: {e}", file=sys.stderr)
+        except NetworkError:
+            # Best-effort like the other aggregators: a failing addon is skipped;
+            # the caller reports "nessuno stream disponibile" if nothing is found.
             continue
     return _dedup(out, lambda s: s.get("url") or id(s))
 

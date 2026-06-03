@@ -10,6 +10,7 @@ import contextlib
 import getpass
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -40,7 +41,7 @@ def _fzf_select(
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("\n".join(p.replace("\n", " ") for p in previews))
             args += [
-                "--preview", f'sed -n "$(({{n}}+1))p" {pv_path}',
+                "--preview", f'sed -n "$(({{n}}+1))p" {shlex.quote(pv_path)}',
                 "--preview-window", "down:3:wrap",
             ]  # fmt: skip
         try:
@@ -55,6 +56,15 @@ def _fzf_select(
     if proc.returncode != 0 or not proc.stdout.strip():
         return None
     return int(proc.stdout.split("\t", 1)[0])
+
+
+def _ask(prompt: str) -> str:
+    """input() that treats EOF (Ctrl-D / closed stdin) as an empty answer,
+    so it cancels the single action instead of crashing."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
 
 
 def _token_status(cfg: Config) -> str:
@@ -114,6 +124,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Salva la posizione per resume e continua-a-guardare.",
         ),
         (
+            "mpv_quiet",
+            "Output mpv pulito",
+            "bool",
+            "on" if cfg.mpv_quiet else "off",
+            "Nasconde track-list e warning mpv; tiene barra e errori.",
+        ),
+        (
             "torrentio_base",
             "Token Real-Debrid",
             "token",
@@ -157,14 +174,14 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
     elif kind == "bool":
         config.save({key: not getattr(cfg, key)})
     elif kind == "int":
-        raw = input(f"{label} (1-120): ").strip()
+        raw = _ask(f"{label} (1-120): ")
         if raw:
             try:
                 config.save({key: max(1, min(int(raw), 120))})
             except ValueError:
                 print("nstream: valore non valido", file=sys.stderr)
     elif kind == "list":
-        raw = input(f"{label} (CSV, es. ita,eng): ").strip()
+        raw = _ask(f"{label} (CSV, es. ita,eng): ")
         if raw:
             config.save({key: [x.strip() for x in raw.split(",") if x.strip()]})
     elif kind == "enum":  # hwdec
@@ -203,14 +220,14 @@ def _addons_menu(cfg: Config) -> None:
         if addon.builtin:
             print("nstream: addon built-in, non rimovibile", file=sys.stderr)
             continue
-        if input(f"Rimuovere '{addon.name}'? [y/N] ").strip().lower() == "y":
+        if _ask(f"Rimuovere '{addon.name}'? [y/N] ").lower() == "y":
             remaining = [u for u in cfg.addons if u != addon.manifest_url]
             config.save({"addons": remaining})
             cfg = config.load()
 
 
 def _add_addon(cfg: Config) -> None:
-    url = input("URL manifest addon (…/manifest.json): ").strip()
+    url = _ask("URL manifest addon (…/manifest.json): ")
     if not url:
         return
     if not url.endswith("manifest.json"):
@@ -231,7 +248,10 @@ def onboard() -> None:
     """First-run: prompt for the Real-Debrid token and write a minimal config."""
     print("Primo avvio nstream — configura il token Real-Debrid.", file=sys.stderr)
     print("Ottienilo su https://real-debrid.com/apitoken", file=sys.stderr)
-    token = getpass.getpass("Token Real-Debrid (nascosto): ").strip()
+    try:
+        token = getpass.getpass("Token Real-Debrid (nascosto): ").strip()
+    except EOFError:
+        token = ""
     if not token:
         raise config.ConfigError("token non fornito")
     config.save({"torrentio_base": f"sort=qualitysize|realdebrid={token}"})
