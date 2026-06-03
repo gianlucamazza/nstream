@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import __version__, api, log, preview, quality, settings, state, tracks, ui
+from . import __version__, api, explain, log, preview, quality, settings, state, tracks, ui
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
 from .config import (
@@ -739,6 +739,40 @@ def run_browse(cfg: Config, cat: str, opts: PlayOpts) -> int:
     return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
+def run_explain(cfg: Config, query: str) -> int:
+    """`--explain`: search → pick a title (and episode, for series) → print WHY the
+    auto-pick won (ranking table for local + cast profiles, plus the audio decision).
+    Read-only: never plays or casts."""
+    metas = api.search(cfg, query)
+    if not metas:
+        print("nstream: nessun risultato", file=sys.stderr)
+        return 1
+    meta = fzf([(meta_label(m), m) for m in metas], "titolo> ", preview=_meta_preview)
+    if meta is None:
+        return 0
+    typ = meta.get("type", "movie")
+    video_id = meta["id"]
+    title = meta.get("name", "?")
+    if typ == "series":
+        eps = api.episodes(cfg, video_id)
+        if not eps:
+            print(f"nstream: nessun episodio per «{title}»", file=sys.stderr)
+            return 1
+        v = fzf([(episode_label(e), e) for e in eps], "episodio> ")
+        if v is None:
+            return 0
+        video_id = v["id"]
+        title = display_title(title, v)
+    results = api.streams(cfg, typ, video_id)
+    print(f"\n# nstream --explain · {title}\n")
+    print(explain.explain_streams(cfg, results, cast=False))
+    print()
+    print(explain.explain_streams(cfg, results, cast=True))
+    print()
+    print(explain.explain_audio(cfg, explain.auto_pick(cfg, results, cast=False)))
+    return 0
+
+
 def run_continue(cfg: Config, opts: PlayOpts) -> int:
     """`-c`: resume from history, returning to the list after each play (ESC exits)."""
     entries = state.recent(cfg)
@@ -821,6 +855,11 @@ def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     if args.browse:
         return run_browse(cfg, CAT_MAP[args.browse], opts)
     query = " ".join(args.query)
+    if args.explain:
+        if not query:
+            print("nstream: --explain richiede un titolo da cercare", file=sys.stderr)
+            return 2
+        return run_explain(cfg, query)
     if query:
         return run_search(cfg, query, opts)
     return run_home(cfg, opts)
@@ -889,6 +928,11 @@ def main() -> int:
         "--no-autoplay", action="store_true", help="non proporre il prossimo episodio"
     )
     parser.add_argument("--settings", action="store_true", help="apri il menu impostazioni")
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="spiega perché uno stream/audio verrebbe scelto (non riproduce)",
+    )
     parser.add_argument(
         "--debug", action="store_true", help="log verboso su stderr (oltre al file di log)"
     )

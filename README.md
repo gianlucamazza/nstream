@@ -213,6 +213,9 @@ RealDebrid/AllDebrid/TorBox/… then enter the key masked, never printed), and *
 stream/subtitle/catalog providers alongside the built-in Cinemeta/Torrentio/OpenSubtitles. On
 first run, if no config exists, nstream asks which debrid provider to use and writes one.
 
+How streams and audio are ranked (and how to debug a pick with `nstream "<title>" --explain`)
+is documented in [docs/selection.md](docs/selection.md).
+
 ## Files
 
 | Path | Role |
