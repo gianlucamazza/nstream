@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import __version__, api, log, preview, quality, settings, state, tracks
+from . import __version__, api, log, preview, quality, settings, state, tracks, ui
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
 from .config import (
@@ -60,14 +60,31 @@ def _clear() -> None:
         sys.stdout.flush()
 
 
+# Active theme (glyphs + palette), resolved once in main() after config load and used by
+# the label builders. Sensible defaults keep direct calls (e.g. in tests) self-contained.
+_GLYPHS: ui.Glyphs = ui.PORTABLE
+_PAL: ui.Palette = ui.palette(ui.Caps())
+
+
+def _init_theme(cfg: Config) -> None:
+    global _GLYPHS, _PAL
+    caps = ui.detect_caps(cfg)
+    ui.set_active_caps(caps)
+    _GLYPHS = ui.glyphs(caps)
+    _PAL = ui.palette(caps)
+
+
 def meta_label(m: Meta) -> str:
+    g, pal = _GLYPHS, _PAL
+    icon = g.series if m.get("type") == "series" else g.movie
     info = m.get("releaseInfo", "")
-    label = f"{m.get('type', '?'):6s} {m.get('name', '?')}  ({info})"
+    year = f"  {ui.ansi(f'({info})', pal.dim)}" if info else ""
+    label = f"{icon}  {ui.ansi(m.get('name', '?'), pal.accent)}{year}"
     # Cheap hint from the slim catalog (year only): flag titles from a future year.
     # Same-year-but-unreleased titles are caught precisely at selection time.
-    year = re.match(r"(\d{4})", str(info))
-    if year and int(year.group(1)) > datetime.now(UTC).year:
-        label += "  · 🎬 in uscita"
+    yr = re.match(r"(\d{4})", str(info))
+    if yr and int(yr.group(1)) > datetime.now(UTC).year:
+        label += "  " + ui.ansi(f"· {g.movie} in uscita", pal.warn)
     return label
 
 
@@ -94,17 +111,30 @@ def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
         tags.append("/".join(sorted(info.languages)))
     if info.size_gb:
         tags.append(f"{info.size_gb:.1f}G")
-    prefix = ("✓" if info.cached else " ") + " " + " ".join(tags)
-    return f"{prefix:36s} {base}"[:200]
+    prefix = (_GLYPHS.cached if info.cached else " ") + " " + " ".join(tags)
+    # Truncate the plain string first, then colour only the fixed-width prefix region so
+    # the alignment is exact and no ANSI escape is ever cut by the 200-char cap.
+    plain = f"{prefix:36s} {base}"[:200]
+    return ui.ansi(plain[:36], _PAL.good if info.cached else _PAL.dim) + plain[36:]
+
+
+def episode_label(v: Video) -> str:
+    g, pal = _GLYPHS, _PAL
+    tag = ui.ansi(f"S{v.get('season', 0):02d}E{v.get('episode', 0):02d}", pal.dim)
+    return f"{g.series}  {tag}  {v.get('name', '')}".rstrip()
 
 
 def history_label(e: HistoryEntry) -> str:
-    title = e.get("title", "?")
+    pal = _PAL
+    title = ui.ansi(e.get("title", "?"), pal.secondary)
     if e.get("type") == "series" and e.get("season"):
-        title += f"  S{e.get('season', 0):02d}E{e.get('episode', 0):02d}"
+        title += "  " + ui.ansi(f"S{e.get('season', 0):02d}E{e.get('episode', 0):02d}", pal.dim)
     dur = e.get("duration") or 0.0
-    pct = f"  · {e.get('position', 0.0) / dur * 100:.0f}%" if dur else ""
-    return f"{title}{pct}"
+    pos = e.get("position", 0.0)
+    if dur:
+        bar = ui.progress_bar(pos, dur, width=12, caps=ui.active_caps())
+        title += "  " + ui.ansi(f"{bar} {pos / dur * 100:.0f}%", pal.accent)
+    return title
 
 
 def display_title(name: str, video: Video | None) -> str:
@@ -221,7 +251,7 @@ def choose_tracks(
     _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
     while True:
         items: list[tuple[str, object]] = [
-            ("▶ Avvia", _PLAY),
+            (f"{_GLYPHS.play}  Avvia", _PLAY),
             (f"🔊 Audio: {_audio_summary(aid, tr)}", _AUDIO),
             (f"💬 Sottotitoli: {_sub_summary(sid, sub_paths, tr)}", _SUBS),
         ]
@@ -587,14 +617,16 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
     eps = api.episodes(cfg, meta["id"])
     if not eps:
         return f"nessun episodio per «{name}»"
-    items = [
-        (f"S{v.get('season', 0):02d}E{v.get('episode', 0):02d}  {v.get('name', '')}", v)
-        for v in eps
-    ]
+    items = [(episode_label(v), v) for v in eps]
+    sid = meta["id"]
+
+    def ep_preview(v: Video) -> str:
+        return f"episode {sid} {v.get('season', 0)} {v.get('episode', 0)}"
+
     # Loop the episode picker so finishing/backing out returns here, not to the list.
     header: str | None = None
     while True:
-        chosen = fzf_key(items, "episodio> ", header=header or _pick_hint(opts))
+        chosen = fzf_key(items, "episodio> ", header=header or _pick_hint(opts), preview=ep_preview)
         if not chosen:
             return None
         key, start_video = chosen
@@ -657,6 +689,20 @@ def _apply_key(opts: PlayOpts, key: str) -> PlayOpts:
     return replace(opts, auto=opts.auto ^ (key == "tab"))
 
 
+def _meta_preview(m: Meta) -> str | None:
+    """The `__preview` token for a title row (poster + metadata pane), or None."""
+    vid = m.get("id")
+    return f"title {m.get('type', 'movie')} {vid}" if vid else None
+
+
+def _entry_preview(e: HistoryEntry) -> str | None:
+    """Preview token for a continue-watching row: the episode for a series, else the title."""
+    if e.get("type") == "series" and e.get("series_id"):
+        return f"episode {e['series_id']} {e.get('season', 0)} {e.get('episode', 0)}"
+    vid = e.get("video_id")
+    return f"title {e.get('type', 'movie')} {vid}" if vid else None
+
+
 def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> int:
     """Loop the title list: play a pick, then return here. ESC leaves to the caller
     (HOME or the shell). A notice from playback is shown as the fzf header next time.
@@ -664,7 +710,9 @@ def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> in
     defer the choice to the episode picker)."""
     header: str | None = None
     while True:
-        chosen = fzf_key(items, "titolo> ", header=header or _pick_hint(opts))
+        chosen = fzf_key(
+            items, "titolo> ", header=header or _pick_hint(opts), preview=_meta_preview
+        )
         if not chosen:
             return 0
         key, meta = chosen
@@ -700,7 +748,9 @@ def run_continue(cfg: Config, opts: PlayOpts) -> int:
     header: str | None = None
     while True:
         items = [(history_label(e), e) for e in entries]
-        chosen = fzf_key(items, "continua> ", header=header or _pick_hint(opts))
+        chosen = fzf_key(
+            items, "continua> ", header=header or _pick_hint(opts), preview=_entry_preview
+        )
         if chosen is None:
             return 0
         key, entry = chosen
@@ -721,17 +771,27 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
     notice: str | None = None
     while True:
         recent = state.recent(cfg) if opts.history else []
+        g = _GLYPHS
         items: list[tuple[str, object]] = [(history_label(e), e) for e in recent]
         items += [
-            ("🔍  Cerca…", (_SEARCH, "")),
-            ("🔥  Popolari", (_BROWSE, "popolari")),
-            ("🆕  Novità", (_BROWSE, "nuovi")),
-            ("⭐  Top IMDb", (_BROWSE, "top")),
-            ("⚙   Impostazioni", (_SETTINGS, "")),
+            (f"{g.search}  Cerca…", (_SEARCH, "")),
+            (f"{g.fire}  Popolari", (_BROWSE, "popolari")),
+            (f"{g.new}  Novità", (_BROWSE, "nuovi")),
+            (f"{g.star}  Top IMDb", (_BROWSE, "top")),
+            (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
         ]
+
+        def home_preview(value: object) -> str | None:
+            # Action rows (tuples) have no preview; continue-watching entries (dicts) do.
+            return (
+                None
+                if isinstance(value, tuple)
+                else _entry_preview(typecast("HistoryEntry", value))
+            )
+
         # The Tab hint only applies to the continue-watching rows.
         header = notice or (_pick_hint(opts) if recent else None)
-        chosen = fzf_key(items, "nstream> ", header=header)
+        chosen = fzf_key(items, "nstream> ", header=header, preview=home_preview)
         notice = None
         if chosen is None:
             return 0
@@ -844,6 +904,8 @@ def main() -> int:
     except ConfigError as e:
         print(f"nstream: {e}", file=sys.stderr)
         return 2
+
+    _init_theme(cfg)
 
     if args.settings:
         settings.run_settings(cfg)

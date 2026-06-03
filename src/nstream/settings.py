@@ -14,7 +14,7 @@ import shlex
 import sys
 import tempfile
 
-from . import addons, config, util
+from . import addons, config, ui, util
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -24,6 +24,11 @@ MAXRES_CHOICES = [
     ("720p (HD)", 720),
     ("illimitata", 0),
 ]
+# Fixed value lists for the "choice" setting kind.
+CHOICE_VALUES: dict[str, list[str]] = {
+    "nerd_font": ["auto", "on", "off"],
+    "image_mode": ["auto", "off"],
+}
 
 # `catt scan` text line: "192.0.2.10 - 43PUS9235/12 - Philips TPM191E". We parse
 # IP + name from text because `catt scan -j` is broken in current catt (CastInfo has
@@ -58,9 +63,12 @@ def _fzf_select(
         return None
     lines = "".join(f"{i}\t{r}\n" for i, r in enumerate(rows))
     # No --height → full alternate screen (clean enter/exit, no scrollback buildup).
+    caps = ui.active_caps()
     args = [
         "fzf", "--prompt", prompt, "--with-nth", "2..", "--delimiter", "\t",
         "--no-sort", "--reverse", "--cycle",
+        "--ansi", "--border", "rounded", "--info", "inline",
+        "--pointer", ui.glyphs(caps).play, *ui.fzf_color_arg(caps),
     ]  # fmt: skip
     if header:
         args += ["--header", header]
@@ -268,6 +276,27 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Quanti stream mostrare prima di «mostra tutti». 0 = nessun limite.",
         ),
         (
+            "nerd_font",
+            "Icone Nerd Font",
+            "choice",
+            cfg.nerd_font,
+            "Glyph Nerd Font nei menu/anteprima. auto = via env NSTREAM_NERD_FONT; on/off forzano.",
+        ),
+        (
+            "posters",
+            "Poster nell'anteprima",
+            "bool",
+            "on" if cfg.posters else "off",
+            "Mostra il poster nel pannello di anteprima fzf (richiede chafa). Off = solo testo.",
+        ),
+        (
+            "image_mode",
+            "Immagini nell'anteprima",
+            "choice",
+            cfg.image_mode,
+            "auto = sixel/half-blocks se il terminale li supporta; off = nessuna immagine.",
+        ),
+        (
             "torrentio_base",
             "Token debrid",
             "token",
@@ -326,6 +355,11 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         i = _fzf_select(HWDEC_CHOICES, prompt=f"{label}> ")
         if i is not None:
             config.save({key: "" if HWDEC_CHOICES[i].startswith("no") else HWDEC_CHOICES[i]})
+    elif kind == "choice":  # fixed value list (nerd_font, image_mode)
+        choices = CHOICE_VALUES[key]
+        i = _fzf_select(choices, prompt=f"{label}> ")
+        if i is not None:
+            config.save({key: choices[i]})
     elif kind == "maxres":
         labels = [c[0] for c in MAXRES_CHOICES]
         i = _fzf_select(labels, prompt=f"{label}> ")

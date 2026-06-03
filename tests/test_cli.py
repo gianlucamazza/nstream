@@ -155,6 +155,42 @@ def test_meta_label_no_hint_past_year():
     assert "in uscita" not in label
 
 
+def test_meta_label_has_type_glyph():
+    movie = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2000"})
+    series = cli.meta_label({"type": "series", "name": "Y", "releaseInfo": "2000"})
+    assert cli.ui.PORTABLE.movie in movie  # portable default in tests (no Nerd Font)
+    assert cli.ui.PORTABLE.series in series
+
+
+def test_episode_label_format():
+    label = cli.episode_label({"season": 1, "episode": 3, "name": "Pilot"})
+    assert "S01E03" in label and "Pilot" in label
+
+
+def test_history_label_has_progress_bar():
+    e = {"title": "Dune", "type": "movie", "position": 50.0, "duration": 100.0}
+    label = cli.history_label(e)
+    assert "50%" in label
+    assert "█" in label  # progress bar rendered
+
+
+def test_history_label_no_bar_without_duration():
+    label = cli.history_label({"title": "Dune", "type": "movie", "duration": 0.0})
+    assert "%" not in label and "█" not in label
+
+
+def test_meta_preview_token():
+    assert cli._meta_preview({"id": "tt1", "type": "movie"}) == "title movie tt1"
+    assert cli._meta_preview({"type": "movie"}) is None  # no id → no preview
+
+
+def test_entry_preview_token():
+    series = {"type": "series", "series_id": "tt9", "season": 2, "episode": 5, "video_id": "v"}
+    assert cli._entry_preview(series) == "episode tt9 2 5"
+    movie = {"type": "movie", "video_id": "tt3"}
+    assert cli._entry_preview(movie) == "title movie tt3"
+
+
 # --- resume / near-end (keep-open) -----------------------------------------
 
 
@@ -311,7 +347,7 @@ def _fzf_script(returns):
     Each item is a (key, value) tuple (key "" = Enter, "tab" = the override) or None."""
     seen = {"headers": [], "i": 0}
 
-    def fake(items, prompt, *, header=None, expect=("tab",)):
+    def fake(items, prompt, *, header=None, expect=("tab",), preview=None):
         seen["headers"].append(header)
         val = returns[seen["i"]]
         seen["i"] += 1
