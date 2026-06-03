@@ -104,7 +104,10 @@ def test_scan_devices_parses_catt_scan(monkeypatch):
         )
 
     monkeypatch.setattr(settings.subprocess, "run", lambda *a, **k: _P())
-    assert settings.scan_devices() == ["43PUS9235/12", "Soggiorno"]
+    assert settings.scan_devices() == [
+        ("43PUS9235/12", "192.0.2.10"),
+        ("Soggiorno", "192.168.1.50"),
+    ]
 
 
 def test_scan_devices_empty_on_failure(monkeypatch):

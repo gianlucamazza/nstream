@@ -601,30 +601,32 @@ _CAST_DONE = 0.97
 _CAST_GIVEUP = 4
 
 
-def _resolve_device(cfg: Config, *, choose: bool = False) -> str | None:
-    """Device NAME for `catt -d`, or None to fall back to catt's own default.
-
-    A configured `cast_device` wins (unless `choose`). Otherwise discover the LAN's
-    Chromecasts (`catt scan`): one → use it; several (or `choose`) → let the user pick
-    via fzf instead of casting to the wrong screen. With no discovery (catt missing or
-    empty), fall back to cast-resolve's per-LAN ladder. `choose=True` always offers the
-    picker (used by the explicit "cast this" / in-player move-to-TV actions)."""
+def _resolve_device(cfg: Config, *, choose: bool = False) -> str:
+    """Resolve the value for `catt -d` — an **IP** from a fresh `catt scan`, so casting
+    is robust to mDNS name-resolution flakiness after a network change. A configured
+    `cast_device` (a stable *name*) is honoured only when present on the current LAN,
+    else we re-discover. One device → use it; several (or `choose`) → pick by name (cast
+    by IP). Raises CastUnavailable when the scan finds nothing reachable / the user
+    cancels (the caller then falls back to local mpv)."""
+    devices = settings.scan_devices()  # [(name, ip)] on the *current* LAN
+    by_name = dict(devices)
+    # A saved preference is honoured only if that device is actually on this LAN —
+    # so after a network change a stale name doesn't pin us to an absent device.
     if cfg.cast_device and not choose:
-        return cfg.cast_device
-    devices = settings.scan_devices()
+        ip = by_name.get(cfg.cast_device)
+        if ip:
+            return ip
+        _log.info("device preferito '%s' non in rete → ridiscovery", cfg.cast_device)
     if not devices:
-        # Discovery found nothing (or catt missing) → fall back to cast-resolve's
-        # per-LAN ladder (auto / fail-loud on ambiguity), preserving prior behaviour.
-        try:
-            proc = subprocess.run(["cast-resolve"], capture_output=True, text=True)
-        except FileNotFoundError:
-            return None
-        if proc.returncode == 0:
-            return proc.stdout.strip() or None
-        raise CastUnavailable(proc.stderr.strip() or "cast-resolve: nessun Chromecast")
+        # Trust the fresh scan: nothing here now (TV off, or a different network). We
+        # deliberately don't fall back to cast-resolve, which returns a configured
+        # default regardless of presence — that would cast to an absent device. The
+        # caller degrades to local playback instead.
+        raise CastUnavailable("nessun Chromecast in rete")
     if len(devices) == 1 and not choose:
-        return devices[0]
-    chosen = fzf([(d, d) for d in devices], "dispositivo> ")
+        return devices[0][1]  # the IP
+    # Several devices (or an explicit choice): pick by name, cast by IP.
+    chosen = fzf([(name, ip) for name, ip in devices], "dispositivo> ")
     if chosen is None:
         raise CastUnavailable("scelta dispositivo annullata")
     return chosen
@@ -987,14 +989,20 @@ def _play_video(
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = _resume_position(cfg, video_id) if opts.history else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
-        if opts.cast:
-            # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV
-            # as an external file when requested, otherwise the receiver picks its own.
+        # Resolve the cast device up front; if none is reachable on this LAN, degrade
+        # gracefully to local mpv instead of failing (network may have changed).
+        use_cast = opts.cast
+        device: str | None = None
+        if use_cast:
             try:
                 device = _resolve_device(cfg, choose=opts.cast_choose)
             except CastUnavailable as e:
-                print(f"nstream: {e}", file=sys.stderr)
-                return (str(e), False)
+                print(f"nstream: {e} — riproduco in locale", file=sys.stderr)
+                _log.info("nessun Chromecast → fallback locale")
+                use_cast = False
+        if use_cast:
+            # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV
+            # as an external file when requested, otherwise the receiver picks its own.
             sub_paths = (
                 pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
                 if opts.sub_mode
@@ -1004,6 +1012,7 @@ def _play_video(
             # release from the current position) when more than one language is
             # available; resolver closes over `results` so no extra fetch is needed.
             cast_langs = _cast_languages(cfg, results)
+            _log.info("cast '%s' → %s", title, device)
             print(f"▶ {title} — {name_line}", file=sys.stderr)
             pos, dur, advance = cast(
                 cfg, title, chosen["url"],
