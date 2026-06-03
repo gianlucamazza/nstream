@@ -406,6 +406,29 @@ def test_cached_still_dominates_language():
     assert playable[0].stream is S_1080_CACHED_UNTAGGED
 
 
+def test_parse_dcprip_and_tscr_are_camrip():
+    # Cinema leaks (DCP rip, HD-TeleSync-Screener) must be classed as camrip, not unknown.
+    assert quality.parse_stream({"title": "Movie 2026 1080p DCPRip x264"}).source == "dcp"
+    assert quality.parse_stream({"title": "Movie (2026) HdTScr Lat"}).source == "scr"
+
+
+def test_rank_excludes_dcprip_cinema_leak():
+    # Real regression: a DCPRip tagged ENG was auto-picked over web releases. It must be
+    # excluded as a camrip (and never become the auto-pick).
+    leak: Stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "The Devil Wears Prada 2 [2026 DCPRip] ENG RUS\n👤 50 💾 11.0 GB ⚙️ x",
+    }
+    web: Stream = {
+        "name": "Torrentio\n1080p",
+        "title": "Movie.2026.1080p.WEB-DL.x264-GRP\n👤 50 💾 5.0 GB ⚙️ x",
+    }
+    spec = FilterSpec(audio_langs=("ita", "eng"), exclude_camrip=True)
+    playable, excluded = quality.rank_streams([leak, web], _CAPS_HW, spec)
+    assert playable and playable[0].stream is web
+    assert any("camrip (dcp)" in (r.reason or "") for r in excluded)
+
+
 def test_score_components_in_sync_with_score():
     info = quality.parse_stream(S_1080_ITA)
     comp = quality.score_components(info, ("ita",))

@@ -97,14 +97,16 @@ _SOURCE_PATTERNS = (
     ("cam", re.compile(r"\b(?:HD)?CAM(?:RIP)?\b", re.I)),
     ("ts", re.compile(r"\b(?:HD)?TS\b|\bTELESYNC\b|\bPDVD\b", re.I)),
     ("tc", re.compile(r"\b(?:HD)?TC\b|\bTELECINE\b", re.I)),
-    ("scr", re.compile(r"\bSCR\b|\bSCREENER\b|\b[BD]?DVDSCR\b|\bBDSCR\b", re.I)),
+    ("scr", re.compile(r"\bSCR\b|\bSCREENER\b|\b[BD]?DVDSCR\b|\bBDSCR\b|\b(?:HD)?TSCR\b", re.I)),
+    # DCP/DCPRip = a rip of a Digital Cinema Package — a cinema leak, same class as CAM/TS.
+    ("dcp", re.compile(r"\bDCP-?RIP\b|\bDCP\b", re.I)),
     ("bluray", re.compile(r"\bBLU-?RAY\b|\bBD(?:RIP)?\b|\bBRRIP\b", re.I)),
     ("webdl", re.compile(r"\bWEB-?DL\b", re.I)),
     ("webrip", re.compile(r"\bWEB-?RIP\b|\bWEB\b", re.I)),
     ("hdtv", re.compile(r"\bHDTV\b|\bPDTV\b", re.I)),
     ("dvd", re.compile(r"\bDVD-?RIP\b|\bDVD\b", re.I)),
 )
-_CAMRIP_SOURCES = frozenset({"cam", "ts", "tc", "scr"})
+_CAMRIP_SOURCES = frozenset({"cam", "ts", "tc", "scr", "dcp"})
 
 # Audio codec tokens, lossless first: a remux often lists "TrueHD + AC3" but the
 # receiver plays the headline (lossless) track, so it's the one that decides Cast
@@ -388,6 +390,7 @@ _SOURCE_RANK = {
     "ts": 0,
     "tc": 0,
     "scr": 0,
+    "dcp": 0,
 }
 _SOURCE_UNKNOWN_RANK = 3
 
