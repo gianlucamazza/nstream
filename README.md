@@ -101,6 +101,15 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 - `max_resolution`: cap for the filter (default `2160`; `0` = no cap).
 - `allow_software`: keep streams whose codec the GPU can't decode in hardware (default `false`).
 - `allow_dv5`: keep Dolby Vision Profile 5 streams (default `false`; they look wrong without DV).
+- `lang_filter`: keep only releases tagged with a preferred audio language (`audio_langs`) or
+  untagged (original) in the main list; releases tagged **only** with other languages drop to the
+  `⚠` section (default `true`).
+- `exclude_camrip`: move CAM/TS/TC/SCR cinema rips to the `⚠` section (default `true`).
+- `min_seeders`: non-cached torrents below this many seeders are treated as near-dead and demoted
+  (default `3`; `0` = off; cached `[RD+]` are exempt).
+- `dedup`: collapse the same release seen on multiple trackers, keeping the best (default `true`).
+- `max_streams`: how many streams the menu shows before a `↓ mostra tutti` entry reveals the rest
+  and the `⚠` excluded ones (default `20`; `0` = no cap).
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
 
 The file holds your RD token, so it is created `chmod 600` and git-ignored.

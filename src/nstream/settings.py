@@ -25,6 +25,8 @@ MAXRES_CHOICES = [
     ("720p (HD)", 720),
     ("illimitata", 0),
 ]
+# Per-key (min, max) bounds for the "int" editor (0 = off where allowed).
+_INT_BOUNDS = {"autoplay_lead": (1, 120), "min_seeders": (0, 100), "max_streams": (0, 500)}
 
 
 def _fzf_select(
@@ -166,6 +168,41 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Tiene gli stream DV Profile 5 (si vedono male senza display/processing DV).",
         ),
         (
+            "lang_filter",
+            "Filtra per lingua",
+            "bool",
+            "on" if cfg.lang_filter else "off",
+            "Sposta in fondo gli stream taggati solo con lingue diverse dalle tue audio_langs.",
+        ),
+        (
+            "exclude_camrip",
+            "Escludi camrip",
+            "bool",
+            "on" if cfg.exclude_camrip else "off",
+            "Sposta in fondo le release CAM/TS/TC/SCR (registrate al cinema, pessima qualità).",
+        ),
+        (
+            "min_seeders",
+            "Seeder minimi",
+            "int",
+            str(cfg.min_seeders),
+            "Stream non-cached sotto questa soglia (quasi morti) finiscono in fondo. 0 = off.",
+        ),
+        (
+            "dedup",
+            "Rimuovi doppioni",
+            "bool",
+            "on" if cfg.dedup else "off",
+            "Collassa la stessa release vista su più tracker, tiene la migliore.",
+        ),
+        (
+            "max_streams",
+            "Max stream mostrati",
+            "int",
+            str(cfg.max_streams) if cfg.max_streams else "tutti",
+            "Quanti stream mostrare prima di «mostra tutti». 0 = nessun limite.",
+        ),
+        (
             "torrentio_base",
             "Token Real-Debrid",
             "token",
@@ -209,10 +246,11 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
     elif kind == "bool":
         config.save({key: not getattr(cfg, key)})
     elif kind == "int":
-        raw = _ask(f"{label} (1-120): ")
+        lo, hi = _INT_BOUNDS.get(key, (1, 120))
+        raw = _ask(f"{label} ({lo}-{hi}): ")
         if raw:
             try:
-                config.save({key: max(1, min(int(raw), 120))})
+                config.save({key: max(lo, min(int(raw), hi))})
             except ValueError:
                 print("nstream: valore non valido", file=sys.stderr)
     elif kind == "list":

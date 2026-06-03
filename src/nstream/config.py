@@ -91,6 +91,14 @@ class Config:
     max_resolution: int = 2160  # 0 = no cap
     allow_software: bool = False  # keep streams whose codec has no HW decode
     allow_dv5: bool = False  # keep Dolby Vision Profile 5 streams
+    # Stream-list curation (Torrentio returns ~150/title): keep only preferred-language
+    # or untagged releases in the main list, drop camrips / near-dead torrents / dupes,
+    # and cap how many are shown (a "show all" entry expands the rest).
+    lang_filter: bool = True  # demote releases tagged only with non-preferred languages
+    exclude_camrip: bool = True  # CAM/TS/TC/SCR out of the main list
+    min_seeders: int = 3  # non-cached torrents below this are near-dead (0 = off)
+    dedup: bool = True  # collapse the same release across trackers
+    max_streams: int = 20  # cap the manual menu (0 = no cap)
     mpv_args: list[str] = field(default_factory=list)
 
 
@@ -132,6 +140,14 @@ def load() -> Config:
         max_resolution = max(0, int(raw.get("max_resolution", Config.max_resolution)))
     except (TypeError, ValueError):
         max_resolution = Config.max_resolution
+    try:
+        min_seeders = max(0, int(raw.get("min_seeders", Config.min_seeders)))
+    except (TypeError, ValueError):
+        min_seeders = Config.min_seeders
+    try:
+        max_streams = max(0, int(raw.get("max_streams", Config.max_streams)))
+    except (TypeError, ValueError):
+        max_streams = Config.max_streams
     return Config(
         torrentio_base=base,
         cinemeta=raw.get("cinemeta", Config.cinemeta),
@@ -148,6 +164,11 @@ def load() -> Config:
         max_resolution=max_resolution,
         allow_software=bool(raw.get("allow_software", Config.allow_software)),
         allow_dv5=bool(raw.get("allow_dv5", Config.allow_dv5)),
+        lang_filter=bool(raw.get("lang_filter", Config.lang_filter)),
+        exclude_camrip=bool(raw.get("exclude_camrip", Config.exclude_camrip)),
+        min_seeders=min_seeders,
+        dedup=bool(raw.get("dedup", Config.dedup)),
+        max_streams=max_streams,
         mpv_args=list(raw.get("mpv_args", [])),
     )
 

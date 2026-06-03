@@ -14,5 +14,10 @@
   "max_resolution": 2160,
   "allow_software": false,
   "allow_dv5": false,
+  "lang_filter": true,
+  "exclude_camrip": true,
+  "min_seeders": 3,
+  "dedup": true,
+  "max_streams": 20,
   "mpv_args": []
 }

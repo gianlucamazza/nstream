@@ -41,6 +41,9 @@ class StreamInfo:
     size_gb: float = 0.0
     seeders: int = 0
     cached: bool = False
+    languages: frozenset[str] = frozenset()  # ISO codes + "multi"; empty = untagged
+    source: str = ""  # remux|bluray|webdl|webrip|hdtv|dvd|cam|ts|tc|scr|""
+    release_name: str = ""  # title's first line (torrent filename), for dedup
 
 
 _RES_PATTERNS = (
@@ -55,6 +58,61 @@ _RES_PATTERNS = (
 
 def _text(stream: Stream) -> str:
     return f"{stream.get('name', '')}\n{stream.get('title', '')}"
+
+
+# Release-name language tokens → ISO code (or "multi"). Word-boundary matched so a
+# group name like "-CYBER" or "ENG" inside another word doesn't false-positive.
+_LANG_TOKENS = {
+    "ita": ("ITA", "ITALIAN", "ITALIANO"),
+    "eng": ("ENG", "ENGLISH"),
+    "fra": ("FRA", "FRENCH", "TRUEFRENCH", "VFF", "VFQ", "VOSTFR"),
+    "spa": ("SPA", "ESP", "SPANISH", "CASTELLANO", "LATINO"),
+    "deu": ("GER", "GERMAN", "DEU"),
+    "rus": ("RUS", "RUSSIAN"),
+    "por": ("POR", "PORTUGUESE", "DUBLADO", "LEGENDADO"),
+    "multi": ("MULTI", "MULTILANG", "MULTI-LANG", "DUAL", "DUALAUDIO"),
+}
+_LANG_RE = {
+    code: re.compile(r"(?<![A-Za-z])(?:" + "|".join(toks) + r")(?![A-Za-z])", re.I)
+    for code, toks in _LANG_TOKENS.items()
+}
+# Flag emoji Torrentio may prepend → ISO code.
+_FLAG_LANG = {
+    "🇮🇹": "ita",
+    "🇬🇧": "eng",
+    "🇺🇸": "eng",
+    "🇫🇷": "fra",
+    "🇪🇸": "spa",
+    "🇩🇪": "deu",
+    "🇷🇺": "rus",
+    "🇵🇹": "por",
+    "🇧🇷": "por",
+}  # noqa: E501
+
+# Source/release type tokens, checked in priority order (REMUX wins over BluRay).
+_SOURCE_PATTERNS = (
+    ("remux", re.compile(r"\bREMUX\b", re.I)),
+    ("cam", re.compile(r"\b(?:HD)?CAM(?:RIP)?\b", re.I)),
+    ("ts", re.compile(r"\b(?:HD)?TS\b|\bTELESYNC\b|\bPDVD\b", re.I)),
+    ("tc", re.compile(r"\b(?:HD)?TC\b|\bTELECINE\b", re.I)),
+    ("scr", re.compile(r"\bSCR\b|\bSCREENER\b|\b[BD]?DVDSCR\b|\bBDSCR\b", re.I)),
+    ("bluray", re.compile(r"\bBLU-?RAY\b|\bBD(?:RIP)?\b|\bBRRIP\b", re.I)),
+    ("webdl", re.compile(r"\bWEB-?DL\b", re.I)),
+    ("webrip", re.compile(r"\bWEB-?RIP\b|\bWEB\b", re.I)),
+    ("hdtv", re.compile(r"\bHDTV\b|\bPDTV\b", re.I)),
+    ("dvd", re.compile(r"\bDVD-?RIP\b|\bDVD\b", re.I)),
+)
+_CAMRIP_SOURCES = frozenset({"cam", "ts", "tc", "scr"})
+
+
+def _parse_languages(text: str) -> frozenset[str]:
+    found = {code for code, pat in _LANG_RE.items() if pat.search(text)}
+    found |= {code for flag, code in _FLAG_LANG.items() if flag in text}
+    return frozenset(found)
+
+
+def _parse_source(text: str) -> str:
+    return next((name for name, pat in _SOURCE_PATTERNS if pat.search(text)), "")
 
 
 def parse_stream(stream: Stream) -> StreamInfo:
@@ -93,6 +151,9 @@ def parse_stream(stream: Stream) -> StreamInfo:
         size_gb=size_gb,
         seeders=seeders,
         cached="[RD+]" in (stream.get("name") or ""),
+        languages=_parse_languages(text),
+        source=_parse_source(text),
+        release_name=(stream.get("title") or "").split("\n", 1)[0].strip(),
     )
 
 
@@ -200,14 +261,40 @@ def _codec_supported(codec: str, caps: Caps) -> bool:
     return codec in caps.codecs
 
 
-def unsupported_reason(info: StreamInfo, caps: Caps, max_resolution: int) -> str | None:
-    """Why this stream isn't playable on the current hardware, or None if it is."""
+def unsupported_reason(
+    info: StreamInfo,
+    caps: Caps,
+    max_resolution: int,
+    *,
+    audio_langs: tuple[str, ...] = (),
+    lang_filter: bool = False,
+    exclude_camrip: bool = False,
+    min_seeders: int = 0,
+) -> str | None:
+    """Why this stream is excluded from the main list, or None if it belongs there.
+    Order: hardware (codec/resolution/DV5) → camrip → language → near-dead torrent.
+    The extra filters are opt-in (defaults are no-ops) so the HW-only behaviour and
+    existing callers are unchanged."""
     if max_resolution and info.resolution > max_resolution:
         return "8K" if info.resolution >= 4320 else f"{info.resolution}p"
     if not _codec_supported(info.codec, caps):
         return f"{info.codec.upper()} no-HW"
     if info.dv_profile == 5:
         return "Dolby Vision P5"
+    if exclude_camrip and info.source in _CAMRIP_SOURCES:
+        return f"camrip ({info.source})"
+    # Tagged with languages but none preferred (and not a multi-language release).
+    if (
+        lang_filter
+        and audio_langs
+        and info.languages
+        and "multi" not in info.languages
+        and not (info.languages & set(audio_langs))
+    ):
+        return "lingua " + "/".join(sorted(info.languages))
+    # Non-cached torrent with too few seeders may never start (cached [RD+] are exempt).
+    if min_seeders and not info.cached and info.seeders < min_seeders:
+        return "pochi seeder"
     return None
 
 
@@ -234,16 +321,53 @@ class RankedStream:
     reason: str | None = None  # set only for excluded streams
 
 
+def _dedup_by_release(
+    infos: list[tuple[Stream, StreamInfo]],
+) -> list[tuple[Stream, StreamInfo]]:
+    """Collapse the same release seen on multiple trackers (identical release_name),
+    keeping the best-scoring copy. Streams without a release_name are kept as-is."""
+    best: dict[str, tuple[Stream, StreamInfo]] = {}
+    out: list[tuple[Stream, StreamInfo]] = []
+    for s, info in infos:
+        key = info.release_name.lower()
+        if not key:
+            out.append((s, info))
+            continue
+        cur = best.get(key)
+        if cur is None or _score(info) > _score(cur[1]):
+            best[key] = (s, info)
+    out.extend(best.values())
+    return out
+
+
 def rank_streams(
-    streams: list[Stream], caps: Caps, *, max_resolution: int, allow_software: bool, allow_dv5: bool
+    streams: list[Stream],
+    caps: Caps,
+    *,
+    max_resolution: int,
+    allow_software: bool,
+    allow_dv5: bool,
+    audio_langs: tuple[str, ...] = (),
+    lang_filter: bool = False,
+    exclude_camrip: bool = False,
+    min_seeders: int = 0,
+    dedup: bool = False,
 ) -> tuple[list[RankedStream], list[RankedStream]]:
     """Split streams into (playable_sorted, excluded). `allow_software` keeps codecs
-    the GPU can't decode; `allow_dv5` keeps Dolby Vision Profile 5."""
+    the GPU can't decode; `allow_dv5` keeps Dolby Vision Profile 5. The opt-in filters
+    (lang_filter/exclude_camrip/min_seeders) move non-matching streams to `excluded`
+    with a reason; `dedup` drops duplicate releases entirely (not in either list)."""
+    infos = [(s, parse_stream(s)) for s in streams]
+    if dedup:
+        infos = _dedup_by_release(infos)
     playable: list[RankedStream] = []
     excluded: list[RankedStream] = []
-    for s in streams:
-        info = parse_stream(s)
-        reason = unsupported_reason(info, caps, max_resolution)
+    for s, info in infos:
+        reason = unsupported_reason(
+            info, caps, max_resolution,
+            audio_langs=audio_langs, lang_filter=lang_filter,
+            exclude_camrip=exclude_camrip, min_seeders=min_seeders,
+        )  # fmt: skip
         if reason and allow_software and reason.endswith("no-HW"):
             reason = None
         if reason and allow_dv5 and reason.startswith("Dolby Vision"):

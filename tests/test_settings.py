@@ -41,6 +41,11 @@ def test_items_cover_all_settings():
         "max_resolution",
         "allow_software",
         "allow_dv5",
+        "lang_filter",
+        "exclude_camrip",
+        "min_seeders",
+        "dedup",
+        "max_streams",
         "torrentio_base",
         "__addons__",
     ]
