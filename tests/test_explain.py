@@ -104,3 +104,10 @@ def test_mpv_audio_choice_order():
     assert ita_first is not None and ita_first.id == 2
     assert eng_first is not None and eng_first.id == 1
     assert explain._mpv_audio_choice(audio, ["jpn"]) is None
+
+
+def test_mpv_audio_choice_matches_two_letter_tags():
+    # Container tags are often ISO-639-1 (it/en) while prefs are 3-letter (ita/eng).
+    audio = [tracks.Track(id=1, lang="en"), tracks.Track(id=2, lang="it")]
+    chosen = explain._mpv_audio_choice(audio, ["ita", "eng"])
+    assert chosen is not None and chosen.id == 2  # "it" matches "ita"

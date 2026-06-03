@@ -95,6 +95,12 @@ container. They can disagree (a release tagged `ITA.ENG` may actually hold ita/e
 - **Local (mpv):** nstream injects `--alang=<audio_langs>` (unless you set `alang` in
   `mpv.conf`/`mpv_args`). mpv picks the first track in the first preferred language present.
   Manual mode (`choose_tracks`) lets you pick an exact track by `--aid` from the ffprobe list.
+  **Auto-play guard**: before playing, if the auto-pick isn't tagged with a preferred language,
+  nstream ffprobes it; when no track matches `audio_langs` it warns and (interactively) reopens
+  the stream menu instead of letting mpv silently fall back to the wrong dub. Tags are matched
+  through `languages.normalize` so a 2-letter container tag (`it`) matches a 3-letter pref
+  (`ita`). Best-effort: a missing/failed probe never blocks playback; binge advances warn and
+  continue. Well-tagged preferred releases skip the probe.
 - **Cast (Chromecast):** the receiver plays the file's **default** track and cannot switch
   embedded tracks. The in-cast `a` hotkey re-casts a *different* release tagged in the chosen
   language; it can only pick a file whose tag matches, not force a track, so a file whose
