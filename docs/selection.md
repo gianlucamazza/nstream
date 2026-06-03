@@ -71,6 +71,21 @@ exactly these terms per stream.
 `audio_langs` (preference order — drives the `lang` score term and `--alang`),
 `exclude_camrip`, `min_seeders`, `dedup`, `max_streams`. Editable via `nstream --settings`.
 
+## Languages: one registry, one allow-list
+
+All language knowledge — release-name tokens, flag emoji, display names — lives in one place,
+`languages.py` (`LANGUAGES`). `quality` derives its token/flag maps from it and `caster` its
+names, so adding a language is a one-line change (no drift across modules).
+
+The selected languages are a **single ordered allow-list**: `audio_langs` / `subtitle_langs`
+in config. They drive `--alang`/`--slang`, the `lang` score term, and the soft `lang_filter`
+demotion — there is deliberately **no separate "hard view filter"** concept (it would risk
+hiding untagged/multi releases that usually carry the wanted audio). Edit them in
+`nstream --settings` → *Lingue audio/sottotitoli*, a multi-select (TAB to toggle, Enter to
+confirm) built from the registry; order is preserved (selected-first) so `--alang` priority
+is kept. `lang_filter` remains the one knob that governs whether non-preferred tagged streams
+are demoted.
+
 ## Audio: stream language vs track language
 
 A stream is a whole file with embedded audio tracks. `StreamInfo.languages` is a **heuristic

@@ -14,7 +14,7 @@ import shlex
 import sys
 import tempfile
 
-from . import addons, config, ui, util
+from . import addons, config, languages, picker, ui, util
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -104,6 +104,22 @@ def _ask(prompt: str) -> str:
         return ""
 
 
+def _pick_languages(current: list[str], label: str) -> list[str] | None:
+    """Multi-select the preferred languages from the registry. Currently-selected codes
+    are listed first (in their existing order) with a check glyph, the rest follow in
+    registry order; the returned list preserves that display order so `--alang` priority
+    is kept. None/empty when nothing was marked."""
+    g = ui.glyphs(ui.active_caps())
+    chosen = [c for c in current if c in languages.by_code]
+    rest = [lang.code for lang in languages.selectable() if lang.code not in chosen]
+    ordered = chosen + rest
+    items = [
+        (f"{g.cached if code in chosen else ' '}  {languages.name(code)}  ({code})", code)
+        for code in ordered
+    ]
+    return picker.fzf_multi(items, f"{label}> ", header="TAB: (de)seleziona · INVIO: conferma")
+
+
 # Debrid providers Torrentio supports (config-string key, display name), RD first.
 # The whole `torrentio_base` is passed to Torrentio as-is, so switching provider is
 # just swapping this key — stream resolution already works for any of them.
@@ -145,16 +161,16 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
         (
             "audio_langs",
             "Lingue audio",
-            "list",
-            ",".join(cfg.audio_langs),
-            "Preferenza audio mpv (--alang), in ordine. CSV, es: ita,eng,jpn",
+            "langs",
+            ", ".join(languages.name(c) for c in cfg.audio_langs) or "—",
+            "Lingue audio preferite (--alang e ranking). TAB per (de)selezionare, in ordine.",
         ),
         (
             "subtitle_langs",
             "Lingue sottotitoli",
-            "list",
-            ",".join(cfg.subtitle_langs),
-            "Preferenza sottotitoli (--slang e --subs), in ordine. CSV, es: ita,eng",
+            "langs",
+            ", ".join(languages.name(c) for c in cfg.subtitle_langs) or "—",
+            "Lingue sottotitoli preferite (--slang e --subs). TAB per (de)selezionare, in ordine.",
         ),
         (
             "auto_play",
@@ -347,10 +363,10 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
                 config.save({key: max(lo, min(int(raw), hi))})
             except ValueError:
                 print("nstream: valore non valido", file=sys.stderr)
-    elif kind == "list":
-        raw = _ask(f"{label} (CSV, es. ita,eng): ")
-        if raw:
-            config.save({key: [x.strip() for x in raw.split(",") if x.strip()]})
+    elif kind == "langs":
+        sel = _pick_languages(getattr(cfg, key), label)
+        if sel:  # empty/ESC → keep current (avoids an accidental wipe of all preferences)
+            config.save({key: sel})
     elif kind == "enum":  # hwdec
         i = _fzf_select(HWDEC_CHOICES, prompt=f"{label}> ")
         if i is not None:

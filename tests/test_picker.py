@@ -116,6 +116,32 @@ def test_fzf_key_with_preview_three_fields(monkeypatch):
 # --- single-item shortcut ---------------------------------------------------
 
 
+# --- multi-select -----------------------------------------------------------
+
+
+def test_fzf_multi_returns_marked_in_order(monkeypatch):
+    cap = _stub_fzf(monkeypatch, stdout="1\teng\n0\tita\n")
+    out = picker.fzf_multi([("ita", "ita"), ("eng", "eng"), ("fra", "fra")], "lang> ")
+    assert out == ["eng", "ita"]  # marked rows, in fzf output order
+    assert "--multi" in cap["cmd"]
+
+
+def test_fzf_multi_esc_returns_none(monkeypatch):
+    _stub_fzf(monkeypatch, returncode=130, stdout="")
+    assert picker.fzf_multi([("ita", "ita"), ("eng", "eng")], "lang> ") is None
+
+
+def test_fzf_multi_empty_output_returns_none(monkeypatch):
+    _stub_fzf(monkeypatch, returncode=0, stdout="\n")
+    assert picker.fzf_multi([("ita", "ita")], "lang> ") is None
+
+
+def test_fzf_multi_missing_binary_returns_none(monkeypatch, capsys):
+    _stub_fzf(monkeypatch, missing=True)
+    assert picker.fzf_multi([("ita", "ita")], "lang> ") is None
+    assert "fzf non trovato" in capsys.readouterr().err
+
+
 def test_fzf_empty_list_returns_none(monkeypatch):
     _stub_fzf(monkeypatch)
     assert picker.fzf([], "p> ") is None

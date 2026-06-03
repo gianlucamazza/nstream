@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import util
+from . import languages, util
 from .config import Config, Stream
 
 _CACHE_VERSION = 2
@@ -62,34 +62,16 @@ def _text(stream: Stream) -> str:
     return f"{stream.get('name', '')}\n{stream.get('title', '')}"
 
 
-# Release-name language tokens → ISO code (or "multi"). Word-boundary matched so a
-# group name like "-CYBER" or "ENG" inside another word doesn't false-positive.
-_LANG_TOKENS = {
-    "ita": ("ITA", "ITALIAN", "ITALIANO"),
-    "eng": ("ENG", "ENGLISH"),
-    "fra": ("FRA", "FRENCH", "TRUEFRENCH", "VFF", "VFQ", "VOSTFR"),
-    "spa": ("SPA", "ESP", "SPANISH", "CASTELLANO", "LATINO"),
-    "deu": ("GER", "GERMAN", "DEU"),
-    "rus": ("RUS", "RUSSIAN"),
-    "por": ("POR", "PORTUGUESE", "DUBLADO", "LEGENDADO"),
-    "multi": ("MULTI", "MULTILANG", "MULTI-LANG", "DUAL", "DUALAUDIO"),
-}
+# Release-name language tokens → ISO code, derived from the single language registry.
+# Word-boundary matched so a group name like "-CYBER" or "ENG" inside another word doesn't
+# false-positive.
+_LANG_TOKENS = {lang.code: lang.tokens for lang in languages.LANGUAGES}
 _LANG_RE = {
     code: re.compile(r"(?<![A-Za-z])(?:" + "|".join(toks) + r")(?![A-Za-z])", re.I)
     for code, toks in _LANG_TOKENS.items()
 }
 # Flag emoji Torrentio may prepend → ISO code.
-_FLAG_LANG = {
-    "🇮🇹": "ita",
-    "🇬🇧": "eng",
-    "🇺🇸": "eng",
-    "🇫🇷": "fra",
-    "🇪🇸": "spa",
-    "🇩🇪": "deu",
-    "🇷🇺": "rus",
-    "🇵🇹": "por",
-    "🇧🇷": "por",
-}  # noqa: E501
+_FLAG_LANG = {flag: lang.code for lang in languages.LANGUAGES for flag in lang.flags}
 
 # Source/release type tokens, checked in priority order (REMUX wins over BluRay).
 _SOURCE_PATTERNS = (

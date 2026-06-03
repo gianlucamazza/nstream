@@ -406,6 +406,19 @@ def test_cached_still_dominates_language():
     assert playable[0].stream is S_1080_CACHED_UNTAGGED
 
 
+def test_parse_languages_unchanged_after_registry_move():
+    # Regression: the historical 8 languages must parse exactly as before, now that the
+    # token/flag maps are derived from languages.LANGUAGES.
+    assert quality.parse_stream({"title": "Movie ITA ENG MULTI"}).languages == frozenset(
+        {"ita", "eng", "multi"}
+    )
+    assert quality.parse_stream({"name": "🇮🇹 Torrentio\n1080p"}).languages == frozenset({"ita"})
+
+
+def test_parse_new_language_jpn():
+    assert "jpn" in quality.parse_stream({"title": "Anime.2024.1080p.JPN.x264"}).languages
+
+
 def test_parse_dcprip_and_tscr_are_camrip():
     # Cinema leaks (DCP rip, HD-TeleSync-Screener) must be classed as camrip, not unknown.
     assert quality.parse_stream({"title": "Movie 2026 1080p DCPRip x264"}).source == "dcp"
