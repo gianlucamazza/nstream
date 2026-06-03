@@ -134,7 +134,7 @@ def test_play_series_loads_script_and_advances(stub_mpv):
     assert any(a.startswith("--script=") and a.endswith("nstream.lua") for a in args)
     assert "--script-opts-append=nstream-lead=12" in args
     assert "--script-opts-append=nstream-resume=42" in args  # resume toast via the script
-    assert adv is True
+    assert adv == "next"  # play() now returns the signal string
 
 
 def test_play_movie_loads_script_no_card_no_advance(stub_mpv):
@@ -146,7 +146,7 @@ def test_play_movie_loads_script_no_card_no_advance(stub_mpv):
     assert any(a.startswith("--script=") and a.endswith("nstream.lua") for a in args)
     assert not any(a.startswith("--script-opts-append=nstream-info=") for a in args)
     assert not any(a.startswith("--script-opts-append=nstream-signal=") for a in args)
-    assert adv is False
+    assert adv == ""  # no card / no cast key → empty signal
 
 
 def test_play_movie_resume_passes_script_opt(stub_mpv):
@@ -491,8 +491,11 @@ def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
         auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
     assert cli._pick_meta(items, CFG, opts) == 0
-    # First render shows the Tab hint; after the pick the notice is threaded through.
-    assert seen["headers"] == ["Tab: avvia al volo", "non ancora disponibile"]
+    # First render shows the Tab/Alt-C hint; after the pick the notice is threaded through.
+    assert seen["headers"] == [
+        "Tab: avvia al volo  ·  Alt-C: casta sul TV",
+        "non ancora disponibile",
+    ]
 
 
 def test_pick_meta_tab_flips_auto(monkeypatch):
@@ -573,7 +576,7 @@ def test_fzf_key_enter(monkeypatch):
     cap = _stub_fzf_proc(monkeypatch, stdout="\n1\tb\n")
     out = cli.fzf_key([("a", 10), ("b", 20)], "p> ")
     assert out == ("", 20)
-    assert "--expect" in cap["cmd"] and "tab" in cap["cmd"]
+    assert "--expect" in cap["cmd"] and "tab,alt-c" in cap["cmd"]
 
 
 def test_fzf_key_tab(monkeypatch):
@@ -936,7 +939,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
-    monkeypatch.setattr(cli, "_resolve_device", lambda c: "TV")
+    monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
 
     def boom(*a, **k):
         raise AssertionError("choose_tracks must not run in cast mode")
@@ -962,7 +965,7 @@ def test_play_video_cast_unavailable_returns_notice(monkeypatch):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
 
-    def boom(_cfg):
+    def boom(_cfg, **k):
         raise cli.CastUnavailable("nessun device")
 
     monkeypatch.setattr(cli, "_resolve_device", boom)
@@ -1051,3 +1054,94 @@ def test_cast_hotkey_esc_keeps_current(monkeypatch):
     )  # fmt: skip
     assert resolved == []  # ESC → resolver never called, no re-cast
     assert not [c for c in calls if "cast" in c and c.count("cast") and "-t" in c]
+
+
+# --- device discovery + picker + in-player cast (Fase 1s) -------------------
+
+
+def test_resolve_device_prefers_config(monkeypatch):
+    monkeypatch.setattr(cli.settings, "scan_devices", lambda: pytest.fail("no scan"))
+    assert cli._resolve_device(Config(torrentio_base="tb", cast_device="Salotto")) == "Salotto"
+
+
+def test_resolve_device_single_auto(monkeypatch):
+    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1"])
+    assert cli._resolve_device(Config(torrentio_base="tb")) == "TV1"
+
+
+def test_resolve_device_multiple_prompts(monkeypatch):
+    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1", "TV2"])
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt: "TV2")
+    assert cli._resolve_device(Config(torrentio_base="tb")) == "TV2"
+
+
+def test_resolve_device_cancel_raises(monkeypatch):
+    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1", "TV2"])
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt: None)
+    with pytest.raises(cli.CastUnavailable):
+        cli._resolve_device(Config(torrentio_base="tb"))
+
+
+def test_resolve_device_choose_forces_picker(monkeypatch):
+    # Even with a single device, choose=True offers the picker.
+    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1"])
+    picked = {}
+
+    def fake_fzf(items, prompt):
+        picked["n"] = len(items)
+        return "TV1"
+
+    monkeypatch.setattr(cli, "fzf", fake_fzf)
+    assert cli._resolve_device(Config(torrentio_base="tb"), choose=True) == "TV1"
+    assert picked["n"] == 1
+
+
+def test_apply_key_alt_c_casts():
+    base = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    out = cli._apply_key(base, "alt-c")
+    assert out.cast is True and out.cast_choose is True
+    assert cli._apply_key(base, "tab").auto is False  # Tab still flips
+    assert cli._apply_key(base, "").auto is True  # Enter keeps default
+
+
+def test_pick_meta_alt_c_sets_cast(monkeypatch):
+    items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
+    fake_fzf, _ = _fzf_script([("alt-c", items[0][1]), None])
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    seen = {}
+    monkeypatch.setattr(
+        cli, "play_meta", lambda c, m, o: seen.update(cast=o.cast, choose=o.cast_choose)
+    )
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    cli._pick_meta(items, CFG, opts)
+    assert seen == {"cast": True, "choose": True}
+
+
+def test_play_video_local_to_cast_on_signal(monkeypatch):
+    """Alt-C in mpv (play() returns 'cast') re-casts from the current position."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
+    monkeypatch.setattr(cli.shutil, "which", lambda _x: "/usr/bin/catt")
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (55.0, 100.0, "cast"))
+    monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "cast",
+        lambda *a, **k: (
+            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False)
+        ),
+    )
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
+    )
+    assert seen == {"start": 55.0, "device": "TV"} and advance is False

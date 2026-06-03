@@ -107,10 +107,16 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   or the remote); nstream warns when it sees a zero volume. During a cast, press **`a`** to change
   the audio language when more than one is available — nstream re-casts a release in that language
   from the current position (the Chromecast plays the file's default track, so this works best with
-  single-language dubs). Locally (mpv) audio is switched with mpv's native `#` key.
-- `cast_device`: pin the Chromecast name for `catt -d` (default `""`). Empty resolves the device
-  per-LAN via `cast-resolve` (fails loud on ambiguity rather than casting to the wrong screen),
-  then falls back to catt's own default.
+  single-language dubs). Locally (mpv) audio is switched with mpv's native `#` key. **Casting from
+  the TUI:** press **Alt-C** on any title/episode/continue row to cast that pick (regardless of
+  `prefer_cast`); during local mpv playback, **Alt-C** moves the stream to the TV from the current
+  position. **Device choice:** when casting, if more than one Chromecast is discovered (`catt scan`)
+  or you used Alt-C, nstream shows a device picker instead of guessing.
+- `cast_device`: preferred Chromecast name for `catt -d` (default `""`). Set it from the settings
+  menu (**Dispositivo cast** → discovery + pick) or here. Empty = `auto`: a single discovered device
+  is used directly, several prompt a picker, and with none nstream falls back to `cast-resolve`'s
+  per-LAN resolution. (Note: `catt scan -j` is broken in current catt, so discovery parses the text
+  `catt scan`.)
 - `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
   default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
