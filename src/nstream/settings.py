@@ -24,8 +24,6 @@ MAXRES_CHOICES = [
     ("720p (HD)", 720),
     ("illimitata", 0),
 ]
-# Per-key (min, max) bounds for the "int" editor (0 = off where allowed).
-_INT_BOUNDS = {"autoplay_lead": (1, 120), "min_seeders": (0, 100), "max_streams": (0, 500)}
 
 # `catt scan` text line: "192.168.1.228 - 43PUS9235/12 - Philips TPM191E". We parse
 # IP + name from text because `catt scan -j` is broken in current catt (CastInfo has
@@ -313,7 +311,7 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
     elif kind == "bool":
         config.save({key: not getattr(cfg, key)})
     elif kind == "int":
-        lo, hi = _INT_BOUNDS.get(key, (1, 120))
+        lo, hi = config.INT_BOUNDS.get(key, (1, 120))
         raw = _ask(f"{label} ({lo}-{hi}): ")
         if raw:
             try:

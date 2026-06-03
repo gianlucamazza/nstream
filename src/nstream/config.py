@@ -111,6 +111,16 @@ class Config:
     mpv_args: list[str] = field(default_factory=list)
 
 
+# (min, max) bounds for the integer config fields, shared with the settings editor so
+# validation lives in one place. max_resolution's 0 means "no cap"; 4320 is 8K.
+INT_BOUNDS: dict[str, tuple[int, int]] = {
+    "autoplay_lead": (1, 120),
+    "max_resolution": (0, 4320),
+    "min_seeders": (0, 100),
+    "max_streams": (0, 500),
+}
+
+
 def config_path() -> Path:
     """Resolve the config path, honouring XDG_CONFIG_HOME."""
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -123,6 +133,16 @@ def state_path() -> Path:
     return Path(base) / "nstream" / "history.json"
 
 
+def _bounded_int(raw: dict, key: str, default: int) -> int:
+    """Coerce a config int, falling back to `default` on a bad value and clamping to the
+    field's INT_BOUNDS range (so out-of-range values can't break ranking/overlay)."""
+    lo, hi = INT_BOUNDS[key]
+    try:
+        return max(lo, min(int(raw.get(key, default)), hi))
+    except (TypeError, ValueError):
+        return default
+
+
 def load() -> Config:
     path = config_path()
     try:
@@ -131,6 +151,8 @@ def load() -> Config:
         raise ConfigError(f"config mancante: {path}") from e
     except json.JSONDecodeError as e:
         raise ConfigError(f"config non valido ({path}): {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigError(f"config non valido ({path}): atteso un oggetto JSON")
 
     base = raw.get("torrentio_base")
     if not base:
@@ -138,25 +160,6 @@ def load() -> Config:
     # Absent → default; explicit "", false or null → disabled.
     hwdec_raw = raw.get("hwdec", Config.hwdec)
     hwdec = str(hwdec_raw) if hwdec_raw else ""
-    try:
-        autoplay_lead = int(raw.get("autoplay_lead", Config.autoplay_lead))
-    except (TypeError, ValueError):
-        autoplay_lead = Config.autoplay_lead
-    # Clamp to a sane range: 0 would show the overlay only in the last half second,
-    # huge values would keep it on screen the whole time.
-    autoplay_lead = max(1, min(autoplay_lead, 120))
-    try:
-        max_resolution = max(0, int(raw.get("max_resolution", Config.max_resolution)))
-    except (TypeError, ValueError):
-        max_resolution = Config.max_resolution
-    try:
-        min_seeders = max(0, int(raw.get("min_seeders", Config.min_seeders)))
-    except (TypeError, ValueError):
-        min_seeders = Config.min_seeders
-    try:
-        max_streams = max(0, int(raw.get("max_streams", Config.max_streams)))
-    except (TypeError, ValueError):
-        max_streams = Config.max_streams
     return Config(
         torrentio_base=base,
         cinemeta=raw.get("cinemeta", Config.cinemeta),
@@ -170,17 +173,17 @@ def load() -> Config:
         prefer_cast=bool(raw.get("prefer_cast", Config.prefer_cast)),
         cast_device=str(raw.get("cast_device", Config.cast_device) or ""),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
-        autoplay_lead=autoplay_lead,
+        autoplay_lead=_bounded_int(raw, "autoplay_lead", Config.autoplay_lead),
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),
         hw_filter=bool(raw.get("hw_filter", Config.hw_filter)),
-        max_resolution=max_resolution,
+        max_resolution=_bounded_int(raw, "max_resolution", Config.max_resolution),
         allow_software=bool(raw.get("allow_software", Config.allow_software)),
         allow_dv5=bool(raw.get("allow_dv5", Config.allow_dv5)),
         lang_filter=bool(raw.get("lang_filter", Config.lang_filter)),
         exclude_camrip=bool(raw.get("exclude_camrip", Config.exclude_camrip)),
-        min_seeders=min_seeders,
+        min_seeders=_bounded_int(raw, "min_seeders", Config.min_seeders),
         dedup=bool(raw.get("dedup", Config.dedup)),
-        max_streams=max_streams,
+        max_streams=_bounded_int(raw, "max_streams", Config.max_streams),
         mpv_args=list(raw.get("mpv_args", [])),
     )
 
