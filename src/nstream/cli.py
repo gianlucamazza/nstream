@@ -139,13 +139,6 @@ def display_title(name: str, video: Video | None) -> str:
     return f"{label} · {epname}" if epname else label
 
 
-def _fmt_time(sec: float) -> str:
-    total = int(sec)
-    h, rem = divmod(total, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
 # --- subtitles ------------------------------------------------------------
 
 
@@ -192,7 +185,7 @@ def pick_subtitles(
     subs.sort(key=lambda s: pref.get(s.get("lang", ""), len(pref)))
     if mode == "menu":
         items = [(f"{s.get('lang', '?'):5s} {s.get('id', '')}", s) for s in subs]
-        chosen = fzf(items, "sottotitolo> ")
+        chosen = fzf(items, "sottotitoli> ")
     else:  # auto: take the best preferred-language track, else skip silently
         chosen = subs[0] if subs[0].get("lang", "") in pref else None
         if chosen is None:
@@ -290,7 +283,6 @@ def _track_position(
     sock_path: str,
     holder: dict[str, float],
     proc: subprocess.Popen,
-    resume_msg: str | None = None,
 ) -> None:
     """Observe mpv's time-pos/duration over the IPC socket; record the last values."""
     sock: socket.socket | None = None
@@ -309,9 +301,6 @@ def _track_position(
     try:
         for cid, prop in ((1, "time-pos"), (2, "duration")):
             sock.sendall(f'{{"command":["observe_property",{cid},"{prop}"]}}\n'.encode())
-        if resume_msg:
-            payload = json.dumps({"command": ["show-text", resume_msg, 4000]})
-            sock.sendall(payload.encode() + b"\n")
         # Time out recv so we notice mpv exiting promptly and the thread joins
         # cleanly — otherwise a blocked recv could outlive mpv and lose the last
         # observed position.
@@ -461,7 +450,6 @@ def play(
     audio_id: int | None = None,
     sub_id: int | str | None = None,
     next_label: str | None = None,
-    resume_msg: str | None = None,
     work_dir: str | None = None,
 ) -> tuple[float, float, bool]:
     """Play `url` in mpv. Returns (position, duration, advance) where `advance`
@@ -503,14 +491,18 @@ def play(
             args.append(f"--sid={sub_id}")
         args.append(f"--input-ipc-server={sock_path}")
 
+        # The overlay script is the single renderer for both the resume toast and the
+        # next-episode card, so load it always (it's additive — it never touches the
+        # user's mpv.conf). --script-opts-append is non-destructive: it won't clobber
+        # a user's own script-opts set for other scripts.
+        lua = stack.enter_context(resources.as_file(resources.files("nstream") / "nstream.lua"))
+        args.append(f"--script={lua}")
+        if start and start > 1:
+            args.append(f"--script-opts-append=nstream-resume={start:.0f}")
         if next_label:
             with open(info_path, "w", encoding="utf-8") as f:
                 f.write(next_label + "\n")
-            # --script-opts-append is non-destructive: it won't clobber a user's
-            # own script-opts set for other scripts.
-            lua = stack.enter_context(resources.as_file(resources.files("nstream") / "nstream.lua"))
             args += [
-                f"--script={lua}",
                 f"--script-opts-append=nstream-info={info_path}",
                 f"--script-opts-append=nstream-signal={signal_path}",
                 f"--script-opts-append=nstream-lead={cfg.autoplay_lead}",
@@ -522,7 +514,7 @@ def play(
             print("nstream: mpv non trovato", file=sys.stderr)
             return (0.0, 0.0, False)
         tracker = threading.Thread(
-            target=_track_position, args=(sock_path, holder, proc, resume_msg), daemon=True
+            target=_track_position, args=(sock_path, holder, proc), daemon=True
         )
         tracker.start()
         proc.wait()
@@ -591,7 +583,7 @@ def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | 
     def _full() -> Stream | None:
         items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
         items += [(f"⚠ {r.reason}  {stream_label(r.stream, r.info)}", r.stream) for r in excluded]
-        return fzf(items, "stream (tutti)> ")
+        return fzf(items, "stream> ")
 
     cap = cfg.max_streams
     if not cap or len(playable) + len(excluded) <= cap:
@@ -665,13 +657,12 @@ def _play_video(
                 return (None, False)  # backed out → return to the list
             audio_id, sub_id, sub_paths = sel
         start = _resume_position(cfg, video_id) if opts.history else None
-        resume_msg = f"⏵ Ripresa da {_fmt_time(start)}" if start and start > 1 else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
         print(f"▶ {title} — {name_line}", file=sys.stderr)
         pos, dur, advance = play(
             cfg, title, chosen["url"],
             start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
-            next_label=next_label, resume_msg=resume_msg, work_dir=work_dir,
+            next_label=next_label, work_dir=work_dir,
         )  # fmt: skip
     _clear()  # drop mpv's exit frame/logs before returning to the menu
     # Only persist a resume we can reason about: a real duration is needed for the

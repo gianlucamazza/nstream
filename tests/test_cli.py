@@ -23,14 +23,6 @@ def test_display_title_series_without_name():
     assert cli.display_title("Show", Video(season=2, episode=10)) == "Show · S02E10"
 
 
-@pytest.mark.parametrize(
-    ("sec", "expected"),
-    [(30, "0:30"), (95, "1:35"), (3725, "1:02:05"), (0, "0:00")],
-)
-def test_fmt_time(sec, expected):
-    assert cli._fmt_time(sec) == expected
-
-
 def _ns(**kw):
     base = {"subs": False, "sub_menu": False, "sub_lang": None}
     base.update(kw)
@@ -141,14 +133,34 @@ def test_play_series_loads_script_and_advances(stub_mpv):
     assert not any("write-filename" in a for a in args)
     assert any(a.startswith("--script=") and a.endswith("nstream.lua") for a in args)
     assert "--script-opts-append=nstream-lead=12" in args
+    assert "--script-opts-append=nstream-resume=42" in args  # resume toast via the script
     assert adv is True
 
 
-def test_play_movie_no_script_no_advance(stub_mpv):
+def test_play_movie_loads_script_no_card_no_advance(stub_mpv):
+    # The overlay script is always loaded (single on-screen renderer), but with no
+    # next_label there's no card/signal opt and nothing can ask to advance.
     cfg = Config(torrentio_base="tb", hwdec="")
     pos, dur, adv = cli.play(cfg, "Movie", "http://u", next_label=None)
-    assert not any(a.startswith("--script=") for a in _FakePopen.last_args)
+    args = _FakePopen.last_args
+    assert any(a.startswith("--script=") and a.endswith("nstream.lua") for a in args)
+    assert not any(a.startswith("--script-opts-append=nstream-info=") for a in args)
+    assert not any(a.startswith("--script-opts-append=nstream-signal=") for a in args)
     assert adv is False
+
+
+def test_play_movie_resume_passes_script_opt(stub_mpv):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    cli.play(cfg, "Movie", "http://u", start=100)
+    assert "--script-opts-append=nstream-resume=100" in _FakePopen.last_args
+
+
+def test_play_no_resume_opt_when_fresh(stub_mpv):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    cli.play(cfg, "Movie", "http://u")
+    assert not any(
+        a.startswith("--script-opts-append=nstream-resume=") for a in _FakePopen.last_args
+    )
 
 
 def test_clear_noop_without_tty(monkeypatch, capsys):
@@ -573,20 +585,20 @@ def test_pick_stream_cap_and_show_all(monkeypatch):
     monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps())
     playable, excluded = _ranked(25), _ranked(2, reason="camrip (cam)")
     monkeypatch.setattr(cli.quality, "rank_streams", lambda *a, **k: (playable, excluded))
-    seen = {}
+    calls = []
 
     def fzf(items, prompt, *, header=None):
-        seen[prompt] = items
-        if prompt == "stream> ":
-            return items[-1][1]  # the "↓ mostra tutti" sentinel
-        return items[0][1]  # first stream in the full menu
+        calls.append(items)  # both menus share the "stream> " prompt now
+        if len(calls) == 1:
+            return items[-1][1]  # capped menu → the "↓ mostra tutti" sentinel
+        return items[0][1]  # full menu → first stream
 
     monkeypatch.setattr(cli, "fzf", fzf)
     out = cli._pick_stream(cfg, [{"url": "x"}] * 27, auto=False)
     # Capped menu = 20 streams + 1 "show all" entry; full menu = 25 playable + 2 excluded.
-    assert len(seen["stream> "]) == 21
-    assert "mostra tutti" in seen["stream> "][-1][0]
-    assert len(seen["stream (tutti)> "]) == 27
+    assert len(calls[0]) == 21
+    assert "mostra tutti" in calls[0][-1][0]
+    assert len(calls[1]) == 27
     assert out is playable[0].stream
 
 

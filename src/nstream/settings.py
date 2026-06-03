@@ -281,16 +281,15 @@ def _addons_menu(cfg: Config) -> None:
         eff = addons.effective_addons(cfg)
         rows: list[str] = []
         for a in eff:
-            tag = "[built-in]" if a.builtin else "[extra]   "
-            rows.append(f"{tag} {a.name:18s} {','.join(a.resources)}")
+            suffix = "  · built-in" if a.builtin else ""
+            rows.append(f"🧩 {a.name:18s} {','.join(a.resources)}{suffix}")
         rows.append("➕ Aggiungi addon…")
-        rows.append("⬅  Indietro")
         idx = _fzf_select(
             rows, prompt="plugin> ", header="INVIO: aggiungi / rimuovi (solo extra) · ESC: indietro"
         )
-        if idx is None or idx == len(rows) - 1:
+        if idx is None:  # ESC backs out, like every other menu
             return
-        if idx == len(rows) - 2:
+        if idx == len(rows) - 1:
             _add_addon(cfg)
             cfg = config.load()
             continue
