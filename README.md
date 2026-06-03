@@ -27,8 +27,10 @@ mpv setup.
 
 Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, `ffmpeg` (its `ffprobe`
 powers the pre-play track menu; nstream degrades gracefully without it), plus `foot` for the
-desktop launcher. Optional: `catt` to cast to a Chromecast (`--cast`), and `cast-resolve` (from
-the `skill_cast` project) to pick the right device per-LAN. Install/dev: `uv`. All native.
+desktop launcher. Optional: `catt` to cast to a Chromecast (`--cast`), `cast-resolve` (from
+the `skill_cast` project) to pick the right device per-LAN, and `chafa` to render poster
+thumbnails in the fzf preview pane (falls back to text-only without it). Install/dev: `uv`.
+All native.
 
 ## Install
 
