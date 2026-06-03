@@ -3,7 +3,7 @@
 pkgname=nstream
 # Keep pkgver in sync with __version__ in src/nstream/__init__.py
 # (build-local.sh derives the tarball name from it; .SRCINFO follows).
-pkgver=1.4.0
+pkgver=1.5.0
 pkgrel=1
 pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/Real-Debrid + mpv)"
 arch=('any')

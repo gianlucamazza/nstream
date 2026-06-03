@@ -147,6 +147,15 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 The file holds your debrid key, so it is created `chmod 600` and git-ignored.
 Watch history lives separately in `~/.local/state/nstream/history.json` (no secrets).
 
+## Logging & diagnostics
+
+nstream writes a rotating log to `~/.local/state/nstream/nstream.log` (512 KB × 3). An unexpected
+crash is captured there (handy when running inside the foot launcher, where the traceback would
+otherwise scroll away) — on a crash nstream prints `errore inatteso — dettagli in <path>`. Run with
+`--debug` (or `NSTREAM_DEBUG=1`) to also echo verbose logs to stderr. A redaction filter scrubs the
+debrid token from **every** log record (`<provider>=…` segments and `/resolve/<provider>/<token>/`
+paths), so the log never contains secrets.
+
 ## Security & limitations
 
 - **Real-Debrid token.** It lives only in `config.json` (`chmod 600`). The Torrentio
@@ -210,6 +219,7 @@ first run, if no config exists, nstream asks which debrid provider to use and wr
 | `src/nstream/settings.py` | native fzf settings menu (config + addons) |
 | `src/nstream/config.py` | config load/save (XDG, atomic 0600) + payload types |
 | `src/nstream/state.py` | watch-history persistence (resume / continue-watching) |
+| `src/nstream/log.py` | rotating file log + debug console; redaction filter (token never logged) |
 | `src/nstream/nstream.lua` | mpv overlay for the next-episode countdown (loaded via `--script`) |
 | `nstream-fuzzel` | thin launcher → opens the TUI home menu in foot |
 | `nstream.desktop` | app launcher entry |

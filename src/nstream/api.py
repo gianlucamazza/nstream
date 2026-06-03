@@ -19,8 +19,10 @@ import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from . import addons
+from . import addons, log
 from .config import Config, Meta, Stream, Subtitle, Video
+
+_log = log.get_logger("api")
 
 UA = "Mozilla/5.0 nstream"
 TIMEOUT = 20.0
@@ -84,8 +86,10 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
 
         if attempt >= retries:
             break
+        _log.debug("%s: tentativo %d fallito (%s), retry", what, attempt + 1, last_exc)
         time.sleep(wait if wait is not None else _backoff(attempt))
 
+    _log.warning("%s: rete non raggiungibile dopo %d tentativi", what, retries + 1)
     raise NetworkError(f"{what}: rete non raggiungibile dopo {retries + 1} tentativi") from last_exc
 
 

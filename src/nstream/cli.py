@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from importlib import resources
 from typing import cast as typecast
 
-from . import __version__, api, quality, settings, state, tracks
+from . import __version__, api, log, quality, settings, state, tracks
 from .config import (
     Config,
     ConfigError,
@@ -40,6 +40,8 @@ from .config import (
 
 # --browse keyword → Cinemeta catalog id.
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
+
+_log = log.get_logger("cli")
 
 
 @dataclass(frozen=True)
@@ -744,6 +746,7 @@ def cast(
     if sub_paths:  # catt takes a single subtitle file
         launch += ["-s", sub_paths[0]]
     dest = device or "Chromecast"
+    _log.debug("catt launch: %s", " ".join(launch))  # token redacted by the log filter
     # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
     print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
     try:
@@ -753,6 +756,7 @@ def cast(
         return (0.0, 0.0, False)
     if proc.returncode != 0:
         # catt prints the cause (e.g. device unreachable); never echo the URL/token.
+        _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
         print("nstream: cast non riuscito", file=sys.stderr)
         return (0.0, 0.0, False)
 
@@ -1341,8 +1345,15 @@ def main() -> int:
         "--no-autoplay", action="store_true", help="non proporre il prossimo episodio"
     )
     parser.add_argument("--settings", action="store_true", help="apri il menu impostazioni")
+    parser.add_argument(
+        "--debug", action="store_true", help="log verboso su stderr (oltre al file di log)"
+    )
     parser.add_argument("--version", action="version", version=f"nstream {__version__}")
     args = parser.parse_args()
+
+    log.setup_logging(args.debug or bool(os.environ.get("NSTREAM_DEBUG")))
+    _log.info("nstream %s avvio (cast=%s)", __version__, args.cast or "")
+    _log.debug("args: %r", vars(args))
 
     try:
         cfg = _ensure_config()
@@ -1366,15 +1377,23 @@ def main() -> int:
     try:
         return _dispatch(cfg, args, opts)
     except api.NetworkError as e:
+        _log.warning("network: %s", e)
         print(f"nstream: {e}", file=sys.stderr)
         return 1
 
 
 def _entry() -> None:
+    # Configure logging before anything else so a crash in main() is captured even
+    # when nstream runs inside the foot launcher (where the traceback would scroll away).
+    log.setup_logging(bool(os.environ.get("NSTREAM_DEBUG")))
     try:
         sys.exit(main())
     except (KeyboardInterrupt, EOFError):
         sys.exit(130)
+    except Exception:
+        _log.exception("crash non gestito")
+        print(f"nstream: errore inatteso — dettagli in {log.log_path()}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
