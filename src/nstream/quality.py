@@ -12,13 +12,14 @@ can really play, while still showing the rest, clearly marked, for manual overri
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import util
 from .config import Stream
 
 _CACHE_VERSION = 2
@@ -225,22 +226,17 @@ def detect_caps(*, use_cache: bool = True) -> Caps:
     """Detect HW decode capabilities via vainfo (cached). Conservative fallback."""
     path = _cache_path()
     if use_cache:
-        try:
-            data = json.loads(path.read_text())
+        data = util.load_json(path, {})
+        with contextlib.suppress(KeyError, TypeError, ValueError):
             if data.get("version") == _CACHE_VERSION:
                 return Caps(
                     codecs=frozenset(data["codecs"]),
                     max_resolution=int(data["max_resolution"]),
                     vaapi=bool(data["vaapi"]),
                 )
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
-            pass
 
-    try:
-        proc = subprocess.run(["vainfo"], capture_output=True, text=True, timeout=10)
-        probed = _caps_from_vainfo(proc.stdout + proc.stderr)
-    except (OSError, subprocess.SubprocessError):
-        probed = frozenset()
+    proc = util.run_cmd(["vainfo"], timeout=util.VAINFO_TIMEOUT)
+    probed = _caps_from_vainfo(proc.stdout + proc.stderr) if proc else frozenset()
     # A real probe means VAAPI is usable; otherwise fall back conservatively and
     # mark vaapi unavailable so we don't force mpv onto a path we couldn't verify.
     vaapi = bool(probed)
