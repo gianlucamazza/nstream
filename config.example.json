@@ -8,6 +8,8 @@
   "history_enabled": true,
   "hwdec": "auto-safe",
   "auto_play": true,
+  "prefer_cast": false,
+  "cast_device": "",
   "autoplay": true,
   "autoplay_lead": 15,
   "mpv_quiet": true,

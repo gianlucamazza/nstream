@@ -112,6 +112,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Invio sul titolo avvia subito il migliore; Tab apre la scelta manuale. Off = inverte.",
         ),
         (
+            "prefer_cast",
+            "Riproduzione su Chromecast",
+            "bool",
+            "on" if cfg.prefer_cast else "off",
+            "Manda lo stream al Chromecast (catt). --cast/--local forzano per la sessione.",
+        ),
+        (
             "autoplay",
             "Autoplay prossimo ep.",
             "bool",

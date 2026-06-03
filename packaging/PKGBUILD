@@ -1,15 +1,21 @@
 # Maintainer: Gianluca Mazza <info@gianlucamazza.it>
 
 pkgname=nstream
-pkgver=1.0.0
+# Keep pkgver in sync with __version__ in src/nstream/__init__.py
+# (build-local.sh derives the tarball name from it; .SRCINFO follows).
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/Real-Debrid + mpv)"
 arch=('any')
 url="https://github.com/gianlucamazza/nstream"
 license=('MIT')
 depends=('python' 'mpv' 'fzf' 'ffmpeg')  # ffmpeg → ffprobe for the pre-play track menu
-optdepends=('foot: terminal used by the desktop launcher')
+optdepends=(
+  'foot: terminal used by the desktop launcher'
+  'catt: cast to a Chromecast with --cast (install via pipx; not in the repos)'
+)
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
+checkdepends=('python-pytest')
 install="$pkgname.install"
 source=("$pkgname-$pkgver.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
@@ -17,6 +23,13 @@ sha256sums=('SKIP')
 build() {
   cd "$pkgname-$pkgver"
   python -m build --wheel --no-isolation
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  # Runtime is stdlib-only, so the source tree on PYTHONPATH is enough to run the
+  # suite without installing first.
+  PYTHONPATH="$PWD/src" python -m pytest -q
 }
 
 package() {
