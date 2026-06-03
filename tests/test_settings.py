@@ -9,10 +9,18 @@ from nstream.config import Config
 def test_token_status():
     assert (
         settings._token_status(Config(torrentio_base="sort=x|realdebrid=ABCD"))
-        == "✓ impostato (••••)"
+        == "✓ RealDebrid (••••)"
     )
     assert settings._token_status(Config(torrentio_base="sort=x|realdebrid=")) == "✗ assente"
     assert settings._token_status(Config(torrentio_base="sort=x")) == "✗ assente"
+
+
+def test_token_status_other_providers():
+    assert (
+        settings._token_status(Config(torrentio_base="sort=x|alldebrid=K")) == "✓ AllDebrid (••••)"
+    )
+    assert settings._token_status(Config(torrentio_base="torbox=K")) == "✓ TorBox (••••)"
+    assert settings._token_status(Config(torrentio_base="sort=x|putio=K")) == "✓ Put.io (••••)"
 
 
 def test_with_token_replaces_only_token():
@@ -24,6 +32,13 @@ def test_with_token_replaces_only_token():
 
 def test_with_token_from_empty():
     assert settings._with_token("", "T") == "sort=qualitysize|realdebrid=T"
+
+
+def test_with_token_switches_provider():
+    # Switching debrid drops the old provider segment, keeps sort, leaves one provider.
+    out = settings._with_token("sort=qualitysize|realdebrid=OLD", "K", "alldebrid")
+    assert out == "sort=qualitysize|alldebrid=K"
+    assert "realdebrid" not in out
 
 
 def test_items_cover_all_settings():
@@ -71,4 +86,4 @@ def test_items_render_current_values():
     by_key = {it[0]: it for it in settings._items(cfg)}
     assert by_key["audio_langs"][3] == "jpn"
     assert by_key["autoplay"][3] == "off"
-    assert by_key["torrentio_base"][3] == "✓ impostato (••••)"
+    assert by_key["torrentio_base"][3] == "✓ RealDebrid (••••)"

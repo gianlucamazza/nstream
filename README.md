@@ -66,8 +66,12 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 ```
 
 - `torrentio_base`: the Torrentio config string (everything between the host and
-  `/manifest.json` in your Torrentio addon URL). Get your Real-Debrid API token at
-  <https://real-debrid.com/apitoken>.
+  `/manifest.json` in your Torrentio addon URL). It carries your **debrid** key as
+  `<provider>=<KEY>`. Torrentio supports 8 providers (use the settings menu to pick one and enter the
+  key, or edit by hand): `realdebrid`, `alldebrid`, `premiumize`, `torbox`, `debridlink`,
+  `easydebrid`, `offcloud`, `putio` — e.g. `sort=qualitysize|alldebrid=YOUR_KEY`. RealDebrid token:
+  <https://real-debrid.com/apitoken>. nstream detects each provider's cached marker (`[RD+]`,
+  `[AD+]`, `[TB+]`, `[Putio+]`, …) so the "prefer instant" ranking works on any of them.
 - `opensubtitles`: base URL of the OpenSubtitles v3 addon (default shown).
 - `subtitle_langs`: preferred subtitle languages, in order. Used to sort/auto-pick subtitles
   and passed to mpv as `--slang` (non-overriding).
@@ -134,7 +138,7 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   and the `⚠` excluded ones (default `20`; `0` = no cap).
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
 
-The file holds your RD token, so it is created `chmod 600` and git-ignored.
+The file holds your debrid key, so it is created `chmod 600` and git-ignored.
 Watch history lives separately in `~/.local/state/nstream/history.json` (no secrets).
 
 ## Security & limitations
@@ -184,10 +188,10 @@ advancing binge episodes always play automatically.
 ## Settings
 
 `nstream --settings` (or the **⚙ Impostazioni** entry in the startup menu) opens a native fzf
-menu to edit languages, autoplay, hardware decoding, history, the Real-Debrid token (entered
-masked, never printed), and **Stremio addons** — add/remove extra manifest URLs to aggregate more
+menu to edit languages, autoplay, hardware decoding, history, the **debrid provider + key** (pick
+RealDebrid/AllDebrid/TorBox/… then enter the key masked, never printed), and **Stremio addons** — add/remove extra manifest URLs to aggregate more
 stream/subtitle/catalog providers alongside the built-in Cinemeta/Torrentio/OpenSubtitles. On
-first run, if no config exists, nstream prompts for the Real-Debrid token and writes one.
+first run, if no config exists, nstream asks which debrid provider to use and writes one.
 
 ## Files
 
