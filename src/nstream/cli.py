@@ -257,6 +257,22 @@ def _hwdec_defaults(cfg: Config) -> list[str]:
     return [f"--hwdec={cfg.hwdec}"]
 
 
+# mpv log modules that spam the terminal of a media frontend (track list +
+# decoder/demuxer/driver warnings). cplayer=warn drops the track list while the
+# progress status line (a separate mechanism) survives; the rest hide ffmpeg/mkv
+# warnings. Real errors (level error/fatal) still print.
+_QUIET_MSG_LEVEL = (
+    "cplayer=warn,ffmpeg=error,ffmpeg/video=error,ffmpeg/audio=error,mkv=error,ad=error,vd=error"  # noqa: E501
+)
+
+
+def _quiet_defaults(cfg: Config) -> list[str]:
+    """Quieten mpv's console unless the user manages msg-level themselves."""
+    if not cfg.mpv_quiet or _user_overrides(cfg, "msg-level"):
+        return []
+    return [f"--msg-level={_QUIET_MSG_LEVEL}"]
+
+
 def _lang_defaults(cfg: Config) -> list[str]:
     """Prefer the user's languages for audio/subtitle track selection, without
     overriding any alang/slang the user already set. `--subs-with-matching-audio=no`
@@ -306,6 +322,7 @@ def play(
             "mpv",
             f"--force-media-title={title}",
             "--no-resume-playback",
+            *_quiet_defaults(cfg),
             *_hwdec_defaults(cfg),
             *_lang_defaults(cfg),
             *cfg.mpv_args,
@@ -350,6 +367,20 @@ def play(
 # --- flow ----------------------------------------------------------------
 
 
+def _resume_position(cfg: Config, video_id: str) -> float | None:
+    """The position to resume from, or None if there's no usable resume point
+    (no history entry, or the title is effectively finished — so we never restart
+    at the very end when mpv was left paused at EOF with keep-open)."""
+    entry = state.load_history(cfg).get(video_id)
+    if not entry or state._watched(entry):
+        return None
+    start = entry.get("position")
+    dur = entry.get("duration") or 0.0
+    if start and dur > 0:
+        return min(start, dur - 5)
+    return start
+
+
 def _play_video(
     cfg: Config,
     typ: str,
@@ -380,7 +411,7 @@ def _play_video(
             if opts.sub_mode
             else ()
         )
-        start = state.load_history(cfg).get(video_id, {}).get("position") if opts.history else None
+        start = _resume_position(cfg, video_id) if opts.history else None
         resume_msg = f"⏵ Ripresa da {_fmt_time(start)}" if start and start > 1 else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
         print(f"▶ {title} — {name_line}", file=sys.stderr)
@@ -389,7 +420,9 @@ def _play_video(
             start=start, sub_paths=sub_paths, next_label=next_label,
             resume_msg=resume_msg, work_dir=work_dir,
         )  # fmt: skip
-    if opts.history and on_save and pos > 0:
+    # Only persist a resume we can reason about: a real duration is needed for the
+    # watched/near-end logic, otherwise the entry would stick forever.
+    if opts.history and on_save and pos > 0 and dur > 0:
         on_save(pos, dur)
     return (0, advance)
 
@@ -531,18 +564,20 @@ def run_continue(cfg: Config, opts: PlayOpts, *, allow_search: bool = False) -> 
         if not allow_search:
             print("nstream: cronologia vuota", file=sys.stderr)
         return None if allow_search else 0
-    items: list[tuple[str, object]] = [(history_label(e), e) for e in entries]
-    if allow_search:
-        items.append(("⚙ Impostazioni", _SETTINGS))
-        items.append(("↳ cerca…", _SEARCH))
-    chosen = fzf(items, "continua> ")
-    if chosen is None or chosen is _SEARCH:
-        # Aborted fzf or 'cerca…': fall through to search when allowed.
-        return None if allow_search else 0
-    if chosen is _SETTINGS:
-        settings.run_settings(load())
-        return run_continue(load(), opts, allow_search=True)
-    return play_history(cfg, cast(HistoryEntry, chosen), opts)
+    while True:
+        items: list[tuple[str, object]] = [(history_label(e), e) for e in entries]
+        if allow_search:
+            items.append(("⚙ Impostazioni", _SETTINGS))
+            items.append(("↳ cerca…", _SEARCH))
+        chosen = fzf(items, "continua> ")
+        if chosen is None or chosen is _SEARCH:
+            # Aborted fzf or 'cerca…': fall through to search when allowed.
+            return None if allow_search else 0
+        if chosen is _SETTINGS:
+            settings.run_settings(load())
+            entries = state.recent(load())  # reflect any change, then re-show
+            continue
+        return play_history(cfg, cast(HistoryEntry, chosen), opts)
 
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
@@ -641,7 +676,7 @@ def main() -> int:
 def _entry() -> None:
     try:
         sys.exit(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         sys.exit(130)
 
 

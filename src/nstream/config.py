@@ -82,6 +82,9 @@ class Config:
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
     autoplay_lead: int = 15
+    # Quiet mpv's terminal output (hide the track list and decoder/driver warnings,
+    # keep the progress line and errors). Injected only if you haven't set msg-level.
+    mpv_quiet: bool = True
     mpv_args: list[str] = field(default_factory=list)
 
 
@@ -130,6 +133,7 @@ def load() -> Config:
         hwdec=hwdec,
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=autoplay_lead,
+        mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),
         mpv_args=list(raw.get("mpv_args", [])),
     )
 

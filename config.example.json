@@ -9,5 +9,6 @@
   "hwdec": "auto-safe",
   "autoplay": true,
   "autoplay_lead": 15,
+  "mpv_quiet": true,
   "mpv_args": []
 }
