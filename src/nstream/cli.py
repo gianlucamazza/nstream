@@ -855,18 +855,8 @@ def _pick_stream(
         return results[0] if auto else fzf(ranked, "stream> ")
 
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    playable, excluded = quality.rank_streams(
-        results, caps,
-        max_resolution=cfg.max_resolution,
-        allow_software=cfg.allow_software,
-        allow_dv5=cfg.allow_dv5,
-        audio_langs=tuple(cfg.audio_langs),
-        lang_filter=cfg.lang_filter,
-        exclude_camrip=cfg.exclude_camrip,
-        min_seeders=cfg.min_seeders,
-        dedup=cfg.dedup,
-        cast_audio=cast,
-    )  # fmt: skip
+    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast)
+    playable, excluded = quality.rank_streams(results, caps, spec)
     if excluded:
         reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
         print(f"nstream: {len(excluded)} stream filtrati ({reasons})", file=sys.stderr)
@@ -906,14 +896,8 @@ def _pick_stream(
 def _cast_playable(cfg: Config, results: list[Stream]) -> list[quality.RankedStream]:
     """Streams the Chromecast can play (cast profile + Cast-compatible audio), ignoring
     the language filter so every available dub is offered for switching."""
-    playable, _ = quality.rank_streams(
-        results, quality.cast_caps(),
-        max_resolution=cfg.max_resolution,
-        allow_software=cfg.allow_software, allow_dv5=cfg.allow_dv5,
-        audio_langs=tuple(cfg.audio_langs), lang_filter=False,
-        exclude_camrip=cfg.exclude_camrip, min_seeders=cfg.min_seeders,
-        dedup=cfg.dedup, cast_audio=True,
-    )  # fmt: skip
+    spec = quality.FilterSpec.from_config(cfg, cast_audio=True, lang_filter=False)
+    playable, _ = quality.rank_streams(results, quality.cast_caps(), spec)
     return playable
 
 

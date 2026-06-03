@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import util
-from .config import Stream
+from .config import Config, Stream
 
 _CACHE_VERSION = 2
 # Conservative default for integrated GPUs when vainfo is unavailable: H.264, HEVC
@@ -140,41 +140,49 @@ def _parse_audio(text: str) -> str:
     return next((name for name, pat in _AUDIO_PATTERNS if pat.search(text)), "")
 
 
-def parse_stream(stream: Stream) -> StreamInfo:
-    text = _text(stream)
-    resolution = next((res for pat, res in _RES_PATTERNS if pat.search(text)), 0)
+def _parse_resolution(text: str) -> int:
+    return next((res for pat, res in _RES_PATTERNS if pat.search(text)), 0)
 
+
+def _parse_codec(text: str) -> str:
     if re.search(r"\bav1\b", text, re.I):
-        codec = "av1"
-    elif re.search(r"x265|h\.?265|hevc", text, re.I):
-        codec = "hevc"
-    elif re.search(r"x264|h\.?264|\bavc\b", text, re.I):
-        codec = "h264"
-    else:
-        codec = ""
+        return "av1"
+    if re.search(r"x265|h\.?265|hevc", text, re.I):
+        return "hevc"
+    if re.search(r"x264|h\.?264|\bavc\b", text, re.I):
+        return "h264"
+    return ""
 
-    dv = bool(re.search(r"\bDV\b|dolby.?vision", text, re.I))
+
+def _parse_dv_profile(text: str) -> int | None:
     prof = re.search(r"\bDV[.\s]?P(\d)\b", text, re.I) or re.search(
         r"dolby.?vision.*?profile\s*(\d)", text, re.I
     )
-    dv_profile = int(prof.group(1)) if prof else None
+    return int(prof.group(1)) if prof else None
 
-    size_gb = 0.0
+
+def _parse_size_gb(text: str) -> float:
     if m := re.search(r"💾\s*([\d.]+)\s*GB", text, re.I):
-        size_gb = float(m.group(1))
-    elif m := re.search(r"💾\s*([\d.]+)\s*MB", text, re.I):
-        size_gb = float(m.group(1)) / 1024
+        return float(m.group(1))
+    if m := re.search(r"💾\s*([\d.]+)\s*MB", text, re.I):
+        return float(m.group(1)) / 1024
+    return 0.0
 
-    seeders = int(m.group(1)) if (m := re.search(r"👤\s*(\d+)", text)) else 0
 
+def _parse_seeders(text: str) -> int:
+    return int(m.group(1)) if (m := re.search(r"👤\s*(\d+)", text)) else 0
+
+
+def parse_stream(stream: Stream) -> StreamInfo:
+    text = _text(stream)
     return StreamInfo(
-        resolution=resolution,
-        codec=codec,
+        resolution=_parse_resolution(text),
+        codec=_parse_codec(text),
         hdr=bool(re.search(r"\bhdr", text, re.I)),
-        dv=dv,
-        dv_profile=dv_profile,
-        size_gb=size_gb,
-        seeders=seeders,
+        dv=bool(re.search(r"\bDV\b|dolby.?vision", text, re.I)),
+        dv_profile=_parse_dv_profile(text),
+        size_gb=_parse_size_gb(text),
+        seeders=_parse_seeders(text),
         cached=bool(_CACHED_RE.search(stream.get("name") or "")),
         languages=_parse_languages(text),
         source=_parse_source(text),
@@ -295,22 +303,46 @@ def _codec_supported(codec: str, caps: Caps) -> bool:
     return codec in caps.codecs
 
 
-def unsupported_reason(
-    info: StreamInfo,
-    caps: Caps,
-    max_resolution: int,
-    *,
-    audio_langs: tuple[str, ...] = (),
-    lang_filter: bool = False,
-    exclude_camrip: bool = False,
-    min_seeders: int = 0,
-    cast_audio: bool = False,
-) -> str | None:
+@dataclass(frozen=True)
+class FilterSpec:
+    """Stream-ranking knobs, grouped so they thread through `rank_streams`/
+    `unsupported_reason` as one value instead of a dozen keyword args. Defaults are all
+    no-ops (hardware-only ranking). Build one from a Config with `FilterSpec.from_config`."""
+
+    max_resolution: int = 0
+    allow_software: bool = False  # keep codecs the GPU can't decode
+    allow_dv5: bool = False  # keep Dolby Vision Profile 5
+    audio_langs: tuple[str, ...] = ()
+    lang_filter: bool = False  # demote releases tagged only with non-preferred languages
+    exclude_camrip: bool = False
+    min_seeders: int = 0
+    dedup: bool = False  # collapse duplicate releases across trackers
+    cast_audio: bool = False  # demote audio a Chromecast can't decode (TrueHD/DTS/REMUX)
+
+    @classmethod
+    def from_config(
+        cls, cfg: Config, *, cast_audio: bool = False, lang_filter: bool | None = None
+    ) -> FilterSpec:
+        """Derive a spec from the user config. `cast_audio`/`lang_filter` override per call
+        (the cast path ranks against the receiver and ignores the language filter)."""
+        return cls(
+            max_resolution=cfg.max_resolution,
+            allow_software=cfg.allow_software,
+            allow_dv5=cfg.allow_dv5,
+            audio_langs=tuple(cfg.audio_langs),
+            lang_filter=cfg.lang_filter if lang_filter is None else lang_filter,
+            exclude_camrip=cfg.exclude_camrip,
+            min_seeders=cfg.min_seeders,
+            dedup=cfg.dedup,
+            cast_audio=cast_audio,
+        )
+
+
+def unsupported_reason(info: StreamInfo, caps: Caps, spec: FilterSpec) -> str | None:
     """Why this stream is excluded from the main list, or None if it belongs there.
     Order: hardware (codec/resolution/DV5) → Cast audio → camrip → language → near-dead.
-    The extra filters are opt-in (defaults are no-ops) so the HW-only behaviour and
-    existing callers are unchanged."""
-    if max_resolution and info.resolution > max_resolution:
+    The opt-in filters on `spec` default to no-ops, leaving the HW-only behaviour."""
+    if spec.max_resolution and info.resolution > spec.max_resolution:
         return "8K" if info.resolution >= 4320 else f"{info.resolution}p"
     if not _codec_supported(info.codec, caps):
         return f"{info.codec.upper()} no-HW"
@@ -319,24 +351,24 @@ def unsupported_reason(
     # Cast: the Default Media Receiver can't decode TrueHD/DTS/DTS-HD → silent audio.
     # A REMUX carries the lossless track even when the title omits the codec, so it's
     # demoted too; other unknown audio gets the benefit of the doubt (WEB-DLs rarely tag).
-    if cast_audio:
+    if spec.cast_audio:
         if info.audio in _CAST_LOSSLESS:
             return f"audio {info.audio.upper()}"
         if info.source == "remux":
             return "audio remux"
-    if exclude_camrip and info.source in _CAMRIP_SOURCES:
+    if spec.exclude_camrip and info.source in _CAMRIP_SOURCES:
         return f"camrip ({info.source})"
     # Tagged with languages but none preferred (and not a multi-language release).
     if (
-        lang_filter
-        and audio_langs
+        spec.lang_filter
+        and spec.audio_langs
         and info.languages
         and "multi" not in info.languages
-        and not (info.languages & set(audio_langs))
+        and not (info.languages & set(spec.audio_langs))
     ):
         return "lingua " + "/".join(sorted(info.languages))
     # Non-cached torrent with too few seeders may never start (cached [RD+] are exempt).
-    if min_seeders and not info.cached and info.seeders < min_seeders:
+    if spec.min_seeders and not info.cached and info.seeders < spec.min_seeders:
         return "pochi seeder"
     return None
 
@@ -384,38 +416,22 @@ def _dedup_by_release(
 
 
 def rank_streams(
-    streams: list[Stream],
-    caps: Caps,
-    *,
-    max_resolution: int,
-    allow_software: bool,
-    allow_dv5: bool,
-    audio_langs: tuple[str, ...] = (),
-    lang_filter: bool = False,
-    exclude_camrip: bool = False,
-    min_seeders: int = 0,
-    dedup: bool = False,
-    cast_audio: bool = False,
+    streams: list[Stream], caps: Caps, spec: FilterSpec
 ) -> tuple[list[RankedStream], list[RankedStream]]:
-    """Split streams into (playable_sorted, excluded). `allow_software` keeps codecs
-    the GPU can't decode; `allow_dv5` keeps Dolby Vision Profile 5. The opt-in filters
-    (lang_filter/exclude_camrip/min_seeders) move non-matching streams to `excluded`
-    with a reason; `dedup` drops duplicate releases entirely (not in either list)."""
+    """Split streams into (playable_sorted, excluded). `spec.allow_software` keeps codecs
+    the GPU can't decode; `spec.allow_dv5` keeps Dolby Vision Profile 5. The opt-in filters
+    (lang_filter/exclude_camrip/min_seeders) move non-matching streams to `excluded` with a
+    reason; `spec.dedup` drops duplicate releases entirely (not in either list)."""
     infos = [(s, parse_stream(s)) for s in streams]
-    if dedup:
+    if spec.dedup:
         infos = _dedup_by_release(infos)
     playable: list[RankedStream] = []
     excluded: list[RankedStream] = []
     for s, info in infos:
-        reason = unsupported_reason(
-            info, caps, max_resolution,
-            audio_langs=audio_langs, lang_filter=lang_filter,
-            exclude_camrip=exclude_camrip, min_seeders=min_seeders,
-            cast_audio=cast_audio,
-        )  # fmt: skip
-        if reason and allow_software and reason.endswith("no-HW"):
+        reason = unsupported_reason(info, caps, spec)
+        if reason and spec.allow_software and reason.endswith("no-HW"):
             reason = None
-        if reason and allow_dv5 and reason.startswith("Dolby Vision"):
+        if reason and spec.allow_dv5 and reason.startswith("Dolby Vision"):
             reason = None
         if reason:
             excluded.append(RankedStream(s, info, reason))

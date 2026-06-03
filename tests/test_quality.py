@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from nstream import quality
 from nstream.config import Stream
-from nstream.quality import Caps
+from nstream.quality import Caps, FilterSpec
 
 # Real Torrentio samples (name, title) captured from "Superman" (2025).
 S_8K: Stream = {
@@ -103,60 +103,50 @@ def test_reason_camrip():
     info = quality.parse_stream(
         {"name": "Torrentio\n720p", "title": "F.2025.720p.CAM-X\n👤 5 💾 1 GB"}
     )
-    assert quality.unsupported_reason(info, CAPS, 2160, exclude_camrip=True) == "camrip (cam)"
+    spec = FilterSpec(max_resolution=2160, exclude_camrip=True)
+    assert quality.unsupported_reason(info, CAPS, spec) == "camrip (cam)"
 
 
 def test_reason_language():
     info = quality.parse_stream(
         {"name": "Torrentio\n1080p", "title": "F.2025.FRENCH.1080p.WEB-DL\n👤 9 💾 2 GB"}
     )
-    r = quality.unsupported_reason(info, CAPS, 2160, audio_langs=("ita", "eng"), lang_filter=True)
-    assert r == "lingua fra"
+    spec = FilterSpec(max_resolution=2160, audio_langs=("ita", "eng"), lang_filter=True)
+    assert quality.unsupported_reason(info, CAPS, spec) == "lingua fra"
 
 
 def test_reason_language_keeps_untagged_and_multi():
     unt = quality.parse_stream({"name": "Torrentio\n1080p", "title": "F.2025.1080p.WEB-DL\n👤 9"})
     mul = quality.parse_stream({"name": "Torrentio\n1080p", "title": "F.MULTI.1080p.WEB-DL\n👤 9"})
+    spec = FilterSpec(max_resolution=2160, audio_langs=("ita", "eng"), lang_filter=True)
     for info in (unt, mul):
-        assert (
-            quality.unsupported_reason(
-                info, CAPS, 2160, audio_langs=("ita", "eng"), lang_filter=True
-            )
-            is None
-        )
+        assert quality.unsupported_reason(info, CAPS, spec) is None
 
 
 def test_reason_low_seeders_only_non_cached():
     dead = quality.parse_stream(
         {"name": "Torrentio\n1080p", "title": "F.1080p.WEB-DL\n👤 1 💾 2 GB"}
     )
-    assert quality.unsupported_reason(dead, CAPS, 2160, min_seeders=3) == "pochi seeder"
+    spec = FilterSpec(max_resolution=2160, min_seeders=3)
+    assert quality.unsupported_reason(dead, CAPS, spec) == "pochi seeder"
     cached = quality.parse_stream({"name": "[RD+] Torrentio\n1080p", "title": "F.1080p\n👤 1"})
-    assert quality.unsupported_reason(cached, CAPS, 2160, min_seeders=3) is None
+    assert quality.unsupported_reason(cached, CAPS, spec) is None
 
 
 def test_rank_dedup_keeps_best():
     rel = "Superman.2025.1080p.BluRay.x264-GROUP"
     s_low: Stream = {"name": "Torrentio\n1080p", "title": f"{rel}\n👤 5 💾 8 GB ⚙️ a"}
     s_high: Stream = {"name": "[RD+] Torrentio\n1080p", "title": f"{rel}\n👤 50 💾 8 GB ⚙️ b"}
-    playable, _ = quality.rank_streams(
-        [s_low, s_high],
-        CAPS,
-        max_resolution=2160,
-        allow_software=False,
-        allow_dv5=False,
-        dedup=True,
-    )
+    spec = FilterSpec(max_resolution=2160, dedup=True)
+    playable, _ = quality.rank_streams([s_low, s_high], CAPS, spec)
     assert len(playable) == 1 and playable[0].info.cached  # kept the [RD+] copy
 
 
 def test_rank_lang_filter_moves_to_excluded():
     fr: Stream = {"name": "Torrentio\n1080p", "title": "F.2025.FRENCH.1080p.WEB-DL\n👤 9 💾 2 GB"}
     en: Stream = {"name": "Torrentio\n1080p", "title": "F.2025.1080p.WEB-DL\n👤 9 💾 2 GB"}
-    playable, excluded = quality.rank_streams(
-        [fr, en], CAPS, max_resolution=2160, allow_software=False, allow_dv5=False,
-        audio_langs=("ita", "eng"), lang_filter=True,
-    )  # fmt: skip
+    spec = FilterSpec(max_resolution=2160, audio_langs=("ita", "eng"), lang_filter=True)
+    playable, excluded = quality.rank_streams([fr, en], CAPS, spec)
     assert len(playable) == 1 and len(excluded) == 1
     assert excluded[0].reason == "lingua fra"
 
@@ -225,10 +215,11 @@ def test_preferred_hwdec():
 CAPS_NO_AV1 = Caps(codecs=frozenset({"h264", "hevc", "hevc10", "vp9"}), max_resolution=2160)
 
 
-def _rank(streams, **kw):
-    opts = {"max_resolution": 2160, "allow_software": False, "allow_dv5": False}
-    opts.update(kw)
-    return quality.rank_streams(streams, CAPS_NO_AV1, **opts)
+def _rank(streams, *, max_resolution=2160, allow_software=False, allow_dv5=False):
+    spec = FilterSpec(
+        max_resolution=max_resolution, allow_software=allow_software, allow_dv5=allow_dv5
+    )
+    return quality.rank_streams(streams, CAPS_NO_AV1, spec)
 
 
 def test_rank_excludes_8k_av1_dvp5():
@@ -299,11 +290,13 @@ def test_parse_bdremux_is_remux():
 def test_reason_cast_audio_demotes_untagged_remux():
     info = quality.parse_stream(S_BDREMUX_UNTAGGED)
     assert info.audio == ""  # no audio token in the title
-    assert quality.unsupported_reason(info, quality.cast_caps(), 2160, cast_audio=True) == (
-        "audio remux"
-    )
+    cast_spec = FilterSpec(max_resolution=2160, cast_audio=True)
+    assert quality.unsupported_reason(info, quality.cast_caps(), cast_spec) == "audio remux"
     # but a non-cast rank keeps it (mpv decodes lossless locally)
-    assert quality.unsupported_reason(info, quality.cast_caps(), 2160) is None
+    assert (
+        quality.unsupported_reason(info, quality.cast_caps(), FilterSpec(max_resolution=2160))
+        is None
+    )
 
 
 def test_parse_audio_codecs():
@@ -323,21 +316,22 @@ def test_cast_caps_profile():
 
 
 def test_reason_cast_audio_excludes_lossless():
+    cast_spec = FilterSpec(max_resolution=2160, cast_audio=True)
     for s in (S_REMUX_TRUEHD, S_DTSHD):
         info = quality.parse_stream(s)
-        r = quality.unsupported_reason(info, quality.cast_caps(), 2160, cast_audio=True)
+        r = quality.unsupported_reason(info, quality.cast_caps(), cast_spec)
         assert r and r.startswith("audio ")
     # compatible / unknown audio passes
     for s in (S_WEBDL_EAC3, S_AC3, S_WEBDL_4K):
         info = quality.parse_stream(s)
-        assert quality.unsupported_reason(info, quality.cast_caps(), 2160, cast_audio=True) is None
+        assert quality.unsupported_reason(info, quality.cast_caps(), cast_spec) is None
 
 
 def test_rank_cast_audio_demotes_lossless():
+    spec = FilterSpec(max_resolution=2160, cast_audio=True)
     playable, excluded = quality.rank_streams(
-        [S_REMUX_TRUEHD, S_WEBDL_EAC3], quality.cast_caps(),
-        max_resolution=2160, allow_software=False, allow_dv5=False, cast_audio=True,
-    )  # fmt: skip
+        [S_REMUX_TRUEHD, S_WEBDL_EAC3], quality.cast_caps(), spec
+    )
     assert [r.stream for r in playable] == [S_WEBDL_EAC3]
     assert len(excluded) == 1 and excluded[0].stream is S_REMUX_TRUEHD
 
