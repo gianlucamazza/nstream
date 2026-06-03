@@ -68,6 +68,9 @@ def test_items_cover_all_settings():
         "min_seeders",
         "dedup",
         "max_streams",
+        "nerd_font",
+        "posters",
+        "image_mode",
         "torrentio_base",
         "__addons__",
     ]
