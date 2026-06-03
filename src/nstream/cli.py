@@ -8,12 +8,15 @@ import gzip
 import json
 import os
 import re
+import select
 import socket
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
+import tty
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -630,6 +633,73 @@ def _cast_progress(info: dict) -> tuple[float, float, str]:
     return (pos, dur, state)
 
 
+# ISO code → display name for the cast audio-language picker.
+_LANG_NAMES = {
+    "ita": "Italiano",
+    "eng": "English",
+    "fra": "Français",
+    "spa": "Español",
+    "deu": "Deutsch",
+    "rus": "Русский",
+    "por": "Português",
+    "multi": "Multi",
+}
+
+
+@contextlib.contextmanager
+def _cbreak(stream):
+    """Put a TTY into cbreak so single keypresses arrive without Enter, restoring
+    the original attributes on exit (even on error). No-op for non-TTY streams.
+    cbreak keeps ISIG enabled, so Ctrl-C still raises KeyboardInterrupt."""
+    if not stream.isatty():
+        yield
+        return
+    fd = stream.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def _poll_wait(timeout: float) -> str | None:
+    """Wait up to `timeout` for a single keypress on stdin; return the char or None.
+    On a non-interactive stdin it just sleeps (same effect as the old time.sleep)."""
+    if not sys.stdin.isatty():
+        time.sleep(timeout)
+        return None
+    with _cbreak(sys.stdin):
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if ready:
+            return sys.stdin.read(1)
+    return None
+
+
+def _switch_cast_audio(
+    base: list[str],
+    langs: tuple[str, ...],
+    resolve_lang: Callable[[str], str | None],
+    pos: float,
+    dest: str,
+) -> None:
+    """Re-cast a release in the chosen audio language from the current position.
+    The Chromecast plays the file's default track, so this picks a differently-dubbed
+    release rather than switching tracks in place (best-effort, single-dub friendly)."""
+    items = [(_LANG_NAMES.get(lang, lang.upper()), lang) for lang in langs]
+    lang = fzf(items, "audio> ")
+    if lang is None:  # ESC → keep the current cast
+        return
+    print(f"📺 cambio audio: {_LANG_NAMES.get(lang, lang)}…", file=sys.stderr)
+    new = resolve_lang(lang)
+    if not new:
+        print(f"nstream: nessuno stream {lang} compatibile col Chromecast", file=sys.stderr)
+        return
+    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run([*base, "cast", new, "-t", str(int(pos))], capture_output=True, text=True)
+
+
 def cast(
     cfg: Config,
     title: str,
@@ -639,6 +709,8 @@ def cast(
     start: float | None = None,
     sub_paths: tuple[str, ...] = (),
     next_label: str | None = None,
+    langs: tuple[str, ...] = (),
+    resolve_lang: Callable[[str], str | None] | None = None,
 ) -> tuple[float, float, bool]:
     """Cast `url` to a Chromecast via `catt`, then poll its status so resume and
     series auto-advance work just like the mpv path. Returns (position, duration,
@@ -665,7 +737,9 @@ def cast(
         print("nstream: cast non riuscito", file=sys.stderr)
         return (0.0, 0.0, False)
 
-    print(f"📺 {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
+    can_switch = bool(langs) and resolve_lang is not None
+    hint = "a: lingua audio · Ctrl-C: stop" if can_switch else "Ctrl-C per smettere di seguire"
+    print(f"📺 {title} → {dest}  ({hint})", file=sys.stderr)
     holder = {"position": 0.0, "duration": 0.0}
     started = False
     finished = False
@@ -673,7 +747,10 @@ def cast(
     idle = 0  # consecutive polls without progress before playback ever starts
     try:
         while True:
-            time.sleep(_CAST_POLL)
+            if _poll_wait(_CAST_POLL) == "a" and can_switch:
+                _switch_cast_audio(base, langs, resolve_lang, holder["position"], dest)
+                started, finished, idle = False, False, 0  # new media re-buffers
+                continue
             res = subprocess.run([*base, "info", "-j"], capture_output=True, text=True)
             info = None
             if res.returncode == 0:
@@ -801,6 +878,44 @@ def _pick_stream(
     return typecast("Stream | None", chosen)
 
 
+def _cast_playable(cfg: Config, results: list[Stream]) -> list[quality.RankedStream]:
+    """Streams the Chromecast can play (cast profile + Cast-compatible audio), ignoring
+    the language filter so every available dub is offered for switching."""
+    playable, _ = quality.rank_streams(
+        results, quality.cast_caps(),
+        max_resolution=cfg.max_resolution,
+        allow_software=cfg.allow_software, allow_dv5=cfg.allow_dv5,
+        audio_langs=tuple(cfg.audio_langs), lang_filter=False,
+        exclude_camrip=cfg.exclude_camrip, min_seeders=cfg.min_seeders,
+        dedup=cfg.dedup, cast_audio=True,
+    )  # fmt: skip
+    return playable
+
+
+def _cast_languages(cfg: Config, results: list[Stream]) -> tuple[str, ...]:
+    """Audio languages available among Cast-compatible streams, preferred ones first."""
+    langs = {
+        lang for r in _cast_playable(cfg, results) for lang in r.info.languages if lang != "multi"
+    }
+    ordered = [lang for lang in cfg.audio_langs if lang in langs]
+    ordered += sorted(langs - set(ordered))
+    return tuple(ordered)
+
+
+def _cast_resolver(cfg: Config, results: list[Stream]) -> Callable[[str], str | None]:
+    """Return a fn picking the best Cast-compatible stream URL for a language, or None.
+    Closes over the already-fetched `results` so switching needs no extra network call."""
+    playable = _cast_playable(cfg, results)
+
+    def resolve(lang: str) -> str | None:
+        for r in playable:  # already ranked best-first
+            if lang in r.info.languages:
+                return r.stream.get("url")
+        return None
+
+    return resolve
+
+
 def _resume_position(cfg: Config, video_id: str) -> float | None:
     """The position to resume from, or None if there's no usable resume point
     (no history entry, or the title is effectively finished — so we never restart
@@ -862,10 +977,16 @@ def _play_video(
                 if opts.sub_mode
                 else ()
             )
+            # Offer an in-cast audio-language switch (re-cast a differently-dubbed
+            # release from the current position) when more than one language is
+            # available; resolver closes over `results` so no extra fetch is needed.
+            cast_langs = _cast_languages(cfg, results)
             print(f"▶ {title} — {name_line}", file=sys.stderr)
             pos, dur, advance = cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, next_label=next_label,
+                langs=cast_langs if len(cast_langs) > 1 else (),
+                resolve_lang=_cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
             )  # fmt: skip
         else:
             audio_id: int | None = None

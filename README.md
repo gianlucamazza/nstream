@@ -100,7 +100,10 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   the ⚠ section) and demotes releases whose audio the Default Media Receiver can't decode —
   **TrueHD/DTS/DTS-HD** (which would play silently) — preferring AC3/E-AC3/AAC. Press Tab to pick a
   demoted release anyway. If the TV is silent, also check the Cast volume isn't at 0 (`catt volume N`
-  or the remote); nstream warns when it sees a zero volume.
+  or the remote); nstream warns when it sees a zero volume. During a cast, press **`a`** to change
+  the audio language when more than one is available — nstream re-casts a release in that language
+  from the current position (the Chromecast plays the file's default track, so this works best with
+  single-language dubs). Locally (mpv) audio is switched with mpv's native `#` key.
 - `cast_device`: pin the Chromecast name for `catt -d` (default `""`). Empty resolves the device
   per-LAN via `cast-resolve` (fails loud on ambiguity rather than casting to the wrong screen),
   then falls back to catt's own default.
