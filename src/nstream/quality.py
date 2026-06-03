@@ -46,6 +46,8 @@ class StreamInfo:
     source: str = ""  # remux|bluray|webdl|webrip|hdtv|dvd|cam|ts|tc|scr|""
     audio: str = ""  # truehd|dtshd|dts|eac3|ac3|aac|""; "headline" track codec
     release_name: str = ""  # title's first line (torrent filename), for dedup
+    info_hash: str = ""  # pure-torrent streams only; resolved to a url by the engine
+    file_idx: int | None = None  # which file in the torrent (None = largest)
 
 
 _RES_PATTERNS = (
@@ -172,6 +174,8 @@ def parse_stream(stream: Stream) -> StreamInfo:
         source=_parse_source(text),
         audio=_parse_audio(text),
         release_name=(stream.get("title") or "").split("\n", 1)[0].strip(),
+        info_hash=stream.get("infoHash") or "",
+        file_idx=stream.get("fileIdx"),
     )
 
 
@@ -378,16 +382,27 @@ _SOURCE_UNKNOWN_RANK = 3
 
 
 def _lang_rank(info: StreamInfo, audio_langs: tuple[str, ...]) -> int:
-    """Audio-language preference for the score: 2 = tagged with a preferred language (or
-    multi-audio, which usually carries it), 1 = untagged (the common case — benefit of the
-    doubt), 0 = tagged only with non-preferred languages. Neutral (1) with no preference.
+    """Audio-language preference for the score (higher = better):
+      4 = name explicitly tags the primary language (audio_langs[0])
+      3 = name explicitly tags another preferred (fallback) language
+      2 = "multi"/"dual" only — likely multi-audio, but the name doesn't say which
+          languages, so it's a *maybe*, not a match (ranks below an explicit hit)
+      1 = untagged — the common case, benefit of the doubt
+      0 = tagged only with non-preferred languages
+    Neutral (1) when there's no preference or nothing parsed.
 
-    This makes the auto-pick favour a file that actually contains the wanted audio track
-    (mpv then selects it via --alang); without it an untagged release could win on quality
-    and leave mpv with no matching track."""
+    Treating "multi"/"dual" as a maybe (2) rather than an explicit match is the fix for
+    releases whose name only says "Dual": that token covers any language pair (e.g.
+    Latino+Eng with no Italian at all), so it must not outrank a release that actually
+    names the wanted language. The player confirms the real tracks with ffprobe before
+    committing when the pick is only a maybe (multi/untagged)."""
     if not audio_langs or not info.languages:
         return 1
-    if "multi" in info.languages or info.languages & set(audio_langs):
+    if audio_langs[0] in info.languages:
+        return 4
+    if info.languages & set(audio_langs):
+        return 3
+    if "multi" in info.languages:
         return 2
     return 0
 

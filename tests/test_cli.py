@@ -47,6 +47,35 @@ def test_audio_langs_of_probes_untagged(monkeypatch):
     assert cli._audio_langs_of(cfg, s) == {"spa"}  # "es" → spa via the registry
 
 
+def test_audio_langs_of_does_not_trust_multi(monkeypatch):
+    # "Dual"/"MULTI" is ambiguous (may be Latino+Eng, no Italian); it must be probed,
+    # not trusted as carrying a preferred track.
+    calls = []
+    monkeypatch.setattr(
+        cli.tracks,
+        "probe_tracks",
+        lambda url: (
+            calls.append(url)
+            or cli.tracks.Tracks(audio=[cli.tracks.Track(1, "spa"), cli.tracks.Track(2, "eng")])
+        ),
+    )
+    s: Stream = {"url": "u", "title": "Dune.Part.Two.2024.Dual.1080p.x265-YG"}
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    assert cli._audio_langs_of(cfg, s) == {"spa", "eng"}  # real tracks, not the "multi" guess
+    assert calls  # the probe actually ran
+
+
+def test_audio_langs_of_reads_title_when_untagged(monkeypatch):
+    # language=und but the track title names the language → recovered via track_lang.
+    monkeypatch.setattr(
+        cli.tracks,
+        "probe_tracks",
+        lambda url: cli.tracks.Tracks(audio=[cli.tracks.Track(1, "und", title="Italian [TrueHD]")]),
+    )
+    s: Stream = {"url": "u", "title": "Movie.2024.1080p.x264"}
+    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=["ita"]), s) == {"ita"}
+
+
 def test_audio_langs_of_unverifiable_returns_none(monkeypatch):
     monkeypatch.setattr(cli.tracks, "probe_tracks", lambda url: cli.tracks.Tracks())
     s: Stream = {"url": "u", "title": "Some.Movie.2024.1080p.x264-GRP"}
@@ -65,6 +94,7 @@ def test_play_video_guard_reselects_on_wrong_audio(monkeypatch, capsys):
     monkeypatch.setattr(cli.api, "streams", lambda *a: [foreign, chosen2])
     monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: next(picks))
     monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"spa"})  # no ita/eng
+    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: None)  # no better source
     got = {}
     monkeypatch.setattr(
         cli, "_play_on_mpv", lambda cfg, chosen, work_dir, **k: got.update(c=chosen) or (1.0, 2.0, False)
@@ -81,6 +111,7 @@ def test_play_video_guard_binge_warns_and_proceeds(monkeypatch, capsys):
     monkeypatch.setattr(cli.api, "streams", lambda *a: [foreign])
     monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: (calls.append(1), foreign)[1])
     monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"spa"})
+    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: None)
     got = {}
     monkeypatch.setattr(
         cli, "_play_on_mpv", lambda cfg, chosen, work_dir, **k: got.update(c=chosen) or (1.0, 2.0, False)
@@ -92,6 +123,43 @@ def test_play_video_guard_binge_warns_and_proceeds(monkeypatch, capsys):
     )  # fmt: skip
     assert got["c"] is foreign and len(calls) == 1  # proceeded, no reselection
     assert "nessuna traccia audio" in capsys.readouterr().err
+
+
+def test_play_video_guard_reselects_for_primary(monkeypatch):
+    # Best pick lacks the primary language; a next-best candidate has it → switch to it.
+    top: Stream = {"url": "u1", "name": "x\n1080p"}
+    better: Stream = {"url": "u2", "name": "y\n1080p"}
+    monkeypatch.setattr(cli.api, "streams", lambda *a: [top, better])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: top)
+    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"eng"})  # top has no ita
+    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: better)
+    got = {}
+    monkeypatch.setattr(
+        cli, "_play_on_mpv",
+        lambda cfg, chosen, work_dir, **k: got.update(c=chosen, safety=k.get("safety_sub_lang")) or (1.0, 2.0, False),
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
+    cli._play_video(cfg, "movie", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None)
+    assert got["c"] is better and got["safety"] is None  # switched source, no subtitle net
+
+
+def test_play_video_guard_safety_subtitles(monkeypatch, capsys):
+    # Audio only in a fallback language (eng), not the primary (ita), and no better source:
+    # play it but turn on primary-language safety subtitles.
+    chosen: Stream = {"url": "u1", "name": "x\n1080p"}
+    monkeypatch.setattr(cli.api, "streams", lambda *a: [chosen])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: chosen)
+    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"eng"})  # fallback only
+    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: None)
+    got = {}
+    monkeypatch.setattr(
+        cli, "_play_on_mpv",
+        lambda cfg, chosen, work_dir, **k: got.update(c=chosen, safety=k.get("safety_sub_lang")) or (1.0, 2.0, False),
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
+    cli._play_video(cfg, "movie", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None)
+    assert got["c"] is chosen and got["safety"] == "ita"
+    assert "sottotitoli ita attivati" in capsys.readouterr().err
 
 
 def test_run_explain_movie(monkeypatch, capsys):

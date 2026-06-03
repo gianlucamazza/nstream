@@ -455,4 +455,29 @@ def test_score_components_in_sync_with_score():
     info = quality.parse_stream(S_1080_ITA)
     comp = quality.score_components(info, ("ita",))
     assert tuple(comp.values()) == quality._score(info, ("ita",))
-    assert comp["lang"] == 2 and comp["source"] == 5  # preferred lang, bluray
+    assert comp["lang"] == 4 and comp["source"] == 5  # primary lang, bluray
+
+
+def _lang(title: str, langs: tuple[str, ...]) -> int:
+    return quality._lang_rank(quality.parse_stream({"title": title}), langs)
+
+
+def test_lang_rank_levels():
+    pref = ("ita", "eng")
+    assert _lang("Film ITA ENG 1080p", pref) == 4  # primary explicit
+    assert _lang("Film ENG 1080p", pref) == 3  # fallback explicit, no primary
+    assert _lang("Film MULTI 1080p", pref) == 2  # multi/dual: only a maybe
+    assert _lang("Film Dual 1080p", pref) == 2  # "Dual" → multi token
+    assert _lang("Film 1080p", pref) == 1  # untagged: benefit of the doubt
+    assert _lang("Film FRENCH 1080p", pref) == 0  # tagged only non-preferred
+
+
+def test_dual_does_not_outrank_explicit_primary():
+    # Regression: a "Dual" release (which may be e.g. Latino+Eng, no Italian) must not
+    # outrank one that explicitly names the primary language at equal quality.
+    base = "2160p.BluRay.x265\n👤 20 💾 20 GB"
+    dual: Stream = {"name": "[RD+] Torrentio", "title": f"Dune.Part.Two.Dual.{base}"}
+    ita: Stream = {"name": "[RD+] Torrentio", "title": f"Dune.Part.Two.ITA.ENG.{base}"}
+    spec = FilterSpec(audio_langs=("ita", "eng"))
+    playable, _ = quality.rank_streams([dual, ita], _CAPS_HW, spec)
+    assert playable[0].stream is ita

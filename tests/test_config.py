@@ -76,11 +76,14 @@ def test_stream_filter_overrides_and_clamp(tmp_path, monkeypatch):
     assert cfg.max_streams == config.Config.max_streams
 
 
-def test_missing_torrentio_base_raises(tmp_path, monkeypatch):
+def test_missing_torrentio_base_defaults_token_less(tmp_path, monkeypatch):
+    # A config without torrentio_base is valid now: the default is token-less so the
+    # local P2P backend works out of the box (no paid debrid key required).
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     write_config(tmp_path, {"cinemeta": "x"})
-    with pytest.raises(config.ConfigError):
-        config.load()
+    cfg = config.load()
+    assert cfg.torrentio_base == "sort=qualitysize"
+    assert cfg.playback_backend == "local"
 
 
 def test_missing_file_raises(tmp_path, monkeypatch):
@@ -225,3 +228,15 @@ def test_non_dict_root_raises(tmp_path, monkeypatch):
     (d / "config.json").write_text('["not", "an", "object"]')
     with pytest.raises(config.ConfigError):
         config.load()
+
+
+def test_primary_and_fallback_langs():
+    from nstream.config import Config
+
+    assert Config().primary == "ita"  # default: first audio lang
+    assert Config().fallback_langs == ["eng"]
+    c = Config(audio_langs=["eng", "ita", "fra"])
+    assert c.primary == "eng" and c.fallback_langs == ["ita", "fra"]
+    # explicit primary_lang overrides the first-of-audio_langs derivation
+    c2 = Config(audio_langs=["eng", "ita"], primary_lang="ita")
+    assert c2.primary == "ita" and c2.fallback_langs == ["eng"]

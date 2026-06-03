@@ -42,3 +42,19 @@ def test_normalize_aliases_tokens_and_names():
 
 def test_lat_token_maps_to_spanish():
     assert languages.normalize("LAT") == "spa"  # Latino releases
+
+
+def test_track_lang_from_tag():
+    assert languages.track_lang("ita") == "ita"  # 3-letter tag
+    assert languages.track_lang("it") == "ita"  # 2-letter tag
+    assert languages.track_lang("eng", "whatever") == "eng"  # tag wins over title
+    assert languages.track_lang("und") is None  # undefined, no title
+    assert languages.track_lang("") is None
+
+
+def test_track_lang_from_title_when_untagged():
+    # ffprobe titles name the language in English; recover it when language=und.
+    assert languages.track_lang("und", "Italian [Dolby TrueHD Atmos 7.1]") == "ita"
+    assert languages.track_lang("und", "English (United States) [Audio Description]") == "eng"
+    assert languages.track_lang("und", "Audio Latino 5.1") == "spa"  # LAT-family token
+    assert languages.track_lang("und", "Commentary track") is None  # no language named

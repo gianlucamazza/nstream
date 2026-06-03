@@ -302,7 +302,17 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
                 "streams", []
             )
         )
-    return _dedup(_gather(tasks), lambda s: s.get("url") or id(s))
+    return _dedup(_gather(tasks), _stream_key)
+
+
+def _stream_key(s: Stream) -> object:
+    """Dedup key: ready url when present, else the torrent's (infoHash, fileIdx) so
+    pure-torrent streams (no url) survive instead of collapsing onto one another."""
+    if s.get("url"):
+        return s["url"]
+    if s.get("infoHash"):
+        return (s["infoHash"], s.get("fileIdx"))
+    return id(s)
 
 
 def subtitles(cfg: Config, typ: str, video_id: str) -> list[Subtitle]:

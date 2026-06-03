@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from nstream import settings
 from nstream.addons import Addon
 from nstream.config import Config
@@ -71,6 +69,7 @@ def test_items_cover_all_settings():
         "nerd_font",
         "posters",
         "image_mode",
+        "playback_backend",
         "torrentio_base",
         "__addons__",
     ]
@@ -381,22 +380,45 @@ def test_addons_menu_builtin_not_removable(monkeypatch, capsys):
 # --- onboard ---------------------------------------------------------------
 
 
-def test_onboard_writes_config(monkeypatch):
+def test_onboard_local_is_default(monkeypatch):
     saved = _capture_save(monkeypatch)
-    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: 0)  # RealDebrid
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: 0)  # P2P locale
+    monkeypatch.setattr(settings.engine, "installed", lambda: True)
+    settings.onboard()
+    assert saved == [{"playback_backend": "local"}]
+
+
+def test_onboard_esc_falls_back_local(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: None)  # ESC on backend pick
+    monkeypatch.setattr(settings.engine, "installed", lambda: True)
+    settings.onboard()
+    assert saved == [{"playback_backend": "local"}]
+
+
+def test_onboard_debrid_writes_token_and_backend(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    picks = iter([1, 0])  # debrid backend, then RealDebrid provider
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(picks))
     monkeypatch.setattr(settings.getpass, "getpass", lambda *a: "TOK")
     settings.onboard()
-    assert saved == [{"torrentio_base": "sort=qualitysize|realdebrid=TOK"}]
+    assert saved == [
+        {"torrentio_base": "sort=qualitysize|realdebrid=TOK", "playback_backend": "debrid"}
+    ]
 
 
-def test_onboard_no_provider_raises(monkeypatch):
-    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: None)
-    with pytest.raises(settings.config.ConfigError):
-        settings.onboard()
+def test_onboard_debrid_no_provider_falls_back_local(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    picks = iter([1, None])  # debrid backend, then ESC on provider
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(picks))
+    settings.onboard()
+    assert saved == [{"playback_backend": "local"}]
 
 
-def test_onboard_no_token_raises(monkeypatch):
-    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: 0)
+def test_onboard_debrid_no_token_falls_back_local(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    picks = iter([1, 0])  # debrid backend, RealDebrid, but empty key
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(picks))
     monkeypatch.setattr(settings.getpass, "getpass", lambda *a: "")
-    with pytest.raises(settings.config.ConfigError):
-        settings.onboard()
+    settings.onboard()
+    assert saved == [{"playback_backend": "local"}]

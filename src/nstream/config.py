@@ -47,11 +47,16 @@ class Video(TypedDict, total=False):
 
 
 class Stream(TypedDict, total=False):
-    """A Torrentio stream result."""
+    """A Torrentio stream result. Debrid/cached results carry a ready HTTP `url`;
+    pure-torrent results (debrid off) carry `infoHash` (+ optional `fileIdx`/`sources`)
+    instead, resolved to a local HTTP url by the P2P engine before playback."""
 
     name: str
     title: str
     url: str
+    infoHash: str
+    fileIdx: int
+    sources: list[str]
 
 
 class Subtitle(TypedDict, total=False):
@@ -78,12 +83,19 @@ class HistoryEntry(TypedDict, total=False):
 
 @dataclass(frozen=True)
 class Config:
-    torrentio_base: str
+    # Torrentio config string. With a debrid segment (`…|realdebrid=TOKEN`) Torrentio
+    # returns ready debrid urls; without one it returns pure-torrent streams that the
+    # local P2P engine resolves. Default is token-less so local playback works out of box.
+    torrentio_base: str = "sort=qualitysize"
     cinemeta: str = "https://v3-cinemeta.strem.io"
     opensubtitles: str = "https://opensubtitles-v3.strem.io"
     subtitle_langs: list[str] = field(default_factory=lambda: ["ita", "eng"])
     # Preferred audio languages for mpv track auto-selection (--alang), in order.
     audio_langs: list[str] = field(default_factory=lambda: ["ita", "eng"])
+    # Primary (native) language. Drives audio selection and the safety-subtitle logic
+    # (subtitles auto-on when the actual audio isn't this language). Empty = first of
+    # audio_langs; the remaining audio_langs are acceptable fallbacks.
+    primary_lang: str = ""
     # Extra Stremio addon manifest URLs (beyond the built-in Cinemeta/Torrentio/
     # OpenSubtitles), aggregated for streams/subtitles/catalogs.
     addons: list[str] = field(default_factory=list)
@@ -128,12 +140,46 @@ class Config:
     nerd_font: str = "auto"
     posters: bool = True
     image_mode: str = "auto"
+    # Playback backend: "local" streams torrents peer-to-peer through a TorrServer
+    # instance nstream drives (free, default); "debrid" plays the ready urls Torrentio
+    # returns for a configured debrid provider. Pure-torrent streams always go local.
+    playback_backend: str = "local"
+    engine_port: int = 8090  # TorrServer HTTP port (also the one nstream spawns)
+    engine_cache_mb: int = 256  # TorrServer in-memory read-ahead cache
+    engine_download_dir: str = ""  # torrent data dir; "" → $XDG_CACHE_HOME/nstream/torrents
+    p2p_ack: bool = False  # user acknowledged the P2P privacy notice (IP exposed to peers)
+
+    @property
+    def primary(self) -> str:
+        """Primary/native language code: explicit `primary_lang`, else first audio lang."""
+        return self.primary_lang or (self.audio_langs[0] if self.audio_langs else "")
+
+    @property
+    def fallback_langs(self) -> list[str]:
+        """Acceptable non-primary audio languages, in preference order."""
+        return [code for code in self.audio_langs if code != self.primary]
+
+
+# Debrid provider keys Torrentio understands, embedded in `torrentio_base` as `key=token`.
+# Single source of truth shared by settings (provider picker) and addons (strip for local
+# backend); kept provider-agnostic — code never special-cases an individual provider.
+DEBRID_PROVIDERS: tuple[str, ...] = (
+    "realdebrid",
+    "alldebrid",
+    "premiumize",
+    "torbox",
+    "debridlink",
+    "easydebrid",
+    "offcloud",
+    "putio",
+)
 
 
 # Allowed values for the enum-like string config fields (bad values fall back to default).
 _ENUM_VALUES: dict[str, set[str]] = {
     "nerd_font": {"auto", "on", "off"},
     "image_mode": {"auto", "off"},
+    "playback_backend": {"local", "debrid"},
 }
 
 
@@ -149,6 +195,8 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "max_resolution": (0, 4320),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
+    "engine_port": (1024, 65535),
+    "engine_cache_mb": (32, 4096),
 }
 
 
@@ -185,9 +233,9 @@ def load() -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(f"config non valido ({path}): atteso un oggetto JSON")
 
-    base = raw.get("torrentio_base")
-    if not base:
-        raise ConfigError(f"'torrentio_base' assente in {path}")
+    # Token-less default so a fresh config still streams locally; a debrid segment is
+    # added to torrentio_base only when the user opts into a paid provider.
+    base = raw.get("torrentio_base") or Config.torrentio_base
     # Absent → default; explicit "", false or null → disabled.
     hwdec_raw = raw.get("hwdec", Config.hwdec)
     hwdec = str(hwdec_raw) if hwdec_raw else ""
@@ -197,6 +245,7 @@ def load() -> Config:
         opensubtitles=raw.get("opensubtitles", Config.opensubtitles),
         subtitle_langs=list(raw.get("subtitle_langs", ["ita", "eng"])),
         audio_langs=list(raw.get("audio_langs", ["ita", "eng"])),
+        primary_lang=str(raw.get("primary_lang", "") or ""),
         addons=list(raw.get("addons", [])),
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,
@@ -219,6 +268,11 @@ def load() -> Config:
         nerd_font=_enum_str(raw, "nerd_font", Config.nerd_font),
         posters=bool(raw.get("posters", Config.posters)),
         image_mode=_enum_str(raw, "image_mode", Config.image_mode),
+        playback_backend=_enum_str(raw, "playback_backend", Config.playback_backend),
+        engine_port=_bounded_int(raw, "engine_port", Config.engine_port),
+        engine_cache_mb=_bounded_int(raw, "engine_cache_mb", Config.engine_cache_mb),
+        engine_download_dir=str(raw.get("engine_download_dir", Config.engine_download_dir) or ""),
+        p2p_ack=bool(raw.get("p2p_ack", Config.p2p_ack)),
     )
 
 
