@@ -7,6 +7,7 @@
   "addons": [],
   "history_enabled": true,
   "hwdec": "auto-safe",
+  "auto_play": true,
   "autoplay": true,
   "autoplay_lead": 15,
   "mpv_quiet": true,

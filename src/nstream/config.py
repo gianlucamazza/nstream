@@ -78,6 +78,10 @@ class Config:
     # mpv hardware decoding, injected only if the user hasn't set hwdec themselves
     # (in mpv.conf or mpv_args). Empty string disables the injection.
     hwdec: str = "auto-safe"
+    # Default playback mode: Enter on a title plays the best stream immediately
+    # (no stream/track menu); Tab in the list flips to manual for that pick. Off
+    # makes manual the default and Tab the auto shortcut.
+    auto_play: bool = True
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -157,6 +161,7 @@ def load() -> Config:
         addons=list(raw.get("addons", [])),
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,
+        auto_play=bool(raw.get("auto_play", Config.auto_play)),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=autoplay_lead,
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),

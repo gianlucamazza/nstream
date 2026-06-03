@@ -85,6 +85,11 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   `gpu-api=vulkan` context that probing causes `VK_KHR_video_decode_queue`/`libcuda` errors and a
   software fallback. nstream's CLI flag overrides `mpv.conf` *only* for that `auto`→vaapi upgrade.
   Set `""` to disable injection entirely.
+- `auto_play`: frictionless playback (`true` by default). Pressing **Enter** on a title plays the
+  best stream immediately — no stream or track menu, since the format is already filtered for your
+  hardware and audio/subtitles default to your preferred languages. Press **Tab** in the list to
+  pick the source and tracks by hand for that title. Set `false` to make manual the default (then
+  Tab plays instantly). `--play` forces auto regardless of this setting.
 - `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
   default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
@@ -130,9 +135,9 @@ Watch history lives separately in `~/.local/state/nstream/history.json` (no secr
 ## Usage
 
 ```sh
-nstream "the matrix"        # search, pick with fzf, play
+nstream "the matrix"        # search → Enter plays the best stream; Tab picks source/tracks
 nstream                     # continue-watching menu (if any), else prompts for a query
-nstream --play "dune"       # auto-pick the top stream, skip the stream menu
+nstream --play "dune"       # force auto-pick even when auto_play is off
 nstream --subs "dune"       # auto-pick subtitles in your preferred language
 nstream --sub-menu "dune"   # pick subtitles by hand (fzf)
 nstream --sub-lang eng ...  # force the auto-picked subtitle language
@@ -149,11 +154,13 @@ From Hyprland: launch **nstream** from your app launcher → it opens a **home m
 TUI; the launcher only opens it. ESC steps back one level; after a title plays (or has no
 sources) you return to the list rather than the app quitting.
 
-Before each interactive playback a **pre-play screen** (`▶ Avvia · 🔊 Audio · 💬 Sottotitoli`) lets
-you pick the exact embedded audio/subtitle track (probed with `ffprobe`, mapped to mpv `--aid`/`--sid`)
-or external OpenSubtitles. `▶ Avvia` is the default (one Enter starts with the auto language
-preference). It's skipped with `--play` and on auto-advancing binge episodes; without `ffprobe` it
-falls back silently to mpv's defaults.
+By default a title plays straight away. Press **Tab** in any title/episode/continue list to enter
+manual mode for that pick: the curated **stream menu** followed by a **pre-play screen**
+(`▶ Avvia · 🔊 Audio · 💬 Sottotitoli`) to choose the exact embedded audio/subtitle track (probed
+with `ffprobe`, mapped to mpv `--aid`/`--sid`) or external OpenSubtitles. `▶ Avvia` is the default
+(one Enter starts with the auto language preference); without `ffprobe` it falls back silently to
+mpv's defaults. Flip the default with the **Riproduzione automatica** setting (`auto_play`); auto-
+advancing binge episodes always play automatically.
 
 ## Settings
 
