@@ -112,11 +112,14 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   `prefer_cast`); during local mpv playback, **Alt-C** moves the stream to the TV from the current
   position. **Device choice:** when casting, if more than one Chromecast is discovered (`catt scan`)
   or you used Alt-C, nstream shows a device picker instead of guessing.
-- `cast_device`: preferred Chromecast name for `catt -d` (default `""`). Set it from the settings
-  menu (**Dispositivo cast** → discovery + pick) or here. Empty = `auto`: a single discovered device
-  is used directly, several prompt a picker, and with none nstream falls back to `cast-resolve`'s
-  per-LAN resolution. (Note: `catt scan -j` is broken in current catt, so discovery parses the text
-  `catt scan`.)
+- `cast_device`: preferred Chromecast **name** (default `""`). Set it from the settings menu
+  (**Dispositivo cast** → discovery + pick) or here. Device resolution is **dynamic per-network**:
+  every cast runs a fresh `catt scan` and casts by the device's current **IP** (`catt -d <ip>`),
+  which is robust to mDNS name-resolution flakiness after a network change. A saved `cast_device` is
+  honoured only when that name is present on the current LAN, otherwise nstream re-discovers (a
+  single device is used directly, several prompt a picker). **If no Chromecast is reachable on the
+  current network, nstream falls back to local mpv** (with a notice) instead of failing. (Note:
+  `catt scan -j` is broken in current catt, so discovery parses the text `catt scan`.)
 - `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
   default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are

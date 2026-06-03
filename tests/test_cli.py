@@ -772,40 +772,56 @@ def test_play_video_interactive_calls_track_menu(monkeypatch):
 # --- cast (Chromecast via catt) --------------------------------------------
 
 
-def test_resolve_device_uses_config_override(monkeypatch):
-    def boom(*a, **k):
-        raise AssertionError("cast-resolve must not run when cast_device is set")
-
-    monkeypatch.setattr(cli.subprocess, "run", boom)
-    assert cli._resolve_device(Config(torrentio_base="tb", cast_device="Salotto")) == "Salotto"
+def _scan(devs):
+    return lambda: list(devs)  # devs: [(name, ip)]
 
 
-def test_resolve_device_from_cast_resolve(monkeypatch):
-    class _P:
-        returncode = 0
-        stdout = "  Living Room TV \n"
+def test_resolve_device_pref_present_returns_ip(monkeypatch):
+    monkeypatch.setattr(
+        cli.settings, "scan_devices", _scan([("Salotto", "192.168.1.5"), ("Camera", "192.168.1.6")])
+    )
+    cfg = Config(torrentio_base="tb", cast_device="Salotto")
+    assert cli._resolve_device(cfg) == "192.168.1.5"  # preferred name → its current IP
 
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _P())
-    assert cli._resolve_device(Config(torrentio_base="tb")) == "Living Room TV"
+
+def test_resolve_device_pref_absent_rediscovers(monkeypatch):
+    # Pinned name not on this LAN (network changed) → re-discover, don't return it stale.
+    monkeypatch.setattr(cli.settings, "scan_devices", _scan([("Camera", "192.168.1.6")]))
+    cfg = Config(torrentio_base="tb", cast_device="Salotto")
+    assert cli._resolve_device(cfg) == "192.168.1.6"
 
 
-def test_resolve_device_ambiguous_raises(monkeypatch):
-    class _P:
-        returncode = 3
-        stdout = ""
-        stderr = "ambiguous: TV-A, TV-B"
+def test_resolve_device_single_auto_ip(monkeypatch):
+    monkeypatch.setattr(cli.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
+    assert cli._resolve_device(Config(torrentio_base="tb")) == "10.0.0.9"
 
-    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _P())
-    with pytest.raises(cli.CastUnavailable, match="TV-A"):
+
+def test_resolve_device_multiple_prompts_ip(monkeypatch):
+    monkeypatch.setattr(
+        cli.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+    )
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt: "10.0.0.2")
+    assert cli._resolve_device(Config(torrentio_base="tb")) == "10.0.0.2"
+
+
+def test_resolve_device_choose_forces_picker_by_name(monkeypatch):
+    monkeypatch.setattr(cli.settings, "scan_devices", _scan([("TV1", "10.0.0.1")]))
+    seen = {}
+
+    def fk(items, prompt):
+        seen["items"] = items
+        return "10.0.0.1"
+
+    monkeypatch.setattr(cli, "fzf", fk)
+    assert cli._resolve_device(Config(torrentio_base="tb"), choose=True) == "10.0.0.1"
+    assert seen["items"] == [("TV1", "10.0.0.1")]  # label=name, value=ip
+
+
+def test_resolve_device_none_raises(monkeypatch):
+    # Empty scan → trust it (no fall-through to a stale cast-resolve default).
+    monkeypatch.setattr(cli.settings, "scan_devices", _scan([]))
+    with pytest.raises(cli.CastUnavailable):
         cli._resolve_device(Config(torrentio_base="tb"))
-
-
-def test_resolve_device_absent_returns_none(monkeypatch):
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(cli.subprocess, "run", boom)
-    assert cli._resolve_device(Config(torrentio_base="tb")) is None
 
 
 def _cast_run(monkeypatch, *, launch_rc=0, info_seq=()):
@@ -960,22 +976,31 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     assert seen == {"device": "TV"}
 
 
-def test_play_video_cast_unavailable_returns_notice(monkeypatch):
+def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
+    """No Chromecast reachable → degrade to local mpv instead of failing."""
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
 
     def boom(_cfg, **k):
-        raise cli.CastUnavailable("nessun device")
+        raise cli.CastUnavailable("nessun Chromecast in rete")
 
     monkeypatch.setattr(cli, "_resolve_device", boom)
+    monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
+
+    def no_cast(*a, **k):
+        raise AssertionError("cast must not run when no device")
+
+    monkeypatch.setattr(cli, "cast", no_cast)
+    seen = {}
+    monkeypatch.setattr(cli, "play", lambda *a, **k: seen.update(local=True) or (0.0, 0.0, ""))
     opts = cli.PlayOpts(
-        auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+        auto=False, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
     notice, advance = cli._play_video(
-        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+        cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
     )
-    assert advance is False and notice == "nessun device"
+    assert seen.get("local") is True and advance is False
 
 
 # --- cast audio-language switch (Fase 1q) -----------------------------------
@@ -1059,41 +1084,13 @@ def test_cast_hotkey_esc_keeps_current(monkeypatch):
 # --- device discovery + picker + in-player cast (Fase 1s) -------------------
 
 
-def test_resolve_device_prefers_config(monkeypatch):
-    monkeypatch.setattr(cli.settings, "scan_devices", lambda: pytest.fail("no scan"))
-    assert cli._resolve_device(Config(torrentio_base="tb", cast_device="Salotto")) == "Salotto"
-
-
-def test_resolve_device_single_auto(monkeypatch):
-    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1"])
-    assert cli._resolve_device(Config(torrentio_base="tb")) == "TV1"
-
-
-def test_resolve_device_multiple_prompts(monkeypatch):
-    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1", "TV2"])
-    monkeypatch.setattr(cli, "fzf", lambda items, prompt: "TV2")
-    assert cli._resolve_device(Config(torrentio_base="tb")) == "TV2"
-
-
 def test_resolve_device_cancel_raises(monkeypatch):
-    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1", "TV2"])
+    monkeypatch.setattr(
+        cli.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+    )
     monkeypatch.setattr(cli, "fzf", lambda items, prompt: None)
     with pytest.raises(cli.CastUnavailable):
         cli._resolve_device(Config(torrentio_base="tb"))
-
-
-def test_resolve_device_choose_forces_picker(monkeypatch):
-    # Even with a single device, choose=True offers the picker.
-    monkeypatch.setattr(cli.settings, "scan_devices", lambda: ["TV1"])
-    picked = {}
-
-    def fake_fzf(items, prompt):
-        picked["n"] = len(items)
-        return "TV1"
-
-    monkeypatch.setattr(cli, "fzf", fake_fzf)
-    assert cli._resolve_device(Config(torrentio_base="tb"), choose=True) == "TV1"
-    assert picked["n"] == 1
 
 
 def test_apply_key_alt_c_casts():

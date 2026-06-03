@@ -29,25 +29,29 @@ MAXRES_CHOICES = [
 _INT_BOUNDS = {"autoplay_lead": (1, 120), "min_seeders": (0, 100), "max_streams": (0, 500)}
 
 # `catt scan` text line: "192.168.1.228 - 43PUS9235/12 - Philips TPM191E". We parse
-# the name from text because `catt scan -j` is broken in current catt (CastInfo has
+# IP + name from text because `catt scan -j` is broken in current catt (CastInfo has
 # no _asdict). Shared by the settings device picker and cli's on-cast resolver.
-_SCAN_RE = re.compile(r"^[\d.]+ - (.+?) - ")
+_SCAN_RE = re.compile(r"^([\d.]+) - (.+?) - ")
 
 
-def scan_devices() -> list[str]:
-    """Discover Chromecast device names on the LAN via `catt scan` (deduped, stable
-    order). Best-effort: returns [] if catt is missing or the scan fails."""
+def scan_devices() -> list[tuple[str, str]]:
+    """Discover Chromecasts on the LAN via `catt scan` as (name, ip) pairs (deduped by
+    name, stable order). The IP lets callers cast with `catt -d <ip>`, which is robust
+    to mDNS name-resolution flakiness (e.g. right after a network change). Best-effort:
+    returns [] if catt is missing or the scan fails."""
     print("🔍 cerco Chromecast…", file=sys.stderr)
     try:
         proc = subprocess.run(["catt", "scan"], capture_output=True, text=True, timeout=15)
     except (FileNotFoundError, subprocess.SubprocessError):
         return []
-    names: list[str] = []
+    devices: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for line in proc.stdout.splitlines():
         m = _SCAN_RE.match(line.strip())
-        if m and m.group(1) not in names:
-            names.append(m.group(1))
-    return names
+        if m and m.group(2) not in seen:
+            seen.add(m.group(2))
+            devices.append((m.group(2), m.group(1)))  # (name, ip)
+    return devices
 
 
 def _fzf_select(
@@ -333,7 +337,7 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         if i is not None:
             config.save({key: MAXRES_CHOICES[i][1]})
     elif kind == "castdev":
-        choices = ["(auto)"] + scan_devices()
+        choices = ["(auto)"] + [name for name, _ in scan_devices()]
         i = _fzf_select(
             choices, prompt="dispositivo> ", header="Chromecast preferito · ESC: annulla"
         )
