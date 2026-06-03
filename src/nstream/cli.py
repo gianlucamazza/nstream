@@ -111,10 +111,14 @@ def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
         tags.append("DV")
     elif info.hdr:
         tags.append("HDR")
+    if info.source:
+        tags.append(info.source)
+    if info.languages:
+        tags.append("/".join(sorted(info.languages)))
     if info.size_gb:
         tags.append(f"{info.size_gb:.1f}G")
     prefix = ("✓" if info.cached else " ") + " " + " ".join(tags)
-    return f"{prefix:28s} {base}"[:200]
+    return f"{prefix:36s} {base}"[:200]
 
 
 def history_label(e: HistoryEntry) -> str:
@@ -554,8 +558,8 @@ def _no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str
 
 
 def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | None:
-    """Rank streams by what the hardware can actually play, then auto-pick the best
-    or show an fzf menu (playable first, unsupported ones last marked ⚠)."""
+    """Rank and curate streams, then auto-pick the best or show an fzf menu (top N
+    playable + a 'show all' entry that reveals the rest and the excluded ones ⚠)."""
     if not cfg.hw_filter:
         ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in results]
         return results[0] if auto else fzf(ranked, "stream> ")
@@ -566,21 +570,41 @@ def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | 
         max_resolution=cfg.max_resolution,
         allow_software=cfg.allow_software,
         allow_dv5=cfg.allow_dv5,
+        audio_langs=tuple(cfg.audio_langs),
+        lang_filter=cfg.lang_filter,
+        exclude_camrip=cfg.exclude_camrip,
+        min_seeders=cfg.min_seeders,
+        dedup=cfg.dedup,
     )  # fmt: skip
     if excluded:
         reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
-        print(
-            f"nstream: {len(excluded)} stream non supportati esclusi ({reasons})", file=sys.stderr
-        )
+        print(f"nstream: {len(excluded)} stream filtrati ({reasons})", file=sys.stderr)
+    dupes = len(results) - len(playable) - len(excluded)
+    if dupes > 0:
+        print(f"nstream: {dupes} doppioni rimossi", file=sys.stderr)
     if auto:
         if playable:
             return playable[0].stream
         print("nstream: nessuno stream supportato dall'hardware", file=sys.stderr)
         return None
-    # Manual: playable first, then the excluded ones flagged so they can be forced.
-    items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
-    items += [(f"⚠ {r.reason}  {stream_label(r.stream, r.info)}", r.stream) for r in excluded]
-    return fzf(items, "stream> ")
+
+    def _full() -> Stream | None:
+        items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
+        items += [(f"⚠ {r.reason}  {stream_label(r.stream, r.info)}", r.stream) for r in excluded]
+        return fzf(items, "stream (tutti)> ")
+
+    cap = cfg.max_streams
+    if not cap or len(playable) + len(excluded) <= cap:
+        return _full()  # nothing hidden → one flat menu
+    _ALL = object()
+    shown = playable[:cap]
+    hidden = len(playable) - len(shown) + len(excluded)
+    items: list[tuple[str, object]] = [(stream_label(r.stream, r.info), r.stream) for r in shown]
+    items.append((f"↓ mostra tutti ({hidden} altri)", _ALL))
+    chosen = fzf(items, "stream> ")
+    if chosen is _ALL:
+        return _full()
+    return cast("Stream | None", chosen)
 
 
 def _resume_position(cfg: Config, video_id: str) -> float | None:

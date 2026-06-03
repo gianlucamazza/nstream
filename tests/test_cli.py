@@ -559,6 +559,45 @@ def test_choose_tracks_subs_none(monkeypatch):
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, "no", ())
 
 
+def _ranked(n, *, reason=None):
+    from nstream.quality import RankedStream, StreamInfo
+
+    return [
+        RankedStream({"url": f"u{i}", "name": f"S{i}"}, StreamInfo(resolution=1080), reason)
+        for i in range(n)
+    ]
+
+
+def test_pick_stream_cap_and_show_all(monkeypatch):
+    cfg = Config(torrentio_base="tb", max_streams=20)
+    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps())
+    playable, excluded = _ranked(25), _ranked(2, reason="camrip (cam)")
+    monkeypatch.setattr(cli.quality, "rank_streams", lambda *a, **k: (playable, excluded))
+    seen = {}
+
+    def fzf(items, prompt, *, header=None):
+        seen[prompt] = items
+        if prompt == "stream> ":
+            return items[-1][1]  # the "↓ mostra tutti" sentinel
+        return items[0][1]  # first stream in the full menu
+
+    monkeypatch.setattr(cli, "fzf", fzf)
+    out = cli._pick_stream(cfg, [{"url": "x"}] * 27, auto=False)
+    # Capped menu = 20 streams + 1 "show all" entry; full menu = 25 playable + 2 excluded.
+    assert len(seen["stream> "]) == 21
+    assert "mostra tutti" in seen["stream> "][-1][0]
+    assert len(seen["stream (tutti)> "]) == 27
+    assert out is playable[0].stream
+
+
+def test_pick_stream_auto_picks_best(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps())
+    playable = _ranked(3)
+    monkeypatch.setattr(cli.quality, "rank_streams", lambda *a, **k: (playable, []))
+    assert cli._pick_stream(cfg, [{"url": "x"}], auto=True) is playable[0].stream
+
+
 def test_play_video_auto_skips_track_menu(monkeypatch):
     """--play / binge (auto=True) must NOT open the pre-play track menu."""
     cfg = Config(torrentio_base="tb", hwdec="")

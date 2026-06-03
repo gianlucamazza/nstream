@@ -26,7 +26,31 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.hwdec == "auto-safe"
     assert cfg.autoplay is True
     assert cfg.autoplay_lead == 15
+    assert cfg.lang_filter is True
+    assert cfg.exclude_camrip is True
+    assert cfg.min_seeders == 3
+    assert cfg.dedup is True
+    assert cfg.max_streams == 20
     assert cfg.mpv_args == []
+
+
+def test_stream_filter_overrides_and_clamp(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(
+        tmp_path,
+        {
+            "torrentio_base": "tb",
+            "lang_filter": False,
+            "exclude_camrip": False,
+            "dedup": False,
+            "min_seeders": -5,  # clamped to 0
+            "max_streams": "bad",  # falls back to default
+        },
+    )
+    cfg = config.load()
+    assert cfg.lang_filter is False and cfg.exclude_camrip is False and cfg.dedup is False
+    assert cfg.min_seeders == 0
+    assert cfg.max_streams == config.Config.max_streams
 
 
 def test_missing_torrentio_base_raises(tmp_path, monkeypatch):
