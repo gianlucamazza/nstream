@@ -273,16 +273,58 @@ def _mpv_conf_has(option: str) -> bool:
     return False
 
 
+def _mpv_conf_get(option: str) -> str | None:
+    """The value the user's mpv.conf sets for `option`, or None if unset.
+    Quotes are stripped so `hwdec="auto"` and `hwdec=auto` read the same."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    candidates = (
+        os.path.join(base, "mpv", "mpv.conf"),
+        os.path.expanduser("~/.mpv/mpv.conf"),
+    )
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            s = line.strip()
+            if s and not s.startswith("#") and "=" in s:
+                key, _, val = s.partition("=")
+                if key.strip() == option:
+                    return val.strip().strip("'\"")
+    return None
+
+
 def _user_overrides(cfg: Config, option: str) -> bool:
     """True if the user already sets `option` via mpv_args or mpv.conf."""
     return any(a.startswith(f"--{option}") for a in cfg.mpv_args) or _mpv_conf_has(option)
 
 
+# mpv's "auto" hwdec family: ambiguous choices that probe several methods. On a
+# vulkan render context mpv 0.41+ prefers (experimental, often unsupported) Vulkan
+# decode and then CUDA before VAAPI — noisy and software-bound on Intel iGPUs.
+_AUTO_HWDEC = {"auto", "auto-safe", "auto-copy", "auto-safe-copy"}
+
+
 def _hwdec_defaults(cfg: Config) -> list[str]:
-    """Inject mpv hardware decoding only if the user hasn't chosen it elsewhere."""
-    if not cfg.hwdec or _user_overrides(cfg, "hwdec"):
-        return []
-    return [f"--hwdec={cfg.hwdec}"]
+    """Choose mpv's hwdec, upgrading the ambiguous `auto` family to the GPU's real
+    method (VAAPI, detected) so mpv doesn't probe unsupported Vulkan decode / missing
+    CUDA. An explicit `--hwdec` in mpv_args, or a concrete method in mpv.conf, is
+    always respected; nstream's CLI flag overrides mpv.conf only to pin `auto`→vaapi."""
+    if any(a.startswith("--hwdec") for a in cfg.mpv_args):
+        return []  # explicit per-app override → defer entirely
+    conf = _mpv_conf_get("hwdec")
+    method = conf if conf is not None else cfg.hwdec
+    if not method:
+        return []  # decoding left to mpv defaults / explicitly disabled
+    if method in _AUTO_HWDEC:
+        detected = quality.preferred_hwdec(quality.detect_caps())
+        if detected:
+            return [f"--hwdec={detected}"]
+        return [] if conf is not None else [f"--hwdec={method}"]
+    # Concrete method: respect mpv.conf as-is; inject only nstream's own config value.
+    return [] if conf is not None else [f"--hwdec={method}"]
 
 
 # mpv log modules that spam the terminal of a media frontend (track list +

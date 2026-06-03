@@ -21,7 +21,7 @@ from pathlib import Path
 
 from .config import Stream
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 # Conservative default for integrated GPUs when vainfo is unavailable: H.264, HEVC
 # (incl. 10-bit) and VP9 decode, no AV1.
 _FALLBACK_CODECS = ("h264", "hevc", "hevc10", "vp9")
@@ -103,6 +103,9 @@ def parse_stream(stream: Stream) -> StreamInfo:
 class Caps:
     codecs: frozenset[str] = field(default_factory=lambda: frozenset(_FALLBACK_CODECS))
     max_resolution: int = _DEFAULT_MAX_RESOLUTION
+    # True only when a real vainfo probe succeeded → VAAPI decode is available, so
+    # mpv's `vaapi` hwdec is the reliable HW path (vs the conservative fallback).
+    vaapi: bool = False
 
 
 def _caps_from_vainfo(out: str) -> frozenset[str]:
@@ -142,19 +145,22 @@ def detect_caps(*, use_cache: bool = True) -> Caps:
                 return Caps(
                     codecs=frozenset(data["codecs"]),
                     max_resolution=int(data["max_resolution"]),
+                    vaapi=bool(data["vaapi"]),
                 )
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
 
     try:
         proc = subprocess.run(["vainfo"], capture_output=True, text=True, timeout=10)
-        codecs = _caps_from_vainfo(proc.stdout + proc.stderr)
+        probed = _caps_from_vainfo(proc.stdout + proc.stderr)
     except (OSError, subprocess.SubprocessError):
-        codecs = frozenset()
-    if not codecs:  # vainfo missing or unparsable → conservative default
-        codecs = frozenset(_FALLBACK_CODECS)
+        probed = frozenset()
+    # A real probe means VAAPI is usable; otherwise fall back conservatively and
+    # mark vaapi unavailable so we don't force mpv onto a path we couldn't verify.
+    vaapi = bool(probed)
+    codecs = probed or frozenset(_FALLBACK_CODECS)
 
-    caps = Caps(codecs=codecs, max_resolution=_DEFAULT_MAX_RESOLUTION)
+    caps = Caps(codecs=codecs, max_resolution=_DEFAULT_MAX_RESOLUTION, vaapi=vaapi)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -163,12 +169,24 @@ def detect_caps(*, use_cache: bool = True) -> Caps:
                     "version": _CACHE_VERSION,
                     "codecs": sorted(caps.codecs),
                     "max_resolution": caps.max_resolution,
+                    "vaapi": caps.vaapi,
                 }
             )
         )
     except OSError:
         pass  # cache is best-effort
     return caps
+
+
+def preferred_hwdec(caps: Caps) -> str | None:
+    """The mpv hwdec method to force for this GPU, or None to leave mpv's choice.
+
+    Returns ``vaapi`` when a real VAAPI probe succeeded (Intel/AMD): it's the mature
+    HW path and avoids mpv probing experimental Vulkan decode (unsupported on many
+    iGPUs) or a missing CUDA. NVIDIA-only setups aren't vainfo-detectable here, so we
+    return None and let mpv decide. Verified live on Iris Xe: `vaapi` decodes zero-copy
+    cleanly even under `gpu-api=vulkan`."""
+    return "vaapi" if caps.vaapi else None
 
 
 # --- support check + ranking ---------------------------------------------

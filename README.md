@@ -77,9 +77,13 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   and subtitles are aggregated across the built-in providers plus these. Manage them from the
   settings menu.
 - `history_enabled`: keep a watch history for resume / continue-watching (`true` by default).
-- `hwdec`: mpv hardware decoding mode (default `auto-safe`). nstream passes `--hwdec=<value>`
-  **only if** you haven't already set `hwdec` in `~/.config/mpv/mpv.conf` or in `mpv_args` —
-  your own mpv config always wins. Set `""` to disable the injection entirely.
+- `hwdec`: mpv hardware decoding mode (default `auto-safe`). An explicit `--hwdec` in `mpv_args`,
+  or a **concrete** method in `~/.config/mpv/mpv.conf`, is always respected. The ambiguous `auto`
+  family (`auto`/`auto-safe`/…) is **auto-upgraded to the GPU's real method** (VAAPI, detected via
+  `vainfo`) so mpv doesn't probe experimental Vulkan decode or a missing CUDA first — on a
+  `gpu-api=vulkan` context that probing causes `VK_KHR_video_decode_queue`/`libcuda` errors and a
+  software fallback. nstream's CLI flag overrides `mpv.conf` *only* for that `auto`→vaapi upgrade.
+  Set `""` to disable injection entirely.
 - `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
   default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
