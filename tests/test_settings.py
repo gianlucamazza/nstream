@@ -37,6 +37,10 @@ def test_items_cover_all_settings():
         "hwdec",
         "history_enabled",
         "mpv_quiet",
+        "hw_filter",
+        "max_resolution",
+        "allow_software",
+        "allow_dv5",
         "torrentio_base",
         "__addons__",
     ]

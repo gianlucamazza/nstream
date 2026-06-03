@@ -88,6 +88,14 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 - `mpv_quiet`: hide mpv's track list and decoder/driver warnings, keeping the progress line and
   real errors (`true` by default). Injected as `--msg-level` only if you haven't set `msg-level`
   in `mpv.conf`/`mpv_args`. Toggle it from the settings menu.
+- `hw_filter`: hardware-aware stream ranking (`true` by default). Torrentio sorts by size, so the
+  first result is usually an 8K "AI upscale" or a 60-100GB Dolby Vision REMUX. nstream detects what
+  the GPU can decode (via `vainfo`, cached) and auto-picks the best stream it can actually play;
+  unsupported streams (8K, Dolby Vision P5, codecs with no HW decode) are excluded from auto-pick
+  and shown at the bottom of the stream menu marked `⚠` (still selectable).
+- `max_resolution`: cap for the filter (default `2160`; `0` = no cap).
+- `allow_software`: keep streams whose codec the GPU can't decode in hardware (default `false`).
+- `allow_dv5`: keep Dolby Vision Profile 5 streams (default `false`; they look wrong without DV).
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
 
 The file holds your RD token, so it is created `chmod 600` and git-ignored.
@@ -139,6 +147,7 @@ first run, if no config exists, nstream prompts for the Real-Debrid token and wr
 | `src/nstream/cli.py` | argparse entry point, fzf/mpv orchestration, subtitles, resume |
 | `src/nstream/api.py` | addon resource dispatch (search/catalog/streams/subtitles) with retry/backoff |
 | `src/nstream/addons.py` | Stremio addon-protocol client (manifests, dispatch, cache) |
+| `src/nstream/quality.py` | hardware-aware stream parsing/ranking (vainfo caps, filter) |
 | `src/nstream/settings.py` | native fzf settings menu (config + addons) |
 | `src/nstream/config.py` | config load/save (XDG, atomic 0600) + payload types |
 | `src/nstream/state.py` | watch-history persistence (resume / continue-watching) |

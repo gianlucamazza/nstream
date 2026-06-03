@@ -85,6 +85,12 @@ class Config:
     # Quiet mpv's terminal output (hide the track list and decoder/driver warnings,
     # keep the progress line and errors). Injected only if you haven't set msg-level.
     mpv_quiet: bool = True
+    # Hardware-aware stream ranking: auto-pick the best stream the GPU can actually
+    # play, excluding e.g. 8K and Dolby Vision P5 (and codecs the GPU can't decode).
+    hw_filter: bool = True
+    max_resolution: int = 2160  # 0 = no cap
+    allow_software: bool = False  # keep streams whose codec has no HW decode
+    allow_dv5: bool = False  # keep Dolby Vision Profile 5 streams
     mpv_args: list[str] = field(default_factory=list)
 
 
@@ -122,6 +128,10 @@ def load() -> Config:
     # Clamp to a sane range: 0 would show the overlay only in the last half second,
     # huge values would keep it on screen the whole time.
     autoplay_lead = max(1, min(autoplay_lead, 120))
+    try:
+        max_resolution = max(0, int(raw.get("max_resolution", Config.max_resolution)))
+    except (TypeError, ValueError):
+        max_resolution = Config.max_resolution
     return Config(
         torrentio_base=base,
         cinemeta=raw.get("cinemeta", Config.cinemeta),
@@ -134,6 +144,10 @@ def load() -> Config:
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=autoplay_lead,
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),
+        hw_filter=bool(raw.get("hw_filter", Config.hw_filter)),
+        max_resolution=max_resolution,
+        allow_software=bool(raw.get("allow_software", Config.allow_software)),
+        allow_dv5=bool(raw.get("allow_dv5", Config.allow_dv5)),
         mpv_args=list(raw.get("mpv_args", [])),
     )
 

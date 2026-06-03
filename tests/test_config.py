@@ -131,3 +131,22 @@ def test_save_no_leftover_tmp(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     config.save({"torrentio_base": "tb"})
     assert list((tmp_path / "nstream").glob(".config-*.tmp")) == []
+
+
+def test_hw_filter_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb"})
+    cfg = config.load()
+    assert cfg.hw_filter is True
+    assert cfg.max_resolution == 2160
+    assert cfg.allow_software is False and cfg.allow_dv5 is False
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(1080, 1080), (0, 0), (-5, 0), ("bad", 2160)],  # negative clamped to 0, invalid → default
+)
+def test_max_resolution_coercion(tmp_path, monkeypatch, value, expected):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb", "max_resolution": value})
+    assert config.load().max_resolution == expected
