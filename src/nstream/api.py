@@ -126,7 +126,10 @@ def _gather(tasks: list[Callable[[], list]]) -> list:
 def _safe(task: Callable[[], list]) -> list:
     try:
         return task()
-    except NetworkError:
+    except NetworkError as e:
+        # The message carries the addon's `what=` label (no clear URL → redaction-safe),
+        # so a silently-skipped addon is still traceable with --debug.
+        _log.debug("addon saltato: %s", e)
         return []
 
 

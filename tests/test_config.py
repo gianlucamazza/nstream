@@ -171,9 +171,37 @@ def test_hw_filter_defaults(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(1080, 1080), (0, 0), (-5, 0), ("bad", 2160)],  # negative clamped to 0, invalid → default
+    [
+        (1080, 1080),
+        (0, 0),  # 0 = no cap, kept
+        (-5, 0),  # negative clamped to 0
+        (99999, 4320),  # clamped down to the 8K ceiling
+        ("bad", 2160),  # invalid → default
+    ],
 )
 def test_max_resolution_coercion(tmp_path, monkeypatch, value, expected):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     write_config(tmp_path, {"torrentio_base": "tb", "max_resolution": value})
     assert config.load().max_resolution == expected
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("min_seeders", 999, 100),  # clamped down to ceiling
+        ("max_streams", 999, 500),  # clamped down to ceiling
+    ],
+)
+def test_int_fields_clamped_to_ceiling(tmp_path, monkeypatch, key, value, expected):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb", key: value})
+    assert getattr(config.load(), key) == expected
+
+
+def test_non_dict_root_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    d = tmp_path / "nstream"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text('["not", "an", "object"]')
+    with pytest.raises(config.ConfigError):
+        config.load()
