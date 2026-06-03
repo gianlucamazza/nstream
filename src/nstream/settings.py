@@ -19,6 +19,12 @@ from . import addons, config
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
+MAXRES_CHOICES = [
+    ("2160p (4K)", 2160),
+    ("1080p (Full HD)", 1080),
+    ("720p (HD)", 720),
+    ("illimitata", 0),
+]
 
 
 def _fzf_select(
@@ -131,6 +137,34 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Nasconde track-list e warning mpv; tiene barra e errori.",
         ),
         (
+            "hw_filter",
+            "Filtro hardware stream",
+            "bool",
+            "on" if cfg.hw_filter else "off",
+            "Auto-sceglie il miglior stream giocabile; 8K/DV P5/non-HW in fondo (⚠).",
+        ),
+        (
+            "max_resolution",
+            "Risoluzione massima",
+            "maxres",
+            f"{cfg.max_resolution}p" if cfg.max_resolution else "illimitata",
+            "Esclude gli stream oltre questa risoluzione (es. 8K). 'illimitata' = nessun limite.",
+        ),
+        (
+            "allow_software",
+            "Consenti codec non-HW",
+            "bool",
+            "on" if cfg.allow_software else "off",
+            "Tiene anche i codec senza decodifica hardware (es. AV1 su GPU che non lo supporta).",
+        ),
+        (
+            "allow_dv5",
+            "Consenti Dolby Vision P5",
+            "bool",
+            "on" if cfg.allow_dv5 else "off",
+            "Tiene gli stream DV Profile 5 (si vedono male senza display/processing DV).",
+        ),
+        (
             "torrentio_base",
             "Token Real-Debrid",
             "token",
@@ -188,6 +222,11 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         i = _fzf_select(HWDEC_CHOICES, prompt=f"{label}> ")
         if i is not None:
             config.save({key: "" if HWDEC_CHOICES[i].startswith("no") else HWDEC_CHOICES[i]})
+    elif kind == "maxres":
+        labels = [c[0] for c in MAXRES_CHOICES]
+        i = _fzf_select(labels, prompt=f"{label}> ")
+        if i is not None:
+            config.save({key: MAXRES_CHOICES[i][1]})
     elif kind == "token":
         token = getpass.getpass("Token Real-Debrid (nascosto): ").strip()
         if token:

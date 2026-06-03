@@ -10,5 +10,9 @@
   "autoplay": true,
   "autoplay_lead": 15,
   "mpv_quiet": true,
+  "hw_filter": true,
+  "max_resolution": 2160,
+  "allow_software": false,
+  "allow_dv5": false,
   "mpv_args": []
 }

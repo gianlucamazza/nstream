@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from importlib import resources
 from typing import cast
 
-from . import __version__, api, settings, state
+from . import __version__, api, quality, settings, state
 from .config import (
     Config,
     ConfigError,
@@ -73,10 +73,25 @@ def meta_label(m: Meta) -> str:
     return f"{m.get('type', '?'):6s} {m.get('name', '?')}  ({m.get('releaseInfo', '')})"
 
 
-def stream_label(s: Stream) -> str:
+def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
     name = (s.get("name") or "").replace("\n", " ")
     title = (s.get("title") or "").replace("\n", " · ")
-    return f"{name}  |  {title}"[:200]
+    base = f"{name}  |  {title}"[:200]
+    if info is None:
+        return base
+    tags = []
+    if info.resolution:
+        tags.append(f"{info.resolution}p")
+    if info.codec:
+        tags.append(info.codec)
+    if info.dv:
+        tags.append("DV")
+    elif info.hdr:
+        tags.append("HDR")
+    if info.size_gb:
+        tags.append(f"{info.size_gb:.1f}G")
+    prefix = ("✓" if info.cached else " ") + " " + " ".join(tags)
+    return f"{prefix:28s} {base}"[:200]
 
 
 def history_label(e: HistoryEntry) -> str:
@@ -367,6 +382,36 @@ def play(
 # --- flow ----------------------------------------------------------------
 
 
+def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | None:
+    """Rank streams by what the hardware can actually play, then auto-pick the best
+    or show an fzf menu (playable first, unsupported ones last marked ⚠)."""
+    if not cfg.hw_filter:
+        ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in results]
+        return results[0] if auto else fzf(ranked, "stream> ")
+
+    caps = quality.detect_caps()
+    playable, excluded = quality.rank_streams(
+        results, caps,
+        max_resolution=cfg.max_resolution,
+        allow_software=cfg.allow_software,
+        allow_dv5=cfg.allow_dv5,
+    )  # fmt: skip
+    if excluded:
+        reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
+        print(
+            f"nstream: {len(excluded)} stream non supportati esclusi ({reasons})", file=sys.stderr
+        )
+    if auto:
+        if playable:
+            return playable[0].stream
+        print("nstream: nessuno stream supportato dall'hardware", file=sys.stderr)
+        return None
+    # Manual: playable first, then the excluded ones flagged so they can be forced.
+    items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
+    items += [(f"⚠ {r.reason}  {stream_label(r.stream, r.info)}", r.stream) for r in excluded]
+    return fzf(items, "stream> ")
+
+
 def _resume_position(cfg: Config, video_id: str) -> float | None:
     """The position to resume from, or None if there's no usable resume point
     (no history entry, or the title is effectively finished — so we never restart
@@ -400,7 +445,7 @@ def _play_video(
     if not results:
         print("nstream: nessuno stream disponibile", file=sys.stderr)
         return (1, False)
-    chosen = results[0] if auto else fzf([(stream_label(s), s) for s in results], "stream> ")
+    chosen = _pick_stream(cfg, results, auto=auto)
     if not chosen:
         return (0, False)
 
