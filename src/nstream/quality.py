@@ -43,6 +43,7 @@ class StreamInfo:
     cached: bool = False
     languages: frozenset[str] = frozenset()  # ISO codes + "multi"; empty = untagged
     source: str = ""  # remux|bluray|webdl|webrip|hdtv|dvd|cam|ts|tc|scr|""
+    audio: str = ""  # truehd|dtshd|dts|eac3|ac3|aac|""; "headline" track codec
     release_name: str = ""  # title's first line (torrent filename), for dedup
 
 
@@ -91,7 +92,7 @@ _FLAG_LANG = {
 
 # Source/release type tokens, checked in priority order (REMUX wins over BluRay).
 _SOURCE_PATTERNS = (
-    ("remux", re.compile(r"\bREMUX\b", re.I)),
+    ("remux", re.compile(r"\bBD-?REMUX\b|\bREMUX\b", re.I)),
     ("cam", re.compile(r"\b(?:HD)?CAM(?:RIP)?\b", re.I)),
     ("ts", re.compile(r"\b(?:HD)?TS\b|\bTELESYNC\b|\bPDVD\b", re.I)),
     ("tc", re.compile(r"\b(?:HD)?TC\b|\bTELECINE\b", re.I)),
@@ -104,6 +105,20 @@ _SOURCE_PATTERNS = (
 )
 _CAMRIP_SOURCES = frozenset({"cam", "ts", "tc", "scr"})
 
+# Audio codec tokens, lossless first: a remux often lists "TrueHD + AC3" but the
+# receiver plays the headline (lossless) track, so it's the one that decides Cast
+# compatibility. First match wins.
+_AUDIO_PATTERNS = (
+    ("truehd", re.compile(r"\bTRUE-?HD\b", re.I)),
+    ("dtshd", re.compile(r"\bDTS-?HD\b|\bDTS-?MA\b|\bDTS:?X\b", re.I)),
+    ("dts", re.compile(r"\bDTS\b", re.I)),
+    ("eac3", re.compile(r"\bE-?AC-?3\b|\bDD\+|\bDDP|\bDOLBY\s?DIGITAL\s?PLUS\b", re.I)),
+    ("ac3", re.compile(r"\bAC-?3\b|\bDD5\.1\b|\bDOLBY\s?DIGITAL\b", re.I)),
+    ("aac", re.compile(r"\bAAC\b", re.I)),
+)
+# Audio the Chromecast Default Media Receiver cannot decode (silent video).
+_CAST_LOSSLESS = frozenset({"truehd", "dtshd", "dts"})
+
 
 def _parse_languages(text: str) -> frozenset[str]:
     found = {code for code, pat in _LANG_RE.items() if pat.search(text)}
@@ -113,6 +128,10 @@ def _parse_languages(text: str) -> frozenset[str]:
 
 def _parse_source(text: str) -> str:
     return next((name for name, pat in _SOURCE_PATTERNS if pat.search(text)), "")
+
+
+def _parse_audio(text: str) -> str:
+    return next((name for name, pat in _AUDIO_PATTERNS if pat.search(text)), "")
 
 
 def parse_stream(stream: Stream) -> StreamInfo:
@@ -153,6 +172,7 @@ def parse_stream(stream: Stream) -> StreamInfo:
         cached="[RD+]" in (stream.get("name") or ""),
         languages=_parse_languages(text),
         source=_parse_source(text),
+        audio=_parse_audio(text),
         release_name=(stream.get("title") or "").split("\n", 1)[0].strip(),
     )
 
@@ -250,6 +270,19 @@ def preferred_hwdec(caps: Caps) -> str | None:
     return "vaapi" if caps.vaapi else None
 
 
+def cast_caps() -> Caps:
+    """Decode profile for a Chromecast/Google TV receiver — NOT the laptop GPU.
+
+    Casting plays on the TV, so the laptop's vainfo codecs are irrelevant. A modern
+    Google TV decodes H.264/HEVC(+10bit)/VP9 up to 4K; AV1 is not guaranteed on older
+    models, so it's left out (such streams drop to the ⚠ section, still pickable)."""
+    return Caps(
+        codecs=frozenset({"h264", "hevc", "hevc10", "vp9"}),
+        max_resolution=2160,
+        vaapi=False,
+    )
+
+
 # --- support check + ranking ---------------------------------------------
 
 
@@ -270,9 +303,10 @@ def unsupported_reason(
     lang_filter: bool = False,
     exclude_camrip: bool = False,
     min_seeders: int = 0,
+    cast_audio: bool = False,
 ) -> str | None:
     """Why this stream is excluded from the main list, or None if it belongs there.
-    Order: hardware (codec/resolution/DV5) → camrip → language → near-dead torrent.
+    Order: hardware (codec/resolution/DV5) → Cast audio → camrip → language → near-dead.
     The extra filters are opt-in (defaults are no-ops) so the HW-only behaviour and
     existing callers are unchanged."""
     if max_resolution and info.resolution > max_resolution:
@@ -281,6 +315,14 @@ def unsupported_reason(
         return f"{info.codec.upper()} no-HW"
     if info.dv_profile == 5:
         return "Dolby Vision P5"
+    # Cast: the Default Media Receiver can't decode TrueHD/DTS/DTS-HD → silent audio.
+    # A REMUX carries the lossless track even when the title omits the codec, so it's
+    # demoted too; other unknown audio gets the benefit of the doubt (WEB-DLs rarely tag).
+    if cast_audio:
+        if info.audio in _CAST_LOSSLESS:
+            return f"audio {info.audio.upper()}"
+        if info.source == "remux":
+            return "audio remux"
     if exclude_camrip and info.source in _CAMRIP_SOURCES:
         return f"camrip ({info.source})"
     # Tagged with languages but none preferred (and not a multi-language release).
@@ -352,6 +394,7 @@ def rank_streams(
     exclude_camrip: bool = False,
     min_seeders: int = 0,
     dedup: bool = False,
+    cast_audio: bool = False,
 ) -> tuple[list[RankedStream], list[RankedStream]]:
     """Split streams into (playable_sorted, excluded). `allow_software` keeps codecs
     the GPU can't decode; `allow_dv5` keeps Dolby Vision Profile 5. The opt-in filters
@@ -367,6 +410,7 @@ def rank_streams(
             info, caps, max_resolution,
             audio_langs=audio_langs, lang_filter=lang_filter,
             exclude_camrip=exclude_camrip, min_seeders=min_seeders,
+            cast_audio=cast_audio,
         )  # fmt: skip
         if reason and allow_software and reason.endswith("no-HW"):
             reason = None
