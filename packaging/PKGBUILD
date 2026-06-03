@@ -3,7 +3,7 @@
 pkgname=nstream
 # Keep pkgver in sync with __version__ in src/nstream/__init__.py
 # (build-local.sh derives the tarball name from it; .SRCINFO follows).
-pkgver=1.7.1
+pkgver=1.8.0
 pkgrel=1
 pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/Real-Debrid + mpv)"
 arch=('any')
@@ -14,6 +14,7 @@ optdepends=(
   'foot: terminal used by the desktop launcher'
   'catt: cast to a Chromecast with --cast (install via pipx; not in the repos)'
   'chafa: poster thumbnails in the fzf preview pane'
+  'torrserver-bin: local P2P playback without a debrid provider (AUR)'
 )
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
 checkdepends=('python-pytest')

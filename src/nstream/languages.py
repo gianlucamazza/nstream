@@ -13,6 +13,7 @@ language, so it is not `selectable` in the preference picker.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -82,3 +83,28 @@ def normalize(tag: str) -> str | None:
 def selectable() -> list[Language]:
     """Languages offered as audio/subtitle preferences (excludes the `multi` attribute)."""
     return [lang for lang in LANGUAGES if lang.selectable]
+
+
+# Title-token matcher for ffprobe track titles. The release tokens already include the
+# English language names (e.g. "ITALIAN", "ENGLISH"), so a title like "Italian [TrueHD]"
+# matches case-insensitively. `multi` is excluded (not a target language). Word-boundary
+# matched so "Italian" doesn't fire inside another word.
+_TITLE_LANG_RE: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(r"(?<![A-Za-z])(?:" + "|".join(lang.tokens) + r")(?![A-Za-z])", re.I), lang.code)
+    for lang in LANGUAGES
+    if lang.selectable and lang.tokens
+)
+
+
+def track_lang(language_tag: str, title: str = "") -> str | None:
+    """Canonical language code of a media track. Uses the ffprobe `language` tag first
+    (via `normalize`, handling 2-letter forms like `it`/`en`); when that's missing or
+    undefined (`und`), falls back to a language name in the track `title`
+    (e.g. title='Italian [Dolby TrueHD Atmos]' → 'ita'). None if neither yields a language.
+
+    This recovers the language of releases whose audio tracks are untagged for language
+    but name it in the title — common in "Dual"/compact rips."""
+    code = normalize(language_tag)
+    if code:
+        return code
+    return next((c for pat, c in _TITLE_LANG_RE if pat.search(title)), None) if title else None

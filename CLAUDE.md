@@ -43,6 +43,10 @@ Modules in `src/nstream/`:
   **Imports nothing from `cli`** (no cycle).
 - `caster.py` — Chromecast playback via `catt`: `resolve_device()`, `cast()`, status poll, in-cast
   audio switch. Imports the picker from `picker`, not `cli`.
+- `engine.py` — local P2P backend: drives an external **TorrServer** (find/spawn, add torrent by
+  infoHash, wait for the read-ahead buffer) and returns a plain `http://…/stream?…` url — the same
+  contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util` + stdlib), like
+  `caster`/`player`. Best-effort: raises `EngineUnavailable` instead of crashing the picker.
 - `picker.py` — shared fzf pickers (TUI flow + cast menus); imports only `util`+`ui`. `fzf`/`fzf_key`.
 - `preview.py` — body of the hidden `nstream __preview` subcommand: poster thumbnail (via `chafa`)
   + metadata card in the fzf preview pane. Best-effort, **never prints stream URLs**.
