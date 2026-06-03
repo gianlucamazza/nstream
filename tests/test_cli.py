@@ -344,7 +344,9 @@ def test_play_video_no_save_when_duration_zero(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 0.0, False))  # duration unobserved
     saved = []
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=True, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
     cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None,
         on_save=lambda p, d: saved.append((p, d)),
@@ -357,7 +359,9 @@ def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": ""}])
     monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     notice, advance = cli._play_video(
         cfg, "movie", "tt1", "Movie", opts, auto=True, next_label=None, on_save=None
     )
@@ -369,7 +373,9 @@ def test_play_video_no_streams_returns_notice(monkeypatch):
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [])
     monkeypatch.setattr(cli.api, "meta", lambda *a, **k: {})  # released unknown → generic
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     notice, advance = cli._play_video(
         cfg, "movie", "tt1", "Dune 3", opts, auto=True, next_label=None, on_save=None
     )
@@ -401,7 +407,9 @@ def _stub_play_video(monkeypatch, advance_until):
 def test_binge_advances_then_stops(monkeypatch):
     eps = _episodes(4)
     calls = _stub_play_video(monkeypatch, advance_until=3)  # advance after ep1, ep2
-    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=True)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
+    )
     assert cli._play_series(CFG, "tt", "Show", eps, eps[0], opts) is None
     assert [c["video_id"] for c in calls] == ["tt:1", "tt:2", "tt:3"]
     # first episode honours opts.auto (False); binge episodes force auto=True
@@ -411,7 +419,9 @@ def test_binge_advances_then_stops(monkeypatch):
 def test_binge_stops_at_last_episode(monkeypatch):
     eps = _episodes(2)
     calls = _stub_play_video(monkeypatch, advance_until=99)  # always wants to advance
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=True)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
+    )
     cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
     assert len(calls) == 2  # no episode 3 to go to
     assert calls[-1]["next_label"] is None  # last episode offers no "next"
@@ -420,7 +430,9 @@ def test_binge_stops_at_last_episode(monkeypatch):
 def test_binge_no_next_label_when_autoplay_off(monkeypatch):
     eps = _episodes(3)
     calls = _stub_play_video(monkeypatch, advance_until=99)
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
     assert len(calls) == 1  # advance never offered → plays one and stops
     assert calls[0]["next_label"] is None
@@ -429,7 +441,9 @@ def test_binge_no_next_label_when_autoplay_off(monkeypatch):
 def test_binge_starts_from_chosen_episode(monkeypatch):
     eps = _episodes(4)
     calls = _stub_play_video(monkeypatch, advance_until=99)
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=True)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
+    )
     cli._play_series(CFG, "tt", "Show", eps, eps[2], opts)  # start at E3
     assert [c["video_id"] for c in calls] == ["tt:3", "tt:4"]
 
@@ -442,7 +456,9 @@ def test_binge_stops_and_propagates_notice(monkeypatch):
         return ("nessuno stream disponibile per «E1»", False)
 
     monkeypatch.setattr(cli, "_play_video", fake)
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=True)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
+    )
     notice = cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
     assert notice == "nessuno stream disponibile per «E1»"
 
@@ -471,7 +487,9 @@ def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
     fake_fzf, seen = _fzf_script([("", items[0][1]), None])  # pick once, then ESC
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     monkeypatch.setattr(cli, "play_meta", lambda *a, **k: "non ancora disponibile")
-    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     assert cli._pick_meta(items, CFG, opts) == 0
     # First render shows the Tab hint; after the pick the notice is threaded through.
     assert seen["headers"] == ["Tab: avvia al volo", "non ancora disponibile"]
@@ -484,7 +502,9 @@ def test_pick_meta_tab_flips_auto(monkeypatch):
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     seen_auto = {}
     monkeypatch.setattr(cli, "play_meta", lambda c, m, o: seen_auto.setdefault("auto", o.auto))
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     cli._pick_meta(items, CFG, opts)
     assert seen_auto["auto"] is False  # Tab flipped auto→manual
 
@@ -505,7 +525,9 @@ def test_run_home_dispatches_actions(monkeypatch):
     monkeypatch.setattr(cli, "run_browse", lambda c, cat, o: called["browse"].append(cat))
     monkeypatch.setattr(cli.settings, "run_settings", lambda c: called.__setitem__("settings", 1))
     monkeypatch.setattr(cli, "load", lambda: CFG)
-    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     assert cli.run_home(CFG, opts) == 0
     assert called["search"] == "matrix"
     assert called["browse"] == [cli.CAT_MAP["popolari"]]
@@ -572,8 +594,12 @@ def test_fzf_key_single_item_still_launches(monkeypatch):
 
 
 def test_pick_hint_reflects_default(monkeypatch):
-    auto = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
-    manual = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    auto = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    manual = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     assert "sorgente" in cli._pick_hint(auto)
     assert "volo" in cli._pick_hint(manual)
 
@@ -687,7 +713,9 @@ def test_play_video_auto_skips_track_menu(monkeypatch):
         raise AssertionError("choose_tracks must not be called when auto")
 
     monkeypatch.setattr(cli, "choose_tracks", boom)
-    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     notice, _ = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
     )
@@ -707,6 +735,182 @@ def test_play_video_interactive_calls_track_menu(monkeypatch):
             seen.update(aid=k.get("audio_id"), sid=k.get("sub_id")) or (0.0, 0.0, False)
         ),
     )
-    opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
     cli._play_video(cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None)
     assert seen == {"aid": 2, "sid": 1}
+
+
+# --- cast (Chromecast via catt) --------------------------------------------
+
+
+def test_resolve_device_uses_config_override(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("cast-resolve must not run when cast_device is set")
+
+    monkeypatch.setattr(cli.subprocess, "run", boom)
+    assert cli._resolve_device(Config(torrentio_base="tb", cast_device="Salotto")) == "Salotto"
+
+
+def test_resolve_device_from_cast_resolve(monkeypatch):
+    class _P:
+        returncode = 0
+        stdout = "  Living Room TV \n"
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _P())
+    assert cli._resolve_device(Config(torrentio_base="tb")) == "Living Room TV"
+
+
+def test_resolve_device_ambiguous_raises(monkeypatch):
+    class _P:
+        returncode = 3
+        stdout = ""
+        stderr = "ambiguous: TV-A, TV-B"
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: _P())
+    with pytest.raises(cli.CastUnavailable, match="TV-A"):
+        cli._resolve_device(Config(torrentio_base="tb"))
+
+
+def test_resolve_device_absent_returns_none(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(cli.subprocess, "run", boom)
+    assert cli._resolve_device(Config(torrentio_base="tb")) is None
+
+
+def _cast_run(monkeypatch, *, launch_rc=0, info_seq=()):
+    """Stub subprocess.run for cast(): the first call is `catt cast` (returns
+    launch_rc), subsequent `catt ... info -j` calls yield info_seq JSON in order.
+    Records every argv. time.sleep is neutralised."""
+    import json as _json
+
+    calls = []
+    seq = list(info_seq)
+
+    class _P:
+        def __init__(self, rc, out=""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    def fake(cmd, **k):
+        calls.append(cmd)
+        if "cast" in cmd:
+            return _P(launch_rc)
+        if "info" in cmd:
+            if seq:
+                item = seq.pop(0)
+                return _P(0, _json.dumps(item)) if item is not None else _P(1)
+            return _P(1)  # device idle/unreachable
+        return _P(0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake)
+    monkeypatch.setattr(cli.time, "sleep", lambda *_: None)
+    return calls
+
+
+def test_cast_builds_command_with_seek_and_sub(monkeypatch):
+    calls = _cast_run(
+        monkeypatch,
+        info_seq=[
+            {"player_state": "PLAYING", "current_time": 1.0, "duration": 100.0},
+            {"player_state": "IDLE", "duration": 100.0},  # ended → exits cleanly
+        ],
+    )
+    cli.cast(
+        CFG, "Dune", "http://u",
+        device="TV", start=125.0, sub_paths=("/tmp/x.srt",), next_label=None,
+    )  # fmt: skip
+    launch = calls[0]
+    assert launch[:2] == ["catt", "-d"] and launch[2] == "TV"
+    assert "cast" in launch and "http://u" in launch
+    assert "-t" in launch and "125" in launch
+    assert "-s" in launch and "/tmp/x.srt" in launch
+
+
+def test_cast_tracks_position_and_advances_on_finish(monkeypatch):
+    _cast_run(
+        monkeypatch,
+        info_seq=[
+            {"player_state": "PLAYING", "current_time": 10.0, "duration": 100.0},
+            {"player_state": "PLAYING", "current_time": 99.0, "duration": 100.0},
+            {"player_state": "IDLE", "duration": 100.0},
+        ],
+    )
+    pos, dur, advance = cli.cast(CFG, "Show E1", "http://u", device="TV", next_label="Show E2")
+    assert (pos, dur) == (99.0, 100.0)
+    assert advance is True  # ended past _CAST_DONE with a next episode queued
+
+
+def test_cast_no_advance_on_early_stop(monkeypatch):
+    _cast_run(
+        monkeypatch,
+        info_seq=[
+            {"player_state": "PLAYING", "current_time": 20.0, "duration": 100.0},
+            {"player_state": "IDLE", "duration": 100.0},  # stopped at 20% → not finished
+        ],
+    )
+    pos, dur, advance = cli.cast(CFG, "Show E1", "http://u", device="TV", next_label="Show E2")
+    assert (pos, dur) == (20.0, 100.0)
+    assert advance is False
+
+
+def test_cast_launch_failure_returns_zero(monkeypatch):
+    _cast_run(monkeypatch, launch_rc=1)
+    assert cli.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
+
+
+def test_cast_gives_up_if_never_starts(monkeypatch):
+    # Receiver stays idle/unreachable forever → bail after _CAST_GIVEUP polls,
+    # never loops indefinitely.
+    calls = _cast_run(monkeypatch, info_seq=[])  # every info poll fails
+    assert cli.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
+    info_polls = sum(1 for c in calls if "info" in c)
+    assert info_polls == cli._CAST_GIVEUP
+
+
+def test_play_video_cast_branch_no_track_menu(monkeypatch):
+    """In cast mode choose_tracks is never called; cast() gets the resolved device."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(cli, "_resolve_device", lambda c: "TV")
+
+    def boom(*a, **k):
+        raise AssertionError("choose_tracks must not run in cast mode")
+
+    monkeypatch.setattr(cli, "choose_tracks", boom)
+    seen = {}
+    monkeypatch.setattr(
+        cli, "cast",
+        lambda *a, **k: seen.update(device=k.get("device")) or (0.0, 0.0, False),
+    )  # fmt: skip
+    opts = cli.PlayOpts(
+        auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, _ = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+    )
+    assert notice is None
+    assert seen == {"device": "TV"}
+
+
+def test_play_video_cast_unavailable_returns_notice(monkeypatch):
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+
+    def boom(_cfg):
+        raise cli.CastUnavailable("nessun device")
+
+    monkeypatch.setattr(cli, "_resolve_device", boom)
+    opts = cli.PlayOpts(
+        auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+    )
+    assert advance is False and notice == "nessun device"

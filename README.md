@@ -27,7 +27,8 @@ mpv setup.
 
 Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, `ffmpeg` (its `ffprobe`
 powers the pre-play track menu; nstream degrades gracefully without it), plus `foot` for the
-desktop launcher. Install/dev: `uv`. All native.
+desktop launcher. Optional: `catt` to cast to a Chromecast (`--cast`), and `cast-resolve` (from
+the `skill_cast` project) to pick the right device per-LAN. Install/dev: `uv`. All native.
 
 ## Install
 
@@ -90,6 +91,14 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   hardware and audio/subtitles default to your preferred languages. Press **Tab** in the list to
   pick the source and tracks by hand for that title. Set `false` to make manual the default (then
   Tab plays instantly). `--play` forces auto regardless of this setting.
+- `prefer_cast`: send playback to a Chromecast via `catt` instead of mpv by default (`false`). The
+  `--cast` flag forces casting for one run; `--local` forces mpv even when this is on. Casting keeps
+  full parity — resume, continue-watching and series auto-advance work by polling `catt info`. The
+  embedded-track menu is mpv-only, so in cast mode subtitles are sent as an external file (when you
+  pass `--subs`/`--sub-lang`) and the rest is left to the receiver.
+- `cast_device`: pin the Chromecast name for `catt -d` (default `""`). Empty resolves the device
+  per-LAN via `cast-resolve` (fails loud on ambiguity rather than casting to the wrong screen),
+  then falls back to catt's own default.
 - `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
   default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
@@ -137,6 +146,8 @@ Watch history lives separately in `~/.local/state/nstream/history.json` (no secr
 ```sh
 nstream "the matrix"        # search → Enter plays the best stream; Tab picks source/tracks
 nstream                     # continue-watching menu (if any), else prompts for a query
+nstream --cast "dune"       # cast to a Chromecast (catt) instead of mpv
+nstream --local "dune"      # force local mpv even when prefer_cast is on
 nstream --play "dune"       # force auto-pick even when auto_play is off
 nstream --subs "dune"       # auto-pick subtitles in your preferred language
 nstream --sub-menu "dune"   # pick subtitles by hand (fzf)
@@ -190,5 +201,4 @@ first run, if no config exists, nstream prompts for the Real-Debrid token and wr
 
 ## Possible extensions
 
-- `--cast` via `catt` to send the stream to a Chromecast.
 - Trakt sync; alternative debrid providers (AllDebrid, Premiumize).

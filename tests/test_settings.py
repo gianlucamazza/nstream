@@ -33,6 +33,7 @@ def test_items_cover_all_settings():
         "audio_langs",
         "subtitle_langs",
         "auto_play",
+        "prefer_cast",
         "autoplay",
         "autoplay_lead",
         "hwdec",

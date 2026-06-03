@@ -82,6 +82,11 @@ class Config:
     # (no stream/track menu); Tab in the list flips to manual for that pick. Off
     # makes manual the default and Tab the auto shortcut.
     auto_play: bool = True
+    # Send playback to a Chromecast (via `catt`) instead of mpv by default.
+    # --cast / --local override per session. cast_device pins a device name for
+    # `catt -d`; empty = resolve per-LAN via `cast-resolve`, then catt's default.
+    prefer_cast: bool = False
+    cast_device: str = ""
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -162,6 +167,8 @@ def load() -> Config:
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,
         auto_play=bool(raw.get("auto_play", Config.auto_play)),
+        prefer_cast=bool(raw.get("prefer_cast", Config.prefer_cast)),
+        cast_device=str(raw.get("cast_device", Config.cast_device) or ""),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=autoplay_lead,
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),
