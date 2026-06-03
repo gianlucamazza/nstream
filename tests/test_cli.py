@@ -451,10 +451,11 @@ def test_binge_stops_and_propagates_notice(monkeypatch):
 
 
 def _fzf_script(returns):
-    """A stub fzf that yields `returns` in order and records the headers it saw."""
+    """A stub fzf_key that yields `returns` in order and records the headers it saw.
+    Each item is a (key, value) tuple (key "" = Enter, "tab" = the override) or None."""
     seen = {"headers": [], "i": 0}
 
-    def fake(items, prompt, *, header=None):
+    def fake(items, prompt, *, header=None, expect=("tab",)):
         seen["headers"].append(header)
         val = returns[seen["i"]]
         seen["i"] += 1
@@ -467,20 +468,37 @@ def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
     """_pick_meta replays the list after a pick (back-to-list) and shows the
     playback notice as the next header; ESC (None) leaves with rc 0."""
     items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
-    fake_fzf, seen = _fzf_script([items[0][1], None])  # pick once, then ESC
-    monkeypatch.setattr(cli, "fzf", fake_fzf)
+    fake_fzf, seen = _fzf_script([("", items[0][1]), None])  # pick once, then ESC
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     monkeypatch.setattr(cli, "play_meta", lambda *a, **k: "non ancora disponibile")
     opts = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
     assert cli._pick_meta(items, CFG, opts) == 0
-    # First render has no header; after the pick the notice is threaded through.
-    assert seen["headers"] == [None, "non ancora disponibile"]
+    # First render shows the Tab hint; after the pick the notice is threaded through.
+    assert seen["headers"] == ["Tab: avvia al volo", "non ancora disponibile"]
+
+
+def test_pick_meta_tab_flips_auto(monkeypatch):
+    """Tab on a movie title flips the default (auto) to manual for that pick."""
+    items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
+    fake_fzf, _ = _fzf_script([("tab", items[0][1]), None])
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    seen_auto = {}
+    monkeypatch.setattr(cli, "play_meta", lambda c, m, o: seen_auto.setdefault("auto", o.auto))
+    opts = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    cli._pick_meta(items, CFG, opts)
+    assert seen_auto["auto"] is False  # Tab flipped auto→manual
 
 
 def test_run_home_dispatches_actions(monkeypatch):
     """Home menu routes search/browse/settings then exits on ESC."""
-    actions = [(cli._SEARCH, ""), (cli._BROWSE, "popolari"), (cli._SETTINGS, ""), None]
+    actions = [
+        ("", (cli._SEARCH, "")),
+        ("", (cli._BROWSE, "popolari")),
+        ("", (cli._SETTINGS, "")),
+        None,
+    ]
     fake_fzf, _ = _fzf_script(actions)
-    monkeypatch.setattr(cli, "fzf", fake_fzf)
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     monkeypatch.setattr(cli, "input", lambda *a: "matrix", raising=False)
     called = {"search": 0, "browse": [], "settings": 0}
     monkeypatch.setattr(cli, "run_search", lambda c, q, o: called.__setitem__("search", q))
@@ -509,6 +527,55 @@ def test_fzf_passes_header_to_argv(monkeypatch):
     cli.fzf([("a", 1), ("b", 2)], "p> ", header="avviso")
     assert "--header" in captured["cmd"]
     assert "avviso" in captured["cmd"]
+
+
+def _stub_fzf_proc(monkeypatch, *, returncode=0, stdout=""):
+    captured = {}
+
+    class _Proc:
+        pass
+
+    _Proc.returncode = returncode
+    _Proc.stdout = stdout
+
+    def fake_run(cmd, **k):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    return captured
+
+
+def test_fzf_key_enter(monkeypatch):
+    # --expect prints an empty first line for Enter, then the selection.
+    cap = _stub_fzf_proc(monkeypatch, stdout="\n1\tb\n")
+    out = cli.fzf_key([("a", 10), ("b", 20)], "p> ")
+    assert out == ("", 20)
+    assert "--expect" in cap["cmd"] and "tab" in cap["cmd"]
+
+
+def test_fzf_key_tab(monkeypatch):
+    _stub_fzf_proc(monkeypatch, stdout="tab\n0\ta\n")
+    assert cli.fzf_key([("a", 10), ("b", 20)], "p> ") == ("tab", 10)
+
+
+def test_fzf_key_esc_returns_none(monkeypatch):
+    _stub_fzf_proc(monkeypatch, returncode=130, stdout="")
+    assert cli.fzf_key([("a", 10), ("b", 20)], "p> ") is None
+
+
+def test_fzf_key_single_item_still_launches(monkeypatch):
+    # With expect set, even a one-item list opens fzf so Tab stays reachable.
+    cap = _stub_fzf_proc(monkeypatch, stdout="tab\n0\ta\n")
+    assert cli.fzf_key([("a", 10)], "p> ") == ("tab", 10)
+    assert "fzf" in cap["cmd"]
+
+
+def test_pick_hint_reflects_default(monkeypatch):
+    auto = cli.PlayOpts(auto=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    manual = cli.PlayOpts(auto=False, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    assert "sorgente" in cli._pick_hint(auto)
+    assert "volo" in cli._pick_hint(manual)
 
 
 # --- pre-play audio/subtitle track menu ------------------------------------

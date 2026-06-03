@@ -105,6 +105,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Preferenza sottotitoli (--slang e --subs), in ordine. CSV, es: ita,eng",
         ),
         (
+            "auto_play",
+            "Riproduzione automatica",
+            "bool",
+            "on" if cfg.auto_play else "off",
+            "Invio sul titolo avvia subito il migliore; Tab apre la scelta manuale. Off = inverte.",
+        ),
+        (
             "autoplay",
             "Autoplay prossimo ep.",
             "bool",

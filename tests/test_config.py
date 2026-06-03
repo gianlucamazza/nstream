@@ -24,6 +24,7 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.subtitle_langs == ["ita", "eng"]
     assert cfg.history_enabled is True
     assert cfg.hwdec == "auto-safe"
+    assert cfg.auto_play is True
     assert cfg.autoplay is True
     assert cfg.autoplay_lead == 15
     assert cfg.lang_filter is True

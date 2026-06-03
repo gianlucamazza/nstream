@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib import resources
 from typing import cast
@@ -57,16 +57,23 @@ def _clear() -> None:
         sys.stdout.flush()
 
 
-def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None) -> T | None:
-    """Pick one of (label, value) pairs via fzf. Returns the value or None.
+def _run_fzf[T](
+    items: list[tuple[str, T]],
+    prompt: str,
+    *,
+    header: str | None = None,
+    expect: tuple[str, ...] = (),
+) -> tuple[str, T] | None:
+    """Core fzf picker. Returns (key, value): `key` is "" for Enter or one of
+    `expect` (e.g. "tab") when that key was pressed; None on ESC/no match.
 
-    `header` shows a transient notice above the list (e.g. why a title couldn't
-    play) — it survives the menu reopening, unlike a stderr line that scrolls away.
-    A single item is returned directly only when there's nothing to announce."""
+    With `expect`, fzf prints the pressed key as the first stdout line (empty for
+    Enter) before the selection, so the single-item shortcut is skipped to keep the
+    alternate key reachable."""
     if not items:
         return None
-    if len(items) == 1 and header is None:
-        return items[0][1]
+    if len(items) == 1 and header is None and not expect:
+        return ("", items[0][1])
     # Hidden leading index lets labels repeat without ambiguity.
     lines = "".join(f"{i}\t{label}\n" for i, (label, _) in enumerate(items))
     # No --height → fzf takes the full alternate screen and restores the terminal on
@@ -75,14 +82,46 @@ def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None
            "--delimiter", "\t", "--no-sort", "--reverse", "--cycle"]  # fmt: skip
     if header:
         cmd += ["--header", header]
+    if expect:
+        cmd += ["--expect", ",".join(expect)]
     try:
         proc = subprocess.run(cmd, input=lines, capture_output=True, text=True)
     except FileNotFoundError:
         print("nstream: fzf non trovato", file=sys.stderr)
         return None
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if proc.returncode != 0:  # ESC / Ctrl-C / no match
         return None
-    return items[int(proc.stdout.split("\t", 1)[0])][1]
+    out = proc.stdout
+    key = ""
+    if expect:  # first line is the pressed key (empty = Enter)
+        key, _, out = out.partition("\n")
+        key = key.strip()
+    out = out.strip()
+    if not out:
+        return None
+    return (key, items[int(out.split("\t", 1)[0])][1])
+
+
+def fzf[T](items: list[tuple[str, T]], prompt: str, *, header: str | None = None) -> T | None:
+    """Pick one of (label, value) pairs via fzf. Returns the value or None.
+
+    `header` shows a transient notice above the list (e.g. why a title couldn't
+    play) — it survives the menu reopening, unlike a stderr line that scrolls away.
+    A single item is returned directly only when there's nothing to announce."""
+    chosen = _run_fzf(items, prompt, header=header)
+    return chosen[1] if chosen else None
+
+
+def fzf_key[T](
+    items: list[tuple[str, T]],
+    prompt: str,
+    *,
+    header: str | None = None,
+    expect: tuple[str, ...] = ("tab",),
+) -> tuple[str, T] | None:
+    """Like `fzf` but also reports which key selected the item — used by the leaf
+    title/continue lists where Tab flips auto ↔ manual playback for that pick."""
+    return _run_fzf(items, prompt, header=header, expect=expect)
 
 
 def meta_label(m: Meta) -> str:
@@ -631,6 +670,9 @@ def _play_video(
 
     `auto` overrides `opts.auto` for this single video: the binge loop forces it
     True from the second episode on, so use `auto` (not `opts.auto`) here."""
+    # Resolving streams (Torrentio + RD) can take a moment; without a menu to mask
+    # the wait, say what's happening so the TUI doesn't look frozen.
+    print(f"▶ {title} — cerco la sorgente migliore…", file=sys.stderr)
     results = api.streams(cfg, typ, video_id)
     if not results:
         notice = _no_streams_message(cfg, typ, video_id, title)
@@ -732,10 +774,12 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
     # Loop the episode picker so finishing/backing out returns here, not to the list.
     header: str | None = None
     while True:
-        start_video = fzf(items, "episodio> ", header=header)
-        if not start_video:
+        chosen = fzf_key(items, "episodio> ", header=header or _pick_hint(opts))
+        if not chosen:
             return None
-        header = _play_series(cfg, meta["id"], name, eps, start_video, opts)
+        key, start_video = chosen
+        sel = replace(opts, auto=opts.auto ^ (key == "tab"))  # Tab flips auto↔manual
+        header = _play_series(cfg, meta["id"], name, eps, start_video, sel)
 
 
 def _entry_video(entry: HistoryEntry) -> Video | None:
@@ -780,15 +824,26 @@ def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None
     return notice
 
 
+def _pick_hint(opts: PlayOpts) -> str:
+    """Discoverability line for the leaf lists: Tab flips the default play mode."""
+    return "Tab: scegli sorgente/tracce" if opts.auto else "Tab: avvia al volo"
+
+
 def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> int:
     """Loop the title list: play a pick, then return here. ESC leaves to the caller
-    (HOME or the shell). A notice from playback is shown as the fzf header next time."""
+    (HOME or the shell). A notice from playback is shown as the fzf header next time.
+    Enter plays with the default mode; Tab flips auto↔manual for that pick (series
+    defer the choice to the episode picker)."""
     header: str | None = None
     while True:
-        meta = fzf(items, "titolo> ", header=header)
-        if not meta:
+        chosen = fzf_key(items, "titolo> ", header=header or _pick_hint(opts))
+        if not chosen:
             return 0
-        header = play_meta(cfg, meta, opts)
+        key, meta = chosen
+        sel = (
+            opts if meta.get("type") == "series" else replace(opts, auto=opts.auto ^ (key == "tab"))
+        )
+        header = play_meta(cfg, meta, sel)
 
 
 def run_search(cfg: Config, query: str, opts: PlayOpts) -> int:
@@ -816,10 +871,11 @@ def run_continue(cfg: Config, opts: PlayOpts) -> int:
     header: str | None = None
     while True:
         items = [(history_label(e), e) for e in entries]
-        chosen = fzf(items, "continua> ", header=header)
+        chosen = fzf_key(items, "continua> ", header=header or _pick_hint(opts))
         if chosen is None:
             return 0
-        header = play_history(cfg, chosen, opts)
+        key, entry = chosen
+        header = play_history(cfg, entry, replace(opts, auto=opts.auto ^ (key == "tab")))
         entries = state.recent(cfg)  # reflect updated positions, then re-show
 
 
@@ -833,11 +889,10 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
     """The TUI home: continue-watching + search + browse + settings, in one menu.
     Loops until the user backs out (ESC). This is the rich entry surface — the
     desktop/fuzzel launcher only opens it; no UI logic lives in fuzzel."""
-    header: str | None = None
+    notice: str | None = None
     while True:
-        items: list[tuple[str, object]] = []
-        if opts.history:
-            items += [(history_label(e), e) for e in state.recent(cfg)]
+        recent = state.recent(cfg) if opts.history else []
+        items: list[tuple[str, object]] = [(history_label(e), e) for e in recent]
         items += [
             ("🔍  Cerca…", (_SEARCH, "")),
             ("🔥  Popolari", (_BROWSE, "popolari")),
@@ -845,14 +900,19 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
             ("⭐  Top IMDb", (_BROWSE, "top")),
             ("⚙   Impostazioni", (_SETTINGS, "")),
         ]
-        chosen = fzf(items, "nstream> ", header=header)
-        header = None
+        # The Tab hint only applies to the continue-watching rows.
+        header = notice or (_pick_hint(opts) if recent else None)
+        chosen = fzf_key(items, "nstream> ", header=header)
+        notice = None
         if chosen is None:
             return 0
-        if not isinstance(chosen, tuple):  # a continue-watching entry
-            header = play_history(cfg, cast(HistoryEntry, chosen), opts)
+        key, value = chosen
+        if not isinstance(value, tuple):  # a continue-watching entry
+            notice = play_history(
+                cfg, cast("HistoryEntry", value), replace(opts, auto=opts.auto ^ (key == "tab"))
+            )
             continue
-        kind, value = chosen
+        kind, value = value
         if kind == _SEARCH:
             try:
                 query = input("cerca> ").strip()
@@ -906,7 +966,11 @@ def main() -> int:
         description="Native Stremio-like client (Cinemeta + Torrentio + Real-Debrid + mpv).",
     )
     parser.add_argument("query", nargs="*", help="titolo da cercare (altrimenti chiede)")
-    parser.add_argument("--play", action="store_true", help="riproduci subito il primo stream")
+    parser.add_argument(
+        "--play",
+        action="store_true",
+        help="forza la riproduzione automatica (anche se disattivata)",
+    )
     parser.add_argument(
         "--subs", action="store_true", help="sottotitoli automatici nella lingua preferita"
     )
@@ -940,7 +1004,7 @@ def main() -> int:
 
     sub_mode, sub_lang = _sub_options(args)
     opts = PlayOpts(
-        auto=args.play,
+        auto=cfg.auto_play or args.play,  # default mode; Tab flips it per pick
         sub_mode=sub_mode,
         sub_lang=sub_lang,
         history=cfg.history_enabled and not args.no_history,

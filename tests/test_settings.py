@@ -32,6 +32,7 @@ def test_items_cover_all_settings():
     assert keys == [
         "audio_langs",
         "subtitle_langs",
+        "auto_play",
         "autoplay",
         "autoplay_lead",
         "hwdec",
