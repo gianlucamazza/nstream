@@ -375,18 +375,65 @@ def unsupported_reason(info: StreamInfo, caps: Caps, spec: FilterSpec) -> str | 
 
 _SEED_BUCKET = 40  # past this many seeders, treat as "well-seeded enough"
 
+# Source quality rank for the score tiebreak (higher = better picture). Unknown source
+# is neutral (above a webrip, below a webdl) so untagged web releases aren't punished.
+_SOURCE_RANK = {
+    "remux": 6,
+    "bluray": 5,
+    "webdl": 4,
+    "webrip": 2,
+    "hdtv": 1,
+    "dvd": 1,
+    "cam": 0,
+    "ts": 0,
+    "tc": 0,
+    "scr": 0,
+}
+_SOURCE_UNKNOWN_RANK = 3
 
-def _score(info: StreamInfo) -> tuple:
-    # cached first; then resolution; HEVC over H264 at equal res; "well-seeded
-    # enough" (bucketed so popularity doesn't force a huge file); then the smaller
-    # file (faster streaming start) among equally-seeded options.
-    return (
-        info.cached,
-        info.resolution,
-        info.codec == "hevc",
-        min(info.seeders, _SEED_BUCKET),
-        -info.size_gb,
-    )
+
+def _lang_rank(info: StreamInfo, audio_langs: tuple[str, ...]) -> int:
+    """Audio-language preference for the score: 2 = tagged with a preferred language (or
+    multi-audio, which usually carries it), 1 = untagged (the common case — benefit of the
+    doubt), 0 = tagged only with non-preferred languages. Neutral (1) with no preference.
+
+    This makes the auto-pick favour a file that actually contains the wanted audio track
+    (mpv then selects it via --alang); without it an untagged release could win on quality
+    and leave mpv with no matching track."""
+    if not audio_langs or not info.languages:
+        return 1
+    if "multi" in info.languages or info.languages & set(audio_langs):
+        return 2
+    return 0
+
+
+def _source_rank(source: str) -> int:
+    return _SOURCE_RANK.get(source, _SOURCE_UNKNOWN_RANK)
+
+
+def score_components(
+    info: StreamInfo, audio_langs: tuple[str, ...] = ()
+) -> dict[str, float | int | bool]:
+    """The labelled score terms in precedence order (highest first). `_score` is just the
+    tuple of these values; `explain` renders the dict — keeping both here keeps the
+    auto-pick and its explanation in sync.
+
+    cached first (instant); then resolution; preferred audio language; better source
+    (remux/bluray > web > …); HEVC over H264; "well-seeded enough" (bucketed so popularity
+    doesn't force a huge file); finally the smaller file (faster start) among equals."""
+    return {
+        "cached": info.cached,
+        "resolution": info.resolution,
+        "lang": _lang_rank(info, audio_langs),
+        "source": _source_rank(info.source),
+        "hevc": info.codec == "hevc",
+        "seeders": min(info.seeders, _SEED_BUCKET),
+        "size": -info.size_gb,
+    }
+
+
+def _score(info: StreamInfo, audio_langs: tuple[str, ...] = ()) -> tuple:
+    return tuple(score_components(info, audio_langs).values())
 
 
 @dataclass(frozen=True)
@@ -397,7 +444,7 @@ class RankedStream:
 
 
 def _dedup_by_release(
-    infos: list[tuple[Stream, StreamInfo]],
+    infos: list[tuple[Stream, StreamInfo]], audio_langs: tuple[str, ...]
 ) -> list[tuple[Stream, StreamInfo]]:
     """Collapse the same release seen on multiple trackers (identical release_name),
     keeping the best-scoring copy. Streams without a release_name are kept as-is."""
@@ -409,7 +456,7 @@ def _dedup_by_release(
             out.append((s, info))
             continue
         cur = best.get(key)
-        if cur is None or _score(info) > _score(cur[1]):
+        if cur is None or _score(info, audio_langs) > _score(cur[1], audio_langs):
             best[key] = (s, info)
     out.extend(best.values())
     return out
@@ -424,7 +471,7 @@ def rank_streams(
     reason; `spec.dedup` drops duplicate releases entirely (not in either list)."""
     infos = [(s, parse_stream(s)) for s in streams]
     if spec.dedup:
-        infos = _dedup_by_release(infos)
+        infos = _dedup_by_release(infos, spec.audio_langs)
     playable: list[RankedStream] = []
     excluded: list[RankedStream] = []
     for s, info in infos:
@@ -437,5 +484,5 @@ def rank_streams(
             excluded.append(RankedStream(s, info, reason))
         else:
             playable.append(RankedStream(s, info))
-    playable.sort(key=lambda r: _score(r.info), reverse=True)
+    playable.sort(key=lambda r: _score(r.info, spec.audio_langs), reverse=True)
     return playable, excluded

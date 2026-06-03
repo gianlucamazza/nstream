@@ -349,3 +349,65 @@ def test_cached_marker_provider_agnostic():
     # Non-cached / no marker → not cached.
     assert quality.parse_stream({"name": "[RD download]\n1080p"}).cached is False
     assert quality.parse_stream({"name": "Torrentio\n1080p"}).cached is False
+
+
+# --- language- and source-aware scoring ------------------------------------
+
+_CAPS_HW = Caps(codecs=frozenset({"h264", "hevc", "hevc10"}), max_resolution=2160, vaapi=True)
+
+S_1080_ITA: Stream = {
+    "name": "Torrentio\n1080p",
+    "title": "Movie.2024.1080p.BluRay.x264.ITA-GRP\n👤 50 💾 8.0 GB ⚙️ x",
+}
+S_1080_UNTAGGED: Stream = {
+    "name": "Torrentio\n1080p",
+    "title": "Movie.2024.1080p.BluRay.x264-GRP\n👤 50 💾 8.0 GB ⚙️ x",
+}
+S_1080_WEBRIP: Stream = {
+    "name": "Torrentio\n1080p",
+    "title": "Movie.2024.1080p.WEBRip.x264-GRP\n👤 50 💾 8.0 GB ⚙️ x",
+}
+S_1080_CACHED_UNTAGGED: Stream = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Movie.2024.1080p.BluRay.x264-GRP\n👤 50 💾 8.0 GB ⚙️ x",
+}
+
+
+def test_score_prefers_audio_language_at_equal_resolution():
+    # Same res/source/seeders/size: the file tagged with a preferred language wins, so
+    # mpv finds the wanted track instead of falling back to an untagged (often English) one.
+    spec = FilterSpec(audio_langs=("ita", "eng"))
+    playable, _ = quality.rank_streams([S_1080_UNTAGGED, S_1080_ITA], _CAPS_HW, spec)
+    assert playable[0].stream is S_1080_ITA
+
+
+def test_score_no_language_preference_is_neutral():
+    # Without audio_langs the language term is neutral → order falls back to other terms
+    # (here identical), so both stay playable and the tagged one isn't artificially boosted.
+    spec = FilterSpec()
+    playable, _ = quality.rank_streams([S_1080_UNTAGGED, S_1080_ITA], _CAPS_HW, spec)
+    assert {r.stream["title"] for r in playable} == {
+        S_1080_UNTAGGED["title"],
+        S_1080_ITA["title"],
+    }
+
+
+def test_score_prefers_better_source_at_equal_resolution():
+    spec = FilterSpec()
+    playable, _ = quality.rank_streams([S_1080_WEBRIP, S_1080_ITA], _CAPS_HW, spec)
+    assert playable[0].stream is S_1080_ITA  # BluRay > WEBRip
+
+
+def test_cached_still_dominates_language():
+    # A cached untagged 1080p outranks a non-cached preferred-language 1080p: instant
+    # availability stays the top priority (language only breaks ties below cached+res).
+    spec = FilterSpec(audio_langs=("ita",))
+    playable, _ = quality.rank_streams([S_1080_ITA, S_1080_CACHED_UNTAGGED], _CAPS_HW, spec)
+    assert playable[0].stream is S_1080_CACHED_UNTAGGED
+
+
+def test_score_components_in_sync_with_score():
+    info = quality.parse_stream(S_1080_ITA)
+    comp = quality.score_components(info, ("ita",))
+    assert tuple(comp.values()) == quality._score(info, ("ita",))
+    assert comp["lang"] == 2 and comp["source"] == 5  # preferred lang, bluray

@@ -23,6 +23,31 @@ def test_main_preview_dispatch(monkeypatch):
     assert seen["argv"] == ["title", "movie", "tt1"]
 
 
+def test_run_explain_movie(monkeypatch, capsys):
+    # --explain ranks and prints WHY, without playing/casting.
+    meta = {"id": "tt1", "type": "movie", "name": "Dune"}
+    monkeypatch.setattr(cli.api, "search", lambda cfg, q: [meta])
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: meta)
+    monkeypatch.setattr(cli.api, "streams", lambda cfg, typ, vid: [
+        {"name": "[RD+] Torrentio\n4k", "title": "Dune.2024.2160p.BluRay.HEVC.ITA-GRP\n👤 9 💾 20 GB", "url": "u"},
+    ])  # fmt: skip
+    monkeypatch.setattr(cli.explain.tracks, "probe_tracks", lambda url: cli.tracks.Tracks())
+    rc = cli.run_explain(Config(torrentio_base="tb"), "dune")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "--explain · Dune" in out
+    assert "profilo LOCALE" in out and "profilo CAST" in out
+
+
+def test_dispatch_explain_requires_query(monkeypatch):
+    args = argparse.Namespace(cont=False, browse=None, query=[], explain=True)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    monkeypatch.setattr(cli, "_clear", lambda: None)
+    assert cli._dispatch(Config(torrentio_base="tb"), args, opts) == 2
+
+
 def test_display_title_movie():
     assert cli.display_title("Dune", None) == "Dune"
 
