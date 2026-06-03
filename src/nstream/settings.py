@@ -28,6 +28,27 @@ MAXRES_CHOICES = [
 # Per-key (min, max) bounds for the "int" editor (0 = off where allowed).
 _INT_BOUNDS = {"autoplay_lead": (1, 120), "min_seeders": (0, 100), "max_streams": (0, 500)}
 
+# `catt scan` text line: "192.0.2.10 - 43PUS9235/12 - Philips TPM191E". We parse
+# the name from text because `catt scan -j` is broken in current catt (CastInfo has
+# no _asdict). Shared by the settings device picker and cli's on-cast resolver.
+_SCAN_RE = re.compile(r"^[\d.]+ - (.+?) - ")
+
+
+def scan_devices() -> list[str]:
+    """Discover Chromecast device names on the LAN via `catt scan` (deduped, stable
+    order). Best-effort: returns [] if catt is missing or the scan fails."""
+    print("🔍 cerco Chromecast…", file=sys.stderr)
+    try:
+        proc = subprocess.run(["catt", "scan"], capture_output=True, text=True, timeout=15)
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return []
+    names: list[str] = []
+    for line in proc.stdout.splitlines():
+        m = _SCAN_RE.match(line.strip())
+        if m and m.group(1) not in names:
+            names.append(m.group(1))
+    return names
+
 
 def _fzf_select(
     rows: list[str], *, prompt: str, header: str = "", previews: list[str] | None = None
@@ -141,6 +162,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "bool",
             "on" if cfg.prefer_cast else "off",
             "Manda lo stream al Chromecast (catt). --cast/--local forzano per la sessione.",
+        ),
+        (
+            "cast_device",
+            "Dispositivo cast",
+            "castdev",
+            cfg.cast_device or "auto (scoperta)",
+            "Chromecast preferito (scoperta via catt). 'auto' = per-LAN (cast-resolve).",
         ),
         (
             "autoplay",
@@ -304,6 +332,13 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         i = _fzf_select(labels, prompt=f"{label}> ")
         if i is not None:
             config.save({key: MAXRES_CHOICES[i][1]})
+    elif kind == "castdev":
+        choices = ["(auto)"] + scan_devices()
+        i = _fzf_select(
+            choices, prompt="dispositivo> ", header="Chromecast preferito · ESC: annulla"
+        )
+        if i is not None:
+            config.save({"cast_device": "" if i == 0 else choices[i]})
     elif kind == "token":
         i = _fzf_select([name for _, name in _PROVIDERS], prompt="provider> ")
         if i is None:

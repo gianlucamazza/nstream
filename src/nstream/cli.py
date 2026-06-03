@@ -9,6 +9,7 @@ import json
 import os
 import re
 import select
+import shutil
 import socket
 import subprocess
 import sys
@@ -51,6 +52,7 @@ class PlayOpts:
     sub_lang: str | None  # force this language for sub_mode="auto"
     history: bool  # record/resume watch history
     autoplay: bool  # offer the next-episode overlay for series
+    cast_choose: bool = False  # force the device picker (explicit "cast this" action)
 
 
 def _clear() -> None:
@@ -121,7 +123,7 @@ def fzf_key[T](
     prompt: str,
     *,
     header: str | None = None,
-    expect: tuple[str, ...] = ("tab",),
+    expect: tuple[str, ...] = ("tab", "alt-c"),
 ) -> tuple[str, T] | None:
     """Like `fzf` but also reports which key selected the item — used by the leaf
     title/continue lists where Tab flips auto ↔ manual playback for that pick."""
@@ -495,14 +497,16 @@ def play(
     audio_id: int | None = None,
     sub_id: int | str | None = None,
     next_label: str | None = None,
+    cast_enabled: bool = False,
     work_dir: str | None = None,
-) -> tuple[float, float, bool]:
-    """Play `url` in mpv. Returns (position, duration, advance) where `advance`
-    is True when the next-episode overlay asked to continue to the next episode.
+) -> tuple[float, float, str]:
+    """Play `url` in mpv. Returns (position, duration, signal) where `signal` is
+    "next" when the next-episode overlay asked to continue, "cast" when the user hit
+    the in-player "send to TV" key (Alt-C), or "" otherwise.
 
     `work_dir` holds the IPC socket and overlay files; when omitted a private
     temp dir is created and removed here (the caller passes one to share it with
-    downloaded subtitles)."""
+    downloaded subtitles). `cast_enabled` binds Alt-C in mpv to move playback to the TV."""
     holder = {"position": 0.0, "duration": 0.0}
     with contextlib.ExitStack() as stack:
         if work_dir is None:
@@ -544,32 +548,37 @@ def play(
         args.append(f"--script={lua}")
         if start and start > 1:
             args.append(f"--script-opts-append=nstream-resume={start:.0f}")
+        # The next-episode card and the in-player "send to TV" key both report back via
+        # the same signal file. Pass it whenever either feature is active.
         if next_label:
             with open(info_path, "w", encoding="utf-8") as f:
                 f.write(next_label + "\n")
             args += [
                 f"--script-opts-append=nstream-info={info_path}",
-                f"--script-opts-append=nstream-signal={signal_path}",
                 f"--script-opts-append=nstream-lead={cfg.autoplay_lead}",
             ]
+        if next_label or cast_enabled:
+            args.append(f"--script-opts-append=nstream-signal={signal_path}")
+        if cast_enabled:
+            args.append("--script-opts-append=nstream-cast=yes")
         args.append(url)
         try:
             proc = subprocess.Popen(args)
         except FileNotFoundError:
             print("nstream: mpv non trovato", file=sys.stderr)
-            return (0.0, 0.0, False)
+            return (0.0, 0.0, "")
         tracker = threading.Thread(
             target=_track_position, args=(sock_path, holder, proc), daemon=True
         )
         tracker.start()
         proc.wait()
         tracker.join(timeout=2.0)
-        advance = False
-        if next_label:
+        signal = ""
+        if next_label or cast_enabled:
             with contextlib.suppress(OSError), open(signal_path, encoding="utf-8") as f:
-                advance = f.read().strip() == "next"
+                signal = f.read().strip()
 
-    return (holder["position"], holder["duration"], advance)
+    return (holder["position"], holder["duration"], signal)
 
 
 # --- cast (Chromecast via catt) ------------------------------------------
@@ -590,23 +599,33 @@ _CAST_DONE = 0.97
 _CAST_GIVEUP = 4
 
 
-def _resolve_device(cfg: Config) -> str | None:
+def _resolve_device(cfg: Config, *, choose: bool = False) -> str | None:
     """Device NAME for `catt -d`, or None to fall back to catt's own default.
 
-    A configured `cast_device` wins. Otherwise `cast-resolve` (from skill_cast)
-    picks the right Chromecast for this LAN; it fails loud (non-zero, candidates on
-    stderr) when the choice is ambiguous, which we surface as CastUnavailable rather
-    than casting to the wrong screen. A missing `cast-resolve` is not fatal — catt
-    has its own default device."""
-    if cfg.cast_device:
+    A configured `cast_device` wins (unless `choose`). Otherwise discover the LAN's
+    Chromecasts (`catt scan`): one → use it; several (or `choose`) → let the user pick
+    via fzf instead of casting to the wrong screen. With no discovery (catt missing or
+    empty), fall back to cast-resolve's per-LAN ladder. `choose=True` always offers the
+    picker (used by the explicit "cast this" / in-player move-to-TV actions)."""
+    if cfg.cast_device and not choose:
         return cfg.cast_device
-    try:
-        proc = subprocess.run(["cast-resolve"], capture_output=True, text=True)
-    except FileNotFoundError:
-        return None
-    if proc.returncode == 0:
-        return proc.stdout.strip() or None
-    raise CastUnavailable(proc.stderr.strip() or "cast-resolve: device non risolto")
+    devices = settings.scan_devices()
+    if not devices:
+        # Discovery found nothing (or catt missing) → fall back to cast-resolve's
+        # per-LAN ladder (auto / fail-loud on ambiguity), preserving prior behaviour.
+        try:
+            proc = subprocess.run(["cast-resolve"], capture_output=True, text=True)
+        except FileNotFoundError:
+            return None
+        if proc.returncode == 0:
+            return proc.stdout.strip() or None
+        raise CastUnavailable(proc.stderr.strip() or "cast-resolve: nessun Chromecast")
+    if len(devices) == 1 and not choose:
+        return devices[0]
+    chosen = fzf([(d, d) for d in devices], "dispositivo> ")
+    if chosen is None:
+        raise CastUnavailable("scelta dispositivo annullata")
+    return chosen
 
 
 def _cast_progress(info: dict) -> tuple[float, float, str]:
@@ -968,7 +987,7 @@ def _play_video(
             # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV
             # as an external file when requested, otherwise the receiver picks its own.
             try:
-                device = _resolve_device(cfg)
+                device = _resolve_device(cfg, choose=opts.cast_choose)
             except CastUnavailable as e:
                 print(f"nstream: {e}", file=sys.stderr)
                 return (str(e), False)
@@ -1006,11 +1025,24 @@ def _play_video(
                     return (None, False)  # backed out → return to the list
                 audio_id, sub_id, sub_paths = sel
             print(f"▶ {title} — {name_line}", file=sys.stderr)
-            pos, dur, advance = play(
+            cast_ok = shutil.which("catt") is not None  # enable in-player Alt-C → TV
+            pos, dur, signal = play(
                 cfg, title, chosen["url"],
                 start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
-                next_label=next_label, work_dir=work_dir,
+                next_label=next_label, cast_enabled=cast_ok, work_dir=work_dir,
             )  # fmt: skip
+            if signal == "cast":
+                # Alt-C in mpv: move this playback to the TV from the current position.
+                try:
+                    device = _resolve_device(cfg, choose=True)
+                except CastUnavailable as e:
+                    print(f"nstream: {e}", file=sys.stderr)
+                    advance = False
+                else:
+                    pos, dur, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
+                    advance = False
+            else:
+                advance = signal == "next"
     _clear()  # drop mpv's exit frame/logs before returning to the menu
     # Only persist a resume we can reason about: a real duration is needed for the
     # watched/near-end logic, otherwise the entry would stick forever.
@@ -1083,8 +1115,7 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
         if not chosen:
             return None
         key, start_video = chosen
-        sel = replace(opts, auto=opts.auto ^ (key == "tab"))  # Tab flips auto↔manual
-        header = _play_series(cfg, meta["id"], name, eps, start_video, sel)
+        header = _play_series(cfg, meta["id"], name, eps, start_video, _apply_key(opts, key))
 
 
 def _entry_video(entry: HistoryEntry) -> Video | None:
@@ -1130,8 +1161,17 @@ def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None
 
 
 def _pick_hint(opts: PlayOpts) -> str:
-    """Discoverability line for the leaf lists: Tab flips the default play mode."""
-    return "Tab: scegli sorgente/tracce" if opts.auto else "Tab: avvia al volo"
+    """Discoverability line for the leaf lists: Tab flips the play mode, Alt-C casts."""
+    tab = "Tab: scegli sorgente/tracce" if opts.auto else "Tab: avvia al volo"
+    return f"{tab}  ·  Alt-C: casta sul TV"
+
+
+def _apply_key(opts: PlayOpts, key: str) -> PlayOpts:
+    """Map a leaf-list selection key to per-pick options: Alt-C casts this title
+    (forcing the device picker); Tab flips auto↔manual; Enter keeps the default."""
+    if key == "alt-c":
+        return replace(opts, cast=True, cast_choose=True)
+    return replace(opts, auto=opts.auto ^ (key == "tab"))
 
 
 def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> int:
@@ -1145,9 +1185,10 @@ def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> in
         if not chosen:
             return 0
         key, meta = chosen
-        sel = (
-            opts if meta.get("type") == "series" else replace(opts, auto=opts.auto ^ (key == "tab"))
-        )
+        # Series defer auto/manual to the episode picker, but Alt-C (cast) still applies.
+        sel = replace(opts, cast=True, cast_choose=True) if key == "alt-c" else opts
+        if meta.get("type") != "series":
+            sel = _apply_key(opts, key)
         header = play_meta(cfg, meta, sel)
 
 
@@ -1180,7 +1221,7 @@ def run_continue(cfg: Config, opts: PlayOpts) -> int:
         if chosen is None:
             return 0
         key, entry = chosen
-        header = play_history(cfg, entry, replace(opts, auto=opts.auto ^ (key == "tab")))
+        header = play_history(cfg, entry, _apply_key(opts, key))
         entries = state.recent(cfg)  # reflect updated positions, then re-show
 
 
@@ -1213,9 +1254,7 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
             return 0
         key, value = chosen
         if not isinstance(value, tuple):  # a continue-watching entry
-            notice = play_history(
-                cfg, typecast("HistoryEntry", value), replace(opts, auto=opts.auto ^ (key == "tab"))
-            )
+            notice = play_history(cfg, typecast("HistoryEntry", value), _apply_key(opts, key))
             continue
         kind, value = value
         if kind == _SEARCH:

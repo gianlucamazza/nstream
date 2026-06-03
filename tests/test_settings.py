@@ -49,6 +49,7 @@ def test_items_cover_all_settings():
         "subtitle_langs",
         "auto_play",
         "prefer_cast",
+        "cast_device",
         "autoplay",
         "autoplay_lead",
         "hwdec",
@@ -87,3 +88,33 @@ def test_items_render_current_values():
     assert by_key["audio_langs"][3] == "jpn"
     assert by_key["autoplay"][3] == "off"
     assert by_key["torrentio_base"][3] == "✓ RealDebrid (••••)"
+
+
+# --- device discovery (Fase 1s) --------------------------------------------
+
+
+def test_scan_devices_parses_catt_scan(monkeypatch):
+    class _P:
+        returncode = 0
+        stdout = (
+            "Scanning Chromecasts...\n"
+            "192.0.2.10 - 43PUS9235/12 - Philips TPM191E\n"
+            "192.168.1.50 - Soggiorno - Google Nest\n"
+            "192.0.2.10 - 43PUS9235/12 - Philips TPM191E\n"  # dup
+        )
+
+    monkeypatch.setattr(settings.subprocess, "run", lambda *a, **k: _P())
+    assert settings.scan_devices() == ["43PUS9235/12", "Soggiorno"]
+
+
+def test_scan_devices_empty_on_failure(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(settings.subprocess, "run", boom)
+    assert settings.scan_devices() == []
+
+
+def test_cast_device_item_present():
+    keys = [it[0] for it in settings._items(Config(torrentio_base="sort=x|realdebrid=T"))]
+    assert "cast_device" in keys

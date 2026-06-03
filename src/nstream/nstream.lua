@@ -10,13 +10,14 @@
 --
 -- script-opts (read_options prefix "nstream"):
 --   nstream-info=<path>    file whose first line is the next-episode label
---   nstream-signal=<path>  file this script writes "next" to when advancing
+--   nstream-signal=<path>  file this script writes "next"/"cast" to for nstream
 --   nstream-lead=<sec>     how many seconds before the end to show the card
 --   nstream-resume=<sec>   resume position; when >1 the resume toast is shown
+--   nstream-cast=yes       bind Alt+C to hand playback to the TV (re-cast)
 
 local options = require 'mp.options'
 
-local opts = { info = "", signal = "", lead = 15, resume = 0 }
+local opts = { info = "", signal = "", lead = 15, resume = 0, cast = "" }
 options.read_options(opts, "nstream")
 
 local function read_first_line(path)
@@ -157,3 +158,19 @@ mp.register_event("end-file", function(ev)
         trigger()
     end
 end)
+
+-- In-player "send to TV": Alt+C signals nstream to re-cast from the current position
+-- and quits mpv. Bound for the whole session, only when nstream enabled it (catt found).
+if opts.cast == "yes" then
+    mp.add_forced_key_binding("alt+c", "nstream-cast", function()
+        if opts.signal ~= "" then
+            local f = io.open(opts.signal, "w")
+            if f then
+                f:write("cast\n")
+                f:close()
+            end
+        end
+        mp.osd_message("nstream: invio al TV...", 3)
+        mp.commandv("quit")
+    end)
+end
