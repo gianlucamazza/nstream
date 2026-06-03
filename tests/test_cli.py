@@ -973,3 +973,81 @@ def test_play_video_cast_unavailable_returns_notice(monkeypatch):
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
     )
     assert advance is False and notice == "nessun device"
+
+
+# --- cast audio-language switch (Fase 1q) -----------------------------------
+
+from nstream.config import Stream as _Stream  # noqa: E402
+
+_S_ITA: _Stream = {
+    "url": "http://ita",
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Film.2020.iTA.1080p.BluRay.DDP5.1.x264-GRP\n👤 20 💾 8.0 GB ⚙️ x",
+}
+_S_ENG_REMUX: _Stream = {
+    "url": "http://eng-remux",
+    "name": "[RD+] Torrentio\n4k",
+    "title": "Film.2020.ENG.2160p.UHD.BluRay.REMUX.TrueHD-GRP\n👤 30 💾 60.0 GB ⚙️ x",
+}
+_S_ENG_WEBDL: _Stream = {
+    "url": "http://eng-webdl",
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Film.2020.ENG.1080p.WEB-DL.DDP5.1.x264-GRP\n👤 10 💾 6.0 GB ⚙️ x",
+}
+
+
+def test_poll_wait_non_tty_sleeps(monkeypatch):
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    slept = []
+    monkeypatch.setattr(cli.time, "sleep", lambda t: slept.append(t))
+    assert cli._poll_wait(15.0) is None
+    assert slept == [15.0]
+
+
+def test_cast_languages_lists_compatible(monkeypatch):
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    langs = cli._cast_languages(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
+    assert langs == ("ita", "eng")  # preferred order; eng present via the WEB-DL
+
+
+def test_cast_resolver_picks_compatible_release(monkeypatch):
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    resolve = cli._cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
+    # ITA → the ITA release; ENG → the WEB-DL, never the TrueHD remux; missing → None
+    assert resolve("ita") == "http://ita"
+    assert resolve("eng") == "http://eng-webdl"
+    assert resolve("ger") is None
+
+
+def test_cast_hotkey_switches_audio(monkeypatch):
+    calls = _cast_run(
+        monkeypatch,
+        info_seq=[
+            {"player_state": "PLAYING", "current_time": 30.0, "duration": 100.0},
+            {"player_state": "PLAYING", "current_time": 35.0, "duration": 100.0},
+            {"player_state": "IDLE", "duration": 100.0},
+        ],
+    )
+    keys = iter(["a", None, None, None, None])
+    monkeypatch.setattr(cli, "_poll_wait", lambda _t: next(keys, None))
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt: "eng")
+    cli.cast(
+        CFG, "Film", "http://ita",
+        device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: "http://eng",
+    )  # fmt: skip
+    recasts = [c for c in calls if "cast" in c and "http://eng" in c]
+    assert recasts and "-t" in recasts[0]  # re-cast the eng url with a seek
+
+
+def test_cast_hotkey_esc_keeps_current(monkeypatch):
+    calls = _cast_run(monkeypatch, info_seq=[{"player_state": "IDLE"}])
+    keys = iter(["a", None, None, None, None])
+    monkeypatch.setattr(cli, "_poll_wait", lambda _t: next(keys, None))
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt: None)  # ESC
+    resolved = []
+    cli.cast(
+        CFG, "Film", "http://ita",
+        device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: resolved.append(lang),
+    )  # fmt: skip
+    assert resolved == []  # ESC → resolver never called, no re-cast
+    assert not [c for c in calls if "cast" in c and c.count("cast") and "-t" in c]
