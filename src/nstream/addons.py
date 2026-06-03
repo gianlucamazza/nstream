@@ -11,16 +11,16 @@ token, so it must never be written to the cache file in clear.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
-import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import api
+from . import api, util
 from .config import Config
 
 CACHE_TTL = 86400  # re-fetch a user addon's manifest at most once a day
@@ -45,24 +45,17 @@ def _cache_path() -> Path:
 
 
 def _load_cache() -> dict:
-    try:
-        data = json.loads(_cache_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return util.load_json(_cache_path(), {})
 
 
 def _store_cache(cache: dict) -> None:
-    path = _cache_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".manifests-", suffix=".tmp", dir=path.parent)
-        os.chmod(tmp, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False)
-        os.replace(tmp, path)
-    except OSError:
-        pass  # the cache is best-effort; never block playback on it
+    # The cache is best-effort; never block playback on a write failure.
+    with contextlib.suppress(OSError):
+        util.atomic_write(
+            _cache_path(),
+            lambda f: json.dump(cache, f, ensure_ascii=False),
+            prefix=".manifests-",
+        )
 
 
 # --- manifest parsing ----------------------------------------------------

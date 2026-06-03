@@ -17,8 +17,9 @@ URL) is never logged.
 from __future__ import annotations
 
 import json
-import subprocess
 from dataclasses import dataclass, field
+
+from . import util
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ def _parse_ffprobe(data: dict) -> Tracks:
     return Tracks(audio=audio, subs=subs)
 
 
-def probe_tracks(url: str, *, timeout: float = 20.0) -> Tracks:
+def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
     """Probe `url` for embedded audio/subtitle tracks. Returns empty lists if ffprobe
     is unavailable or the probe fails (caller falls back to mpv defaults)."""
     cmd = [
@@ -69,9 +70,8 @@ def probe_tracks(url: str, *, timeout: float = 20.0) -> Tracks:
         "-show_entries", "stream=index,codec_type,codec_name,channels:stream_tags=language,title",
         url,
     ]  # fmt: skip
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
+    proc = util.run_cmd(cmd, timeout=timeout)
+    if proc is None:
         return Tracks()  # ffprobe missing or timed out
     try:
         data = json.loads(proc.stdout)

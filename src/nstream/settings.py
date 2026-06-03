@@ -11,11 +11,10 @@ import getpass
 import os
 import re
 import shlex
-import subprocess
 import sys
 import tempfile
 
-from . import addons, config
+from . import addons, config, util
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -40,9 +39,8 @@ def scan_devices() -> list[tuple[str, str]]:
     to mDNS name-resolution flakiness (e.g. right after a network change). Best-effort:
     returns [] if catt is missing or the scan fails."""
     print("🔍 cerco Chromecast…", file=sys.stderr)
-    try:
-        proc = subprocess.run(["catt", "scan"], capture_output=True, text=True, timeout=15)
-    except (FileNotFoundError, subprocess.SubprocessError):
+    proc = util.run_cmd(["catt", "scan"], timeout=util.CATT_SCAN_TIMEOUT)
+    if proc is None:
         return []
     devices: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -78,9 +76,8 @@ def _fzf_select(
                 "--preview", f'sed -n "$(({{n}}+1))p" {shlex.quote(pv_path)}',
                 "--preview-window", "down:3:wrap",
             ]  # fmt: skip
-        try:
-            proc = subprocess.run(args, input=lines, capture_output=True, text=True)
-        except FileNotFoundError:
+        proc = util.run_cmd(args, input=lines)
+        if proc is None:
             print("nstream: fzf non trovato", file=sys.stderr)
             return None
     finally:

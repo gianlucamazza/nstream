@@ -103,7 +103,7 @@ def test_scan_devices_parses_catt_scan(monkeypatch):
             "192.168.1.228 - 43PUS9235/12 - Philips TPM191E\n"  # dup
         )
 
-    monkeypatch.setattr(settings.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(settings.util, "run_cmd", lambda *a, **k: _P())
     assert settings.scan_devices() == [
         ("43PUS9235/12", "192.168.1.228"),
         ("Soggiorno", "192.168.1.50"),
@@ -111,10 +111,8 @@ def test_scan_devices_parses_catt_scan(monkeypatch):
 
 
 def test_scan_devices_empty_on_failure(monkeypatch):
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(settings.subprocess, "run", boom)
+    # run_cmd returns None when catt is missing or the scan fails.
+    monkeypatch.setattr(settings.util, "run_cmd", lambda *a, **k: None)
     assert settings.scan_devices() == []
 
 

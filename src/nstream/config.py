@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
+
+from . import util
 
 
 class ConfigError(Exception):
@@ -187,11 +187,7 @@ def load() -> Config:
 
 def load_raw() -> dict:
     """Return the raw config dict, or {} if the file is missing/corrupt."""
-    try:
-        data = json.loads(config_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return util.load_json(config_path(), {})
 
 
 def save(updates: dict) -> None:
@@ -199,15 +195,8 @@ def save(updates: dict) -> None:
     preserving keys nstream doesn't model. The file holds the RD token."""
     data = load_raw()
     data.update(updates)
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=path.parent)
-    try:
-        os.chmod(tmp, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    util.atomic_write(
+        config_path(),
+        lambda f: json.dump(data, f, ensure_ascii=False, indent=2),
+        prefix=".config-",
+    )

@@ -7,12 +7,10 @@ file yields an empty history so playback is never blocked by state errors.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
-import tempfile
 import time
 
+from . import util
 from .config import Config, HistoryEntry, Video, state_path
 
 # Past this fraction of the runtime a title counts as watched and drops out of
@@ -51,11 +49,7 @@ def make_entry(
 def load_history(cfg: Config) -> dict[str, HistoryEntry]:
     if not cfg.history_enabled:
         return {}
-    try:
-        data = json.loads(state_path().read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return util.load_json(state_path(), {})
 
 
 # Within this many seconds of the end a title counts as finished, even if the
@@ -85,20 +79,11 @@ def save_entry(cfg: Config, entry: HistoryEntry) -> None:
     else:
         history[vid] = entry
 
-    path = state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Unique temp name so concurrent nstream processes don't clobber each other's
-    # write before the atomic replace.
-    fd, tmp = tempfile.mkstemp(prefix=".history-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(history, f, ensure_ascii=False)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except OSError:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    util.atomic_write(
+        state_path(),
+        lambda f: json.dump(history, f, ensure_ascii=False),
+        prefix=".history-",
+    )
 
 
 def recent(cfg: Config, limit: int = 30) -> list[HistoryEntry]:

@@ -36,21 +36,9 @@ def test_parse_empty_when_no_av_tracks():
     assert tr.empty()
 
 
-def test_probe_tracks_missing_ffprobe(monkeypatch):
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(tracks.subprocess, "run", boom)
-    assert tracks.probe_tracks("http://u").empty()
-
-
-def test_probe_tracks_timeout(monkeypatch):
-    import subprocess as sp
-
-    def slow(*a, **k):
-        raise sp.TimeoutExpired(cmd="ffprobe", timeout=1)
-
-    monkeypatch.setattr(tracks.subprocess, "run", slow)
+def test_probe_tracks_missing_or_failed_ffprobe(monkeypatch):
+    # run_cmd returns None when the binary is missing or the probe times out.
+    monkeypatch.setattr(tracks.util, "run_cmd", lambda *a, **k: None)
     assert tracks.probe_tracks("http://u").empty()
 
 
@@ -60,6 +48,6 @@ def test_probe_tracks_parses_stdout(monkeypatch):
     class _P:
         stdout = json.dumps(FFPROBE_JSON)
 
-    monkeypatch.setattr(tracks.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(tracks.util, "run_cmd", lambda *a, **k: _P())
     tr = tracks.probe_tracks("http://u")
     assert len(tr.audio) == 2 and len(tr.subs) == 2

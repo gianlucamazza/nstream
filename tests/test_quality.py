@@ -193,11 +193,8 @@ def test_caps_ignores_encode_only():
 
 def test_detect_caps_fallback_when_vainfo_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-
-    def boom(*a, **k):
-        raise FileNotFoundError
-
-    monkeypatch.setattr(quality.subprocess, "run", boom)
+    # run_cmd returns None when vainfo is missing or fails.
+    monkeypatch.setattr(quality.util, "run_cmd", lambda *a, **k: None)
     caps = quality.detect_caps(use_cache=False)
     assert "hevc" in caps.codecs and "av1" not in caps.codecs  # conservative default
     assert caps.vaapi is False  # no real probe → don't claim VAAPI
@@ -210,7 +207,7 @@ def test_detect_caps_sets_vaapi_and_caches(tmp_path, monkeypatch):
         stdout = VAINFO_NO_AV1
         stderr = ""
 
-    monkeypatch.setattr(quality.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(quality.util, "run_cmd", lambda *a, **k: _P())
     caps = quality.detect_caps(use_cache=False)
     assert caps.vaapi is True
     # Cached round-trip preserves the vaapi flag (cache v2).
