@@ -151,6 +151,18 @@ def test_play_movie_no_script_no_advance(stub_mpv):
     assert adv is False
 
 
+def test_clear_noop_without_tty(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False)
+    cli._clear()
+    assert capsys.readouterr().out == ""  # never clears a non-interactive stream
+
+
+def test_clear_emits_escape_on_tty(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    cli._clear()
+    assert "\x1b[2J" in capsys.readouterr().out
+
+
 def test_play_aid_sid_injected(stub_mpv):
     cfg = Config(torrentio_base="tb", hwdec="")
     cli.play(cfg, "Movie", "http://u", audio_id=2, sub_id=3)

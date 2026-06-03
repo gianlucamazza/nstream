@@ -34,9 +34,10 @@ def _fzf_select(
     if not rows:
         return None
     lines = "".join(f"{i}\t{r}\n" for i, r in enumerate(rows))
+    # No --height → full alternate screen (clean enter/exit, no scrollback buildup).
     args = [
         "fzf", "--prompt", prompt, "--with-nth", "2..", "--delimiter", "\t",
-        "--no-sort", "--reverse", "--height", "90%",
+        "--no-sort", "--reverse", "--cycle",
     ]  # fmt: skip
     if header:
         args += ["--header", header]
