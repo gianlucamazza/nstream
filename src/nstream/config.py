@@ -16,12 +16,22 @@ class ConfigError(Exception):
 
 
 class Meta(TypedDict, total=False):
-    """A Cinemeta catalog/meta entry."""
+    """A Cinemeta catalog/meta entry. Catalog responses carry the first four fields;
+    the full meta endpoint adds the rest (surfaced in the preview pane)."""
 
     id: str
     type: str
     name: str
     releaseInfo: str
+    poster: str
+    background: str
+    description: str
+    imdbRating: str
+    genres: list[str]
+    runtime: str
+    cast: list[str]
+    director: list[str]
+    released: str
 
 
 class Video(TypedDict, total=False):
@@ -31,6 +41,9 @@ class Video(TypedDict, total=False):
     season: int
     episode: int
     name: str
+    overview: str
+    thumbnail: str
+    released: str
 
 
 class Stream(TypedDict, total=False):
@@ -109,6 +122,24 @@ class Config:
     dedup: bool = True  # collapse the same release across trackers
     max_streams: int = 20  # cap the manual menu (0 = no cap)
     mpv_args: list[str] = field(default_factory=list)
+    # TUI appearance. nerd_font: "auto" (env opt-in) | "on" | "off"; posters: render
+    # poster thumbnails in the fzf preview pane (needs chafa); image_mode: "auto" |
+    # "off" to force the image protocol off regardless of terminal.
+    nerd_font: str = "auto"
+    posters: bool = True
+    image_mode: str = "auto"
+
+
+# Allowed values for the enum-like string config fields (bad values fall back to default).
+_ENUM_VALUES: dict[str, set[str]] = {
+    "nerd_font": {"auto", "on", "off"},
+    "image_mode": {"auto", "off"},
+}
+
+
+def _enum_str(raw: dict, key: str, default: str) -> str:
+    val = str(raw.get(key, default))
+    return val if val in _ENUM_VALUES[key] else default
 
 
 # (min, max) bounds for the integer config fields, shared with the settings editor so
@@ -185,6 +216,9 @@ def load() -> Config:
         dedup=bool(raw.get("dedup", Config.dedup)),
         max_streams=_bounded_int(raw, "max_streams", Config.max_streams),
         mpv_args=list(raw.get("mpv_args", [])),
+        nerd_font=_enum_str(raw, "nerd_font", Config.nerd_font),
+        posters=bool(raw.get("posters", Config.posters)),
+        image_mode=_enum_str(raw, "image_mode", Config.image_mode),
     )
 
 

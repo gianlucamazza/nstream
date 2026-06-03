@@ -35,6 +35,26 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.dedup is True
     assert cfg.max_streams == 20
     assert cfg.mpv_args == []
+    assert cfg.nerd_font == "auto"
+    assert cfg.posters is True
+    assert cfg.image_mode == "auto"
+
+
+def test_ui_fields_override_and_validate(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(
+        tmp_path,
+        {
+            "torrentio_base": "tb",
+            "nerd_font": "on",
+            "posters": False,
+            "image_mode": "bogus",  # not in the allowlist → default "auto"
+        },
+    )
+    cfg = config.load()
+    assert cfg.nerd_font == "on"
+    assert cfg.posters is False
+    assert cfg.image_mode == "auto"
 
 
 def test_stream_filter_overrides_and_clamp(tmp_path, monkeypatch):
