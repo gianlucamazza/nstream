@@ -117,6 +117,23 @@ def catalog(
     return _dedup(metas, lambda m: m.get("id") or id(m))
 
 
+def meta(cfg: Config, typ: str, video_id: str) -> dict:
+    """Full Cinemeta-style meta object for an id (first meta addon that answers)."""
+    for addon in addons.effective_addons(cfg):
+        if not addons.serves(addon, "meta", typ, video_id):
+            continue
+        try:
+            data = http_get_json(
+                f"{addon.base}/meta/{typ}/{video_id}.json", what=f"meta ({addon.name})"
+            )
+        except NetworkError:
+            continue
+        obj = data.get("meta")
+        if obj:
+            return obj
+    return {}
+
+
 def episodes(cfg: Config, series_id: str) -> list[Video]:
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "meta", "series", series_id):
