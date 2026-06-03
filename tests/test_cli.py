@@ -152,17 +152,49 @@ def test_play_movie_no_script_no_advance(stub_mpv):
 
 
 def test_play_hwdec_injected_when_configured(stub_mpv, monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
-    cfg = Config(torrentio_base="tb", hwdec="auto-safe", mpv_args=[])
+    # No mpv.conf hwdec; concrete nstream value → injected as-is.
+    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: None)
+    cfg = Config(torrentio_base="tb", hwdec="vaapi", mpv_args=[])
     cli.play(cfg, "Movie", "http://u")
-    assert "--hwdec=auto-safe" in _FakePopen.last_args
+    assert "--hwdec=vaapi" in _FakePopen.last_args
 
 
 def test_play_hwdec_not_injected_when_user_set(stub_mpv, monkeypatch):
-    monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: opt == "hwdec")
+    # A concrete method in mpv.conf is respected, nothing injected.
+    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "vaapi" if opt == "hwdec" else None)
     cfg = Config(torrentio_base="tb", hwdec="auto-safe")
     cli.play(cfg, "Movie", "http://u")
     assert not any(a.startswith("--hwdec") for a in _FakePopen.last_args)
+
+
+# --- hwdec auto→vaapi upgrade (_hwdec_defaults) -----------------------------
+
+
+def test_hwdec_auto_upgraded_to_detected(monkeypatch):
+    """mpv.conf auto-safe + VAAPI detected → nstream pins --hwdec=vaapi (CLI wins)."""
+    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "auto-safe" if opt == "hwdec" else None)
+    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps(vaapi=True))
+    monkeypatch.setattr(cli.quality, "preferred_hwdec", lambda caps: "vaapi")
+    assert cli._hwdec_defaults(Config(torrentio_base="tb", hwdec="auto-safe")) == ["--hwdec=vaapi"]
+
+
+def test_hwdec_auto_no_detection_defers_to_conf(monkeypatch):
+    """auto in mpv.conf but no GPU detected → leave mpv.conf in charge."""
+    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "auto-safe" if opt == "hwdec" else None)
+    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps(vaapi=False))
+    monkeypatch.setattr(cli.quality, "preferred_hwdec", lambda caps: None)
+    assert cli._hwdec_defaults(Config(torrentio_base="tb", hwdec="auto-safe")) == []
+
+
+def test_hwdec_mpv_args_override_defers(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: "auto-safe")
+    cfg = Config(torrentio_base="tb", hwdec="auto-safe", mpv_args=["--hwdec=foo"])
+    assert cli._hwdec_defaults(cfg) == []
+
+
+def test_hwdec_disabled_when_empty(monkeypatch):
+    monkeypatch.setattr(cli, "_mpv_conf_get", lambda opt: None)
+    assert cli._hwdec_defaults(Config(torrentio_base="tb", hwdec="")) == []
 
 
 # --- language preference (--alang/--slang) ---------------------------------
