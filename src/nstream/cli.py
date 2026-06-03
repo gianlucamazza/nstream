@@ -7,6 +7,7 @@ import contextlib
 import gzip
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import resources
 from typing import cast
 
@@ -70,7 +72,14 @@ def fzf[T](items: list[tuple[str, T]], prompt: str) -> T | None:
 
 
 def meta_label(m: Meta) -> str:
-    return f"{m.get('type', '?'):6s} {m.get('name', '?')}  ({m.get('releaseInfo', '')})"
+    info = m.get("releaseInfo", "")
+    label = f"{m.get('type', '?'):6s} {m.get('name', '?')}  ({info})"
+    # Cheap hint from the slim catalog (year only): flag titles from a future year.
+    # Same-year-but-unreleased titles are caught precisely at selection time.
+    year = re.match(r"(\d{4})", str(info))
+    if year and int(year.group(1)) > datetime.now(UTC).year:
+        label += "  · 🎬 in uscita"
+    return label
 
 
 def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
@@ -382,6 +391,25 @@ def play(
 # --- flow ----------------------------------------------------------------
 
 
+def _future_release(iso: str | None) -> datetime | None:
+    """Parse a Cinemeta `released` ISO date; return it only if it's in the future."""
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt > datetime.now(UTC) else None
+
+
+def _no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
+    """A specific 'not released yet' notice when a title has no streams, else generic."""
+    released = _future_release(api.meta(cfg, typ, video_id).get("released"))
+    if released:
+        return f"🎬 «{title}» non ancora disponibile — uscita prevista il {released:%d/%m/%Y}"
+    return f"nessuno stream disponibile per «{title}»"
+
+
 def _pick_stream(cfg: Config, results: list[Stream], *, auto: bool) -> Stream | None:
     """Rank streams by what the hardware can actually play, then auto-pick the best
     or show an fzf menu (playable first, unsupported ones last marked ⚠)."""
@@ -443,7 +471,7 @@ def _play_video(
     True from the second episode on, so use `auto` (not `opts.auto`) here."""
     results = api.streams(cfg, typ, video_id)
     if not results:
-        print("nstream: nessuno stream disponibile", file=sys.stderr)
+        print(f"nstream: {_no_streams_message(cfg, typ, video_id, title)}", file=sys.stderr)
         return (1, False)
     chosen = _pick_stream(cfg, results, auto=auto)
     if not chosen:

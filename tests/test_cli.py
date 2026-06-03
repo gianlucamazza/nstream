@@ -193,6 +193,35 @@ def test_lang_defaults_not_when_in_mpv_conf(monkeypatch):
     assert not any(f.startswith("--slang") for f in flags)
 
 
+def test_future_release_parsing():
+    assert cli._future_release("2999-12-18T00:00:00.000Z") is not None  # far future
+    assert cli._future_release("2000-01-01T00:00:00.000Z") is None  # past
+    assert cli._future_release(None) is None
+    assert cli._future_release("not-a-date") is None
+
+
+def test_no_streams_message_upcoming(monkeypatch):
+    monkeypatch.setattr(cli.api, "meta", lambda *a, **k: {"released": "2999-12-18T00:00:00.000Z"})
+    msg = cli._no_streams_message(Config(torrentio_base="tb"), "movie", "tt1", "Dune 3")
+    assert "non ancora disponibile" in msg and "18/12/2999" in msg
+
+
+def test_no_streams_message_released(monkeypatch):
+    monkeypatch.setattr(cli.api, "meta", lambda *a, **k: {"released": "2000-01-01T00:00:00.000Z"})
+    msg = cli._no_streams_message(Config(torrentio_base="tb"), "movie", "tt1", "Old Film")
+    assert "nessuno stream disponibile" in msg
+
+
+def test_meta_label_upcoming_future_year():
+    label = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2999"})
+    assert "in uscita" in label
+
+
+def test_meta_label_no_hint_past_year():
+    label = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2000"})
+    assert "in uscita" not in label
+
+
 def test_quiet_defaults_injected(monkeypatch):
     monkeypatch.setattr(cli, "_mpv_conf_has", lambda opt: False)
     cfg = Config(torrentio_base="tb", mpv_quiet=True)
