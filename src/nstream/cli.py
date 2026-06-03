@@ -577,12 +577,14 @@ class CastUnavailable(Exception):
 
 
 # How often to poll `catt info -j` while casting (resume tracking + end detection).
-_CAST_POLL = 5.0
+# Each poll spawns a `catt` process (new castv2 connection), so keep it coarse: 15s
+# costs ~240 polls over a 2h film and resume granularity of ≤15s is plenty.
+_CAST_POLL = 15.0
 # Fraction of the runtime past which a stop counts as "finished" (→ binge advance).
 _CAST_DONE = 0.97
 # Give up if the cast never starts playing within this many polls (~60s): the device
 # may be unreachable or the receiver refused the media — don't poll forever.
-_CAST_GIVEUP = 12
+_CAST_GIVEUP = 4
 
 
 def _resolve_device(cfg: Config) -> str | None:
@@ -1037,7 +1039,7 @@ def run_search(cfg: Config, query: str, opts: PlayOpts) -> int:
 
 
 def run_browse(cfg: Config, cat: str, opts: PlayOpts) -> int:
-    metas = api.catalog(cfg, "movie", cat) + api.catalog(cfg, "series", cat)
+    metas = api.browse(cfg, cat)  # movies + series, fetched concurrently
     if not metas:
         print("nstream: catalogo vuoto", file=sys.stderr)
         return 1

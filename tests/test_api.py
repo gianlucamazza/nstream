@@ -10,6 +10,13 @@ from nstream.config import Config
 CFG = Config(torrentio_base="tb")
 
 
+@pytest.fixture(autouse=True)
+def _clear_meta_cache():
+    api.clear_cache()
+    yield
+    api.clear_cache()
+
+
 def _addon(name, base, resource, types=("movie",), idp=("tt",), catalogs=()):
     return addons.Addon(
         base=base,
@@ -101,3 +108,104 @@ def test_episodes_returns_first_with_videos(monkeypatch):
     monkeypatch.setattr(api, "http_get_json", fake_get)
     vids = api.episodes(CFG, "tt1")
     assert [(v["season"], v["episode"]) for v in vids] == [(1, 1), (1, 2)]  # sorted
+
+
+# --- gzip, browse, cache (Fase 1p) -----------------------------------------
+
+import gzip as _gzip  # noqa: E402
+import json as _json  # noqa: E402
+
+
+class _Resp:
+    """Minimal urlopen() context-manager stand-in."""
+
+    def __init__(self, body: bytes, headers: dict | None = None):
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_http_get_json_plain(monkeypatch):
+    body = _json.dumps({"ok": 1}).encode()
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: _Resp(body))
+    assert api.http_get_json("http://x", what="t") == {"ok": 1}
+
+
+def test_http_get_json_gzip(monkeypatch):
+    body = _gzip.compress(_json.dumps({"ok": 2}).encode())
+    resp = _Resp(body, {"Content-Encoding": "gzip"})
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: resp)
+    assert api.http_get_json("http://x", what="t") == {"ok": 2}
+
+
+def test_http_get_json_corrupt_gzip_raises(monkeypatch):
+    resp = _Resp(b"\x1f\x8bnot-gzip", {"Content-Encoding": "gzip"})
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: resp)
+    with pytest.raises(api.NetworkError, match="non valida"):
+        api.http_get_json("http://x", what="t")
+
+
+def test_browse_combines_movie_and_series(monkeypatch):
+    cine = _addon(
+        "Cine",
+        "http://cine",
+        "catalog",
+        types=("movie", "series"),
+        catalogs=(("movie", "top"), ("series", "top")),
+    )
+    cine = addons.Addon(**{**cine.__dict__, "builtin": True})
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+
+    def fake_get(url, **k):
+        typ = "movie" if "/movie/" in url else "series"
+        return {"metas": [{"id": f"{typ}1", "name": typ}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    ids = [m["id"] for m in api.browse(CFG, "top")]
+    assert set(ids) == {"movie1", "series1"}
+
+
+def test_catalog_caches_within_ttl(monkeypatch):
+    cine = addons.Addon(
+        base="http://cine",
+        name="Cine",
+        builtin=True,
+        resources={"catalog": {"types": ["movie"], "idPrefixes": ["tt"]}},
+    )
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+    calls = {"n": 0}
+
+    def fake_get(url, **k):
+        calls["n"] += 1
+        return {"metas": [{"id": "tt1"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    api.catalog(CFG, "movie", "top")
+    api.catalog(CFG, "movie", "top")
+    assert calls["n"] == 1  # second call served from cache
+    api.clear_cache()
+    api.catalog(CFG, "movie", "top")
+    assert calls["n"] == 2  # cache cleared → refetched
+
+
+def test_streams_not_cached(monkeypatch):
+    a = _addon("A", "http://a", "stream")
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])
+    calls = {"n": 0}
+
+    def fake_get(url, **k):
+        calls["n"] += 1
+        return {"streams": [{"url": "u1"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    api.streams(CFG, "movie", "tt1")
+    api.streams(CFG, "movie", "tt1")
+    assert calls["n"] == 2  # streams must never be cached

@@ -191,7 +191,7 @@ first run, if no config exists, nstream prompts for the Real-Debrid token and wr
 | Path | Role |
 |------|------|
 | `src/nstream/cli.py` | argparse entry point, fzf/mpv orchestration, subtitles, resume |
-| `src/nstream/api.py` | addon resource dispatch (search/catalog/streams/subtitles) with retry/backoff |
+| `src/nstream/api.py` | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
 | `src/nstream/addons.py` | Stremio addon-protocol client (manifests, dispatch, cache) |
 | `src/nstream/quality.py` | hardware-aware stream parsing/ranking (vainfo caps, filter) |
 | `src/nstream/settings.py` | native fzf settings menu (config + addons) |
