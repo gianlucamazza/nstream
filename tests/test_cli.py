@@ -720,9 +720,9 @@ def test_pick_stream_cast_uses_cast_caps_and_audio(monkeypatch):
     seen = {}
     playable = _ranked(2)
 
-    def fake_rank(streams, caps, **k):
+    def fake_rank(streams, caps, spec):
         seen["caps"] = caps
-        seen["cast_audio"] = k.get("cast_audio")
+        seen["cast_audio"] = spec.cast_audio
         return (playable, [])
 
     monkeypatch.setattr(cli.quality, "rank_streams", fake_rank)
