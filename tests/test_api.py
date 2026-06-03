@@ -33,7 +33,7 @@ def test_streams_aggregate_and_dedup(monkeypatch):
     assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["u1", "u2", "u3"]
 
 
-def test_streams_one_addon_fails_does_not_block(monkeypatch):
+def test_streams_one_addon_fails_does_not_block(monkeypatch, capsys):
     a = _addon("A", "http://a", "stream")
     b = _addon("B", "http://b", "stream")
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a, b])
@@ -45,6 +45,8 @@ def test_streams_one_addon_fails_does_not_block(monkeypatch):
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
     assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["u3"]
+    # No per-addon error spam (avoids the double "stream … / nessuno stream" message).
+    assert capsys.readouterr().err == ""
 
 
 def test_streams_skips_addon_not_serving_type(monkeypatch):

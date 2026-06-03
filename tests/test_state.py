@@ -42,6 +42,13 @@ def test_watched_threshold():
     assert state._watched({"position": 10.0, "duration": 0.0}) is False
 
 
+def test_watched_absolute_tail():
+    # Within END_TAIL_SECONDS of the end counts as finished even below 0.9
+    # (e.g. long credits / padded duration / mpv paused at EOF with keep-open).
+    assert state._watched({"position": 8800.0, "duration": 8850.0}) is True  # 99.4%, <60s left
+    assert state._watched({"position": 5000.0, "duration": 10000.0}) is False  # 50%, far from end
+
+
 def test_save_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10.0, 100.0))
