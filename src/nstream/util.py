@@ -44,6 +44,23 @@ def atomic_write(
         raise
 
 
+def atomic_write_bytes(path: Path, data: bytes, *, prefix: str, mode: int = 0o600) -> None:
+    """Binary sibling of `atomic_write` for cached blobs (e.g. poster images): write
+    `data` to a temp file in the target dir, chmod, then `os.replace` over the target.
+    Same best-effort contract — temp cleaned up and OSError re-raised on failure."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=path.parent)
+    try:
+        os.chmod(tmp, mode)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def load_json[T](path: Path, fallback: T) -> T:
     """Parse JSON from `path`, returning `fallback` if the file is missing, unreadable,
     corrupt, or of a different top-level type than the fallback (e.g. a list where a dict

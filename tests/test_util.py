@@ -43,6 +43,14 @@ def test_atomic_write_cleans_temp_and_raises_on_error(tmp_path):
     assert not path.exists()  # target untouched
 
 
+def test_atomic_write_bytes_roundtrip(tmp_path):
+    path = tmp_path / "sub" / "poster.img"
+    util.atomic_write_bytes(path, b"\x89PNG\x00", prefix=".poster-")
+    assert path.read_bytes() == b"\x89PNG\x00"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert list(tmp_path.glob("**/*.tmp")) == []
+
+
 def test_load_json_roundtrip(tmp_path):
     path = tmp_path / "d.json"
     path.write_text(json.dumps({"k": "v"}))
