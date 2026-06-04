@@ -198,7 +198,7 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Dispositivo cast",
             "castdev",
             cfg.cast_device or "auto (scoperta)",
-            "Chromecast preferito (scoperta via catt). 'auto' = per-LAN (cast-resolve).",
+            "Chromecast preferito (scoperta via catt). 'auto' = per-LAN (catt scan).",
         ),
         (
             "autoplay",

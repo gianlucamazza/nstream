@@ -122,7 +122,7 @@ class Config:
     auto_play: bool = True
     # Send playback to a Chromecast (via `catt`) instead of mpv by default.
     # --cast / --local override per session. cast_device pins a device name for
-    # `catt -d`; empty = resolve per-LAN via `cast-resolve`, then catt's default.
+    # `catt -d`; empty = resolve per-LAN via a fresh `catt scan` (see caster.py).
     prefer_cast: bool = False
     cast_device: str = ""
     # Autoplay the next episode of a series via the in-video overlay.
