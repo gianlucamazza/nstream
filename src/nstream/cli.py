@@ -246,7 +246,8 @@ def _play_on_cast(
     _log.info("cast '%s' → %s", title, device)
     # Tier-2: if the audio is one the receiver can't decode, remux it (video kept native)
     # and let catt serve the complete file. No in-cast audio switch on this path.
-    remux_path = remux.prepare_for_cast(chosen["url"], cfg, hint=quality.parse_stream(chosen).audio)
+    _info = quality.parse_stream(chosen)
+    remux_path = remux.prepare_for_cast(chosen["url"], cfg, hint=_info.audio, size_gb=_info.size_gb)
     if remux_path:
         return remux.cast_file(
             cfg, title, remux_path,
@@ -761,8 +762,9 @@ def _auto_play(
             # Tier-2: remux Dolby/DTS audio (video kept native) and let catt serve the
             # complete file; else cast the url directly. Default fire-and-return unless
             # --follow (for a remux cast that leaves a detached catt serving the file).
+            _info = quality.parse_stream(chosen)
             remux_path = remux.prepare_for_cast(
-                chosen["url"], cfg, hint=quality.parse_stream(chosen).audio
+                chosen["url"], cfg, hint=_info.audio, size_gb=_info.size_gb
             )
             if remux_path:
                 remux.cast_file(

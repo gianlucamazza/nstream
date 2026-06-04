@@ -145,6 +145,11 @@ class Config:
     # resolution (default 1080p). 0 = no cap. A preference, not an exclusion — a sole 4K
     # Dolby release is still cast.
     cast_remux_max_resolution: int = 1080
+    # Hard ceiling on how big a release a Tier-2 remux may fetch: a remux downloads + rewrites
+    # the whole file, so a 4K Dolby title can be 30-60 GB. Above this many GB the cast asks for
+    # confirmation on an interactive tty (headless proceeds — it was the only castable release).
+    # A free-disk pre-check always runs regardless. 0 = no size prompt (only the disk check).
+    cast_remux_max_size_gb: int = 0
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -248,6 +253,7 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "autoplay_lead": (1, 120),
     "max_resolution": (0, 4320),
     "cast_remux_max_resolution": (0, 4320),
+    "cast_remux_max_size_gb": (0, 1000),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
@@ -311,6 +317,9 @@ def load() -> Config:
         cast_audio_codec=str(raw.get("cast_audio_codec", Config.cast_audio_codec) or "aac"),
         cast_remux_max_resolution=_bounded_int(
             raw, "cast_remux_max_resolution", Config.cast_remux_max_resolution
+        ),
+        cast_remux_max_size_gb=_bounded_int(
+            raw, "cast_remux_max_size_gb", Config.cast_remux_max_size_gb
         ),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=_bounded_int(raw, "autoplay_lead", Config.autoplay_lead),

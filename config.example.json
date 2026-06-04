@@ -14,6 +14,7 @@
   "cast_remux": true,
   "cast_audio_codec": "aac",
   "cast_remux_max_resolution": 1080,
+  "cast_remux_max_size_gb": 0,
   "autoplay": true,
   "autoplay_lead": 15,
   "mpv_quiet": true,
