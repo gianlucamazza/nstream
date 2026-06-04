@@ -94,22 +94,74 @@ def _pick_stream(
     return typecast("Stream | None", chosen)
 
 
-def _cast_playable(cfg: Config, results: list[Stream]) -> list[quality.RankedStream]:
-    """Streams the Chromecast can play (cast profile + Cast-compatible audio), ignoring
-    the language filter so every available dub is offered for switching."""
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=True, lang_filter=False)
-    playable, _ = quality.rank_streams(results, quality.cast_caps(), spec)
+def _playable_set(cfg: Config, results: list[Stream], *, cast: bool) -> list[quality.RankedStream]:
+    """Streams playable on the target profile (Chromecast or local GPU), ranked best-first,
+    ignoring the language filter so every available dub is visible (for listing/switching)."""
+    caps = quality.cast_caps() if cast else quality.detect_caps()
+    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, lang_filter=False)
+    playable, _ = quality.rank_streams(results, caps, spec)
     return playable
 
 
-def cast_languages(cfg: Config, results: list[Stream]) -> tuple[str, ...]:
-    """Audio languages available among Cast-compatible streams, preferred ones first."""
+def _cast_playable(cfg: Config, results: list[Stream]) -> list[quality.RankedStream]:
+    """Streams the Chromecast can play (cast profile + Cast-compatible audio)."""
+    return _playable_set(cfg, results, cast=True)
+
+
+def audio_languages(cfg: Config, results: list[Stream], *, cast: bool) -> tuple[str, ...]:
+    """Audio languages available among playable streams (local or cast profile), with the
+    user's preferred languages first. Name-tag based, like the rest of the language ranking."""
     langs = {
-        lang for r in _cast_playable(cfg, results) for lang in r.info.languages if lang != "multi"
+        lang
+        for r in _playable_set(cfg, results, cast=cast)
+        for lang in r.info.languages
+        if lang != "multi"
     }
     ordered = [lang for lang in cfg.audio_langs if lang in langs]
     ordered += sorted(langs - set(ordered))
     return tuple(ordered)
+
+
+def pick_audio_stream(
+    cfg: Config, results: list[Stream], lang: str, *, cast: bool
+) -> Stream | None:
+    """The best playable stream whose audio includes `lang` (url resolved), or None."""
+    for r in _playable_set(cfg, results, cast=cast):
+        if lang in r.info.languages and _playable_url(cfg, r.stream):
+            return r.stream
+    return None
+
+
+def pick_audio_stream_verified(
+    cfg: Config, results: list[Stream], lang: str, *, cast: bool, probe_cap: int = 4
+) -> tuple[Stream | None, bool]:
+    """Track-accurate variant: among the playable streams whose NAME tags `lang`, ffprobe up
+    to `probe_cap` candidates and return the first whose REAL audio tracks carry `lang`
+    (verified=True). When a candidate's real tracks are unverifiable (und/no ffprobe), accept
+    it on benefit of the doubt (verified=False). Returns (None, False) only when every
+    name-match's real tracks are known AND lack `lang` — i.e. the name lied for all of them."""
+    name_pick: Stream | None = None
+    probed = 0
+    for r in _playable_set(cfg, results, cast=cast):
+        if lang not in r.info.languages or not _playable_url(cfg, r.stream):
+            continue
+        if name_pick is None:
+            name_pick = r.stream
+        if probed >= probe_cap:
+            break
+        probed += 1
+        real = stream_audio_langs(cfg, r.stream)
+        if real is None:
+            return r.stream, False  # unverifiable → benefit of the doubt
+        if lang in real:
+            return r.stream, True  # confirmed by the actual tracks
+    # Every probed name-match had real tracks WITHOUT `lang` (name mistagged) → no match.
+    return (None, False) if name_pick is not None and probed else (name_pick, False)
+
+
+def cast_languages(cfg: Config, results: list[Stream]) -> tuple[str, ...]:
+    """Audio languages available among Cast-compatible streams, preferred ones first."""
+    return audio_languages(cfg, results, cast=True)
 
 
 def cast_resolver(cfg: Config, results: list[Stream]) -> Callable[[str], str | None]:
@@ -181,6 +233,22 @@ def _audio_langs_of(cfg: Config, chosen: Stream) -> set[str] | None:
     if tr.empty():
         return None  # unverifiable → don't block
     return {code for t in tr.audio if (code := languages.track_lang(t.lang, t.title))}
+
+
+def stream_audio_langs(cfg: Config, chosen: Stream) -> frozenset[str] | None:
+    """Audio languages ACTUALLY in `chosen`, by ffprobe (track-accurate, unlike the name-tag
+    heuristic `parse_stream().languages` used for ranking). Resolves the url first. Returns
+    None when unverifiable — no url, ffprobe missing/empty, or no identifiable track language
+    (e.g. a single `und` track) — so the caller treats it as 'can't tell' and doesn't block,
+    matching the local guard's benefit-of-the-doubt. Used to confirm a forced cast dub."""
+    url = _playable_url(cfg, chosen)
+    if not url:
+        return None
+    tr = tracks.probe_tracks(url)
+    if tr.empty():
+        return None
+    found = frozenset(code for t in tr.audio if (code := languages.track_lang(t.lang, t.title)))
+    return found or None
 
 
 def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:

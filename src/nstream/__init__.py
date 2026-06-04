@@ -1,3 +1,3 @@
 """nstream — native Stremio-like client: Cinemeta + Torrentio (Real-Debrid) + mpv."""
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"

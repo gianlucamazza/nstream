@@ -58,6 +58,11 @@ Modules in `src/nstream/`:
   **Imports nothing from `cli`** (no cycle).
 - `caster.py` — Chromecast playback via `catt`: `resolve_device()`, `cast()`, status poll, in-cast
   audio switch. Imports the picker from `picker`, not `cli`.
+- `remux.py` — Tier-2 cast for titles whose audio the Chromecast can't decode (AC-3/E-AC-3/DTS/
+  TrueHD → silent). Detects them (ffprobe), remuxes to a complete temp MP4 (video `-c copy`, audio
+  → AAC) on disk, then lets a **detached catt** serve it (the only delivery this DMR accepts —
+  see `docs/adr/0005`). `needs_remux`/`prepare_for_cast`/`cast_file`/`stop`. Leaf below `cli`
+  (imports `caster`/`config`/`log` + stdlib), like `engine`/`player`.
 - `engine.py` — local P2P backend: drives an external **TorrServer** (find/spawn, add torrent by
   infoHash, wait for the read-ahead buffer) and returns a plain `http://…/stream?…` url — the same
   contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util` + stdlib), like
@@ -109,8 +114,19 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
 - Playback: `caster.py:cast()` runs `catt cast <url> [-d ip] [-t start] [-s subs]`, polled via
   `catt info -j` every 15s.
 - In-cast audio switch ('a'): re-casts the same title with a different dub via already-fetched streams.
-- Cast ranking ignores the language filter (show all dubs) but avoids Cast-incompatible
-  audio (TrueHD/DTS-HD/DTS → would be silent).
+- Cast ranking ignores the language filter (show all dubs) and models the **Default Media
+  Receiver**: it plays HEVC/4K/HDR natively but **doesn't decode Dolby** (AC-3/E-AC-3/DTS/TrueHD →
+  silent). Two tiers:
+  - **Tier 1 — direct**: audio already AAC/Opus → `caster.cast(url)` (DMR streams it, even 4K, no
+    host download). Selection **prefers AAC** so this is the common, instant path.
+  - **Tier 2 — remux** (`remux.py`, when `cfg.cast_remux`): Dolby/DTS audio → host remuxes to a
+    complete temp MP4 (video `-c copy` → native HEVC/4K/HDR kept, audio → AAC) and a detached catt
+    serves it. The DMR only plays a complete, Range-served file (streaming-while-transcoding fails on
+    it — `docs/adr/0005`), so the whole file is fetched first (a prepare wait). A **remux-only
+    resolution cap** (`cast_remux_max_resolution`, default 1080p) avoids downloading a full 4K just
+    to cast; direct 4K casts are uncapped (free, no download).
+  - Last resort for what even the DMR can't play: the H.264 1080p mirror (`skill-cast`/openscreen).
+  - Dolby/DTS are no longer *excluded* from cast (they were "silent") — only ranked below native AAC.
 
 ### mpv ↔ nstream signalling
 Per-play temp dir under `$XDG_RUNTIME_DIR/nstream-*/` holds the mpv IPC socket, a signal

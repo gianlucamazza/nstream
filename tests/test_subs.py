@@ -73,3 +73,19 @@ def test_auto_subs_safety_lang_overrides_mode(monkeypatch, tmp_path):
 
 def test_auto_subs_no_mode_returns_empty(tmp_path):
     assert subs.auto_subs(CFG, "movie", "id", str(tmp_path), _opts(sub_mode=None)) == ()
+
+
+def test_available_subtitle_langs_sorted_unique(monkeypatch):
+    monkeypatch.setattr(
+        subs.api, "subtitles",
+        lambda cfg, t, v: [{"lang": "ita"}, {"lang": "eng"}, {"lang": "ita"}, {"id": "x"}],
+    )  # fmt: skip
+    assert subs.available_subtitle_langs(CFG, "movie", "tt1") == ["eng", "ita"]
+
+
+def test_available_subtitle_langs_network_error(monkeypatch):
+    def boom(*a, **k):
+        raise subs.api.NetworkError("down")
+
+    monkeypatch.setattr(subs.api, "subtitles", boom)
+    assert subs.available_subtitle_langs(CFG, "movie", "tt1") == []

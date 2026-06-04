@@ -32,9 +32,14 @@ Regex over `name`+`title`: `resolution`, `codec` (av1/hevc/h264), `hdr`, `dv`/`d
 ### 2. Filter (`unsupported_reason`, first match excludes)
 
 Order: **hardware** (resolution cap → codec not HW-decodable → Dolby Vision P5) → **cast
-audio** (TrueHD/DTS/DTS-HD, and remux, when casting) → **camrip** → **language** → **low
-seeders**. Hardware checks always apply; the rest are opt-in config knobs (and
-`allow_software`/`allow_dv5` can flip a hardware exclusion back to playable).
+audio** → **camrip** → **language** → **low seeders**. Hardware checks always apply; the rest
+are opt-in config knobs (and `allow_software`/`allow_dv5` can flip a hardware exclusion back to
+playable).
+
+The **cast audio** exclusion (TrueHD/DTS/DTS-HD, and remux, when casting) only applies when
+Tier-2 remux is **off** (`cfg.cast_remux = false`). With remux on (the default), those titles
+are no longer excluded — the host remuxes their audio to AAC (`remux.py`) — so they're only
+*ranked* below native-AAC releases, not dropped (see the cast score below and `docs/adr/0005`).
 
 Language filter only excludes a stream **tagged exclusively with non-preferred languages**.
 **Untagged streams are never excluded** (they usually carry the common audio, and most good
@@ -59,6 +64,21 @@ web releases are untagged) — see the trade-off below.
 `cached` and `resolution` stay dominant, so language/source only break ties **below** them
 (no surprising resolution downgrade). See `quality.score_components` — `--explain` renders
 exactly these terms per stream.
+
+**Cast score** (`cast=True`, models the Default Media Receiver, not the GPU):
+
+```
+(cached, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
+```
+
+| term | meaning |
+|------|---------|
+| `cast_audio` | 2 = receiver decodes it natively (AAC/Opus/FLAC…), 1 = untagged, 0 = Dolby/DTS (needs a Tier-2 remux). Prefers AAC so the **direct, instant** cast wins and a remux (a prepare wait) only triggers when no AAC release exists |
+| `remux_within_cap` | among releases that need a remux, prefers those ≤ `cast_remux_max_resolution` (default 1080p) — a remux downloads the whole file, so a 4K Dolby release is a 30-60 GB fetch while a direct 4K cast is free. A preference, not an exclusion |
+| `cast_h264` | tie-breaker only (the receiver decodes HEVC natively too) |
+
+The receiver plays HEVC/4K/HDR natively, so after audio the **resolution** wins; H.264-vs-HEVC
+no longer matters. Native-AAC titles are never capped (they cast direct, no download).
 
 ### 4. Cap & pick (`stream_select._pick_stream`)
 

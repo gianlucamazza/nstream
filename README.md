@@ -110,9 +110,14 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   embedded-track menu is mpv-only, so in cast mode subtitles are sent as an external file (when you
   pass `--subs`/`--sub-lang`) and the rest is left to the receiver. Stream selection is **Cast-aware**:
   it ranks against the Chromecast's decode profile (H.264/HEVC/VP9 up to 4K; AV1 and 8K dropped to
-  the ⚠ section) and demotes releases whose audio the Default Media Receiver can't decode —
-  **TrueHD/DTS/DTS-HD** (which would play silently) — preferring AC3/E-AC3/AAC. Press Tab to pick a
-  demoted release anyway. If the TV is silent, also check the Cast volume isn't at 0 (`catt volume N`
+  the ⚠ section). The Default Media Receiver plays HEVC/4K/HDR natively but can't decode **Dolby**
+  audio (AC-3/E-AC-3/DTS/TrueHD → silent), so selection **prefers an AAC release** (cast it directly,
+  instant). When a title is only available with Dolby/DTS audio, nstream casts it anyway via an
+  **on-host remux** — it keeps the original video (`-c copy`, so 4K/HDR/HEVC are preserved) and
+  transcodes only the audio to AAC, then serves the file to the TV. That path downloads the file
+  first (a short "preparo l'audio…" wait), so it caps remuxed releases to **1080p** by default
+  (`cast_remux_max_resolution`) to avoid fetching a full 4K — direct AAC casts stay uncapped.
+  If the TV is silent, also check the Cast volume isn't at 0 (`catt volume N`
   or the remote); nstream warns when it sees a zero volume. During a cast, press **`a`** to change
   the audio language when more than one is available — nstream re-casts a release in that language
   from the current position (the Chromecast plays the file's default track, so this works best with

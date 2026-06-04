@@ -15,18 +15,20 @@ from typing import cast as typecast
 from . import (
     __version__,
     api,
+    caster,
     debrid,
     explain,
     log,
     preview,
     quality,
+    remux,
     settings,
     state,
     stream_select,
     tracks,
     ui,
 )
-from .caster import CastUnavailable, cast
+from .caster import CastUnavailable, cast, device_volume
 from .caster import resolve_device as _resolve_device
 from .config import (
     Config,
@@ -50,7 +52,7 @@ from .labels import (
 )
 from .picker import fzf, fzf_key
 from .player import play
-from .subs import auto_subs, pick_subtitles
+from .subs import auto_subs, available_subtitle_langs, pick_subtitles
 
 # --browse keyword → Cinemeta catalog id.
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
@@ -241,8 +243,16 @@ def _play_on_cast(
     # external file when requested (or as a safety net when audio isn't the primary
     # language), otherwise the receiver picks its own.
     sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
-    cast_langs = stream_select.cast_languages(cfg, results)
     _log.info("cast '%s' → %s", title, device)
+    # Tier-2: if the audio is one the receiver can't decode, remux it (video kept native)
+    # and let catt serve the complete file. No in-cast audio switch on this path.
+    remux_path = remux.prepare_for_cast(chosen["url"], cfg, hint=quality.parse_stream(chosen).audio)
+    if remux_path:
+        return remux.cast_file(
+            cfg, title, remux_path,
+            device=device, start=start, sub_paths=sub_paths, follow=True,
+        )  # fmt: skip
+    cast_langs = stream_select.cast_languages(cfg, results)
     return cast(
         cfg, title, chosen["url"],
         device=device, start=start, sub_paths=sub_paths, next_label=next_label,
@@ -532,6 +542,11 @@ def _select_meta(metas: list[Meta], query: str, year: str | None) -> tuple[Meta,
     """Pick a title without fzf: an exact normalized-name match (optionally pinned by
     release year) wins, else the first result. Returns (meta, "exact"|"first")."""
     q = _norm_title(query)
+    # A trailing 4-digit year ("dune 2021") is a disambiguator, not part of the title: split it
+    # off so the name match works, and let it pin the year when --year wasn't given.
+    head, _, tail = q.rpartition(" ")
+    if head and len(tail) == 4 and tail.isdigit():
+        q, year = head, year or tail
     exact = [m for m in metas if _norm_title(m.get("name", "")) == q]
     if year:
         by_year = [m for m in exact if str(m.get("releaseInfo", "")).startswith(year)]
@@ -571,20 +586,33 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             {"ok": False, "error": "usage", "message": "--sub-menu incompatibile con --json"}
         )
         return 2
+    # Cast lifecycle actions: no title needed, no playback.
+    if args.stop:
+        return _run_stop(cfg, args)
+    if args.status:
+        return _run_status(cfg, args)
     query = " ".join(args.query)
     if args.cont:
         return _run_auto_resume(cfg, args, opts, query)
-    if not query:
-        _emit_json({"ok": False, "error": "usage", "message": "--json richiede un titolo"})
-        return 2
 
-    metas = api.search(cfg, query)
-    if not metas:
-        _emit_json(
-            {"ok": False, "error": "no_result", "message": f"nessun risultato per «{query}»"}
-        )
-        return 1
-    meta, selection = _select_meta(metas, query, args.year)
+    # Meta source: a catalog (--browse) or a title search.
+    if args.browse:
+        metas = api.browse(cfg, CAT_MAP[args.browse])
+        if not metas:
+            _emit_json({"ok": False, "error": "no_result", "message": "catalogo vuoto"})
+            return 1
+        meta, selection = metas[0], "browse"
+    else:
+        if not query:
+            _emit_json({"ok": False, "error": "usage", "message": "--json richiede un titolo"})
+            return 2
+        metas = api.search(cfg, query)
+        if not metas:
+            _emit_json(
+                {"ok": False, "error": "no_result", "message": f"nessun risultato per «{query}»"}
+            )
+            return 1
+        meta, selection = _select_meta(metas, query, args.year)
     typ = meta.get("type", "movie")
     name = meta.get("name", "?")
     imdb_id = meta.get("id", "")
@@ -613,6 +641,27 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             return 1
         video_id = v["id"]
         title = display_title(name, v)
+
+    if args.probe:
+        # Discovery only: list available audio/subtitle languages, never play.
+        results = api.streams(cfg, typ, video_id)
+        _emit_json(
+            {
+                "ok": True,
+                "action": "probe",
+                "title": title,
+                "type": typ,
+                "imdb_id": imdb_id,
+                "season": season,
+                "episode": episode,
+                "available_audio": list(
+                    stream_select.audio_languages(cfg, results, cast=opts.cast)
+                ),
+                "available_subtitles": available_subtitle_langs(cfg, typ, video_id),
+                "error": None,
+            }
+        )
+        return 0
 
     return _auto_play(cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection)
 
@@ -644,9 +693,41 @@ def _auto_play(
             }
         )
         return 1
-    vetted = stream_select.prepare_stream(
-        cfg, results, opts, auto=True, reselect_on_wrong_audio=False
-    )
+    available_audio = stream_select.audio_languages(cfg, results, cast=opts.cast)
+
+    audio_verified: bool | None = None
+    if opts.audio_lang:
+        # Forced dub: explicit error if no stream carries it (no silent fallback).
+        if opts.audio_lang not in available_audio:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "audio_lang_unavailable",
+                    "message": f"audio «{opts.audio_lang}» non disponibile per «{title}»",
+                    "available_audio": list(available_audio),
+                }
+            )
+            return 1
+        # Track-accurate: ffprobe-confirm the real tracks carry the dub (the name tag can
+        # lie). None back = every name-match's real tracks lack the language.
+        chosen, audio_verified = stream_select.pick_audio_stream_verified(
+            cfg, results, opts.audio_lang, cast=opts.cast
+        )
+        if chosen is None:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "audio_lang_unavailable",
+                    "message": f"audio «{opts.audio_lang}» assente dalle tracce reali di «{title}»",
+                    "available_audio": list(available_audio),
+                }
+            )
+            return 1
+        vetted = stream_select.VettedStream(stream=chosen, auto=True, safety_sub_lang=None)
+    else:
+        vetted = stream_select.prepare_stream(
+            cfg, results, opts, auto=True, reselect_on_wrong_audio=False
+        )
     if vetted is None:
         _emit_json(
             {
@@ -661,6 +742,10 @@ def _auto_play(
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     device_name: str | None = None
+    volume: float | None = None
+    muted: bool | None = None
+    notice: str | None = None
+    reencoded = False  # set when a Tier-2 audio remux was used for the cast
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = _resume_position(cfg, video_id) if opts.history else None
         sub_paths = auto_subs(
@@ -673,13 +758,34 @@ def _auto_play(
                 _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
                 return 1
             device_name = args.device or cfg.cast_device or device
-            # Default to fire-and-return for cast unless the user asked to --follow.
-            cast(
-                cfg, title, chosen["url"],
-                device=device, start=start, sub_paths=sub_paths,
-                langs=(), resolve_lang=None, follow=bool(args.follow),
-            )  # fmt: skip
+            # Tier-2: remux Dolby/DTS audio (video kept native) and let catt serve the
+            # complete file; else cast the url directly. Default fire-and-return unless
+            # --follow (for a remux cast that leaves a detached catt serving the file).
+            remux_path = remux.prepare_for_cast(
+                chosen["url"], cfg, hint=quality.parse_stream(chosen).audio
+            )
+            if remux_path:
+                remux.cast_file(
+                    cfg, title, remux_path,
+                    device=device, start=start, sub_paths=sub_paths, follow=bool(args.follow),
+                )  # fmt: skip
+                reencoded = True
+            else:
+                cast(
+                    cfg, title, chosen["url"],
+                    device=device, start=start, sub_paths=sub_paths,
+                    langs=(), resolve_lang=None, follow=bool(args.follow),
+                )  # fmt: skip
             action = "cast"
+            # Optional explicit volume (closes the loop with the zero-volume detection).
+            if args.volume is not None:
+                caster.set_volume(device, args.volume)
+            # Fire-and-return skips the poll loop's volume guard — read it once so a muted
+            # or zero-volume receiver (a silent cast that looks fine) is surfaced.
+            volume, muted = device_volume(device)
+            if muted or volume == 0:
+                notice = "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'"
+                print(f"nstream: {notice}", file=sys.stderr)
         else:
             # Local mpv blocks until the window closes (intended; the user is watching).
             play(
@@ -699,9 +805,15 @@ def _auto_play(
             "episode": episode,
             "selection": selection,
             "stream": stream_block,
+            "reencoded": reencoded,
             "device": device_name,
+            "volume": volume,
+            "muted": muted,
+            "audio_lang": opts.audio_lang or (cfg.primary or None),
+            "audio_verified": audio_verified,
+            "available_audio": list(available_audio),
             "subtitles": (vetted.safety_sub_lang or opts.sub_lang) if sub_paths else None,
-            "notice": None,
+            "notice": notice,
             "error": None,
         }
     )
@@ -735,6 +847,40 @@ def _run_auto_resume(cfg: Config, args: argparse.Namespace, opts: PlayOpts, quer
         entry.get("series_id") or entry["video_id"],
         entry.get("season") or None, entry.get("episode") or None, "resume",
     )  # fmt: skip
+
+
+def _headless_device(cfg: Config, args: argparse.Namespace) -> str | None:
+    """Resolve the cast device for a lifecycle action (--stop/--status), or None (emitting a
+    device_not_found JSON) when no Chromecast can be resolved without a picker."""
+    try:
+        return _resolve_device(cfg, headless=True, prefer=args.device)
+    except CastUnavailable as e:
+        _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
+        return None
+
+
+def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
+    """`--json --stop`: stop the cast on the resolved device."""
+    device = _headless_device(cfg, args)
+    if device is None:
+        return 1
+    ok = caster.stop(device)
+    # Also tear down a detached Tier-2 remux server + its temp file, if one is serving.
+    remux.stop(device)
+    _emit_json(
+        {"ok": ok, "action": "stop", "device": device, "error": None if ok else "stop_failed"}
+    )
+    return 0 if ok else 1
+
+
+def _run_status(cfg: Config, args: argparse.Namespace) -> int:
+    """`--json --status`: report the receiver's current playback state."""
+    device = _headless_device(cfg, args)
+    if device is None:
+        return 1
+    st = caster.status(device)
+    _emit_json({"ok": True, "action": "status", "device": device, **st, "error": None})
+    return 0
 
 
 def run_continue(cfg: Config, opts: PlayOpts) -> int:
@@ -814,7 +960,14 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     if args.json:
-        return run_auto(cfg, args, opts)  # headless: no _clear, no fzf, JSON on stdout
+        # Headless: no _clear, no fzf, JSON on stdout. Catch NetworkError here so a network
+        # failure emits a JSON error object, not the human stderr message main() would print
+        # (which would break the agent parsing stdout).
+        try:
+            return run_auto(cfg, args, opts)
+        except api.NetworkError as e:
+            _emit_json({"ok": False, "error": "network", "message": str(e)})
+            return 1
     _clear()  # start the interactive session on a clean screen (drop launcher banner)
     if args.cont:
         return run_continue(cfg, opts)
@@ -920,6 +1073,26 @@ def main() -> int:
         "--device", metavar="NAME", help="Chromecast di destinazione (--json, evita il picker)"
     )
     parser.add_argument(
+        "--audio-lang", metavar="CODE", help="forza la lingua audio/dub (es. eng, ita) (--json)"
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="--json: elenca audio/sottotitoli disponibili per il titolo, non riproduce",
+    )
+    parser.add_argument(
+        "--stop", action="store_true", help="--json: ferma il cast in corso, non riproduce"
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="--json: stato del cast (player_state, titolo…)"
+    )
+    parser.add_argument(
+        "--volume",
+        type=int,
+        metavar="N",
+        help="--json+cast: imposta il volume del Chromecast (0-100)",
+    )
+    parser.add_argument(
         "--follow",
         dest="follow",
         action=argparse.BooleanOptionalAction,
@@ -961,6 +1134,7 @@ def main() -> int:
         sub_lang=sub_lang,
         history=cfg.history_enabled and not args.no_history,
         autoplay=cfg.autoplay and not args.no_autoplay,
+        audio_lang=args.audio_lang or None,
     )
     try:
         return _dispatch(cfg, args, opts)

@@ -30,18 +30,30 @@ def auto_pick(cfg: Config, results: list[Stream], *, cast: bool) -> quality.Rank
     return playable[0] if playable else None
 
 
+_COMP_LABEL = {
+    "cached": "cached",
+    "resolution": "res",
+    "cast_audio": "caud",
+    "cast_h264": "h264",
+    "lang": "lang",
+    "source": "src",
+    "hevc": "hevc",
+    "seeders": "seed",
+}
+
+
 def _fmt_components(comp: dict[str, float | int | bool]) -> str:
-    """Compact one-line render of the score terms (precedence order)."""
-    size = comp["size"]
-    parts = [
-        f"cached={int(bool(comp['cached']))}",
-        f"res={comp['resolution']}",
-        f"lang={comp['lang']}",
-        f"src={comp['source']}",
-        f"hevc={int(bool(comp['hevc']))}",
-        f"seed={comp['seeders']}",
-        f"sz={-float(size):.1f}",  # stored negated; show the real size
-    ]
+    """Compact one-line render of the score terms (precedence order). Profile-agnostic:
+    renders whatever keys the dict carries (local has `hevc`, cast has `cast_audio`/
+    `cast_h264`), so it works for both score profiles."""
+    parts = []
+    for key, val in comp.items():
+        if key == "size":
+            parts.append(f"sz={-float(val):.1f}")  # stored negated; show the real size
+        elif isinstance(val, bool):
+            parts.append(f"{_COMP_LABEL.get(key, key)}={int(val)}")
+        else:
+            parts.append(f"{_COMP_LABEL.get(key, key)}={val}")
     return " ".join(parts)
 
 
@@ -57,8 +69,15 @@ def _fmt_info(info: quality.StreamInfo) -> str:
     return " ".join(tags)
 
 
-def _row(idx: int, r: quality.RankedStream, audio_langs: tuple[str, ...], mark: str) -> str:
-    comp = quality.score_components(r.info, audio_langs)
+def _row(
+    idx: int,
+    r: quality.RankedStream,
+    audio_langs: tuple[str, ...],
+    mark: str,
+    *,
+    cast: bool = False,
+) -> str:
+    comp = quality.score_components(r.info, audio_langs, cast=cast)
     name = (r.stream.get("title") or "").split("\n", 1)[0][:60]
     return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {name}"
 
@@ -83,12 +102,12 @@ def explain_streams(cfg: Config, results: list[Stream], *, cast: bool) -> str:
         "PLAYABLE (ordine di score, best-first):",
     ]
     for i, r in enumerate(playable):
-        lines.append(_row(i + 1, r, spec.audio_langs, "✓PICK" if i == 0 else ""))
+        lines.append(_row(i + 1, r, spec.audio_langs, "✓PICK" if i == 0 else "", cast=cast))
     if excluded:
         lines.append("")
         lines.append("ESCLUSI (motivo):")
         for i, r in enumerate(excluded):
-            lines.append(_row(i + 1, r, spec.audio_langs, "⚠"))
+            lines.append(_row(i + 1, r, spec.audio_langs, "⚠", cast=cast))
             lines[-1] = lines[-1].replace("[", f"[escluso: {r.reason}] [", 1)
     return "\n".join(lines)
 
