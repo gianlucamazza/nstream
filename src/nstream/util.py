@@ -23,7 +23,7 @@ from typing import IO
 # External-command timeouts (seconds), centralised so they're consistent and tunable.
 FFPROBE_TIMEOUT = 20.0
 VAINFO_TIMEOUT = 10.0
-CATT_SCAN_TIMEOUT = 15.0
+CATT_SCAN_TIMEOUT = 20.0  # headroom for a cold mDNS scan on hosts with many interfaces
 
 # HTTP retry tuning, shared by every retrying client (api addon fetch, native debrid).
 _BACKOFF_BASE = 0.5

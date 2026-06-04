@@ -174,6 +174,17 @@ def _quiet_defaults(cfg: Config) -> list[str]:
     return [f"--msg-level={_QUIET_MSG_LEVEL}"]
 
 
+def _display_tags_defaults(cfg: Config) -> list[str]:
+    """Suppress mpv's terminal "File tags:" block (Date/Description/Title) unless the user
+    manages display-tags themselves. Those are the *file's* embedded container metadata —
+    often a wrong-language plot baked into the release — and pure noise for a frontend that
+    already forces the correct title via --force-media-title. (--msg-level can't hide this
+    block; --display-tags is the only lever.) Gated by mpv_quiet, like the console quieting."""
+    if not cfg.mpv_quiet or _user_overrides(cfg, "display-tags"):
+        return []
+    return ["--display-tags="]
+
+
 def _lang_defaults(cfg: Config) -> list[str]:
     """Prefer the user's languages for audio/subtitle track selection, without
     overriding any alang/slang the user already set. `--subs-with-matching-audio=no`
@@ -227,6 +238,7 @@ def play(
             f"--force-media-title={title}",
             "--no-resume-playback",
             *_quiet_defaults(cfg),
+            *_display_tags_defaults(cfg),
             *_hwdec_defaults(cfg),
             *_lang_defaults(cfg),
             *cfg.mpv_args,
