@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -14,9 +15,11 @@ from typing import cast as typecast
 from . import (
     __version__,
     api,
+    debrid,
     explain,
     log,
     preview,
+    quality,
     settings,
     state,
     stream_select,
@@ -510,6 +513,230 @@ def run_explain(cfg: Config, query: str) -> int:
     return 0
 
 
+# --- headless (--json): non-interactive play/cast for agents ---------------
+
+
+def _emit_json(obj: dict) -> None:
+    """Write one machine-readable JSON object to stdout (progress stays on stderr).
+    Never carries a stream/debrid url or token — only descriptive metadata."""
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _norm_title(s: str) -> str:
+    """Casefold + strip punctuation for tolerant title matching."""
+    return " ".join("".join(c if c.isalnum() else " " for c in s.casefold()).split())
+
+
+def _select_meta(metas: list[Meta], query: str, year: str | None) -> tuple[Meta, str]:
+    """Pick a title without fzf: an exact normalized-name match (optionally pinned by
+    release year) wins, else the first result. Returns (meta, "exact"|"first")."""
+    q = _norm_title(query)
+    exact = [m for m in metas if _norm_title(m.get("name", "")) == q]
+    if year:
+        by_year = [m for m in exact if str(m.get("releaseInfo", "")).startswith(year)]
+        exact = by_year or exact
+    if exact:
+        return exact[0], "exact"
+    return metas[0], "first"
+
+
+def _stream_block(cfg: Config, chosen: Stream) -> dict:
+    """Descriptive JSON for the chosen stream — parsed quality only, never the url/token."""
+    info = quality.parse_stream(chosen)
+    backend = (
+        "debrid"
+        if info.cached
+        else {"local": "p2p", "auto": "p2p", "native": "native"}.get(
+            cfg.playback_backend, cfg.playback_backend
+        )
+    )
+    return {
+        "resolution": info.resolution,
+        "codec": info.codec,
+        "audio": info.audio,
+        "size_gb": round(info.size_gb, 2),
+        "cached": info.cached,
+        "languages": sorted(info.languages),
+        "backend": backend,
+    }
+
+
+def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
+    """`--json`: headless, non-interactive play/cast. No fzf, no TTY. Emits one JSON
+    object on stdout (diagnostics on stderr). Returns 0 on success, 1 on a recoverable
+    failure (no result / no stream / device), 2 on a usage error."""
+    if args.sub_menu:
+        _emit_json(
+            {"ok": False, "error": "usage", "message": "--sub-menu incompatibile con --json"}
+        )
+        return 2
+    query = " ".join(args.query)
+    if args.cont:
+        return _run_auto_resume(cfg, args, opts, query)
+    if not query:
+        _emit_json({"ok": False, "error": "usage", "message": "--json richiede un titolo"})
+        return 2
+
+    metas = api.search(cfg, query)
+    if not metas:
+        _emit_json(
+            {"ok": False, "error": "no_result", "message": f"nessun risultato per «{query}»"}
+        )
+        return 1
+    meta, selection = _select_meta(metas, query, args.year)
+    typ = meta.get("type", "movie")
+    name = meta.get("name", "?")
+    imdb_id = meta.get("id", "")
+    season: int | None = None
+    episode: int | None = None
+    video_id = imdb_id
+    title = display_title(name, None)
+
+    if typ == "series":
+        eps = api.episodes(cfg, imdb_id)
+        season = args.season or 1
+        episode = args.episode or 1
+        v = next(
+            (e for e in eps if e.get("season") == season and e.get("episode") == episode), None
+        )
+        if v is None:
+            avail = sorted({(e.get("season", 0), e.get("episode", 0)) for e in eps})
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "episode_not_found",
+                    "message": f"S{season:02d}E{episode:02d} non trovato per «{name}»",
+                    "available": [{"season": s, "episode": ep} for s, ep in avail[:50]],
+                }
+            )
+            return 1
+        video_id = v["id"]
+        title = display_title(name, v)
+
+    return _auto_play(cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection)
+
+
+def _auto_play(
+    cfg: Config,
+    args: argparse.Namespace,
+    opts: PlayOpts,
+    typ: str,
+    video_id: str,
+    title: str,
+    imdb_id: str,
+    season: int | None,
+    episode: int | None,
+    selection: str,
+) -> int:
+    """Resolve the best stream for one video and play/cast it headlessly, then emit JSON.
+    Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
+    auto_subs → play/cast) but never opens fzf (auto=True, reselect_on_wrong_audio=False)
+    and never silently falls back to local when a requested cast device is missing."""
+    print(f"▶ {title} — cerco la sorgente migliore…", file=sys.stderr)
+    results = api.streams(cfg, typ, video_id)
+    if not results:
+        _emit_json(
+            {
+                "ok": False,
+                "error": "no_streams",
+                "message": stream_select.no_streams_message(cfg, typ, video_id, title),
+            }
+        )
+        return 1
+    vetted = stream_select.prepare_stream(
+        cfg, results, opts, auto=True, reselect_on_wrong_audio=False
+    )
+    if vetted is None:
+        _emit_json(
+            {
+                "ok": False,
+                "error": "no_playable_stream",
+                "message": f"nessuno stream riproducibile per «{title}»",
+            }
+        )
+        return 1
+    chosen = vetted.stream
+    stream_block = _stream_block(cfg, chosen)
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    device_name: str | None = None
+    with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
+        start = _resume_position(cfg, video_id) if opts.history else None
+        sub_paths = auto_subs(
+            cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang
+        )
+        if opts.cast:
+            try:
+                device = _resolve_device(cfg, headless=True, prefer=args.device)
+            except CastUnavailable as e:
+                _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
+                return 1
+            device_name = args.device or cfg.cast_device or device
+            # Default to fire-and-return for cast unless the user asked to --follow.
+            cast(
+                cfg, title, chosen["url"],
+                device=device, start=start, sub_paths=sub_paths,
+                langs=(), resolve_lang=None, follow=bool(args.follow),
+            )  # fmt: skip
+            action = "cast"
+        else:
+            # Local mpv blocks until the window closes (intended; the user is watching).
+            play(
+                cfg, title, chosen["url"],
+                start=start, sub_paths=sub_paths, cast_enabled=False, work_dir=work_dir,
+            )  # fmt: skip
+            action = "play"
+
+    _emit_json(
+        {
+            "ok": True,
+            "action": action,
+            "title": title,
+            "type": typ,
+            "imdb_id": imdb_id,
+            "season": season,
+            "episode": episode,
+            "selection": selection,
+            "stream": stream_block,
+            "device": device_name,
+            "subtitles": (vetted.safety_sub_lang or opts.sub_lang) if sub_paths else None,
+            "notice": None,
+            "error": None,
+        }
+    )
+    return 0
+
+
+def _run_auto_resume(cfg: Config, args: argparse.Namespace, opts: PlayOpts, query: str) -> int:
+    """Headless resume (`--json -c`): pick a history entry by normalized title (or the most
+    recent when no query) and replay it, with no fzf."""
+    entries = state.recent(cfg)
+    if not entries:
+        _emit_json({"ok": False, "error": "no_result", "message": "cronologia vuota"})
+        return 1
+    entry = entries[0]
+    if query:
+        q = _norm_title(query)
+        entry = next((e for e in entries if _norm_title(e.get("title", "")) == q), None)
+        if entry is None:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "no_result",
+                    "message": f"nessuna cronologia per «{query}»",
+                }
+            )
+            return 1
+    typ = entry.get("type", "movie")
+    return _auto_play(
+        cfg, args, opts, typ, entry["video_id"],
+        display_title(entry.get("title", "?"), _entry_video(entry)),
+        entry.get("series_id") or entry["video_id"],
+        entry.get("season") or None, entry.get("episode") or None, "resume",
+    )  # fmt: skip
+
+
 def run_continue(cfg: Config, opts: PlayOpts) -> int:
     """`-c`: resume from history, returning to the list after each play (ESC exits)."""
     entries = state.recent(cfg)
@@ -586,6 +813,8 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
+    if args.json:
+        return run_auto(cfg, args, opts)  # headless: no _clear, no fzf, JSON on stdout
     _clear()  # start the interactive session on a clean screen (drop launcher banner)
     if args.cont:
         return run_continue(cfg, opts)
@@ -671,6 +900,33 @@ def main() -> int:
         help="spiega perché uno stream/audio verrebbe scelto (non riproduce)",
     )
     parser.add_argument(
+        "--debrid-test",
+        metavar="INFOHASH",
+        help="diagnostica: prova cache+resolve del provider debrid nativo (aggiunge il torrent)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="modalità headless non-interattiva: niente fzf, un oggetto JSON su stdout",
+    )
+    parser.add_argument("--year", metavar="YYYY", help="disambigua il titolo per anno (--json)")
+    parser.add_argument(
+        "--season", type=int, metavar="N", help="stagione serie (--json, default 1)"
+    )
+    parser.add_argument(
+        "--episode", type=int, metavar="M", help="episodio serie (--json, default 1)"
+    )
+    parser.add_argument(
+        "--device", metavar="NAME", help="Chromecast di destinazione (--json, evita il picker)"
+    )
+    parser.add_argument(
+        "--follow",
+        dest="follow",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="--json+cast: segui fino a fine (resume) o ritorna subito (--no-follow, default)",
+    )
+    parser.add_argument(
         "--debug", action="store_true", help="log verboso su stderr (oltre al file di log)"
     )
     parser.add_argument("--version", action="version", version=f"nstream {__version__}")
@@ -692,9 +948,14 @@ def main() -> int:
         settings.run_settings(cfg)
         return 0
 
+    if args.debrid_test:
+        print(debrid.selftest(cfg, args.debrid_test))
+        return 0
+
     sub_mode, sub_lang = _sub_options(args)
     opts = PlayOpts(
-        auto=cfg.auto_play or args.play,  # default mode; Tab flips it per pick
+        # --json is headless: always auto-pick (no fzf stream menu).
+        auto=cfg.auto_play or args.play or args.json,
         cast=(cfg.prefer_cast or args.cast) and not args.local,
         sub_mode=sub_mode,
         sub_lang=sub_lang,

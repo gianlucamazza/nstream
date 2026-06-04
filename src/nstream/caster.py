@@ -40,15 +40,27 @@ _CAST_DONE = 0.97
 _CAST_GIVEUP = 4
 
 
-def resolve_device(cfg: Config, *, choose: bool = False) -> str:
+def resolve_device(
+    cfg: Config, *, choose: bool = False, headless: bool = False, prefer: str | None = None
+) -> str:
     """Resolve the value for `catt -d` — an **IP** from a fresh `catt scan`, so casting
     is robust to mDNS name-resolution flakiness after a network change. A configured
     `cast_device` (a stable *name*) is honoured only when present on the current LAN,
     else we re-discover. One device → use it; several (or `choose`) → pick by name (cast
     by IP). Raises CastUnavailable when the scan finds nothing reachable / the user
-    cancels (the caller then falls back to local mpv)."""
+    cancels (the caller then falls back to local mpv).
+
+    `headless` (non-interactive callers) never opens the fzf picker: an explicit `prefer`
+    name (or `cfg.cast_device`) must be on the LAN, else a single device is used, else it
+    raises CastUnavailable so the caller can surface a clean error instead of blocking."""
     devices = settings.scan_devices()  # [(name, ip)] on the *current* LAN
     by_name = dict(devices)
+    # An explicit target (--device) wins, but only if actually on this LAN.
+    if prefer:
+        ip = by_name.get(prefer)
+        if ip:
+            return ip
+        raise CastUnavailable(f"dispositivo '{prefer}' non in rete")
     # A saved preference is honoured only if that device is actually on this LAN —
     # so after a network change a stale name doesn't pin us to an absent device.
     if cfg.cast_device and not choose:
@@ -63,6 +75,11 @@ def resolve_device(cfg: Config, *, choose: bool = False) -> str:
         raise CastUnavailable("nessun Chromecast in rete")
     if len(devices) == 1 and not choose:
         return devices[0][1]  # the IP
+    if headless:
+        # Ambiguous LAN and no usable preference: a headless caller can't pick — surface
+        # it as an error (the agent re-runs with --device) instead of opening fzf.
+        names = ", ".join(name for name, _ in devices)
+        raise CastUnavailable(f"più dispositivi in rete ({names}): specifica --device")
     # Several devices (or an explicit choice): pick by name, cast by IP.
     chosen = fzf([(name, ip) for name, ip in devices], "dispositivo> ")
     if chosen is None:
@@ -159,13 +176,18 @@ def cast(
     next_label: str | None = None,
     langs: tuple[str, ...] = (),
     resolve_lang: Callable[[str], str | None] | None = None,
+    follow: bool = True,
 ) -> tuple[float, float, bool]:
     """Cast `url` to a Chromecast via `catt`, then poll its status so resume and
     series auto-advance work just like the mpv path. Returns (position, duration,
     advance) — same contract as `play()`.
 
     `advance` is True only when a next episode is queued (`next_label`) and playback
-    reached the end (so a manual stop mid-episode doesn't binge ahead)."""
+    reached the end (so a manual stop mid-episode doesn't binge ahead).
+
+    `follow=False` (headless fire-and-return): once `catt cast` has handed the media to
+    the receiver, return immediately without the resume/advance poll loop — so an agent
+    isn't held for the whole runtime. No position is tracked (no resume) in that mode."""
     base = ["catt", *(["-d", device] if device else [])]
     launch = [*base, "cast", url]
     if start and start > 1:
@@ -185,6 +207,11 @@ def cast(
         # catt prints the cause (e.g. device unreachable); never echo the URL/token.
         _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
         print("nstream: cast non riuscito", file=sys.stderr)
+        return (0.0, 0.0, False)
+
+    if not follow:
+        # Fire-and-return: the receiver has the media; don't poll for the whole runtime.
+        print(f"📺 {title} → {dest}", file=sys.stderr)
         return (0.0, 0.0, False)
 
     can_switch = bool(langs) and resolve_lang is not None

@@ -257,3 +257,30 @@ def test_cast_hotkey_esc_keeps_current(monkeypatch):
     )  # fmt: skip
     assert resolved == []  # ESC → resolver never called, no re-cast
     assert not [c for c in calls if "cast" in c and "-t" in c]
+
+
+# --- headless device resolution (no fzf) -----------------------------------
+
+
+def test_resolve_device_headless_ambiguous_raises(monkeypatch):
+    # ≥2 devices, no preference: headless must NOT open fzf — it raises so the caller
+    # can surface a clean error and re-run with --device.
+    monkeypatch.setattr(
+        caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+    )
+    monkeypatch.setattr(caster, "fzf", lambda *a, **k: (_ for _ in ()).throw(AssertionError("fzf")))
+    with pytest.raises(caster.CastUnavailable):
+        caster.resolve_device(CFG, headless=True)
+
+
+def test_resolve_device_headless_prefers_named(monkeypatch):
+    monkeypatch.setattr(
+        caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("Salotto", "10.0.0.2")])
+    )
+    assert caster.resolve_device(CFG, headless=True, prefer="Salotto") == "10.0.0.2"
+
+
+def test_resolve_device_prefer_absent_raises(monkeypatch):
+    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1")]))
+    with pytest.raises(caster.CastUnavailable):
+        caster.resolve_device(CFG, prefer="Salotto")

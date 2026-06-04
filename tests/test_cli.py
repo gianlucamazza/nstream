@@ -7,6 +7,7 @@ test_picker.py; here we exercise cli's coordination, mocking play/cast/_resolve_
 from __future__ import annotations
 
 import argparse
+import json
 
 import pytest
 
@@ -42,7 +43,7 @@ def test_run_explain_movie(monkeypatch, capsys):
 
 
 def test_dispatch_explain_requires_query(monkeypatch):
-    args = argparse.Namespace(cont=False, browse=None, query=[], explain=True)
+    args = argparse.Namespace(cont=False, browse=None, query=[], explain=True, json=False)
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
@@ -565,3 +566,221 @@ def test_pick_meta_alt_c_sets_cast(monkeypatch):
     )
     cli._pick_meta(items, CFG, opts)
     assert seen == {"cast": True, "choose": True}
+
+
+# --- headless mode (--json / run_auto) -------------------------------------
+
+
+def _hns(**kw):
+    """argparse.Namespace for a headless (--json) invocation, with safe defaults."""
+    base = {
+        "query": [],
+        "cont": False,
+        "sub_menu": False,
+        "year": None,
+        "season": None,
+        "episode": None,
+        "device": None,
+        "follow": None,  # BooleanOptionalAction default → fire-and-return
+    }
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _hopts(cast=False):
+    return cli.PlayOpts(
+        auto=True, cast=cast, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+
+
+def _VETTED(s):
+    return cli.stream_select.VettedStream(stream=s, auto=True, safety_sub_lang=None)
+
+
+def _wire_movie(monkeypatch, *, name="Dune", stream=None):
+    stream = stream or {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Dune.2024.1080p.WEB-DL.HEVC.ITA-GRP\n👤 9 💾 8 GB",
+        "url": "http://rd.example/secret-token-abc/dune.mkv",
+    }
+    monkeypatch.setattr(
+        cli.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": name}]
+    )
+    monkeypatch.setattr(cli.api, "streams", lambda cfg, t, v: [stream])
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    return stream
+
+
+def test_run_auto_movie_emits_json(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(cli, "play", lambda *a, **k: seen.update(played=True) or (0.0, 0.0, ""))
+    rc = cli.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and seen.get("played")
+    assert out["ok"] and out["action"] == "play" and out["type"] == "movie"
+    assert out["title"] == "Dune" and out["selection"] == "exact"
+    assert out["stream"]["resolution"] == 1080 and out["stream"]["codec"] == "hevc"
+    assert out["stream"]["cached"] is True and out["stream"]["backend"] == "debrid"
+
+
+def test_run_auto_skips_fzf(monkeypatch):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+
+    def boom(*a, **k):
+        raise AssertionError("fzf called")
+
+    monkeypatch.setattr(cli, "fzf", boom)
+    monkeypatch.setattr(cli, "fzf_key", boom)
+    assert cli.run_auto(CFG, _hns(query=["dune"]), _hopts()) == 0
+
+
+def test_run_auto_exact_match_over_first(monkeypatch, capsys):
+    metas = [
+        {"id": "tt9", "type": "movie", "name": "Dune: Part Two"},
+        {"id": "tt1", "type": "movie", "name": "Dune"},
+    ]
+    monkeypatch.setattr(cli.api, "search", lambda cfg, q: metas)
+    monkeypatch.setattr(
+        cli.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
+    )
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    cli.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert out["imdb_id"] == "tt1" and out["selection"] == "exact"
+
+
+def test_run_auto_year_disambiguates(monkeypatch, capsys):
+    metas = [
+        {"id": "old", "type": "movie", "name": "Dune", "releaseInfo": "1984"},
+        {"id": "new", "type": "movie", "name": "Dune", "releaseInfo": "2021"},
+    ]
+    monkeypatch.setattr(cli.api, "search", lambda cfg, q: metas)
+    monkeypatch.setattr(
+        cli.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
+    )
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    cli.run_auto(CFG, _hns(query=["dune"], year="2021"), _hopts())
+    assert json.loads(capsys.readouterr().out)["imdb_id"] == "new"
+
+
+def test_run_auto_no_result(monkeypatch, capsys):
+    monkeypatch.setattr(cli.api, "search", lambda cfg, q: [])
+    rc = cli.run_auto(CFG, _hns(query=["zzz"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False and out["error"] == "no_result"
+
+
+def test_run_auto_series_season_episode(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.api, "search", lambda cfg, q: [{"id": "tt2", "type": "series", "name": "Severance"}]
+    )
+    eps = [
+        {"id": "tt2:1:1", "season": 1, "episode": 1},
+        {"id": "tt2:1:2", "season": 1, "episode": 2},
+    ]
+    monkeypatch.setattr(cli.api, "episodes", lambda cfg, sid: eps)
+    monkeypatch.setattr(
+        cli.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
+    )
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    seen = {}
+    monkeypatch.setattr(
+        cli.api,
+        "streams",
+        lambda cfg, t, v: seen.update(vid=v) or [{"name": "x", "title": "y", "url": "u"}],
+    )
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    cli.run_auto(CFG, _hns(query=["severance"], season=1, episode=2), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert seen["vid"] == "tt2:1:2"
+    assert out["type"] == "series" and out["season"] == 1 and out["episode"] == 2
+
+
+def test_run_auto_episode_not_found(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.api, "search", lambda cfg, q: [{"id": "tt2", "type": "series", "name": "Severance"}]
+    )
+    monkeypatch.setattr(
+        cli.api, "episodes", lambda cfg, sid: [{"id": "tt2:1:1", "season": 1, "episode": 1}]
+    )
+    rc = cli.run_auto(CFG, _hns(query=["severance"], season=5, episode=9), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "episode_not_found"
+    assert {"season": 1, "episode": 1} in out["available"]
+
+
+def test_run_auto_cast_device_not_found(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+
+    def boom(cfg, **k):
+        raise cli.CastUnavailable("più dispositivi in rete")
+
+    monkeypatch.setattr(cli, "_resolve_device", boom)
+    monkeypatch.setattr(
+        cli, "cast", lambda *a, **k: (_ for _ in ()).throw(AssertionError("cast called"))
+    )
+    rc = cli.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "device_not_found"
+
+
+def test_run_auto_cast_emits_device(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    seen = {}
+    monkeypatch.setattr(
+        cli, "cast", lambda *a, **k: seen.update(follow=k.get("follow")) or (0.0, 0.0, False)
+    )
+    cli.run_auto(CFG, _hns(query=["dune"], device="Salotto"), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["action"] == "cast" and out["device"] == "Salotto"
+    assert seen["follow"] is False  # default fire-and-return
+
+
+def test_run_auto_no_debrid_url_leak(monkeypatch, capsys):
+    _wire_movie(
+        monkeypatch,
+        stream={
+            "name": "[RD+] Torrentio\n1080p",
+            "title": "Dune.2021.1080p\n💾 8 GB",
+            "url": "http://rd.example/secret-token-abc123/dune.mkv",
+        },
+    )
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    cli.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = capsys.readouterr().out
+    assert "secret-token-abc123" not in out and "http" not in out
+
+
+def test_run_auto_sub_menu_rejected(monkeypatch, capsys):
+    rc = cli.run_auto(CFG, _hns(query=["dune"], sub_menu=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2 and out["error"] == "usage"
+
+
+def test_dispatch_json_skips_clear(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "_clear", lambda: seen.update(cleared=True))
+    monkeypatch.setattr(cli, "run_auto", lambda cfg, args, opts: 0)
+    cli._dispatch(CFG, _hns(query=["dune"], browse=None, explain=False, json=True), _hopts())
+    assert "cleared" not in seen
