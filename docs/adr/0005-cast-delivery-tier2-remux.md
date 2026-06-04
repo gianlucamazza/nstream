@@ -47,6 +47,7 @@ and catt's server (which elicits the `206`/Range exchange the DMR wants) is the 
 | **Custom CAF receiver** | Non-libre: Google dev account ($5) + per-device registration + hosted app. |
 | **Streaming** the remux (on-the-fly fMP4 200, `--stream-type live`, HLS-fMP4, growing-file + Range/Content-Length) | All **black** / no segments on this DMR — it requires a complete file. |
 | **Native player** on the TV (Kodi/VLC via ADB/JointSpace) | Vendor-locked and/or a third-party app — rejected as the default for a libre project. |
+| **Embedded audio-track selection** (`activeTrackIds` on a direct cast) | Not possible on the DMR: [Google Cast docs](https://developers.google.com/cast/docs/android_sender/media_tracks) — *"the Default Media Receiver allows you to use only the **text** tracks … to work with the audio and video tracks, you must develop a Custom Receiver."* So picking a non-default audio dub without a registered receiver **requires the remux** (keep one track). catt/pychromecast expose no audio-track API either. |
 
 ## Consequences
 
@@ -61,12 +62,16 @@ and catt's server (which elicits the `206`/Range exchange the DMR wants) is the 
   (disk, never `$XDG_RUNTIME_DIR` tmpfs) and a detached serving `catt`, tracked in a state file so
   `--stop` (and the next run's GC) tear them down. `quality`/`config`/`cli` gain `cast_remux`,
   `cast_audio_codec`, `cast_remux_max_resolution`.
-- **Per-language audio (1.11):** the remux picks the audio track matching the user's language
-  priority (`cfg.primary`/`audio_langs`), not blindly `0:a:0` — a dual-audio release no longer casts
-  the wrong dub (the cast path can't switch embedded tracks the way local mpv can). Bitrate scales
-  with the channel count (stereo 192k → 5.1 448k → 7.1 640k) instead of a flat 256k. A Dolby-Vision
-  *dual-layer* (profile 7) source is flagged: only `0:v:0` is mapped, so its enhancement layer drops
-  to HDR10 base (MP4 can't carry the EL — a device/container limit, surfaced as a warning).
+- **Per-language audio (1.11/1.12):** the remux keeps the audio track matching the user's language
+  priority (`cfg.primary`/`audio_langs`), by its **absolute ffprobe stream index** — a dual/multi-audio
+  release no longer casts the wrong dub. This is now the cast's language mechanism, not just a Dolby
+  fix: **Google Cast docs confirm the Default Media Receiver exposes only *text* tracks to the Track
+  API — audio track selection requires a custom (registered, non-libre) receiver**, so on a libre path
+  the only way to pick an embedded audio track is to remux the file down to that single track. The
+  decision lives in `stream_select.vet_cast_audio` (direct / remux / reselect / fallback-subs); see
+  CLAUDE.md → Casting. Bitrate scales with the channel count (stereo 192k → 5.1 448k → 7.1 640k); an
+  already-decodable track is stream-copied (no re-encode). A Dolby-Vision *dual-layer* (profile 7)
+  source is flagged: only `0:v:0` is mapped, so its enhancement layer drops to HDR10 base.
 - **Guards (1.11):** a single probe per cast feeds the decision (a positively-AAC release name skips
   it entirely → instant Tier-1). `cast_remux_max_size_gb` (default 20) is the download budget: in
   ranking, `quality.remux_within_size` demotes a likely-remux release over budget below any feasible

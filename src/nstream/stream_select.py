@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import api, debrid, engine, languages, log, quality, tracks
+from . import api, debrid, engine, languages, log, quality, remux, tracks
 from . import config as config_mod
 from .config import Config, ConfigError, PlayOpts, Stream
 from .labels import stream_label
@@ -176,6 +176,108 @@ def cast_resolver(cfg: Config, results: list[Stream]) -> Callable[[str], str | N
         return None
 
     return resolve
+
+
+@dataclass(frozen=True)
+class CastAudioPlan:
+    """How to cast a stream so the audio plays in the target language. The Chromecast Default
+    Media Receiver plays a file's FIRST audio track and can't switch tracks in place, so the
+    language is decided here (selection time), not on the device:
+      - `direct`: the first track is already the target language + DMR-decodable → cast the url.
+      - `remux`:  the target language is present but not the first decodable track → remux
+                  keeping only `audio_index` (a single-track AAC/copy file the DMR plays right).
+      - `absent`: no candidate carries the target language → caller falls back (other dub + subs).
+    `real_lang` is the language that will actually play (for honest `audio_lang` reporting)."""
+
+    mode: str
+    stream: Stream
+    audio_index: int = 0  # ABSOLUTE ffprobe stream index of the chosen track → ffmpeg `-map 0:<i>`
+    real_lang: str | None = None
+    verified: bool = False  # True when decided from real ffprobe tracks (not a name guess)
+
+
+# Cast language decisions are correctness-critical (the DMR plays one track and can't switch),
+# so probe with a longer cap than the pre-play menu — a big remote file's header read can be
+# slow, and a timed-out probe would otherwise look like "unverifiable → cast blind".
+_CAST_PROBE_TIMEOUT = 40.0
+
+
+def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
+    """Probed audio tracks of `stream` (url resolved first), or [] when unprobeable."""
+    url = _playable_url(cfg, stream)
+    return list(tracks.probe_tracks(url, timeout=_CAST_PROBE_TIMEOUT).audio) if url else []
+
+
+def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) -> CastAudioPlan:
+    """Decide the cast plan for one resolved `stream` given its probed `audio` tracks and the
+    desired `target_lang` (a canonical code, or "" for no preference → codec-only legacy
+    behaviour). The DMR plays `audio[0]`, so a direct cast is correct only when that track is
+    the target language and decodable; otherwise, if a target-language track exists anywhere,
+    remux selects it."""
+    if not audio:  # unprobeable (no ffprobe / no tracks) → benefit of the doubt, cast directly
+        return CastAudioPlan("direct", stream, 0, target_lang or None, verified=False)
+    codes = [languages.track_lang(t.lang, t.title) for t in audio]
+    c0 = audio[0].codec.lower()
+
+    def abs_index(k: int) -> int:  # the absolute ffmpeg stream index of the k-th audio track
+        return audio[k].index if audio[k].index >= 0 else k
+
+    if not target_lang:  # no language preference: codec-only decision on the default track
+        mode = "remux" if remux.needs_remux(c0) else "direct"
+        return CastAudioPlan(mode, stream, abs_index(0), codes[0], verified=True)
+    if codes[0] == target_lang and remux._decodable(c0):
+        return CastAudioPlan("direct", stream, abs_index(0), target_lang, verified=True)
+    k = next((i for i, c in enumerate(codes) if c == target_lang), None)
+    if k is not None:
+        return CastAudioPlan("remux", stream, abs_index(k), target_lang, verified=True)
+    return CastAudioPlan("absent", stream, 0, codes[0], verified=True)
+
+
+def _reselect_cast_for_lang(
+    cfg: Config, results: list[Stream], current: Stream, target_lang: str, *, probe_cap: int = 6
+) -> CastAudioPlan | None:
+    """Find another cast candidate (best-first) carrying `target_lang`, preferring one castable
+    directly (target is the first decodable track) over one needing a remux. Probes up to
+    `probe_cap` candidates whose NAME claims the language (tagged `target_lang` or `multi`) —
+    spending the probe budget on releases that actually advertise it, rather than on untagged
+    ones that usually don't. None if none qualifies."""
+    fallback: CastAudioPlan | None = None
+    probed = 0
+    for r in _cast_playable(cfg, results):
+        s = r.stream
+        if s is current or s.get("url") == current.get("url"):
+            continue
+        langs = r.info.languages
+        if target_lang not in langs and "multi" not in langs:  # only chase claimed-language dubs
+            continue
+        if probed >= probe_cap:
+            break
+        probed += 1
+        plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
+        if plan.mode == "direct" and plan.verified:
+            return plan  # cheapest *verified* correct option (no download) → take it
+        if plan.mode == "remux" and fallback is None:
+            fallback = plan  # remember, but keep looking for a direct one
+        # unverified direct (probe failed) is a guess, not a confident dub → skip it
+    return fallback
+
+
+def vet_cast_audio(
+    cfg: Config, results: list[Stream], chosen: Stream, target_lang: str
+) -> CastAudioPlan:
+    """Decide how to cast `chosen` so the audio plays in `target_lang` (default `cfg.primary`;
+    "" = no preference). Probes the real tracks — the DMR plays the first one and can't switch —
+    and, when `chosen` carries no `target_lang` track, reselects a candidate that does. Returns
+    a CastAudioPlan; `absent` means no candidate has the language (caller does fallback+subs)."""
+    plan = _cast_plan_for(chosen, _cast_audio_tracks(cfg, chosen), target_lang)
+    if not target_lang:
+        return plan
+    # Confident plans for the best pick win outright: a verified direct cast, or a remux that
+    # selects the target track. Otherwise (probe failed → unverified guess, or the language is
+    # absent from this release) search the other dubs for a *verified* one before falling back.
+    if (plan.mode == "direct" and plan.verified) or plan.mode == "remux":
+        return plan
+    return _reselect_cast_for_lang(cfg, results, chosen, target_lang) or plan
 
 
 def _native_resolve(cfg: Config, stream: Stream) -> str | None:

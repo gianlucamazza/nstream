@@ -36,7 +36,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import caster, languages, log
+from . import caster, log
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -103,37 +103,20 @@ def _probe_meta(url: str):
     return t, n_video, duration
 
 
-def should_remux(url: str, cfg: Config, *, hint: str = "") -> bool:
-    """Whether casting `url` needs a Tier-2 audio remux. A positively-decodable release-name
-    `hint` is trusted (no probe — keeps Tier-1 instant); otherwise ffprobe the real headline
-    codec (truth over the name, which mistags) and check it against the set the Default Media
-    Receiver can't decode. False unless `cfg.cast_remux` and ffmpeg are present."""
+def remux_for_cast(url: str, cfg: Config, *, audio_index: int, size_gb: float = 0.0) -> str | None:
+    """Remux `url` to a complete temp MP4 keeping the audio track at `audio_index` (the cast
+    decision in `stream_select.vet_cast_audio` picks it by language), and return the temp
+    path — or None on failure / a refused size guard (caller then degrades to a direct cast).
+    Probes once for the channel count (bitrate), video-stream count (DV7 warning) and duration
+    (progress line); `size_gb` gates the disk and big-download guards. The url is passed only
+    to ffprobe/ffmpeg, never logged."""
     if not cfg.cast_remux or not available():
-        return False
-    if hint and _decodable(hint):
-        return False
-    t, _n, _d = _probe_meta(url)
-    real = (t.audio[0].codec.lower() if t.audio else "") or hint
-    return needs_remux(real)
-
-
-def prepare_for_cast(url: str, cfg: Config, *, hint: str = "", size_gb: float = 0.0) -> str | None:
-    """If `url`'s audio needs remuxing for the DMR, remux to a complete temp file and return
-    its path; else None (the caller casts `url` directly). Probes once and threads the result
-    (audio tracks for language selection, video-stream count for the DV7 warning, duration for
-    the progress line) into the remux. `size_gb` (the release's estimated size) gates the disk
-    and big-download guards. The url is passed only to ffprobe/ffmpeg, never logged."""
-    if not cfg.cast_remux or not available():
-        return None
-    if hint and _decodable(hint):  # trust a clearly-decodable name → instant Tier-1, no probe
         return None
     t, n_video, duration = _probe_meta(url)
-    real = (t.audio[0].codec.lower() if t.audio else "") or hint
-    if not needs_remux(real):
-        return None
     return remux_to_file(
-        url, cfg, audio=t.audio, n_video=n_video, duration=duration, size_gb=size_gb
-    )
+        url, cfg, audio_index=audio_index, audio=t.audio,
+        n_video=n_video, duration=duration, size_gb=size_gb,
+    )  # fmt: skip
 
 
 # --- temp file + state tracking -------------------------------------------
@@ -208,21 +191,6 @@ def _kill(pid: int | None) -> None:
 # --- remux ----------------------------------------------------------------
 
 
-def _select_audio_index(audio: list, cfg: Config) -> int:
-    """0-based index (among audio streams) of the track to cast: the first whose language
-    matches the user's priority (`cfg.primary` then `fallback_langs`), else 0. Single-track
-    or unmatched files keep track 0. Prevents a dual-audio release from casting the wrong dub
-    — the cast path can't switch embedded tracks the way local mpv can."""
-    if len(audio) <= 1:
-        return 0
-    codes = [languages.track_lang(tr.lang, tr.title) for tr in audio]
-    for want in (c for c in (cfg.primary, *cfg.fallback_langs) if c):
-        for i, code in enumerate(codes):
-            if code == want:
-                return i
-    return 0
-
-
 def _audio_bitrate(channels: int | None) -> str:
     """AAC target bitrate scaled to the channel count, so a 5.1/7.1 remux isn't squeezed
     into a stereo-sized stream (the old fixed 256k under-served multichannel audio)."""
@@ -288,20 +256,27 @@ def remux_to_file(
     url: str,
     cfg: Config,
     *,
+    audio_index: int = 0,
     audio: list | None = None,
     n_video: int = 0,
     duration: float = 0.0,
     size_gb: float = 0.0,
 ) -> str | None:
-    """Remux `url` to a complete temp MP4 (video `-c copy`, audio → `cfg.cast_audio_codec`,
-    `+faststart`) on disk. Blocks until done — this DMR only plays a complete file, so the
-    whole source is fetched+remuxed before casting. Returns the temp path, or None on failure
-    or a refused/over-budget guard (caller then degrades, e.g. to a direct cast).
+    """Remux `url` to a complete temp MP4 (video `-c copy`, the chosen audio track kept or
+    transcoded to a DMR-decodable codec, `+faststart`) on disk. Blocks until done — this DMR
+    only plays a complete file, so the whole source is fetched+remuxed before casting. Returns
+    the temp path, or None on failure or a refused/over-budget guard (caller then degrades).
 
-    `audio` (the probed audio tracks) drives per-language track selection and channel-aware
-    bitrate; `n_video` ≥ 2 flags a Dolby-Vision dual-layer source (its enhancement layer is
-    dropped — only `0:v:0` is mapped); `duration` feeds the progress line; `size_gb` gates the
-    disk-space and big-download guards."""
+    `audio_index` is the ABSOLUTE container stream index to map (the cast decision in
+    `stream_select` picks it by language from ffprobe's `index`; the DMR can't switch embedded
+    tracks, so we keep exactly one — see Google Cast docs: the Default Media Receiver exposes
+    only text tracks, audio selection needs a custom receiver). If that track is already
+    DMR-decodable it's stream-copied (no re-encode / no quality loss — e.g. picking a non-default
+    AAC track just drops the others); otherwise it's transcoded to `cfg.cast_audio_codec` at a
+    channel-aware bitrate. `audio` (probed tracks) supplies the
+    codec/channels; `n_video` ≥ 2 flags a Dolby-Vision dual-layer source (its enhancement layer
+    is dropped — only `0:v:0` is mapped); `duration` feeds the progress line; `size_gb` gates
+    the disk-space and big-download guards."""
     if not available():
         _log.warning("ffmpeg assente: impossibile remuxare per il cast")
         return None
@@ -328,22 +303,24 @@ def remux_to_file(
             "sorgente Dolby Vision dual-layer (profile 7): l'enhancement layer cade → HDR10 base"
         )
     _gc_stale()
-    codec = cfg.cast_audio_codec or "aac"
     audio = audio or []
-    if len(audio) > 1:
-        idx = _select_audio_index(audio, cfg)
-        amap = f"0:a:{idx}"
-        bitrate = _audio_bitrate(audio[idx].channels)
+    # `audio_index` is the ABSOLUTE container stream index (ffprobe `index`) of the track the
+    # cast decision picked — map it directly so ffmpeg keeps exactly that stream, with no
+    # audio-relative re-indexing assumption (the DMR plays whatever single track we leave).
+    sel = next((t for t in audio if t.index == audio_index), audio[0] if audio else None)
+    amap = f"0:{audio_index}?"
+    if sel is not None and _decodable(sel.codec):
+        acodec = ["-c:a", "copy"]  # already DMR-decodable → keep it (no re-encode)
     else:
-        amap = "0:a:0?"
-        bitrate = _audio_bitrate(audio[0].channels if audio else None)
+        codec = cfg.cast_audio_codec or "aac"
+        acodec = ["-c:a", codec, "-b:a", _audio_bitrate(sel.channels if sel else None)]
     fd, path = tempfile.mkstemp(suffix=".mp4", prefix="cast-", dir=str(_cache_dir()))
     os.close(fd)
     cmd = [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         "-i", url,
         "-map", "0:v:0", "-map", amap,
-        "-c:v", "copy", "-c:a", codec, "-b:a", bitrate,
+        "-c:v", "copy", *acodec,
         "-movflags", "+faststart", path,
     ]  # fmt: skip
     print("📺 preparo l'audio per il cast (può richiedere un po')…", file=sys.stderr)
