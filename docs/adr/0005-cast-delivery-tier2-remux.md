@@ -61,6 +61,17 @@ and catt's server (which elicits the `206`/Range exchange the DMR wants) is the 
   (disk, never `$XDG_RUNTIME_DIR` tmpfs) and a detached serving `catt`, tracked in a state file so
   `--stop` (and the next run's GC) tear them down. `quality`/`config`/`cli` gain `cast_remux`,
   `cast_audio_codec`, `cast_remux_max_resolution`.
+- **Per-language audio (1.11):** the remux picks the audio track matching the user's language
+  priority (`cfg.primary`/`audio_langs`), not blindly `0:a:0` — a dual-audio release no longer casts
+  the wrong dub (the cast path can't switch embedded tracks the way local mpv can). Bitrate scales
+  with the channel count (stereo 192k → 5.1 448k → 7.1 640k) instead of a flat 256k. A Dolby-Vision
+  *dual-layer* (profile 7) source is flagged: only `0:v:0` is mapped, so its enhancement layer drops
+  to HDR10 base (MP4 can't carry the EL — a device/container limit, surfaced as a warning).
+- **Guards (1.11):** a single probe per cast feeds the decision (a positively-AAC release name skips
+  it entirely → instant Tier-1). Before a remux: a free-disk pre-check aborts to a direct cast if the
+  release won't fit, and `cast_remux_max_size_gb` prompts for confirmation on an interactive tty
+  before a large (e.g. 4K Dolby) download — the resolution cap is only a ranking preference, so this
+  is the hard ceiling. Headless callers proceed without blocking.
 
 ## References
 

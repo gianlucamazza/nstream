@@ -122,9 +122,13 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
   - **Tier 2 — remux** (`remux.py`, when `cfg.cast_remux`): Dolby/DTS audio → host remuxes to a
     complete temp MP4 (video `-c copy` → native HEVC/4K/HDR kept, audio → AAC) and a detached catt
     serves it. The DMR only plays a complete, Range-served file (streaming-while-transcoding fails on
-    it — `docs/adr/0005`), so the whole file is fetched first (a prepare wait). A **remux-only
-    resolution cap** (`cast_remux_max_resolution`, default 1080p) avoids downloading a full 4K just
-    to cast; direct 4K casts are uncapped (free, no download).
+    it — `docs/adr/0005`), so the whole file is fetched first (a prepare wait, shown as an ffmpeg
+    `-progress` percentage). A **remux-only resolution cap** (`cast_remux_max_resolution`, default
+    1080p) avoids downloading a full 4K just to cast; direct 4K casts are uncapped (free, no download).
+    The remux picks the audio track matching the user's language priority (not blindly `0:a:0`, so a
+    dual-audio release casts the right dub) and scales the AAC bitrate to the channel count. A single
+    pre-cast ffprobe drives this (a positively-AAC release name skips it → instant Tier-1); a free-disk
+    check and `cast_remux_max_size_gb` (interactive confirm) guard against a runaway 4K download.
   - Last resort for what even the DMR can't play: the H.264 1080p mirror (`skill-cast`/openscreen).
   - Dolby/DTS are no longer *excluded* from cast (they were "silent") — only ranked below native AAC.
 

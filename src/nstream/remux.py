@@ -36,7 +36,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import caster, log
+from . import caster, languages, log
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -44,6 +44,13 @@ _log = log.get_logger("remux")
 # Audio codecs the Default Media Receiver does NOT decode (passthrough-only / unsupported)
 # → playback is silent unless we remux the audio to something it decodes natively.
 _UNDECODABLE = frozenset({"ac3", "eac3", "dts", "dtshd", "truehd"})
+
+# Codecs the DMR decodes natively. When a release name *positively* advertises one of these
+# we trust it and skip the pre-cast ffprobe (the common Tier-1 path stays instant); the rare
+# AAC-mislabelled-Dolby release then casts silent until the user notices — an accepted trade
+# for not probing every cast. We still probe when the hint is empty or names an undecodable
+# codec (a costly remux shouldn't fire on a misparsed name).
+_DMR_DECODABLE = frozenset({"aac", "he-aac", "heaac", "mp3", "opus", "flac", "vorbis", "lpcm"})
 
 # How long to wait for the receiver to actually start playing the served file before
 # giving up (the remux already succeeded; this only confirms the cast handoff).
@@ -62,33 +69,71 @@ def available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _probe_audio(url: str) -> str:
-    """The real headline-audio codec of `url` via ffprobe (truth, vs the release-name
-    heuristic — releases mistag), or "" if unprobeable. Imported lazily so a missing
-    ffprobe degrades to the caller's name hint instead of failing the cast."""
-    from . import tracks
+def _decodable(codec: str) -> bool:
+    """True when `codec` is one the DMR plays natively (so no remux, and we can skip the probe)."""
+    return (codec or "").lower() in _DMR_DECODABLE
 
-    t = tracks.probe_tracks(url)
-    return t.audio[0].codec.lower() if t.audio else ""
+
+def _probe_meta(url: str):
+    """One ffprobe over `url`: embedded audio/sub tracks + video-stream count + duration.
+    Returns `(Tracks, n_video, duration_s)`, all empty/zero if ffprobe is unavailable or the
+    probe fails (the caller then falls back to the name hint / a track-blind remux). The url
+    (which may embed a debrid token) is passed only to ffprobe, never logged."""
+    from . import tracks, util
+
+    cmd = [
+        "ffprobe", "-v", "error", "-of", "json", "-show_entries",
+        "format=duration:stream=index,codec_type,codec_name,channels:stream_tags=language,title",
+        url,
+    ]  # fmt: skip
+    proc = util.run_cmd(cmd, timeout=util.FFPROBE_TIMEOUT)
+    if proc is None:
+        return tracks.Tracks(), 0, 0.0
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return tracks.Tracks(), 0, 0.0
+    data = data if isinstance(data, dict) else {}
+    t = tracks._parse_ffprobe(data)
+    n_video = sum(1 for s in data.get("streams", []) if s.get("codec_type") == "video")
+    try:
+        duration = float((data.get("format") or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return t, n_video, duration
 
 
 def should_remux(url: str, cfg: Config, *, hint: str = "") -> bool:
-    """Whether casting `url` needs a Tier-2 audio remux: ffprobe the real audio codec (fall
-    back to the release-name `hint` when ffprobe is unavailable) and check it against the
-    set the Default Media Receiver can't decode. False unless `cfg.cast_remux` and ffmpeg."""
+    """Whether casting `url` needs a Tier-2 audio remux. A positively-decodable release-name
+    `hint` is trusted (no probe — keeps Tier-1 instant); otherwise ffprobe the real headline
+    codec (truth over the name, which mistags) and check it against the set the Default Media
+    Receiver can't decode. False unless `cfg.cast_remux` and ffmpeg are present."""
     if not cfg.cast_remux or not available():
         return False
-    real = _probe_audio(url)
-    return needs_remux(real or hint)
+    if hint and _decodable(hint):
+        return False
+    t, _n, _d = _probe_meta(url)
+    real = (t.audio[0].codec.lower() if t.audio else "") or hint
+    return needs_remux(real)
 
 
-def prepare_for_cast(url: str, cfg: Config, *, hint: str = "") -> str | None:
-    """If `url`'s audio needs remuxing for the DMR, remux to a complete temp file and
-    return its path; else None (the caller casts `url` directly). The url is passed only to
-    ffprobe/ffmpeg, never logged."""
-    if not should_remux(url, cfg, hint=hint):
+def prepare_for_cast(url: str, cfg: Config, *, hint: str = "", size_gb: float = 0.0) -> str | None:
+    """If `url`'s audio needs remuxing for the DMR, remux to a complete temp file and return
+    its path; else None (the caller casts `url` directly). Probes once and threads the result
+    (audio tracks for language selection, video-stream count for the DV7 warning, duration for
+    the progress line) into the remux. `size_gb` (the release's estimated size) gates the disk
+    and big-download guards. The url is passed only to ffprobe/ffmpeg, never logged."""
+    if not cfg.cast_remux or not available():
         return None
-    return remux_to_file(url, cfg)
+    if hint and _decodable(hint):  # trust a clearly-decodable name → instant Tier-1, no probe
+        return None
+    t, n_video, duration = _probe_meta(url)
+    real = (t.audio[0].codec.lower() if t.audio else "") or hint
+    if not needs_remux(real):
+        return None
+    return remux_to_file(
+        url, cfg, audio=t.audio, n_video=n_video, duration=duration, size_gb=size_gb
+    )
 
 
 # --- temp file + state tracking -------------------------------------------
@@ -163,49 +208,148 @@ def _kill(pid: int | None) -> None:
 # --- remux ----------------------------------------------------------------
 
 
-def remux_to_file(url: str, cfg: Config) -> str | None:
+def _select_audio_index(audio: list, cfg: Config) -> int:
+    """0-based index (among audio streams) of the track to cast: the first whose language
+    matches the user's priority (`cfg.primary` then `fallback_langs`), else 0. Single-track
+    or unmatched files keep track 0. Prevents a dual-audio release from casting the wrong dub
+    — the cast path can't switch embedded tracks the way local mpv can."""
+    if len(audio) <= 1:
+        return 0
+    codes = [languages.track_lang(tr.lang, tr.title) for tr in audio]
+    for want in (c for c in (cfg.primary, *cfg.fallback_langs) if c):
+        for i, code in enumerate(codes):
+            if code == want:
+                return i
+    return 0
+
+
+def _audio_bitrate(channels: int | None) -> str:
+    """AAC target bitrate scaled to the channel count, so a 5.1/7.1 remux isn't squeezed
+    into a stereo-sized stream (the old fixed 256k under-served multichannel audio)."""
+    if not channels or channels <= 2:
+        return "192k"
+    if channels <= 6:
+        return "448k"
+    return "640k"
+
+
+def _free_gb(path: Path) -> float:
+    """Free space (GB) on the filesystem holding `path`, or 0.0 if it can't be determined."""
+    try:
+        return shutil.disk_usage(path).free / 1e9
+    except OSError:
+        return 0.0
+
+
+def _confirm(msg: str) -> bool:
+    """Ask y/n on an interactive tty; headless (no tty) → proceed without blocking (the
+    release was the only castable option, and a JSON/auto caller must not hang on input)."""
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return True
+    try:
+        ans = input(f"{msg} — procedo? [s/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return ans in ("s", "si", "sì", "y", "yes")
+
+
+def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
+    """Run the ffmpeg remux, rendering a percentage line from its `-progress` stream so the
+    (minutes-long) prepare isn't a silent wait. Returns `(returncode, stderr)`; rc is None if
+    ffmpeg couldn't be launched. Progress is best-effort — any parse hiccup just shows no bar."""
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, str(e)
+    pct = -1
+    show = duration > 0 and sys.stderr.isatty()
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            if show and line.startswith("out_time_us="):
+                try:
+                    cur = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                new = min(99, int(cur / duration * 100))
+                if new != pct:
+                    pct = new
+                    msg = f"\r📺 preparo l'audio per il cast… {pct}%"
+                    print(msg, end="", file=sys.stderr, flush=True)
+    proc.wait()
+    if pct >= 0:
+        print("\r📺 audio pronto, avvio il cast.        ", file=sys.stderr)
+    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    return proc.returncode, stderr
+
+
+def remux_to_file(
+    url: str,
+    cfg: Config,
+    *,
+    audio: list | None = None,
+    n_video: int = 0,
+    duration: float = 0.0,
+    size_gb: float = 0.0,
+) -> str | None:
     """Remux `url` to a complete temp MP4 (video `-c copy`, audio → `cfg.cast_audio_codec`,
     `+faststart`) on disk. Blocks until done — this DMR only plays a complete file, so the
-    whole source is fetched+remuxed before casting. Returns the temp path, or None on
-    failure (caller then degrades, e.g. to the H.264 mirror or a direct cast)."""
+    whole source is fetched+remuxed before casting. Returns the temp path, or None on failure
+    or a refused/over-budget guard (caller then degrades, e.g. to a direct cast).
+
+    `audio` (the probed audio tracks) drives per-language track selection and channel-aware
+    bitrate; `n_video` ≥ 2 flags a Dolby-Vision dual-layer source (its enhancement layer is
+    dropped — only `0:v:0` is mapped); `duration` feeds the progress line; `size_gb` gates the
+    disk-space and big-download guards."""
     if not available():
         _log.warning("ffmpeg assente: impossibile remuxare per il cast")
         return None
+    if size_gb > 0:
+        free = _free_gb(_cache_dir())
+        if free and free < size_gb * 1.1:
+            _log.warning(
+                "spazio insufficiente per il remux: %.1fGB liberi < ~%.1fGB", free, size_gb
+            )
+            print(
+                f"nstream: spazio disco insufficiente per il remux "
+                f"(~{size_gb:.0f}GB, {free:.0f}GB liberi) — cast diretto",
+                file=sys.stderr,
+            )
+            return None
+        cap = cfg.cast_remux_max_size_gb
+        if cap and size_gb > cap:
+            ask = f"il cast richiede di scaricare+remuxare ~{size_gb:.0f}GB (cap {cap}GB)"
+            if not _confirm(ask):
+                print("nstream: remux annullato", file=sys.stderr)
+                return None
+    if n_video >= 2:
+        _log.warning(
+            "sorgente Dolby Vision dual-layer (profile 7): l'enhancement layer cade → HDR10 base"
+        )
     _gc_stale()
     codec = cfg.cast_audio_codec or "aac"
+    audio = audio or []
+    if len(audio) > 1:
+        idx = _select_audio_index(audio, cfg)
+        amap = f"0:a:{idx}"
+        bitrate = _audio_bitrate(audio[idx].channels)
+    else:
+        amap = "0:a:0?"
+        bitrate = _audio_bitrate(audio[0].channels if audio else None)
     fd, path = tempfile.mkstemp(suffix=".mp4", prefix="cast-", dir=str(_cache_dir()))
     os.close(fd)
     cmd = [
-        "ffmpeg",
-        "-nostdin",
-        "-y",
-        "-loglevel",
-        "error",
-        "-i",
-        url,
-        "-map",
-        "0:v:0",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "copy",
-        "-c:a",
-        codec,
-        "-b:a",
-        "256k",
-        "-movflags",
-        "+faststart",
-        path,
-    ]
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+        "-i", url,
+        "-map", "0:v:0", "-map", amap,
+        "-c:v", "copy", "-c:a", codec, "-b:a", bitrate,
+        "-movflags", "+faststart", path,
+    ]  # fmt: skip
     print("📺 preparo l'audio per il cast (può richiedere un po')…", file=sys.stderr)
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
-    except (OSError, subprocess.SubprocessError) as e:
-        _log.warning("remux fallito: %s", e)
-        _rm(path)
-        return None
-    if proc.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
-        _log.warning("remux fallito (rc=%s): %s", proc.returncode, (proc.stderr or "")[:300])
+    rc, stderr = _run_ffmpeg(cmd, duration)
+    if rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
+        _log.warning("remux fallito (rc=%s): %s", rc, (stderr or "")[:300])
         _rm(path)
         return None
     return path
