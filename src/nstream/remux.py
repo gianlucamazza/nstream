@@ -267,13 +267,13 @@ def remux_to_file(
     only plays a complete file, so the whole source is fetched+remuxed before casting. Returns
     the temp path, or None on failure or a refused/over-budget guard (caller then degrades).
 
-    `audio_index` is the ABSOLUTE container stream index to map (the cast decision in
-    `stream_select` picks it by language from ffprobe's `index`; the DMR can't switch embedded
-    tracks, so we keep exactly one — see Google Cast docs: the Default Media Receiver exposes
-    only text tracks, audio selection needs a custom receiver). If that track is already
-    DMR-decodable it's stream-copied (no re-encode / no quality loss — e.g. picking a non-default
-    AAC track just drops the others); otherwise it's transcoded to `cfg.cast_audio_codec` at a
-    channel-aware bitrate. `audio` (probed tracks) supplies the
+    `audio_index` is the audio-relative index to map with `0:a:N` (the cast decision in
+    `stream_select` picks it by language; the DMR can't switch embedded tracks, so we keep
+    exactly one — see Google Cast docs: the Default Media Receiver exposes only text tracks,
+    audio selection needs a custom receiver). If that track is already DMR-decodable it's
+    stream-copied (no re-encode / no quality loss — e.g. picking a non-default AAC track just
+    drops the others); otherwise it's transcoded to `cfg.cast_audio_codec` at a channel-aware
+    bitrate. `audio` (probed tracks) supplies the
     codec/channels; `n_video` ≥ 2 flags a Dolby-Vision dual-layer source (its enhancement layer
     is dropped — only `0:v:0` is mapped); `duration` feeds the progress line; `size_gb` gates
     the disk-space and big-download guards."""
@@ -304,11 +304,12 @@ def remux_to_file(
         )
     _gc_stale()
     audio = audio or []
-    # `audio_index` is the ABSOLUTE container stream index (ffprobe `index`) of the track the
-    # cast decision picked — map it directly so ffmpeg keeps exactly that stream, with no
-    # audio-relative re-indexing assumption (the DMR plays whatever single track we leave).
-    sel = next((t for t in audio if t.index == audio_index), audio[0] if audio else None)
-    amap = f"0:{audio_index}?"
+    # `audio_index` is the audio-relative index of the track the cast decision picked; map it
+    # with ffmpeg's standard `0:a:N` (the DMR plays whatever single track we leave). `?` only on
+    # the index-0 default (tolerate a video with no audio); an explicit pick stays strict so a
+    # bad index errors out instead of silently producing a mute file.
+    sel = audio[audio_index] if 0 <= audio_index < len(audio) else (audio[0] if audio else None)
+    amap = f"0:a:{audio_index}" if audio_index > 0 else "0:a:0?"
     if sel is not None and _decodable(sel.codec):
         acodec = ["-c:a", "copy"]  # already DMR-decodable → keep it (no re-encode)
     else:

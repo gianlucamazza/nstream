@@ -134,13 +134,13 @@ def test_remux_to_file_encodes_undecodable(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
     seen = {}
     monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
-    audio = [Track(id=1, lang="ita", codec="eac3", channels=6, index=1)]
-    path = remux.remux_to_file("http://x?token=secret", _cfg(), audio_index=1, audio=audio)
+    audio = [Track(id=1, lang="ita", codec="eac3", channels=6)]
+    path = remux.remux_to_file("http://x?token=secret", _cfg(), audio_index=0, audio=audio)
     cmd = seen["cmd"]
     assert path and path.endswith(".mp4")
     assert "-c:v" in cmd and "copy" in cmd  # video always copied
     assert "-c:a" in cmd and "aac" in cmd and "448k" in cmd  # 5.1 EAC3 → AAC 448k
-    assert "0:1?" in cmd  # absolute stream index of the chosen track
+    assert "0:a:0?" in cmd  # default audio track
     assert "secret" not in path  # token-bearing url never returned
 
 
@@ -150,13 +150,10 @@ def test_remux_to_file_copies_decodable_track(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
     seen = {}
     monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
-    audio = [
-        Track(id=1, lang="eng", codec="aac", index=1),
-        Track(id=2, lang="ita", codec="aac", index=2),
-    ]
-    remux.remux_to_file("http://x", _cfg(), audio_index=2, audio=audio)
+    audio = [Track(id=1, lang="eng", codec="aac"), Track(id=2, lang="ita", codec="aac")]
+    remux.remux_to_file("http://x", _cfg(), audio_index=1, audio=audio)
     cmd = seen["cmd"]
-    assert "0:2?" in cmd  # absolute index of the requested (Italian) track
+    assert "0:a:1" in cmd  # the requested (Italian) track, audio-relative
     assert cmd[cmd.index("-c:a") + 1] == "copy"  # already decodable → copy
     assert "-b:a" not in cmd
 

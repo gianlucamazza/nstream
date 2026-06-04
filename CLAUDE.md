@@ -119,8 +119,8 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
   Cast docs only *text* tracks are selectable on the Default Media Receiver; audio selection needs
   a custom (registered, non-libre) receiver. So `vet_cast_audio` ffprobes the chosen dub and returns
   a `CastAudioPlan`: **direct** when the first track is already primary-language + decodable;
-  **remux** (keeping only the primary track, by its absolute ffprobe stream index) when the language
-  is present but not the playable first track; **absent** → reselect another dub, else cast with
+  **remux** (keeping only the primary-language audio track, mapped with ffmpeg `0:a:N`) when the
+  language is present but not the playable first track; **absent** → reselect another dub, else cast with
   primary-language safety subtitles. The remux *is* the cast's `--aid` (the only libre way to pick
   an embedded audio track). `--audio-lang` overrides the target; default is `cfg.primary`.
 - Cast ranking ignores the language filter (show all dubs) and models the **Default Media

@@ -191,21 +191,15 @@ class CastAudioPlan:
 
     mode: str
     stream: Stream
-    audio_index: int = 0  # ABSOLUTE ffprobe stream index of the chosen track → ffmpeg `-map 0:<i>`
+    audio_index: int = 0  # audio-relative index of the chosen track → ffmpeg `-map 0:a:<i>`
     real_lang: str | None = None
     verified: bool = False  # True when decided from real ffprobe tracks (not a name guess)
-
-
-# Cast language decisions are correctness-critical (the DMR plays one track and can't switch),
-# so probe with a longer cap than the pre-play menu — a big remote file's header read can be
-# slow, and a timed-out probe would otherwise look like "unverifiable → cast blind".
-_CAST_PROBE_TIMEOUT = 40.0
 
 
 def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
     """Probed audio tracks of `stream` (url resolved first), or [] when unprobeable."""
     url = _playable_url(cfg, stream)
-    return list(tracks.probe_tracks(url, timeout=_CAST_PROBE_TIMEOUT).audio) if url else []
+    return list(tracks.probe_tracks(url).audio) if url else []
 
 
 def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) -> CastAudioPlan:
@@ -218,18 +212,14 @@ def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) 
         return CastAudioPlan("direct", stream, 0, target_lang or None, verified=False)
     codes = [languages.track_lang(t.lang, t.title) for t in audio]
     c0 = audio[0].codec.lower()
-
-    def abs_index(k: int) -> int:  # the absolute ffmpeg stream index of the k-th audio track
-        return audio[k].index if audio[k].index >= 0 else k
-
     if not target_lang:  # no language preference: codec-only decision on the default track
         mode = "remux" if remux.needs_remux(c0) else "direct"
-        return CastAudioPlan(mode, stream, abs_index(0), codes[0], verified=True)
+        return CastAudioPlan(mode, stream, 0, codes[0], verified=True)
     if codes[0] == target_lang and remux._decodable(c0):
-        return CastAudioPlan("direct", stream, abs_index(0), target_lang, verified=True)
+        return CastAudioPlan("direct", stream, 0, target_lang, verified=True)
     k = next((i for i, c in enumerate(codes) if c == target_lang), None)
     if k is not None:
-        return CastAudioPlan("remux", stream, abs_index(k), target_lang, verified=True)
+        return CastAudioPlan("remux", stream, k, target_lang, verified=True)
     return CastAudioPlan("absent", stream, 0, codes[0], verified=True)
 
 
