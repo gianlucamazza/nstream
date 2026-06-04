@@ -127,8 +127,11 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
     1080p) avoids downloading a full 4K just to cast; direct 4K casts are uncapped (free, no download).
     The remux picks the audio track matching the user's language priority (not blindly `0:a:0`, so a
     dual-audio release casts the right dub) and scales the AAC bitrate to the channel count. A single
-    pre-cast ffprobe drives this (a positively-AAC release name skips it → instant Tier-1); a free-disk
-    check and `cast_remux_max_size_gb` (interactive confirm) guard against a runaway 4K download.
+    pre-cast ffprobe drives this (a positively-AAC release name skips it → instant Tier-1). Against a
+    runaway 4K download, `cast_remux_max_size_gb` (default 20) both **demotes** oversized likely-remux
+    releases in ranking (`quality.remux_within_size` — size is the real cost an unlabelled 4K REMUX
+    hides from the resolution cap) and asks for **confirmation** on an interactive tty before fetching;
+    a free-disk pre-check always runs.
   - Last resort for what even the DMR can't play: the H.264 1080p mirror (`skill-cast`/openscreen).
   - Dolby/DTS are no longer *excluded* from cast (they were "silent") — only ranked below native AAC.
 

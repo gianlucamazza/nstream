@@ -362,9 +362,21 @@ _C_1080_AAC: Stream = {
 }
 
 
-def _cast_spec(cap: int) -> FilterSpec:
+# A 4K REMUX whose name omits the audio codec — reads as audio="" (unknown) yet a remux
+# carries the lossless disc track, so it really needs a huge host remux. The field trap.
+_C_4K_REMUX_UNLABELED: Stream = {
+    "name": "[RD+] Torrentio\n4k",
+    "title": "Film.2024.2160p.UHD.BluRay.REMUX.HEVC.HDR-GRP\n👤 20 💾 86.0 GB ⚙️ x",
+}
+
+
+def _cast_spec(cap: int, size: int = 0) -> FilterSpec:
     return FilterSpec(
-        max_resolution=2160, cast_audio=True, cast_remux=True, cast_remux_max_resolution=cap
+        max_resolution=2160,
+        cast_audio=True,
+        cast_remux=True,
+        cast_remux_max_resolution=cap,
+        cast_remux_max_size=size,
     )
 
 
@@ -404,6 +416,53 @@ def test_remux_cap_leaves_direct_aac_casts_untouched():
         [_C_4K_AAC, _C_1080_AAC], quality.cast_caps(), _cast_spec(1080)
     )
     assert playable[0].stream is _C_4K_AAC
+
+
+def test_likely_needs_remux():
+    likely = quality._likely_needs_remux
+    assert likely(quality.StreamInfo(audio="ac3")) is True
+    assert likely(quality.StreamInfo(audio="truehd")) is True
+    assert likely(quality.StreamInfo(audio="", source="remux")) is True  # unlabelled remux
+    assert likely(quality.StreamInfo(audio="aac")) is False
+    assert likely(quality.StreamInfo(audio="", source="webdl")) is False  # unlabelled web → benefit
+
+
+def test_size_budget_demotes_oversized_unlabelled_remux():
+    # The field trap: an 86GB unlabelled 4K REMUX must not out-rank a feasible 1080p AC-3 (8GB)
+    # once a size budget is set — size is the real download cost the resolution cap can't see.
+    playable, _ = quality.rank_streams(
+        [_C_4K_REMUX_UNLABELED, _C_1080_DOLBY], quality.cast_caps(), _cast_spec(1080, size=20)
+    )
+    assert playable[0].stream is _C_1080_DOLBY
+
+
+def test_size_budget_keeps_sole_oversized_remux():
+    # Preference, not exclusion: a sole oversized remux is still playable (cast-time guard then
+    # prompts before the download).
+    playable, _ = quality.rank_streams(
+        [_C_4K_REMUX_UNLABELED], quality.cast_caps(), _cast_spec(1080, size=20)
+    )
+    assert len(playable) == 1 and playable[0].stream is _C_4K_REMUX_UNLABELED
+
+
+def test_size_budget_does_not_demote_aac():
+    # A 4K AAC (no remux, streamed directly) is never demoted by the size budget, even when big.
+    big_aac: Stream = {
+        "name": "[RD+] Torrentio\n4k",
+        "title": "Film.2024.2160p.WEB-DL.HEVC.AAC-GRP\n👤 20 💾 40.0 GB ⚙️ x",
+    }
+    playable, _ = quality.rank_streams(
+        [big_aac, _C_1080_DOLBY], quality.cast_caps(), _cast_spec(1080, size=20)
+    )
+    assert playable[0].stream is big_aac
+
+
+def test_size_budget_zero_disables():
+    # size=0 → no size demotion → the 4K remux wins on resolution again (cap also off).
+    playable, _ = quality.rank_streams(
+        [_C_4K_REMUX_UNLABELED, _C_1080_DOLBY], quality.cast_caps(), _cast_spec(0, size=0)
+    )
+    assert playable[0].stream is _C_4K_REMUX_UNLABELED
 
 
 def test_cached_marker_provider_agnostic():

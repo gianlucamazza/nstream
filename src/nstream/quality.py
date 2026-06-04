@@ -127,6 +127,17 @@ def _cast_audio_rank(info: StreamInfo) -> int:
     return 0
 
 
+def _likely_needs_remux(info: StreamInfo) -> bool:
+    """True when casting this release will probably need a Tier-2 host remux — so its
+    download cost (size) matters for ranking. Known-undecodable codecs need it; so does a
+    REMUX whose name omits the codec, because a remux carries the untouched lossless disc
+    track (TrueHD/DTS-HD) even when untagged — the same reasoning `unsupported_reason` uses
+    to demote unlabelled remuxes. A definitive answer only comes from the cast-time ffprobe;
+    this is the ranking heuristic that keeps a huge unlabelled 4K remux from out-ranking a
+    modest alternative (it would otherwise look like decodable/unknown audio)."""
+    return info.audio in _CAST_NEEDS_REMUX or (not info.audio and info.source == "remux")
+
+
 # Torrentio marks an instantly-available (cached) debrid stream with a per-provider
 # prefix: [RD+] (RealDebrid), [AD+], [PM+], [TB+], [Putio+]… ("+" = cached, vs
 # "[RD download]"). Provider-agnostic so any debrid's cached streams are detected.
@@ -333,6 +344,11 @@ class FilterSpec:
     # Resolution cap applied ONLY to releases that need remuxing (a remux downloads the
     # whole file). 0 = no cap. A ranking preference, not an exclusion.
     cast_remux_max_resolution: int = 0
+    # Size budget (GB) for a remux: a likely-remux release larger than this is demoted below
+    # any feasible alternative, because the cast-time size guard would otherwise prompt/refuse
+    # it. Size is the real download-cost proxy (the resolution cap can't see an unlabelled 4K
+    # remux). 0 = no size demotion. Mirrors `Config.cast_remux_max_size_gb`.
+    cast_remux_max_size: int = 0
 
     @classmethod
     def from_config(
@@ -352,6 +368,7 @@ class FilterSpec:
             cast_audio=cast_audio,
             cast_remux=cast_audio and cfg.cast_remux,
             cast_remux_max_resolution=cfg.cast_remux_max_resolution if cast_audio else 0,
+            cast_remux_max_size=cfg.cast_remux_max_size_gb if cast_audio else 0,
         )
 
 
@@ -448,6 +465,7 @@ def score_components(
     *,
     cast: bool = False,
     cast_remux_cap: int = 0,
+    cast_remux_size: int = 0,
 ) -> dict[str, float | int | bool]:
     """The labelled score terms in precedence order (highest first). `_score` is just the
     tuple of these values; `explain` renders the dict — keeping both here keeps the
@@ -467,15 +485,26 @@ def score_components(
     or below this resolution — a remux downloads the whole file, so a 4K Dolby release is a
     huge fetch while a direct 4K cast is free. Ranked just after audio (a native-AAC release
     still wins) and before resolution (within the cap the best res still wins). A preference:
-    a sole 4K Dolby release is still chosen."""
+    a sole 4K Dolby release is still chosen.
+
+    `cast_remux_size` (>0): `remux_within_size` demotes a likely-remux release bigger than this
+    many GB below any feasible alternative — size is the real download cost, and it catches the
+    case the resolution cap can't (an unlabelled 4K REMUX reads as decodable/unknown audio yet
+    really carries lossless Dolby, so it would otherwise out-rank a modest option and then make
+    the cast-time size guard prompt/refuse). Ranked right after `cached`: avoiding a pick the
+    guard would reject matters more than codec/resolution. AAC releases never trip it (no remux,
+    streamed directly even at 4K)."""
     if cast:
+        needs_remux = _likely_needs_remux(info)
         within_remux_cap = (
-            info.audio not in _CAST_NEEDS_REMUX
-            or cast_remux_cap == 0
-            or info.resolution <= cast_remux_cap
+            not needs_remux or cast_remux_cap == 0 or info.resolution <= cast_remux_cap
+        )
+        within_remux_size = (
+            not needs_remux or cast_remux_size == 0 or info.size_gb <= cast_remux_size
         )
         return {
             "cached": info.cached,
+            "remux_within_size": within_remux_size,
             "cast_audio": _cast_audio_rank(info),
             "remux_within_cap": within_remux_cap,
             "resolution": info.resolution,
@@ -502,9 +531,16 @@ def _score(
     *,
     cast: bool = False,
     cast_remux_cap: int = 0,
+    cast_remux_size: int = 0,
 ) -> tuple:
     return tuple(
-        score_components(info, audio_langs, cast=cast, cast_remux_cap=cast_remux_cap).values()
+        score_components(
+            info,
+            audio_langs,
+            cast=cast,
+            cast_remux_cap=cast_remux_cap,
+            cast_remux_size=cast_remux_size,
+        ).values()
     )
 
 
@@ -564,6 +600,7 @@ def rank_streams(
             spec.audio_langs,
             cast=spec.cast_audio,
             cast_remux_cap=spec.cast_remux_max_resolution,
+            cast_remux_size=spec.cast_remux_max_size,
         ),
         reverse=True,
     )

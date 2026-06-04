@@ -68,10 +68,13 @@ and catt's server (which elicits the `206`/Range exchange the DMR wants) is the 
   *dual-layer* (profile 7) source is flagged: only `0:v:0` is mapped, so its enhancement layer drops
   to HDR10 base (MP4 can't carry the EL — a device/container limit, surfaced as a warning).
 - **Guards (1.11):** a single probe per cast feeds the decision (a positively-AAC release name skips
-  it entirely → instant Tier-1). Before a remux: a free-disk pre-check aborts to a direct cast if the
-  release won't fit, and `cast_remux_max_size_gb` prompts for confirmation on an interactive tty
-  before a large (e.g. 4K Dolby) download — the resolution cap is only a ranking preference, so this
-  is the hard ceiling. Headless callers proceed without blocking.
+  it entirely → instant Tier-1). `cast_remux_max_size_gb` (default 20) is the download budget: in
+  ranking, `quality.remux_within_size` demotes a likely-remux release over budget below any feasible
+  alternative (size is the real cost — an *unlabelled* 4K REMUX reads as decodable/unknown audio yet
+  carries the lossless disc track, so the resolution cap alone can't catch it; a field cast of a 3 hr
+  REMUX surfaced an 86 GB pick that the cap let through). Before the remux itself: a free-disk
+  pre-check aborts to a direct cast if it won't fit, and the same budget prompts for confirmation on
+  an interactive tty before a large download. Headless callers proceed without blocking.
 
 ## References
 

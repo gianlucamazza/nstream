@@ -68,11 +68,12 @@ exactly these terms per stream.
 **Cast score** (`cast=True`, models the Default Media Receiver, not the GPU):
 
 ```
-(cached, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
+(cached, remux_within_size, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
 ```
 
 | term | meaning |
 |------|---------|
+| `remux_within_size` | demotes a **likely-remux** release bigger than `cast_remux_max_size_gb` (default 20) below any feasible alternative — size is the real download cost. A *likely-remux* is Dolby/DTS audio **or** an unlabelled REMUX (its name omits the codec but it carries the lossless disc track, so it reads as decodable/unknown yet really needs a huge remux — the resolution cap can't see it). Ranked right after `cached`: avoiding a pick the cast-time size guard would reject matters more than codec/resolution. AAC releases never trip it (no remux, streamed directly even at 4K). A preference, not an exclusion |
 | `cast_audio` | 2 = receiver decodes it natively (AAC/Opus/FLAC…), 1 = untagged, 0 = Dolby/DTS (needs a Tier-2 remux). Prefers AAC so the **direct, instant** cast wins and a remux (a prepare wait) only triggers when no AAC release exists |
 | `remux_within_cap` | among releases that need a remux, prefers those ≤ `cast_remux_max_resolution` (default 1080p) — a remux downloads the whole file, so a 4K Dolby release is a 30-60 GB fetch while a direct 4K cast is free. A preference, not an exclusion |
 | `cast_h264` | tie-breaker only (the receiver decodes HEVC natively too) |

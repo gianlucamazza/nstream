@@ -145,11 +145,13 @@ class Config:
     # resolution (default 1080p). 0 = no cap. A preference, not an exclusion — a sole 4K
     # Dolby release is still cast.
     cast_remux_max_resolution: int = 1080
-    # Hard ceiling on how big a release a Tier-2 remux may fetch: a remux downloads + rewrites
-    # the whole file, so a 4K Dolby title can be 30-60 GB. Above this many GB the cast asks for
-    # confirmation on an interactive tty (headless proceeds — it was the only castable release).
-    # A free-disk pre-check always runs regardless. 0 = no size prompt (only the disk check).
-    cast_remux_max_size_gb: int = 0
+    # Ceiling (GB) on how big a release a Tier-2 remux may fetch: a remux downloads + rewrites
+    # the whole file, so a 4K Dolby title can be 30-90 GB. This both demotes oversized
+    # likely-remux releases in cast ranking (`quality.remux_within_size` — size is the real cost
+    # an unlabelled 4K REMUX hides from the resolution cap) and, above the threshold, asks for
+    # confirmation on an interactive tty before downloading (headless proceeds — it was the only
+    # castable release). A free-disk pre-check always runs regardless. 0 = off (disk check only).
+    cast_remux_max_size_gb: int = 20
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
