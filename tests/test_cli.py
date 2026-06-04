@@ -898,3 +898,61 @@ def test_pick_meta_alt_c_sets_cast(monkeypatch):
     )
     cli._pick_meta(items, CFG, opts)
     assert seen == {"cast": True, "choose": True}
+
+
+def test_ensure_playable_passthrough_when_reachable(monkeypatch):
+    monkeypatch.setattr(cli.api, "url_playable", lambda u, **k: True)
+    chosen: Stream = {"url": "https://rd/u"}
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    assert cli._ensure_playable(cfg, [chosen], chosen, _gopts()) is chosen
+
+
+def test_ensure_playable_local_skips_check(monkeypatch):
+    monkeypatch.setattr(
+        cli.api, "url_playable", lambda u, **k: pytest.fail("no reachability check in local mode")
+    )
+    chosen: Stream = {"url": "http://127.0.0.1:8090/stream"}
+    cfg = Config(torrentio_base="tb", playback_backend="local")
+    assert cli._ensure_playable(cfg, [chosen], chosen, _gopts()) is chosen
+
+
+def test_ensure_playable_hybrid_falls_back_to_p2p(monkeypatch):
+    monkeypatch.setattr(cli.api, "url_playable", lambda u, **k: False)
+    monkeypatch.setattr(cli.engine, "resolve", lambda cfg, s: "http://192.168.1.5:8090/stream")
+    chosen: Stream = {"url": "https://rd/dead", "infoHash": "ABC"}
+    cfg = Config(torrentio_base="tb", playback_backend="auto")
+    out = cli._ensure_playable(cfg, [chosen], chosen, _gopts())
+    assert out["url"] == "http://192.168.1.5:8090/stream"  # fell back to local P2P
+
+
+def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
+    dead: Stream = {"url": "https://rd/dead"}
+    good: Stream = {"url": "https://rd/good"}
+    monkeypatch.setattr(cli.api, "url_playable", lambda u, **k: u == "https://rd/good")
+    monkeypatch.setattr(cli, "_auto_candidates", lambda *a, **k: [dead, good])
+    monkeypatch.setattr(cli, "_resolve_stream", lambda cfg, s: s)
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    out = cli._ensure_playable(cfg, [dead, good], dead, _gopts())
+    assert out is good  # skipped the dead cached link for the next reachable candidate
+
+
+def test_p2p_guard_blocks_without_vpn_when_required(monkeypatch, capsys):
+    monkeypatch.setattr(cli.engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    assert cli._p2p_guard(cfg) is False
+    assert "bloccato" in capsys.readouterr().err
+
+
+def test_p2p_guard_warns_without_vpn_but_proceeds(monkeypatch, capsys):
+    monkeypatch.setattr(cli.engine, "vpn_active", lambda: False)
+    monkeypatch.setattr(cli, "_p2p_notice_once", lambda cfg: None)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=False)
+    assert cli._p2p_guard(cfg) is True
+    assert "nessuna VPN" in capsys.readouterr().err
+
+
+def test_p2p_guard_silent_with_vpn(monkeypatch, capsys):
+    monkeypatch.setattr(cli.engine, "vpn_active", lambda: True)
+    monkeypatch.setattr(cli, "_p2p_notice_once", lambda cfg: None)
+    assert cli._p2p_guard(Config(torrentio_base="tb")) is True
+    assert "VPN" not in capsys.readouterr().err

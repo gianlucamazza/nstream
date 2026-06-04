@@ -58,6 +58,22 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
     return None
 
 
+def url_playable(url: str, *, timeout: float = 6.0) -> bool:
+    """Best-effort reachability check for a ready (debrid) stream url: True if the server
+    serves the first byte, False on a clear failure (dead/expired link, 4xx/5xx, connection
+    error). Conservative — a HEAD/Range rejection (403/405/416) still counts as reachable, so
+    we only veto clear misses. Real-Debrid can't reliably report a cached-miss, so this catches
+    dead links and resolve errors, not every non-cached case."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status < 400
+    except urllib.error.HTTPError as e:
+        return e.code in (403, 405, 416)  # method/range not allowed, but the resource exists
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+        return False
+
+
 def _read_json(resp) -> dict:
     """Read a urllib response body, transparently gunzipping when needed."""
     raw = resp.read()
@@ -302,7 +318,64 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
                 "streams", []
             )
         )
+    # Hybrid "auto" backend: the main query carries the debrid token (cached urls); fetch the
+    # token-less Torrentio variant too (pure-torrent infoHash) and merge, so a release can be
+    # played via debrid AND fall back to local P2P. Run it as another concurrent task.
+    if cfg.playback_backend == "auto":
+        tl = f"{addons.torrentio_token_less(cfg)}/stream/{typ}/{video_id}.json"
+        tasks.append(
+            lambda tl=tl: _tagged(
+                http_get_json(tl, what="stream (Torrentio P2P)").get("streams", [])
+            )
+        )
+        gathered = _gather(tasks)  # flat list of streams, task order preserved
+        debrid = [s for s in gathered if not _is_p2p(s)]
+        torrents = [s for s in gathered if _is_p2p(s)]
+        return _dedup(_merge_hybrid(debrid, torrents), _stream_key)
     return _dedup(_gather(tasks), _stream_key)
+
+
+# Marker key (private, stripped before returning) tagging the pure-torrent batch in the
+# hybrid merge so it can be told apart from the debrid batch after the concurrent gather.
+_P2P_TAG = "__p2p__"
+
+
+def _tagged(streams: list[Stream]) -> list[Stream]:
+    for s in streams:
+        s[_P2P_TAG] = True
+    return streams
+
+
+def _is_p2p(s: Stream) -> bool:
+    return bool(s.get(_P2P_TAG))
+
+
+def _filename(s: Stream) -> str:
+    """Torrentio's per-file name (behaviorHints.filename) — identical across the debrid and
+    token-less queries for the same release, so it's the join key for the hybrid merge.
+    Falls back to the title's first line when absent."""
+    fn = (s.get("behaviorHints") or {}).get("filename")
+    return fn or (s.get("title") or "").split("\n", 1)[0].strip()
+
+
+def _merge_hybrid(debrid: list[Stream], torrents: list[Stream]) -> list[Stream]:
+    """Fuse the debrid (url) and token-less (infoHash) Torrentio results by filename: a matched
+    release gets both a debrid `url` and the torrent's `infoHash`/`fileIdx`/`sources`, so it can
+    play via debrid and fall back to local P2P. Token-less-only releases are kept as pure-torrent;
+    the internal _P2P_TAG marker is stripped from everything."""
+    by_name = {_filename(s): s for s in torrents}
+    out: list[Stream] = []
+    for s in debrid:
+        t = by_name.pop(_filename(s), None)
+        if t:
+            for k in ("infoHash", "fileIdx", "sources"):
+                if k in t and k not in s:
+                    s[k] = t[k]
+        out.append(s)
+    out.extend(by_name.values())  # pure-torrent releases with no debrid match
+    for s in out:
+        s.pop(_P2P_TAG, None)
+    return out
 
 
 def _stream_key(s: Stream) -> object:

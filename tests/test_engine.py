@@ -157,3 +157,30 @@ def test_wait_buffer_returns_when_preloaded(monkeypatch, capsys):
     monkeypatch.setattr(engine.time, "sleep", lambda _: pytest.fail("should not loop"))
     engine._wait_buffer("http://127.0.0.1:8090", "H")  # returns promptly
     assert "buffering" in capsys.readouterr().err
+
+
+def test_vpn_active_detects_wireguard(monkeypatch):
+    import io
+
+    monkeypatch.setattr(engine.os, "listdir", lambda p: ["eth0", "lo", "wg0"])
+
+    def fake_open(path, *a, **k):
+        if path.endswith("wg0/operstate"):
+            return io.StringIO("unknown\n")  # wg often reports "unknown" while up
+        raise OSError
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert engine.vpn_active() is True
+
+
+def test_vpn_active_false_without_vpn_iface(monkeypatch):
+    monkeypatch.setattr(engine.os, "listdir", lambda p: ["eth0", "lo", "docker0"])
+    assert engine.vpn_active() is False
+
+
+def test_vpn_active_false_when_iface_down(monkeypatch):
+    import io
+
+    monkeypatch.setattr(engine.os, "listdir", lambda p: ["tun0"])
+    monkeypatch.setattr("builtins.open", lambda path, *a, **k: io.StringIO("down\n"))
+    assert engine.vpn_active() is False

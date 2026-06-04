@@ -114,14 +114,31 @@ def load_addon(manifest_url: str, *, use_cache: bool = True) -> Addon | None:
 # --- built-ins + dispatch ------------------------------------------------
 
 
+def _strip_debrid(base: str) -> str:
+    """Drop any debrid segment from a Torrentio config string, so Torrentio returns
+    pure-torrent results (infoHash) instead of debrid urls."""
+    segs = [s for s in base.split("|") if s and s.split("=", 1)[0] not in DEBRID_PROVIDERS]
+    return "|".join(segs) or "sort=qualitysize"
+
+
+def _torrentio_url(base: str) -> str:
+    return "https://torrentio.strem.fun/" + urllib.parse.quote(base, safe="=|")
+
+
 def torrentio_base(cfg: Config) -> str:
     base = cfg.torrentio_base
-    # Local backend streams torrents itself, so query Torrentio token-less: dropping the
-    # debrid segment makes it return pure-torrent results (infoHash) instead of debrid urls.
+    # Local backend streams torrents itself, so query Torrentio token-less. The hybrid
+    # "auto" backend keeps the token here (debrid urls / cached) and fetches the
+    # pure-torrent variant separately (see torrentio_token_less / api hybrid merge).
     if cfg.playback_backend == "local":
-        segs = [s for s in base.split("|") if s and s.split("=", 1)[0] not in DEBRID_PROVIDERS]
-        base = "|".join(segs) or "sort=qualitysize"
-    return "https://torrentio.strem.fun/" + urllib.parse.quote(base, safe="=|")
+        base = _strip_debrid(base)
+    return _torrentio_url(base)
+
+
+def torrentio_token_less(cfg: Config) -> str:
+    """Torrentio base URL with the debrid segment stripped — pure-torrent results
+    (infoHash). Used by the hybrid 'auto' backend's P2P-fallback query."""
+    return _torrentio_url(_strip_debrid(cfg.torrentio_base))
 
 
 def _builtins(cfg: Config) -> list[Addon]:

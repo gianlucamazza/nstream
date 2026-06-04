@@ -228,3 +228,66 @@ def test_streams_not_cached(monkeypatch):
     api.streams(CFG, "movie", "tt1")
     api.streams(CFG, "movie", "tt1")
     assert calls["n"] == 2  # streams must never be cached
+
+
+# --- hybrid backend merge (auto) ------------------------------------------
+
+
+def _bh(filename):
+    return {"behaviorHints": {"filename": filename}}
+
+
+def test_filename_join_key_prefers_behaviorhints():
+    s = {"title": "Title line\nextra", **_bh("Movie.2024.x265.mkv")}
+    assert api._filename(s) == "Movie.2024.x265.mkv"
+    # falls back to the title's first line when behaviorHints.filename is absent
+    assert api._filename({"title": "Movie.2024\n👤 5"}) == "Movie.2024"
+
+
+def test_merge_hybrid_fuses_by_filename():
+    fn = "Inception.2010.2160p.BluRay.mkv"
+    debrid = [{"url": "https://rd/u1", **_bh(fn)}, {"url": "https://rd/u2", **_bh("Other.mkv")}]
+    torrents = [
+        {"infoHash": "AAA", "fileIdx": 0, "sources": ["tracker:x"], api._P2P_TAG: True, **_bh(fn)},
+        {"infoHash": "BBB", api._P2P_TAG: True, **_bh("PureTorrent.Only.mkv")},
+    ]
+    out = api._merge_hybrid(debrid, torrents)
+    # the matched release carries BOTH the debrid url and the torrent's infoHash/fileIdx/sources
+    fused = next(s for s in out if api._filename(s) == fn)
+    assert fused["url"] == "https://rd/u1" and fused["infoHash"] == "AAA"
+    assert fused["fileIdx"] == 0 and fused["sources"] == ["tracker:x"]
+    # the debrid-only release stays url-only; the torrent-only release survives as pure-torrent
+    assert any(s.get("url") == "https://rd/u2" and "infoHash" not in s for s in out)
+    assert any(s.get("infoHash") == "BBB" and "url" not in s for s in out)
+    # the internal marker is stripped from every result
+    assert all(api._P2P_TAG not in s for s in out)
+
+
+def test_url_playable_true_on_partial(monkeypatch):
+    class _Resp:
+        status = 206
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert api.url_playable("http://x") is True
+
+
+def test_url_playable_false_on_connection_error(monkeypatch):
+    def boom(*a, **k):
+        raise api.urllib.error.URLError("down")
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", boom)
+    assert api.url_playable("http://x") is False
+
+
+def test_url_playable_optimistic_on_method_rejection(monkeypatch):
+    def reject(*a, **k):
+        raise api.urllib.error.HTTPError("http://x", 405, "no", {}, None)
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", reject)
+    assert api.url_playable("http://x") is True  # HEAD/Range rejected, resource still exists

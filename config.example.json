@@ -28,5 +28,6 @@
   "engine_port": 8090,
   "engine_cache_mb": 256,
   "engine_download_dir": "",
-  "p2p_ack": false
+  "p2p_ack": false,
+  "p2p_require_vpn": false
 }
