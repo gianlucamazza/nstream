@@ -122,6 +122,41 @@ def test_scan_devices_empty_on_failure(monkeypatch):
     assert settings.scan_devices() == []
 
 
+def test_scan_devices_retries_on_empty(monkeypatch):
+    # A cold mDNS scan can come back empty; the next attempt finds the device.
+    class _P:
+        returncode = 0
+        stdout = "192.168.1.228 - 43PUS9235/12 - Philips TPM191E\n"
+
+    results = [None, _P()]  # first scan empty (None), second populated
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(a)
+        return results[len(calls) - 1]
+
+    monkeypatch.setattr(settings.util, "run_cmd", fake_run)
+    assert settings.scan_devices() == [("43PUS9235/12", "192.168.1.228")]
+    assert len(calls) == 2  # retried once
+
+
+def test_scan_devices_no_retry_when_populated(monkeypatch):
+    # A populated scan is trustworthy and used immediately — no wasted second scan.
+    class _P:
+        returncode = 0
+        stdout = "192.168.1.50 - Soggiorno - Google Nest\n"
+
+    calls = []
+
+    def fake_run(*a, **k):
+        calls.append(a)
+        return _P()
+
+    monkeypatch.setattr(settings.util, "run_cmd", fake_run)
+    assert settings.scan_devices() == [("Soggiorno", "192.168.1.50")]
+    assert len(calls) == 1
+
+
 def test_cast_device_item_present():
     keys = [it[0] for it in settings._items(Config(torrentio_base="sort=x|realdebrid=T"))]
     assert "cast_device" in keys

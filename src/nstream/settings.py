@@ -14,8 +14,10 @@ import shlex
 import sys
 import tempfile
 
-from . import addons, config, debrid, engine, languages, picker, ui, util
+from . import addons, config, debrid, engine, languages, log, picker, ui, util
 from .config import Config
+
+_log = log.get_logger("settings")
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
 MAXRES_CHOICES = [
@@ -36,12 +38,28 @@ CHOICE_VALUES: dict[str, list[str]] = {
 _SCAN_RE = re.compile(r"^([\d.]+) - (.+?) - ")
 
 
-def scan_devices() -> list[tuple[str, str]]:
+def scan_devices(*, attempts: int = 2) -> list[tuple[str, str]]:
     """Discover Chromecasts on the LAN via `catt scan` as (name, ip) pairs (deduped by
     name, stable order). The IP lets callers cast with `catt -d <ip>`, which is robust
     to mDNS name-resolution flakiness (e.g. right after a network change). Best-effort:
-    returns [] if catt is missing or the scan fails."""
+    returns [] if catt is missing or every scan comes back empty.
+
+    mDNS discovery is probabilistic and degrades on hosts with many interfaces (docker
+    bridges, VPNs, veth): a single cold `catt scan` can return empty even when the device
+    is reachable. A *populated* scan is trustworthy and returned immediately; only an empty
+    result is retried (up to `attempts`) before we trust the absence and fall back to local."""
     print("🔍 cerco Chromecast…", file=sys.stderr)
+    for attempt in range(1, attempts + 1):
+        devices = _scan_once()
+        if devices:
+            return devices
+        if attempt < attempts:
+            _log.debug("catt scan vuoto (tentativo %d/%d) → riprovo", attempt, attempts)
+    return []
+
+
+def _scan_once() -> list[tuple[str, str]]:
+    """One `catt scan`, parsed to deduped (name, ip) pairs; [] if catt is missing/failed."""
     proc = util.run_cmd(["catt", "scan"], timeout=util.CATT_SCAN_TIMEOUT)
     if proc is None:
         return []

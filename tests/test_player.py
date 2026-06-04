@@ -201,3 +201,24 @@ def test_quiet_defaults_not_when_user_sets_msg_level(monkeypatch):
     monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: opt == "msg-level")
     cfg = Config(torrentio_base="tb", mpv_quiet=True)
     assert player._quiet_defaults(cfg) == []
+
+
+# --- file-tags display (--display-tags) ------------------------------------
+
+
+def test_display_tags_suppressed_by_default(monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_quiet=True)
+    assert player._display_tags_defaults(cfg) == ["--display-tags="]
+
+
+def test_display_tags_off_when_not_quiet(monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_quiet=False)
+    assert player._display_tags_defaults(cfg) == []
+
+
+def test_display_tags_not_when_user_sets_it(monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_quiet=True, mpv_args=["--display-tags=Title"])
+    assert player._display_tags_defaults(cfg) == []
