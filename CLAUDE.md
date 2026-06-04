@@ -62,6 +62,12 @@ Modules in `src/nstream/`:
   infoHash, wait for the read-ahead buffer) and returns a plain `http://…/stream?…` url — the same
   contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util` + stdlib), like
   `caster`/`player`. Best-effort: raises `EngineUnavailable` instead of crashing the picker.
+  `magnet_from_stream()` is shared with `debrid`.
+- `debrid.py` — native debrid backend: talks **directly** to a provider's API (TorBox/Premiumize)
+  to batch-check the cache and resolve an infoHash to an `http://…` url — same contract as `engine`.
+  Used only by the `native` playback backend; RealDebrid is intentionally absent (no cache endpoint
+  since 2024 — see `docs/adr/0002`). Leaf below `cli` (imports `config`/`engine`/`log` + stdlib);
+  best-effort, raises `DebridUnavailable` → caller degrades to P2P. `get_resolver`/`DebridResolver`.
 - `picker.py` — shared fzf pickers (TUI flow + cast menus); imports only `util`+`ui`. `fzf`/`fzf_key`.
 - `preview.py` — body of the hidden `nstream __preview` subcommand: poster thumbnail (via `chafa`)
   + metadata card in the fzf preview pane. Best-effort, **never prints stream URLs**.
@@ -93,7 +99,8 @@ The debrid token is embedded in the Torrentio base URL — `cfg.torrentio_base` 
 8 providers supported (realdebrid, alldebrid, premiumize, torbox, debridlink, easydebrid,
 offcloud, putio). Cached-marker detection (`[RD+]`, `[AD+]`, `[TB+]`, …) and log redaction
 are all handled generically (single regex), never per-provider. **When touching debrid logic,
-keep it provider-agnostic** — don't special-case RealDebrid.
+keep it provider-agnostic** — don't special-case RealDebrid. A proposed native-resolver adapter
+layer that would narrow (not abandon) this principle is recorded in `docs/adr/` (ADR 0001–0004).
 
 ### Casting (Chromecast via catt)
 - Discovery: `settings.py:scan_devices()` runs `catt scan` → `(name, ip)` pairs.

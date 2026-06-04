@@ -14,7 +14,7 @@ import shlex
 import sys
 import tempfile
 
-from . import addons, config, engine, languages, picker, ui, util
+from . import addons, config, debrid, engine, languages, picker, ui, util
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -146,7 +146,12 @@ def _token_status(cfg: Config) -> str:
 
 def _backend_status(cfg: Config) -> str:
     if cfg.playback_backend == "debrid":
-        return "debrid (premium)"
+        return "debrid (premium, via Torrentio)"
+    if cfg.playback_backend == "native":
+        creds = config.debrid_credentials(cfg.torrentio_base)
+        provider = creds[0] if creds else "?"
+        ok = creds is not None and debrid.supports_native(provider)
+        return f"debrid nativo · {provider}" + ("" if ok else " ⚠ provider non supportato")
     health = "TorrServer ✓" if engine.installed() else "TorrServer ✗ (installalo)"
     return f"P2P locale · {health}"
 
@@ -324,7 +329,8 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Backend riproduzione",
             "backend",
             _backend_status(cfg),
-            "P2P locale (gratis, via TorrServer) o debrid (premium, stream cached istantanei).",
+            "P2P locale (gratis, TorrServer) · debrid via Torrentio · debrid nativo "
+            "(API diretta TorBox/Premiumize, indipendente da Torrentio).",
         ),
         (
             "torrentio_base",
@@ -403,7 +409,11 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         if i is not None:
             config.save({"cast_device": "" if i == 0 else choices[i]})
     elif kind == "backend":
-        choices = ["P2P locale (gratis)", "debrid (premium)"]
+        choices = [
+            "P2P locale (gratis)",
+            "debrid via Torrentio (premium)",
+            "debrid nativo — API diretta (TorBox/Premiumize)",
+        ]
         i = _fzf_select(
             choices, prompt="backend> ", header="Sorgente di riproduzione · ESC: annulla"
         )
@@ -417,10 +427,20 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
                     "installalo (es. `yay -S torrserver-bin`) per lo streaming P2P",
                     file=sys.stderr,
                 )
-        else:
+        elif i == 1:
             config.save({"playback_backend": "debrid"})
             if _token_status(cfg).startswith("✗"):
                 print("nstream: imposta un token debrid qui sotto per usarlo", file=sys.stderr)
+        else:
+            config.save({"playback_backend": "native"})
+            creds = config.debrid_credentials(cfg.torrentio_base)
+            if creds is None or not debrid.supports_native(creds[0]):
+                supported = ", ".join(debrid.NATIVE_PROVIDERS)
+                print(
+                    f"nstream: il backend nativo supporta {supported} — "
+                    "imposta uno di questi token qui sotto",
+                    file=sys.stderr,
+                )
     elif kind == "token":
         i = _fzf_select([name for _, name in _PROVIDERS], prompt="provider> ")
         if i is None:
