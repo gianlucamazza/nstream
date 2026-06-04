@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +26,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
-from . import engine, log
+from . import engine, log, util
 from .config import Config, Stream, debrid_credentials
 
 _log = log.get_logger("debrid")
@@ -68,10 +69,13 @@ def _request(
     token: str | None = None,
     params: dict | None = None,
     form: dict | None = None,
+    retries: int = 3,
 ) -> dict:
-    """One JSON request. `params` are appended to the query, `form` is sent url-encoded.
-    Auth is a Bearer header. Any HTTP/transport/decoding failure becomes DebridUnavailable
-    (the message carries `what`, never the token — the log filter also scrubs Bearer/token)."""
+    """One JSON request, retried like `api.http_get_json`: transient failures (429, 5xx,
+    connection/timeout) back off and retry (honouring `Retry-After`), other 4xx and bad
+    bodies fail fast. `params` are appended to the query, `form` is sent url-encoded; auth is
+    a Bearer header. Every failure becomes DebridUnavailable — the message carries `what`,
+    never the token (the log filter also scrubs Bearer/token)."""
     if params:
         url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
     data = urllib.parse.urlencode(form, doseq=True).encode() if form is not None else None
@@ -80,18 +84,30 @@ def _request(
         headers["Authorization"] = f"Bearer {token}"
     if data is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with _urlopen(req, _TIMEOUT) as resp:
-            raw = resp.read()
-            enc = (resp.headers.get("Content-Encoding") or "").lower() if resp.headers else ""
-            if "gzip" in enc or raw[:2] == b"\x1f\x8b":
-                raw = gzip.decompress(raw)
-            return json.loads(raw or b"{}")
-    except urllib.error.HTTPError as e:
-        raise DebridUnavailable(f"{what}: HTTP {e.code}") from None
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
-        raise DebridUnavailable(f"{what}: {e}") from e
+
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with _urlopen(req, _TIMEOUT) as resp:
+                raw = resp.read()
+                enc = (resp.headers.get("Content-Encoding") or "").lower() if resp.headers else ""
+                if "gzip" in enc or raw[:2] == b"\x1f\x8b":
+                    raw = gzip.decompress(raw)
+                return json.loads(raw or b"{}")
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and not (500 <= e.code < 600):  # auth/not-found/bad-input: fail fast
+                raise DebridUnavailable(f"{what}: HTTP {e.code}") from None
+            last, wait = e, util.retry_after(e)
+        except (json.JSONDecodeError, gzip.BadGzipFile, EOFError) as e:
+            raise DebridUnavailable(f"{what}: risposta non valida") from e
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last, wait = e, None
+        if attempt >= retries:
+            break
+        _log.debug("%s: tentativo %d fallito (%s), retry", what, attempt + 1, last)
+        time.sleep(wait if wait is not None else util.backoff(attempt))
+    raise DebridUnavailable(f"{what}: non raggiungibile dopo {retries + 1} tentativi") from last
 
 
 def _chunks(seq: Sequence[str], n: int) -> Iterator[list[str]]:
@@ -102,6 +118,8 @@ def _chunks(seq: Sequence[str], n: int) -> Iterator[list[str]]:
 # --- TorBox --------------------------------------------------------------
 
 _TORBOX_API = "https://api.torbox.app/v1/api"
+_MYLIST_TRIES = 3  # poll mylist this many times for a just-added torrent's file list
+_MYLIST_DELAY = 0.5  # seconds between mylist polls
 
 
 @dataclass(frozen=True)
@@ -174,16 +192,22 @@ def _torbox_cached_hashes(payload: object) -> set[str]:
 
 def _torbox_file_id(token: str, torrent_id: object, file_idx: object) -> object:
     """The TorBox file id to stream: the release's `fileIdx` when in range, else the largest
-    file (the feature video). Reads `mylist` for the just-added torrent."""
-    data = _request(
-        "GET",
-        f"{_TORBOX_API}/torrents/mylist",
-        what="torbox mylist",
-        token=token,
-        params={"id": torrent_id},
-    )
-    info = data.get("data") or {}
-    files = info.get("files") or []
+    file (the feature video). Reads `mylist` for the just-added torrent, polling a few times
+    since a freshly-added (even cached) torrent may not list its files instantly."""
+    files: list[dict] = []
+    for attempt in range(_MYLIST_TRIES):
+        data = _request(
+            "GET",
+            f"{_TORBOX_API}/torrents/mylist",
+            what="torbox mylist",
+            token=token,
+            params={"id": torrent_id},
+        )
+        files = (data.get("data") or {}).get("files") or []
+        if files:
+            break
+        if attempt < _MYLIST_TRIES - 1:
+            time.sleep(_MYLIST_DELAY)
     if not files:
         raise DebridUnavailable("torbox: nessun file nel torrent")
     if isinstance(file_idx, int) and 0 <= file_idx < len(files):
@@ -276,3 +300,44 @@ def get_resolver(cfg: Config) -> DebridResolver | None:
     if factory is None:
         return None
     return factory(token=token)
+
+
+# --- diagnostics ---------------------------------------------------------
+
+
+def _mask_url(url: str) -> str:
+    """A resolved url with its query string dropped (it may carry a signed token), for printing."""
+    p = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, "", "")) + ("?…" if p.query else "")
+
+
+def selftest(cfg: Config, info_hash: str) -> str:
+    """Smoke-test the configured native resolver against a real account: batch cache-check the
+    given infoHash, then resolve it (which **adds the torrent** to the account). Verifies the
+    provider response field names match the implementation. Read-mostly diagnostic — it never
+    plays. The resolved url is printed with its query masked."""
+    resolver = get_resolver(cfg)
+    if resolver is None:
+        creds = debrid_credentials(cfg.torrentio_base)
+        provider = creds[0] if creds else "nessuno"
+        return (
+            f"nessun resolver nativo per il provider configurato ({provider}). "
+            f"Imposta un token {', '.join(NATIVE_PROVIDERS)} e backend=native nei settings."
+        )
+    ih = info_hash.strip().lower()
+    lines = [f"provider: {resolver.name} (marker [{resolver.marker}+])", f"infoHash: {ih}"]
+    try:
+        cached = resolver.cached([ih])
+        lines.append(
+            f"cached(): {'sì' if ih in cached else 'no'} (hash cached riportati: {len(cached)})"
+        )
+    except DebridUnavailable as e:
+        lines.append(f"cached(): errore — {e}")
+    lines.append("resolve(): aggiungo il torrent all'account e risolvo l'url…")
+    try:
+        url = resolver.resolve({"infoHash": ih})
+        lines.append(f"resolve() → {_mask_url(url)}")
+        lines.append("OK: i field-name delle risposte combaciano con l'implementazione.")
+    except DebridUnavailable as e:
+        lines.append(f"resolve(): errore — {e}")
+    return "\n".join(lines)

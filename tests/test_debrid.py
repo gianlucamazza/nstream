@@ -190,3 +190,55 @@ def test_http_error_becomes_debrid_unavailable(monkeypatch):
     monkeypatch.setattr(debrid, "_urlopen", _router([(lambda u, m, d: True, err)]))
     with pytest.raises(debrid.DebridUnavailable):
         debrid.TorBoxResolver(token="T").cached(["aabb"])
+
+
+def test_request_retries_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    def flaky(req, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.URLError("temporaneo")
+        return FakeResp({"ok": True})
+
+    monkeypatch.setattr(debrid, "_urlopen", flaky)
+    monkeypatch.setattr(debrid.time, "sleep", lambda _s: None)
+    assert debrid._request("GET", "https://x", what="t") == {"ok": True}
+    assert calls["n"] == 2  # retried once
+
+
+def test_request_4xx_fails_fast(monkeypatch):
+    err = urllib.error.HTTPError("https://x", 404, "nf", email.message.Message(), None)
+    calls = {"n": 0}
+
+    def boom(req, timeout):
+        calls["n"] += 1
+        raise err
+
+    monkeypatch.setattr(debrid, "_urlopen", boom)
+    monkeypatch.setattr(debrid.time, "sleep", lambda _s: None)
+    with pytest.raises(debrid.DebridUnavailable):
+        debrid._request("GET", "https://x", what="t")
+    assert calls["n"] == 1  # 404 not retried
+
+
+# --- selftest ------------------------------------------------------------
+
+
+def test_selftest_no_resolver():
+    out = debrid.selftest(_cfg("sort=qualitysize|realdebrid=T"), "abcd")
+    assert "nessun resolver nativo" in out
+
+
+def test_selftest_masks_token_in_url(monkeypatch):
+    routes = [
+        (lambda u, m, d: "checkcached" in u, {"data": [{"hash": "abcd"}]}),
+        (lambda u, m, d: "createtorrent" in u, {"success": True, "data": {"torrent_id": 1}}),
+        (lambda u, m, d: "mylist" in u, {"data": {"files": [{"id": 5, "size": 10}]}}),
+        (lambda u, m, d: "requestdl" in u, {"data": "https://cdn.torbox/v.mkv?token=SECRET"}),
+    ]
+    monkeypatch.setattr(debrid, "_urlopen", _router(routes))
+    out = debrid.selftest(_cfg("sort=qualitysize|torbox=T"), "ABCD")
+    assert "cached(): sì" in out
+    assert "https://cdn.torbox/v.mkv" in out and "SECRET" not in out  # query masked
+    assert "OK:" in out

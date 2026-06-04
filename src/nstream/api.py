@@ -13,7 +13,6 @@ import gzip
 import hashlib
 import json
 import os
-import random
 import threading
 import time
 import urllib.error
@@ -30,8 +29,6 @@ _log = log.get_logger("api")
 
 UA = "Mozilla/5.0 nstream"
 TIMEOUT = 20.0
-_BACKOFF_BASE = 0.5
-_RETRY_AFTER_CAP = 30.0
 _MAX_WORKERS = 8
 # In-process TTL cache for token-free metadata (search/catalog/meta/episodes). Each
 # CLI run is a fresh process, but the home TUI / browse / pick loops live in one
@@ -45,17 +42,6 @@ _cache_lock = threading.Lock()
 
 class NetworkError(Exception):
     """A request failed after exhausting retries, or hit a non-retryable status."""
-
-
-def _backoff(attempt: int) -> float:
-    return _BACKOFF_BASE * (2**attempt) + random.uniform(0.0, 0.3)
-
-
-def _retry_after(exc: urllib.error.HTTPError) -> float | None:
-    value = exc.headers.get("Retry-After") if exc.headers else None
-    if value and value.isdigit():
-        return min(float(value), _RETRY_AFTER_CAP)
-    return None
 
 
 def url_playable(url: str, *, timeout: float = 6.0) -> bool:
@@ -95,7 +81,7 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
             if e.code != 429 and not (500 <= e.code < 600):
                 raise NetworkError(f"{what}: HTTP {e.code}") from None
             last_exc = e
-            wait = _retry_after(e)
+            wait = util.retry_after(e)
         except (json.JSONDecodeError, gzip.BadGzipFile, EOFError) as e:
             # Bad body (incl. corrupt gzip) — caught before the broad OSError branch
             # since BadGzipFile is an OSError; retrying wouldn't help.
@@ -107,7 +93,7 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
         if attempt >= retries:
             break
         _log.debug("%s: tentativo %d fallito (%s), retry", what, attempt + 1, last_exc)
-        time.sleep(wait if wait is not None else _backoff(attempt))
+        time.sleep(wait if wait is not None else util.backoff(attempt))
 
     _log.warning("%s: rete non raggiungibile dopo %d tentativi", what, retries + 1)
     raise NetworkError(f"{what}: rete non raggiungibile dopo {retries + 1} tentativi") from last_exc
