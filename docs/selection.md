@@ -85,7 +85,7 @@ After ranking, the cast pick passes through `stream_select.vet_cast_audio`, whic
 audio language**: the Default Media Receiver plays a file's first track and can't switch embedded
 audio tracks (Google Cast: only *text* tracks are selectable without a custom receiver), so it
 ffprobes the dub and either casts directly (first track already primary + decodable), remuxes to
-keep only the primary track (by absolute stream index), reselects another dub, or casts with
+keep only the primary-language track (ffmpeg `0:a:N`), reselects another dub, or casts with
 primary-language safety subtitles. This is why a high-ranked but wrong-language pick still ends up
 in the right language.
 

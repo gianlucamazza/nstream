@@ -63,8 +63,8 @@ and catt's server (which elicits the `206`/Range exchange the DMR wants) is the 
   `--stop` (and the next run's GC) tear them down. `quality`/`config`/`cli` gain `cast_remux`,
   `cast_audio_codec`, `cast_remux_max_resolution`.
 - **Per-language audio (1.11/1.12):** the remux keeps the audio track matching the user's language
-  priority (`cfg.primary`/`audio_langs`), by its **absolute ffprobe stream index** — a dual/multi-audio
-  release no longer casts the wrong dub. This is now the cast's language mechanism, not just a Dolby
+  priority (`cfg.primary`/`audio_langs`), mapped with ffmpeg's `0:a:N` — a dual/multi-audio release
+  no longer casts the wrong dub. This is now the cast's language mechanism, not just a Dolby
   fix: **Google Cast docs confirm the Default Media Receiver exposes only *text* tracks to the Track
   API — audio track selection requires a custom (registered, non-libre) receiver**, so on a libre path
   the only way to pick an embedded audio track is to remux the file down to that single track. The

@@ -29,7 +29,6 @@ class Track:
     codec: str = ""
     channels: int | None = None
     title: str = ""
-    index: int = -1  # absolute container stream index (ffprobe `index`) → ffmpeg `-map 0:<index>`
 
 
 @dataclass(frozen=True)
@@ -52,14 +51,12 @@ def _parse_ffprobe(data: dict) -> Tracks:
         bucket = audio if kind == "audio" else subs
         tags = s.get("tags") or {}
         chans = s.get("channels")
-        idx = s.get("index")
         track = Track(
             id=len(bucket) + 1,
             lang=str(tags.get("language") or "und"),
             codec=str(s.get("codec_name") or ""),
             channels=int(chans) if isinstance(chans, int) else None,
             title=str(tags.get("title") or ""),
-            index=int(idx) if isinstance(idx, int) else -1,
         )
         bucket.append(track)
     return Tracks(audio=audio, subs=subs)

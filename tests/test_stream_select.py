@@ -581,16 +581,6 @@ def test_cast_plan_remux_selects_nondefault_aac_track():
     assert p.mode == "remux" and p.audio_index == 1
 
 
-def test_cast_plan_uses_absolute_stream_index():
-    # With real ffprobe indices (video=0, audio start at 1), the plan maps the ABSOLUTE index
-    # of the target track — not its audio-relative position — so ffmpeg keeps exactly it.
-    audio = [Track(1, "eng", "aac", index=1), Track(2, "ita", "ac3", 6, index=2)]
-    p = _plan(audio)
-    assert (
-        p.mode == "remux" and p.audio_index == 2
-    )  # absolute index, == audio-relative 1 here + offset
-
-
 def test_cast_plan_absent_when_no_target_track():
     p = _plan([Track(1, "eng", "aac"), Track(2, "fra", "aac")])
     assert p.mode == "absent" and p.real_lang == "eng"
