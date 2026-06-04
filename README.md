@@ -274,7 +274,10 @@ is documented in [docs/selection.md](docs/selection.md).
 
 | Path | Role |
 |------|------|
-| `src/nstream/cli.py` | argparse entry point, fzf/mpv orchestration, subtitles, resume |
+| `src/nstream/cli.py` | argparse entry point, fzf/mpv orchestration, resume, series auto-advance |
+| `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards |
+| `src/nstream/subs.py` | subtitle fetch/rank/download (OpenSubtitles) |
+| `src/nstream/labels.py` | display-label formatting for the fzf/mpv UI |
 | `src/nstream/api.py` | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
 | `src/nstream/addons.py` | Stremio addon-protocol client (manifests, dispatch, cache) |
 | `src/nstream/quality.py` | hardware-aware stream parsing/ranking (vainfo caps, filter) |
@@ -291,4 +294,4 @@ is documented in [docs/selection.md](docs/selection.md).
 
 ## Possible extensions
 
-- Trakt sync; alternative debrid providers (AllDebrid, Premiumize).
+- Trakt sync.

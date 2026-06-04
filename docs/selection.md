@@ -18,7 +18,7 @@ the one mpv would select — without playing anything.
 ## Pipeline
 
 `quality.parse_stream` → `unsupported_reason` (filter) → `_score` (rank) → cap → pick
-(`cli._pick_stream`). For a movie the auto-pick is `playable[0]`; manual mode shows an fzf
+(`stream_select._pick_stream`). For a movie the auto-pick is `playable[0]`; manual mode shows an fzf
 menu (top `max_streams` playable + a "show all" entry that reveals the rest and the
 excluded ones, each marked with its reason).
 
@@ -60,7 +60,7 @@ web releases are untagged) — see the trade-off below.
 (no surprising resolution downgrade). See `quality.score_components` — `--explain` renders
 exactly these terms per stream.
 
-### 4. Cap & pick (`cli._pick_stream`)
+### 4. Cap & pick (`stream_select._pick_stream`)
 
 `auto` → `playable[0]`. Manual → fzf menu capped at `max_streams` with a "show all". With
 `hw_filter` off, ranking is skipped entirely (Torrentio order).
@@ -95,9 +95,11 @@ container. They can disagree (a release tagged `ITA.ENG` may actually hold ita/e
 - **Local (mpv):** nstream injects `--alang=<audio_langs>` (unless you set `alang` in
   `mpv.conf`/`mpv_args`). mpv picks the first track in the first preferred language present.
   Manual mode (`choose_tracks`) lets you pick an exact track by `--aid` from the ffprobe list.
-  **Auto-play guard**: before playing, if the auto-pick isn't tagged with a preferred language,
-  nstream ffprobes it; when no track matches `audio_langs` it warns and (interactively) reopens
-  the stream menu instead of letting mpv silently fall back to the wrong dub. Tags are matched
+  **Auto-play guard** (`stream_select.prepare_stream`): before playing, if the auto-pick isn't
+  tagged with a preferred language, nstream ffprobes it; when no track matches `audio_langs` it
+  warns and (interactively) reopens the stream menu instead of letting mpv silently fall back to
+  the wrong dub. When only a fallback language is present it plays it with primary-language safety
+  subtitles. Tags are matched
   through `languages.normalize` so a 2-letter container tag (`it`) matches a 3-letter pref
   (`ita`). Best-effort: a missing/failed probe never blocks playback; binge advances warn and
   continue. Well-tagged preferred releases skip the probe.
