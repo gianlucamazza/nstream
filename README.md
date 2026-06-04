@@ -162,6 +162,8 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   - `"local"`: query Torrentio **token-less** (drops the debrid segment) to get pure-torrent
     results, and stream them peer-to-peer through a local **TorrServer** instance nstream drives —
     no paid service. Set it from the settings menu (it warns if TorrServer isn't installed).
+  - `"auto"`: hybrid — run **both** Torrentio queries (with and without the token) and merge them
+    by filename, so a release can play via debrid (cached = instant) *and* fall back to local P2P.
 - `engine_port`: TorrServer HTTP port (default `8090`). nstream reuses a server already listening
   there, otherwise spawns one (and stops only the instance it spawned, never yours).
 - `engine_cache_mb`: TorrServer in-memory read-ahead cache, in MB (default `256`).
@@ -169,6 +171,8 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   `$XDG_CACHE_HOME/nstream/torrents`).
 - `p2p_ack`: set to `true` once you've acknowledged the one-time P2P privacy notice (see below); it
   isn't shown again.
+- `p2p_require_vpn`: block local P2P streaming unless a VPN interface is detected (default `false` —
+  nstream only *warns*). With `true`, P2P is refused when no VPN is up (use debrid or enable the VPN).
 
 ### Playback backend: debrid or local P2P
 
@@ -183,8 +187,21 @@ debrid provider in the settings. Prefer instant, hands-off playback and already 
 service? Set `playback_backend = "debrid"`.
 
 > **P2P privacy.** Local streaming joins the torrent swarm, so your IP is visible to peers (as with
-> any torrent client). nstream shows this notice once and records `p2p_ack`. Consider a VPN if that's
-> a concern. Debrid playback does **not** expose your IP to peers.
+> any torrent client). nstream shows this notice once and records `p2p_ack`, warns when no VPN is
+> detected, and can refuse P2P without one (`p2p_require_vpn`). Debrid playback does **not** expose
+> your IP to peers.
+
+#### P2P + VPN (recommended)
+
+If you use the `local`/`auto` backend, run TorrServer behind a VPN. Best practice (a 2025 study
+found interface-binding cut real-IP leaks from ~31% to ~0.4%):
+
+- **Bind TorrServer to the VPN interface**, don't just "have a VPN on". Either run it inside a VPN
+  network namespace, or pass its torrent listener the VPN address (`torrserver --torrentaddr <vpn-ip>:<port>`).
+- **Disable IPv6** on the torrent path if your VPN doesn't tunnel it (a common leak vector).
+- **Avoid free/unaudited VPNs** — several have been caught logging/selling P2P sessions.
+- nstream's `p2p_require_vpn = true` adds a local guard: it refuses to stream P2P when it can't
+  detect a VPN interface (`tun*`/`wg*`/…). It's a safety net, **not** a substitute for binding.
 
 The file holds your debrid key, so it is created `chmod 600` and git-ignored.
 Watch history lives separately in `~/.local/state/nstream/history.json` (no secrets).

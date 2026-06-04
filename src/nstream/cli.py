@@ -464,7 +464,8 @@ def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
     if not chosen.get("infoHash"):
         print("nstream: stream privo di url e infoHash, salto", file=sys.stderr)
         return None
-    _p2p_notice_once(cfg)
+    if not _p2p_guard(cfg):
+        return None
     try:
         chosen["url"] = engine.resolve(cfg, chosen)
         return chosen
@@ -522,6 +523,54 @@ def _reselect_for_primary(
     return None
 
 
+def _ensure_playable(cfg: Config, results: list[Stream], chosen: Stream, opts: PlayOpts) -> Stream:
+    """Debrid/auto only: the "cached" marker is a crowdsourced guess, so a ready url may be a
+    dead/expired link. If the chosen url isn't reachable, fall back — to local P2P when the
+    stream also carries an infoHash (hybrid 'auto'), else to the next-best reachable candidate.
+    Local backend urls are engine-served (`_wait_buffer` already gates them), so skip the check."""
+    if cfg.playback_backend == "local":
+        return chosen
+    url = chosen.get("url")
+    if not url or api.url_playable(url):
+        return chosen
+    print("nstream: la sorgente «cached» non risponde, ripiego…", file=sys.stderr)
+    if chosen.get("infoHash"):  # hybrid stream → local P2P fallback
+        with contextlib.suppress(engine.EngineUnavailable):
+            chosen["url"] = engine.resolve(cfg, chosen)
+            return chosen
+    tried = 0
+    for s in _auto_candidates(cfg, results, cast=opts.cast):
+        if tried >= 3:
+            break
+        if s is chosen or s.get("url") == url:
+            continue
+        tried += 1
+        ready = _resolve_stream(cfg, s)
+        if ready and (not ready.get("url") or api.url_playable(ready["url"])):
+            return ready
+    return chosen  # nothing better reachable — let the player try anyway
+
+
+def _p2p_guard(cfg: Config) -> bool:
+    """Privacy gate before serving a P2P stream. Returns False — blocking playback — only when
+    `p2p_require_vpn` is set and no VPN interface is detected; otherwise warns (when no VPN) and
+    proceeds. BP: P2P joins the swarm, so without a VPN the real IP is visible to peers."""
+    if not engine.vpn_active():
+        if cfg.p2p_require_vpn:
+            print(
+                "nstream: nessuna VPN rilevata e p2p_require_vpn=true — streaming P2P bloccato.\n"
+                "         Attiva la VPN, oppure usa un provider debrid.",
+                file=sys.stderr,
+            )
+            return False
+        print(
+            "nstream: ⚠ nessuna VPN rilevata — in P2P il tuo IP è visibile ai peer del torrent.",
+            file=sys.stderr,
+        )
+    _p2p_notice_once(cfg)
+    return True
+
+
 def _p2p_notice_once(cfg: Config) -> None:
     """One-time privacy notice the first time a P2P stream is served: torrent peers see the
     client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback."""
@@ -566,6 +615,12 @@ def _play_video(
     chosen = _pick_and_resolve(cfg, results, auto=auto, cast=opts.cast)
     if not chosen:
         return (None, False)
+
+    # Cached-miss fallback (debrid/auto): a "[RD+]" marker is a guess, so verify the ready url
+    # is reachable and fall back (local P2P for a hybrid stream, else the next candidate) before
+    # committing to it. Only in auto mode (manual picks are the user's explicit choice).
+    if auto:
+        chosen = _ensure_playable(cfg, results, chosen, opts)
 
     # Auto-play language guard (local mpv only): the auto-pick can be a file whose audio
     # isn't in the primary language — an untagged/mistagged foreign leak, or a "Dual"
