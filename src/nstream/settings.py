@@ -120,20 +120,11 @@ def _pick_languages(current: list[str], label: str) -> list[str] | None:
     return picker.fzf_multi(items, f"{label}> ", header="TAB: (de)seleziona · INVIO: conferma")
 
 
-# Debrid providers Torrentio supports (config-string key, display name), RD first.
-# The whole `torrentio_base` is passed to Torrentio as-is, so switching provider is
-# just swapping this key — stream resolution already works for any of them.
-_PROVIDERS: list[tuple[str, str]] = [
-    ("realdebrid", "RealDebrid"),
-    ("alldebrid", "AllDebrid"),
-    ("premiumize", "Premiumize"),
-    ("torbox", "TorBox"),
-    ("debridlink", "Debrid-Link"),
-    ("easydebrid", "EasyDebrid"),
-    ("offcloud", "Offcloud"),
-    ("putio", "Put.io"),
-]
-_PROVIDER_KEYS = {k for k, _ in _PROVIDERS}
+# Debrid providers Torrentio supports (config-string key, display name), derived from the
+# single source in config so the key set never drifts. The whole `torrentio_base` is passed
+# to Torrentio as-is, so switching provider is just swapping this key.
+_PROVIDERS: list[tuple[str, str]] = list(config.DEBRID_PROVIDER_NAMES.items())
+_PROVIDER_KEYS = set(config.DEBRID_PROVIDERS)
 
 
 def _token_status(cfg: Config) -> str:

@@ -76,7 +76,7 @@ def test_load_addon_caches(tmp_path, monkeypatch):
         calls["n"] += 1
         return {"name": "Cached", "types": ["movie"], "resources": ["stream"]}
 
-    monkeypatch.setattr(addons.api, "http_get_json", fake_get)
+    monkeypatch.setattr(addons.net, "http_get_json", fake_get)
     a1 = addons.load_addon("https://c/manifest.json")
     a2 = addons.load_addon("https://c/manifest.json")  # served from cache
     assert a1 is not None and a2 is not None
@@ -88,9 +88,9 @@ def test_load_addon_unreachable_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
 
     def boom(url, **k):
-        raise addons.api.NetworkError("down")
+        raise addons.net.NetworkError("down")
 
-    monkeypatch.setattr(addons.api, "http_get_json", boom)
+    monkeypatch.setattr(addons.net, "http_get_json", boom)
     assert addons.load_addon("https://c/manifest.json") is None
 
 
@@ -109,7 +109,7 @@ def test_load_addon_uses_single_retry(tmp_path, monkeypatch):
         seen["retries"] = retries
         return {"name": "X", "resources": ["stream"]}
 
-    monkeypatch.setattr(addons.api, "http_get_json", fake_get)
+    monkeypatch.setattr(addons.net, "http_get_json", fake_get)
     addons.load_addon("https://x/manifest.json", use_cache=False)
     assert seen["retries"] == 1
 
@@ -118,7 +118,7 @@ def test_cache_file_has_no_token(tmp_path, monkeypatch):
     """The manifest cache must be keyed by hash, never store the token-bearing URL."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.setattr(
-        addons.api, "http_get_json", lambda url, **k: {"name": "X", "resources": ["stream"]}
+        addons.net, "http_get_json", lambda url, **k: {"name": "X", "resources": ["stream"]}
     )
     addons.load_addon("https://torrentio.strem.fun/realdebrid=SECRETTOK/manifest.json")
     cache_text = (tmp_path / "nstream" / "manifests.json").read_text()

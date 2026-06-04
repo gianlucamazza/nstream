@@ -9,26 +9,29 @@ Real-Debrid token embedded in Torrentio URLs is never leaked to logs.
 from __future__ import annotations
 
 import contextlib
-import gzip
 import hashlib
 import json
 import os
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import cast
 
 from . import addons, log, util
 from .config import Config, Meta, Stream, Subtitle, Video
 
+# HTTP-JSON primitives live in `net` (below both api and addons) to break the addons↔api
+# cycle. Re-exported here so existing `api.http_get_json` / `api.NetworkError` / `api.url_playable`
+# / `api.UA` / `api.TIMEOUT` references (and their monkeypatching in tests) keep working.
+from .net import TIMEOUT, UA, NetworkError, http_get_json, url_playable
+
 _log = log.get_logger("api")
 
-UA = "Mozilla/5.0 nstream"
-TIMEOUT = 20.0
+__all__ = ["TIMEOUT", "UA", "NetworkError", "http_get_json", "url_playable"]
+
 _MAX_WORKERS = 8
 # In-process TTL cache for token-free metadata (search/catalog/meta/episodes). Each
 # CLI run is a fresh process, but the home TUI / browse / pick loops live in one
@@ -38,65 +41,6 @@ _MAX_WORKERS = 8
 _META_TTL = 600.0
 _meta_cache: dict[str, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
-
-
-class NetworkError(Exception):
-    """A request failed after exhausting retries, or hit a non-retryable status."""
-
-
-def url_playable(url: str, *, timeout: float = 6.0) -> bool:
-    """Best-effort reachability check for a ready (debrid) stream url: True if the server
-    serves the first byte, False on a clear failure (dead/expired link, 4xx/5xx, connection
-    error). Conservative — a HEAD/Range rejection (403/405/416) still counts as reachable, so
-    we only veto clear misses. Real-Debrid can't reliably report a cached-miss, so this catches
-    dead links and resolve errors, not every non-cached case."""
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status < 400
-    except urllib.error.HTTPError as e:
-        return e.code in (403, 405, 416)  # method/range not allowed, but the resource exists
-    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
-        return False
-
-
-def _read_json(resp) -> dict:
-    """Read a urllib response body, transparently gunzipping when needed."""
-    raw = resp.read()
-    enc = (resp.headers.get("Content-Encoding") or "").lower() if resp.headers else ""
-    if "gzip" in enc or raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-    return json.loads(raw)
-
-
-def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dict:
-    last_exc: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                return _read_json(resp)
-        except urllib.error.HTTPError as e:
-            # Don't retry client errors (auth, not found, bad config).
-            if e.code != 429 and not (500 <= e.code < 600):
-                raise NetworkError(f"{what}: HTTP {e.code}") from None
-            last_exc = e
-            wait = util.retry_after(e)
-        except (json.JSONDecodeError, gzip.BadGzipFile, EOFError) as e:
-            # Bad body (incl. corrupt gzip) — caught before the broad OSError branch
-            # since BadGzipFile is an OSError; retrying wouldn't help.
-            raise NetworkError(f"{what}: risposta non valida") from e
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
-            last_exc = e
-            wait = None
-
-        if attempt >= retries:
-            break
-        _log.debug("%s: tentativo %d fallito (%s), retry", what, attempt + 1, last_exc)
-        time.sleep(wait if wait is not None else util.backoff(attempt))
-
-    _log.warning("%s: rete non raggiungibile dopo %d tentativi", what, retries + 1)
-    raise NetworkError(f"{what}: rete non raggiungibile dopo {retries + 1} tentativi") from last_exc
 
 
 def _dedup(items: list, key) -> list:
@@ -327,13 +271,15 @@ _P2P_TAG = "__p2p__"
 
 
 def _tagged(streams: list[Stream]) -> list[Stream]:
+    # _P2P_TAG is a transient, non-schema marker; operate via a plain-dict view so the
+    # TypedDict stays type-clean (the key is stripped again in _merge_hybrid).
     for s in streams:
-        s[_P2P_TAG] = True
+        cast("dict", s)[_P2P_TAG] = True
     return streams
 
 
 def _is_p2p(s: Stream) -> bool:
-    return bool(s.get(_P2P_TAG))
+    return bool(cast("dict", s).get(_P2P_TAG))
 
 
 def _filename(s: Stream) -> str:
@@ -354,13 +300,18 @@ def _merge_hybrid(debrid: list[Stream], torrents: list[Stream]) -> list[Stream]:
     for s in debrid:
         t = by_name.pop(_filename(s), None)
         if t:
-            for k in ("infoHash", "fileIdx", "sources"):
-                if k in t and k not in s:
-                    s[k] = t[k]
+            # Copy the torrent identity onto the matched debrid stream so it can fall back to
+            # local P2P. Explicit keys (not a loop) keep the TypedDict access type-safe.
+            if "infoHash" in t and "infoHash" not in s:
+                s["infoHash"] = t["infoHash"]
+            if "fileIdx" in t and "fileIdx" not in s:
+                s["fileIdx"] = t["fileIdx"]
+            if "sources" in t and "sources" not in s:
+                s["sources"] = t["sources"]
         out.append(s)
     out.extend(by_name.values())  # pure-torrent releases with no debrid match
     for s in out:
-        s.pop(_P2P_TAG, None)
+        cast("dict", s).pop(_P2P_TAG, None)
     return out
 
 
