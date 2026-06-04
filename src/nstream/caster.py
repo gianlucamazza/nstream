@@ -58,9 +58,8 @@ def resolve_device(cfg: Config, *, choose: bool = False) -> str:
         _log.info("device preferito '%s' non in rete → ridiscovery", cfg.cast_device)
     if not devices:
         # Trust the fresh scan: nothing here now (TV off, or a different network). We
-        # deliberately don't fall back to cast-resolve, which returns a configured
-        # default regardless of presence — that would cast to an absent device. The
-        # caller degrades to local playback instead.
+        # deliberately don't fall back to a configured default regardless of presence —
+        # that would cast to an absent device. The caller degrades to local playback.
         raise CastUnavailable("nessun Chromecast in rete")
     if len(devices) == 1 and not choose:
         return devices[0][1]  # the IP
