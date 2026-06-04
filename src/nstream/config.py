@@ -142,12 +142,16 @@ class Config:
     image_mode: str = "auto"
     # Playback backend: "local" streams torrents peer-to-peer through a TorrServer
     # instance nstream drives (free, default); "debrid" plays the ready urls Torrentio
-    # returns for a configured debrid provider. Pure-torrent streams always go local.
+    # returns for a configured debrid provider; "auto" is hybrid — prefer cached debrid
+    # urls and fall back to local P2P (merges both Torrentio queries by filename).
+    # Pure-torrent streams always go local.
     playback_backend: str = "local"
     engine_port: int = 8090  # TorrServer HTTP port (also the one nstream spawns)
     engine_cache_mb: int = 256  # TorrServer in-memory read-ahead cache
     engine_download_dir: str = ""  # torrent data dir; "" → $XDG_CACHE_HOME/nstream/torrents
     p2p_ack: bool = False  # user acknowledged the P2P privacy notice (IP exposed to peers)
+    # Block local P2P streaming unless a VPN interface is detected (default off: only warn).
+    p2p_require_vpn: bool = False
 
     @property
     def primary(self) -> str:
@@ -179,7 +183,7 @@ DEBRID_PROVIDERS: tuple[str, ...] = (
 _ENUM_VALUES: dict[str, set[str]] = {
     "nerd_font": {"auto", "on", "off"},
     "image_mode": {"auto", "off"},
-    "playback_backend": {"local", "debrid"},
+    "playback_backend": {"local", "debrid", "auto"},
 }
 
 
@@ -273,6 +277,7 @@ def load() -> Config:
         engine_cache_mb=_bounded_int(raw, "engine_cache_mb", Config.engine_cache_mb),
         engine_download_dir=str(raw.get("engine_download_dir", Config.engine_download_dir) or ""),
         p2p_ack=bool(raw.get("p2p_ack", Config.p2p_ack)),
+        p2p_require_vpn=bool(raw.get("p2p_require_vpn", Config.p2p_require_vpn)),
     )
 
 

@@ -118,6 +118,31 @@ def installed() -> bool:
     return _binary() is not None
 
 
+# Interface name prefixes used by common VPNs (WireGuard, OpenVPN, Proton, Nord, Mullvad).
+_VPN_IFACE_PREFIXES = ("tun", "tap", "wg", "proton", "nordlynx", "mullvad", "wgpia", "pia")
+
+
+def vpn_active() -> bool:
+    """Best-effort: True if a VPN-style network interface (tun*/wg*/…) is up. Read-only,
+    stdlib only (reads /sys/class/net). Used to warn before P2P streaming exposes the IP to
+    peers. A heuristic, not a guarantee — split-tunnel or unusual setups may evade it."""
+    net = "/sys/class/net"
+    try:
+        names = os.listdir(net)
+    except OSError:
+        return False
+    for n in names:
+        if not n.startswith(_VPN_IFACE_PREFIXES):
+            continue
+        try:
+            with open(os.path.join(net, n, "operstate")) as f:
+                if f.read().strip() in ("up", "unknown"):  # wg often reports "unknown" while up
+                    return True
+        except OSError:
+            return True  # a VPN-named iface exists but has no operstate → assume up
+    return False
+
+
 # --- lifecycle -----------------------------------------------------------
 
 
