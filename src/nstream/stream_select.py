@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import api, engine, languages, log, quality, tracks
+from . import api, debrid, engine, languages, log, quality, tracks
 from . import config as config_mod
 from .config import Config, ConfigError, PlayOpts, Stream
 from .labels import stream_label
@@ -126,14 +126,34 @@ def cast_resolver(cfg: Config, results: list[Stream]) -> Callable[[str], str | N
     return resolve
 
 
+def _native_resolve(cfg: Config, stream: Stream) -> str | None:
+    """Resolve a pure-torrent stream through the configured native debrid API, or None
+    (best-effort: not the native backend, no resolver for the provider, or a provider error
+    — the caller then falls back to local P2P). Never raises."""
+    if cfg.playback_backend != "native":
+        return None
+    resolver = debrid.get_resolver(cfg)
+    if resolver is None:
+        return None
+    try:
+        return resolver.resolve(stream)
+    except debrid.DebridUnavailable as e:
+        _log.info("native resolve fallita: %s", e)
+        return None
+
+
 def _playable_url(cfg: Config, stream: Stream) -> str | None:
-    """Ready url for a stream, resolving a pure-torrent (infoHash) one through the P2P
-    engine on demand. Best-effort and silent: returns None if the engine can't serve it
-    (the caller already has a user-facing fallback)."""
+    """Ready url for a stream, resolving a pure-torrent (infoHash) one through the native
+    debrid API (native backend) or the P2P engine on demand. Best-effort and silent: returns
+    None if neither can serve it (the caller already has a user-facing fallback)."""
     if stream.get("url"):
         return stream["url"]
     if not stream.get("infoHash"):
         return None
+    native = _native_resolve(cfg, stream)
+    if native:
+        stream["url"] = native
+        return native
     try:
         stream["url"] = engine.resolve(cfg, stream)
         return stream["url"]
@@ -164,14 +184,21 @@ def _audio_langs_of(cfg: Config, chosen: Stream) -> set[str] | None:
 
 
 def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
-    """Make `chosen` playable: debrid/cached streams already carry a url, pure-torrent
-    streams (infoHash) are resolved to a local http url by the P2P engine. Returns None
-    for a stream with neither url nor infoHash, or an unservable engine."""
+    """Make `chosen` playable: debrid/cached streams already carry a url; pure-torrent streams
+    (infoHash) are resolved through the native debrid API (native backend, no P2P privacy gate)
+    or, failing that, the local P2P engine. Returns None for a stream with neither url nor
+    infoHash, or when every path is unservable."""
     if chosen.get("url"):
         return chosen  # debrid/cached: ready to play
     if not chosen.get("infoHash"):
         print("nstream: stream privo di url e infoHash, salto", file=sys.stderr)
         return None
+    native = _native_resolve(cfg, chosen)
+    if native:
+        chosen["url"] = native
+        return chosen
+    if cfg.playback_backend == "native":  # native asked but unavailable → say we degrade
+        print("nstream: risoluzione debrid nativa non riuscita, ripiego su P2P…", file=sys.stderr)
     if not _p2p_guard(cfg):
         return None
     try:
@@ -293,6 +320,32 @@ def _p2p_notice_once(cfg: Config) -> None:
         config_mod.save({"p2p_ack": True})
 
 
+def _mark_native_cached(cfg: Config, results: list[Stream]) -> None:
+    """Native backend: batch-ask the provider which infoHashes are cached and prefix their
+    `name` with the provider's `[XX+]` marker, so the existing `quality` cached signal ranks
+    them first without any provider-specific code downstream. Best-effort: a provider with no
+    cache check (or any error) just leaves the list unmarked (uncached streams still resolve,
+    or fall back to P2P). Mutates `results` in place; idempotent via the marker check."""
+    if cfg.playback_backend != "native":
+        return
+    resolver = debrid.get_resolver(cfg)
+    if resolver is None:
+        return
+    hashes = [s["infoHash"].lower() for s in results if s.get("infoHash") and not s.get("url")]
+    if not hashes:
+        return
+    try:
+        cached = resolver.cached(hashes)
+    except debrid.DebridUnavailable as e:
+        _log.info("native cache-check non disponibile: %s", e)
+        return
+    marker = f"[{resolver.marker}+]"
+    for s in results:
+        ih = s.get("infoHash")
+        if ih and ih.lower() in cached and marker not in (s.get("name") or ""):
+            s["name"] = f"{marker} {s.get('name') or ''}".rstrip()
+
+
 @dataclass(frozen=True)
 class VettedStream:
     """The outcome of `prepare_stream`: a playable, language-vetted stream plus the two
@@ -316,6 +369,9 @@ def prepare_stream(
     the second episode on). Steps: pick+resolve → cached-miss fallback (auto only) → primary-
     language audio guard (local mpv only). Cast keeps its own language UX, so the guard is
     skipped there."""
+    # Native backend: tag cached releases up front so the cached score term ranks them first
+    # for both the auto-pick and the cast menu (mutates `results` once, in place).
+    _mark_native_cached(cfg, results)
     chosen = pick_and_resolve(cfg, results, auto=auto, cast=opts.cast)
     if not chosen:
         return None

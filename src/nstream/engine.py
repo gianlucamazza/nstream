@@ -213,9 +213,10 @@ def _shutdown() -> None:
 # --- torrent add / stream-url construction -------------------------------
 
 
-def _magnet(stream: Stream) -> str:
+def magnet_from_stream(stream: Stream) -> str:
     """Build a magnet from the Stremio stream's infoHash + tracker `sources` (better peer
-    discovery than the bare hash)."""
+    discovery than the bare hash). Public so the native debrid resolver (`debrid.py`) can
+    reuse the same magnet — TorBox/Premiumize add it just like TorrServer does."""
     ih = stream["infoHash"]
     parts = [f"magnet:?xt=urn:btih:{ih}"]
     title = (stream.get("title") or "").split("\n", 1)[0].strip()
@@ -240,7 +241,7 @@ def resolve(cfg: Config, stream: Stream) -> str:
     file. The host is the machine's LAN IP — reachable both by local mpv and by a Chromecast,
     so one url serves both playback paths (loopback would be invisible to the TV)."""
     base = ensure_running(cfg)
-    link = _magnet(stream)
+    link = magnet_from_stream(stream)
     try:
         added = _post(base, "/torrents", {"action": "add", "link": link, "save_to_db": False})
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:

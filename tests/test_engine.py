@@ -32,7 +32,7 @@ def test_magnet_includes_hash_name_and_trackers():
         "title": "Some Movie 2024\n👤 5 💾 2 GB",
         "sources": ["tracker:udp://t1:80", "dht:node", "tracker:http://t2/announce"],
     }
-    magnet = engine._magnet(s)
+    magnet = engine.magnet_from_stream(s)
     assert magnet.startswith("magnet:?xt=urn:btih:ABCDEF")
     assert "dn=Some%20Movie%202024" in magnet
     assert "tr=udp%3A//t1%3A80" in magnet and "tr=http%3A//t2/announce" in magnet
@@ -40,7 +40,7 @@ def test_magnet_includes_hash_name_and_trackers():
 
 
 def test_magnet_bare_hash_when_no_extras():
-    assert engine._magnet({"infoHash": "H"}) == "magnet:?xt=urn:btih:H"
+    assert engine.magnet_from_stream({"infoHash": "H"}) == "magnet:?xt=urn:btih:H"
 
 
 def test_largest_index_picks_biggest_file():

@@ -163,6 +163,11 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
     no paid service. Set it from the settings menu (it warns if TorrServer isn't installed).
   - `"auto"`: hybrid — run **both** Torrentio queries (with and without the token) and merge them
     by filename, so a release can play via debrid (cached = instant) *and* fall back to local P2P.
+  - `"native"`: discover pure-torrent streams (token-less Torrentio) and resolve the chosen one
+    through the provider's **own API** — independent of Torrentio's debrid resolution. Supports
+    **TorBox** and **Premiumize** (they keep a live cache check); RealDebrid stays on the `debrid`
+    path (it removed its cache endpoint in 2024). Falls back to local P2P if resolution fails. See
+    [docs/adr/](docs/adr/) (ADR 0001–0004) for the rationale.
 - `engine_port`: TorrServer HTTP port (default `8090`). nstream reuses a server already listening
   there, otherwise spawns one (and stops only the instance it spawned, never yours).
 - `engine_cache_mb`: TorrServer in-memory read-ahead cache, in MB (default `256`).
@@ -267,7 +272,8 @@ stream/subtitle/catalog providers alongside the built-in Cinemeta/Torrentio/Open
 first run, if no config exists, nstream asks which debrid provider to use and writes one.
 
 How streams and audio are ranked (and how to debug a pick with `nstream "<title>" --explain`)
-is documented in [docs/selection.md](docs/selection.md).
+is documented in [docs/selection.md](docs/selection.md). Architectural decisions — why the code
+is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 
 ## Files
 
@@ -279,6 +285,7 @@ is documented in [docs/selection.md](docs/selection.md).
 | `src/nstream/labels.py` | display-label formatting for the fzf/mpv UI |
 | `src/nstream/api.py` | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
 | `src/nstream/addons.py` | Stremio addon-protocol client (manifests, dispatch, cache) |
+| `src/nstream/debrid.py` | native debrid resolver (TorBox/Premiumize API: cache check + resolve) for the `native` backend |
 | `src/nstream/quality.py` | hardware-aware stream parsing/ranking (vainfo caps, filter) |
 | `src/nstream/settings.py` | native fzf settings menu (config + addons) |
 | `src/nstream/config.py` | config load/save (XDG, atomic 0600) + payload types |

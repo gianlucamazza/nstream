@@ -16,12 +16,15 @@ import re
 import sys
 from pathlib import Path
 
-# Debrid token carriers to redact. Provider `key=token` (Torrentio config / URLs) and
-# the resolve path `/resolve/<provider>/<token>/`.
+# Debrid token carriers to redact. Provider `key=token` (Torrentio config / URLs), the
+# resolve path `/resolve/<provider>/<token>/`, a `token=` query param (TorBox requestdl)
+# and an `Authorization: Bearer <token>` header (native debrid API calls).
 _PROVIDERS = "realdebrid|alldebrid|premiumize|torbox|debridlink|easydebrid|offcloud|putio"
 _REDACTIONS = (
     (re.compile(rf"\b({_PROVIDERS})=[^|&\s\"']+", re.I), r"\1=<redacted>"),
     (re.compile(r"(/resolve/[^/]+/)[^/?\s]+", re.I), r"\1<redacted>"),
+    (re.compile(r"([?&]token=)[^|&\s\"']+", re.I), r"\1<redacted>"),
+    (re.compile(r"(Bearer\s+)\S+", re.I), r"\1<redacted>"),
 )
 
 

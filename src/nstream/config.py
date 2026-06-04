@@ -156,8 +156,10 @@ class Config:
     # Playback backend: "local" streams torrents peer-to-peer through a TorrServer
     # instance nstream drives (free, default); "debrid" plays the ready urls Torrentio
     # returns for a configured debrid provider; "auto" is hybrid — prefer cached debrid
-    # urls and fall back to local P2P (merges both Torrentio queries by filename).
-    # Pure-torrent streams always go local.
+    # urls and fall back to local P2P (merges both Torrentio queries by filename);
+    # "native" discovers pure-torrent streams (token-less Torrentio) and resolves the
+    # chosen one through the provider's own API (TorBox/Premiumize — see debrid.py),
+    # falling back to local P2P on failure. Pure-torrent streams always go local.
     playback_backend: str = "local"
     engine_port: int = 8090  # TorrServer HTTP port (also the one nstream spawns)
     engine_cache_mb: int = 256  # TorrServer in-memory read-ahead cache
@@ -196,8 +198,20 @@ DEBRID_PROVIDERS: tuple[str, ...] = (
 _ENUM_VALUES: dict[str, set[str]] = {
     "nerd_font": {"auto", "on", "off"},
     "image_mode": {"auto", "off"},
-    "playback_backend": {"local", "debrid", "auto"},
+    "playback_backend": {"local", "debrid", "auto", "native"},
 }
+
+
+def debrid_credentials(base: str) -> tuple[str, str] | None:
+    """Extract the (provider, token) pair from a Torrentio config string, or None when no
+    debrid segment is present. Single source of truth for the token — the native resolver
+    reads it from here too (sent as an Authorization header), so there's no second copy to
+    keep in sync. Only the first debrid segment counts (Torrentio expects one)."""
+    for seg in base.split("|"):
+        key, sep, val = seg.partition("=")
+        if sep and key in DEBRID_PROVIDERS and val:
+            return (key, val)
+    return None
 
 
 def _enum_str(raw: dict, key: str, default: str) -> str:

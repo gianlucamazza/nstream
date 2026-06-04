@@ -127,10 +127,11 @@ def _torrentio_url(base: str) -> str:
 
 def torrentio_base(cfg: Config) -> str:
     base = cfg.torrentio_base
-    # Local backend streams torrents itself, so query Torrentio token-less. The hybrid
-    # "auto" backend keeps the token here (debrid urls / cached) and fetches the
+    # "local" streams torrents itself and "native" resolves the chosen one through the
+    # provider's own API, so both query Torrentio token-less (pure-torrent infoHash). The
+    # hybrid "auto" backend keeps the token here (debrid urls / cached) and fetches the
     # pure-torrent variant separately (see torrentio_token_less / api hybrid merge).
-    if cfg.playback_backend == "local":
+    if cfg.playback_backend in ("local", "native"):
         base = _strip_debrid(base)
     return _torrentio_url(base)
 
