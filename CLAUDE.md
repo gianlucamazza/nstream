@@ -81,9 +81,11 @@ Modules in `src/nstream/`:
   import graph, stdlib-only.
 - `nstream.lua` — mpv overlay (resume toast + next-episode card).
 
-**Import-graph discipline:** `util`/`ui`/`languages` sit at the top (little or no internal imports),
-`cli` orchestrates at the bottom; `player`/`caster`/`picker` never import `cli`. This is the recurring
-constraint that explains where logic lives — preserve it when moving code.
+**Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
+imports), `cli` orchestrates at the bottom; everything below `cli` —
+`player`/`caster`/`picker`/`stream_select`/`subs`/`labels`/`engine`/`preview`/`explain` — never
+imports `cli`. This is the recurring constraint that explains where logic lives — preserve it when
+moving code.
 
 ### Debrid: provider-agnostic
 The debrid token is embedded in the Torrentio base URL — `cfg.torrentio_base` is
