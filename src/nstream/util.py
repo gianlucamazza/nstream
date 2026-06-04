@@ -12,8 +12,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import random
 import subprocess
 import tempfile
+import urllib.error
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO
@@ -22,6 +24,23 @@ from typing import IO
 FFPROBE_TIMEOUT = 20.0
 VAINFO_TIMEOUT = 10.0
 CATT_SCAN_TIMEOUT = 15.0
+
+# HTTP retry tuning, shared by every retrying client (api addon fetch, native debrid).
+_BACKOFF_BASE = 0.5
+_RETRY_AFTER_CAP = 30.0
+
+
+def backoff(attempt: int) -> float:
+    """Exponential backoff with jitter (seconds) for a 0-based retry `attempt`."""
+    return _BACKOFF_BASE * (2**attempt) + random.uniform(0.0, 0.3)
+
+
+def retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """Seconds to wait from a `Retry-After` header (capped), or None if absent/non-numeric."""
+    value = exc.headers.get("Retry-After") if exc.headers else None
+    if value and value.isdigit():
+        return min(float(value), _RETRY_AFTER_CAP)
+    return None
 
 
 def atomic_write(

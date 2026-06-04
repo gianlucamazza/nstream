@@ -43,6 +43,93 @@ def test_no_streams_message_released(monkeypatch):
     assert "nessuno stream disponibile" in msg
 
 
+# --- native debrid wiring --------------------------------------------------
+
+
+class _FakeResolver:
+    name = "torbox"
+    marker = "TB"
+
+    def __init__(self, *, cached=(), resolved="http://cdn/x.mkv", fail=False):
+        self._cached = {h.lower() for h in cached}
+        self._resolved = resolved
+        self._fail = fail
+
+    def cached(self, hashes):
+        return {h.lower() for h in hashes if h.lower() in self._cached}
+
+    def resolve(self, stream):
+        if self._fail:
+            raise stream_select.debrid.DebridUnavailable("boom")
+        return self._resolved
+
+
+def _native_cfg() -> Config:
+    return Config(torrentio_base="sort=qualitysize|torbox=TOK", playback_backend="native")
+
+
+def test_mark_native_cached_prefixes_only_cached(monkeypatch):
+    monkeypatch.setattr(
+        stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(cached=["aaaa"])
+    )
+    results: list[Stream] = [
+        {"name": "Movie A", "infoHash": "AAAA"},
+        {"name": "Movie B", "infoHash": "bbbb"},
+    ]
+    stream_select._mark_native_cached(_native_cfg(), results)
+    assert results[0]["name"].startswith("[TB+]")
+    assert not results[1]["name"].startswith("[TB+]")
+    stream_select._mark_native_cached(_native_cfg(), results)  # idempotent
+    assert results[0]["name"].count("[TB+]") == 1
+
+
+def test_mark_native_cached_noop_off_backend(monkeypatch):
+    called = []
+    monkeypatch.setattr(stream_select.debrid, "get_resolver", lambda cfg: called.append(1))
+    results: list[Stream] = [{"name": "X", "infoHash": "aaaa"}]
+    stream_select._mark_native_cached(Config(playback_backend="local"), results)
+    assert results[0]["name"] == "X" and not called
+
+
+def test_native_resolve_returns_url(monkeypatch):
+    monkeypatch.setattr(
+        stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(resolved="http://cdn/y.mkv")
+    )
+    assert stream_select._native_resolve(_native_cfg(), {"infoHash": "aaaa"}) == "http://cdn/y.mkv"
+
+
+def test_native_resolve_none_off_backend():
+    assert (
+        stream_select._native_resolve(Config(playback_backend="local"), {"infoHash": "a"}) is None
+    )
+
+
+def test_resolve_stream_native_first(monkeypatch):
+    monkeypatch.setattr(
+        stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(resolved="http://cdn/z.mkv")
+    )
+    monkeypatch.setattr(
+        stream_select.engine, "resolve", lambda *a, **k: pytest.fail("engine must not be called")
+    )
+    out = stream_select._resolve_stream(_native_cfg(), {"infoHash": "aaaa"})
+    assert out is not None and out["url"] == "http://cdn/z.mkv"
+
+
+def test_resolve_stream_falls_back_to_p2p(monkeypatch):
+    monkeypatch.setattr(stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(fail=True))
+    monkeypatch.setattr(stream_select, "_p2p_guard", lambda cfg: True)
+    monkeypatch.setattr(stream_select.engine, "resolve", lambda cfg, s: "http://127.0.0.1:8090/s")
+    out = stream_select._resolve_stream(_native_cfg(), {"infoHash": "aaaa"})
+    assert out is not None and out["url"] == "http://127.0.0.1:8090/s"
+
+
+def test_playable_url_native(monkeypatch):
+    monkeypatch.setattr(
+        stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(resolved="http://cdn/p.mkv")
+    )
+    assert stream_select._playable_url(_native_cfg(), {"infoHash": "aaaa"}) == "http://cdn/p.mkv"
+
+
 # --- audio language probing ------------------------------------------------
 
 

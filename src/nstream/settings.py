@@ -501,15 +501,20 @@ def _add_addon(cfg: Config) -> None:
 
 
 def onboard() -> None:
-    """First-run: pick the playback backend. Local P2P (free, default) needs no key and
-    writes a token-less config; debrid (premium) asks for a provider + API key as before."""
+    """First-run: pick the playback backend. Local P2P (free, default) needs no key and writes
+    a token-less config; debrid (via Torrentio) and native (direct provider API) ask for a
+    provider + API key. The native option restricts the provider list to those with a resolver."""
     print("Primo avvio nstream — scegli come riprodurre.", file=sys.stderr)
     i = _fzf_select(
-        ["P2P locale — gratis, nessuna chiave (consigliato)", "Debrid — premium, serve una chiave"],
+        [
+            "P2P locale — gratis, nessuna chiave (consigliato)",
+            "Debrid via Torrentio — premium, serve una chiave",
+            "Debrid nativo — API diretta (TorBox/Premiumize)",
+        ],
         prompt="backend> ",
         header="P2P locale streama i torrent in locale; il debrid usa stream cached a pagamento",
     )
-    if i == 0 or i is None:  # default to local (also when ESC: no paid signup required)
+    if i is None or i == 0:  # default to local (also when ESC: no paid signup required)
         config.save({"playback_backend": "local"})
         if not engine.installed():
             print(
@@ -518,15 +523,22 @@ def onboard() -> None:
                 file=sys.stderr,
             )
         return
+    backend = "debrid" if i == 1 else "native"
+    # Native resolves through the provider's own API, so only providers with a resolver qualify.
+    providers = (
+        [p for p in _PROVIDERS if debrid.supports_native(p[0])]
+        if backend == "native"
+        else _PROVIDERS
+    )
     j = _fzf_select(
-        [name for _, name in _PROVIDERS],
+        [name for _, name in providers],
         prompt="provider> ",
         header="Scegli il debrid (poi inserisci la chiave API dal suo sito)",
     )
     if j is None:
         config.save({"playback_backend": "local"})  # backed out → safe free default
         return
-    provider_key, provider_name = _PROVIDERS[j]
+    provider_key, provider_name = providers[j]
     try:
         token = getpass.getpass(f"Chiave {provider_name} (nascosta): ").strip()
     except EOFError:
@@ -535,5 +547,5 @@ def onboard() -> None:
         config.save({"playback_backend": "local"})  # no key → fall back to free local
         return
     config.save(
-        {"torrentio_base": _with_token("", token, provider_key), "playback_backend": "debrid"}
+        {"torrentio_base": _with_token("", token, provider_key), "playback_backend": backend}
     )
