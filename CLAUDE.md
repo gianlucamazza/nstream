@@ -19,12 +19,16 @@ Tooling is `uv`-based (no venv activation needed).
 
 | Task | Command |
 |------|---------|
-| Run tests | `uv run pytest` |
-| Single test | `uv run pytest tests/test_cli.py::test_display_title_movie` |
+| Run tests | `uv run python -m pytest` |
+| Single test | `uv run python -m pytest tests/test_labels.py::test_display_title_movie` |
 | Lint | `uvx ruff check . && uvx ruff format --check .` |
 | Type check | `uvx ty check` |
 | Dev run | `uv run nstream "the matrix"` |
 | Install (dev) | `./install.sh` (uses `uv tool install`) |
+
+Use `python -m pytest` (not bare `uv run pytest`): if a system-wide `nstream` is installed,
+bare `pytest` resolves to the system interpreter and imports the **installed** package instead
+of `src/`. `python -m` runs the project venv with the editable `src/` checkout.
 
 Ruff: line-length 100, rules `E,F,I,UP,B,SIM`. Pytest: `testpaths=["tests"]`, `-q`.
 Each `src/nstream/<mod>.py` has a matching `tests/test_<mod>.py`.
@@ -32,7 +36,18 @@ Each `src/nstream/<mod>.py` has a matching `tests/test_<mod>.py`.
 ## Architecture
 
 Modules in `src/nstream/`:
-- `cli.py` — orchestrator: argparse, TUI flow, resume, series auto-advance, `--explain`/`__preview` commands.
+- `cli.py` — orchestrator: argparse, TUI flow, resume, series auto-advance, `--explain`/`__preview`
+  commands. Delegates stream selection to `stream_select`, subtitles to `subs`, label formatting to
+  `labels`; sits at the bottom of the import graph.
+- `stream_select.py` — stream selection + resolution + auto-play vetting guards. `prepare_stream()`
+  is the single entry the orchestrator calls (pick+resolve → cached-miss fallback → primary-language
+  audio guard), returning a `VettedStream`. Also `cast_languages`/`cast_resolver` for the in-cast
+  switch. Imports `api`/`quality`/`engine`/`tracks`/`languages`/`picker`/`labels`; never `cli`.
+- `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download), `auto_subs`
+  (no-menu paths + safety-subtitle net). Leaf below `cli`; imports `api`/`picker`/`config`.
+- `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
+  `display_title`/`track_label`/`audio_summary`/`sub_summary`). Reads active caps on demand via
+  `ui.active_caps()`. Top tier: imports only `ui`/`quality`/`tracks`/`config`.
 - `api.py` — HTTP addon dispatch (retry/backoff, gzip, `ThreadPoolExecutor` ≤8); 600s in-process
   metadata cache **plus** an on-disk metadata cache (`meta_cached_disk`, `$XDG_CACHE_HOME/nstream/meta/`);
   streams/subs NOT cached.
@@ -56,7 +71,8 @@ Modules in `src/nstream/`:
   same primitives the player uses. Read-only.
 - `languages.py` — **single source of truth** for languages (release tokens, flags, display names);
   formerly three hand-synced maps. Leaf module (imports nothing from nstream).
-- `config.py` — XDG config load/save (atomic temp+replace), typed schema (incl. `posters`, `nerd_font`).
+- `config.py` — XDG config load/save (atomic temp+replace), typed schema (incl. `posters`, `nerd_font`);
+  also home to the `PlayOpts` per-invocation value object (config-shaped, imported everywhere).
 - `state.py` — watch history (resume / continue-watching).
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
 - `settings.py` — fzf-based settings menu (debrid token, addons, hwdec…), `scan_devices()`.

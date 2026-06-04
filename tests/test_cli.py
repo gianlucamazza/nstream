@@ -11,7 +11,9 @@ import argparse
 import pytest
 
 from nstream import cli
-from nstream.config import Config, HistoryEntry, Meta, Stream, Video
+from nstream.config import Config, HistoryEntry, Meta, Video
+
+CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
 
 def test_main_preview_dispatch(monkeypatch):
@@ -21,145 +23,6 @@ def test_main_preview_dispatch(monkeypatch):
     monkeypatch.setattr(cli.preview, "run_preview", lambda argv: (seen.update(argv=argv), 0)[1])
     assert cli.main() == 0
     assert seen["argv"] == ["title", "movie", "tt1"]
-
-
-def _gopts(*, auto=True, cast=False):
-    return cli.PlayOpts(
-        auto=auto, cast=cast, sub_mode=None, sub_lang=None, history=False, autoplay=False
-    )
-
-
-def test_audio_langs_of_trusts_preferred_tag(monkeypatch):
-    def boom(url):
-        raise AssertionError("ffprobe should be skipped for a preferred-tagged release")
-
-    monkeypatch.setattr(cli.tracks, "probe_tracks", boom)
-    s: Stream = {"url": "u", "title": "Movie.2024.1080p.ITA.ENG.x264-GRP"}
-    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=["ita"]), s) == {"ita"}
-
-
-def test_audio_langs_of_probes_untagged(monkeypatch):
-    monkeypatch.setattr(
-        cli.tracks, "probe_tracks", lambda url: cli.tracks.Tracks(audio=[cli.tracks.Track(1, "es")])
-    )
-    s: Stream = {"url": "u", "title": "Some.Movie.2024.1080p.x264-GRP"}  # untagged
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
-    assert cli._audio_langs_of(cfg, s) == {"spa"}  # "es" → spa via the registry
-
-
-def test_audio_langs_of_does_not_trust_multi(monkeypatch):
-    # "Dual"/"MULTI" is ambiguous (may be Latino+Eng, no Italian); it must be probed,
-    # not trusted as carrying a preferred track.
-    calls = []
-    monkeypatch.setattr(
-        cli.tracks,
-        "probe_tracks",
-        lambda url: (
-            calls.append(url)
-            or cli.tracks.Tracks(audio=[cli.tracks.Track(1, "spa"), cli.tracks.Track(2, "eng")])
-        ),
-    )
-    s: Stream = {"url": "u", "title": "Dune.Part.Two.2024.Dual.1080p.x265-YG"}
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
-    assert cli._audio_langs_of(cfg, s) == {"spa", "eng"}  # real tracks, not the "multi" guess
-    assert calls  # the probe actually ran
-
-
-def test_audio_langs_of_reads_title_when_untagged(monkeypatch):
-    # language=und but the track title names the language → recovered via track_lang.
-    monkeypatch.setattr(
-        cli.tracks,
-        "probe_tracks",
-        lambda url: cli.tracks.Tracks(audio=[cli.tracks.Track(1, "und", title="Italian [TrueHD]")]),
-    )
-    s: Stream = {"url": "u", "title": "Movie.2024.1080p.x264"}
-    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=["ita"]), s) == {"ita"}
-
-
-def test_audio_langs_of_unverifiable_returns_none(monkeypatch):
-    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda url: cli.tracks.Tracks())
-    s: Stream = {"url": "u", "title": "Some.Movie.2024.1080p.x264-GRP"}
-    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=["ita"]), s) is None
-
-
-def test_audio_langs_of_no_preference_returns_none():
-    s: Stream = {"url": "u", "title": "x"}
-    assert cli._audio_langs_of(Config(torrentio_base="tb", audio_langs=[]), s) is None
-
-
-def test_play_video_guard_reselects_on_wrong_audio(monkeypatch, capsys):
-    foreign: Stream = {"url": "u1", "name": "x\n1080p"}
-    chosen2: Stream = {"url": "u2", "name": "y\n1080p"}
-    picks = iter([foreign, chosen2])
-    monkeypatch.setattr(cli.api, "streams", lambda *a: [foreign, chosen2])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: next(picks))
-    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"spa"})  # no ita/eng
-    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: None)  # no better source
-    got = {}
-    monkeypatch.setattr(
-        cli, "_play_on_mpv", lambda cfg, chosen, work_dir, **k: got.update(c=chosen) or (1.0, 2.0, False)
-    )  # fmt: skip
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
-    cli._play_video(cfg, "movie", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None)
-    assert got["c"] is chosen2  # reselected after the warning
-    assert "nessuna traccia audio ita,eng" in capsys.readouterr().err
-
-
-def test_play_video_guard_binge_warns_and_proceeds(monkeypatch, capsys):
-    foreign: Stream = {"url": "u1", "name": "x\n1080p"}
-    calls = []
-    monkeypatch.setattr(cli.api, "streams", lambda *a: [foreign])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: (calls.append(1), foreign)[1])
-    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"spa"})
-    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: None)
-    got = {}
-    monkeypatch.setattr(
-        cli, "_play_on_mpv", lambda cfg, chosen, work_dir, **k: got.update(c=chosen) or (1.0, 2.0, False)
-    )  # fmt: skip
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
-    cli._play_video(
-        cfg, "series", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None,
-        reselect_on_wrong_audio=False,
-    )  # fmt: skip
-    assert got["c"] is foreign and len(calls) == 1  # proceeded, no reselection
-    assert "nessuna traccia audio" in capsys.readouterr().err
-
-
-def test_play_video_guard_reselects_for_primary(monkeypatch):
-    # Best pick lacks the primary language; a next-best candidate has it → switch to it.
-    top: Stream = {"url": "u1", "name": "x\n1080p"}
-    better: Stream = {"url": "u2", "name": "y\n1080p"}
-    monkeypatch.setattr(cli.api, "streams", lambda *a: [top, better])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: top)
-    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"eng"})  # top has no ita
-    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: better)
-    got = {}
-    monkeypatch.setattr(
-        cli, "_play_on_mpv",
-        lambda cfg, chosen, work_dir, **k: got.update(c=chosen, safety=k.get("safety_sub_lang")) or (1.0, 2.0, False),
-    )  # fmt: skip
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
-    cli._play_video(cfg, "movie", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None)
-    assert got["c"] is better and got["safety"] is None  # switched source, no subtitle net
-
-
-def test_play_video_guard_safety_subtitles(monkeypatch, capsys):
-    # Audio only in a fallback language (eng), not the primary (ita), and no better source:
-    # play it but turn on primary-language safety subtitles.
-    chosen: Stream = {"url": "u1", "name": "x\n1080p"}
-    monkeypatch.setattr(cli.api, "streams", lambda *a: [chosen])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: chosen)
-    monkeypatch.setattr(cli, "_audio_langs_of", lambda cfg, ch: {"eng"})  # fallback only
-    monkeypatch.setattr(cli, "_reselect_for_primary", lambda *a, **k: None)
-    got = {}
-    monkeypatch.setattr(
-        cli, "_play_on_mpv",
-        lambda cfg, chosen, work_dir, **k: got.update(c=chosen, safety=k.get("safety_sub_lang")) or (1.0, 2.0, False),
-    )  # fmt: skip
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], history_enabled=False)
-    cli._play_video(cfg, "movie", "tt1", "T", _gopts(), auto=True, next_label=None, on_save=None)
-    assert got["c"] is chosen and got["safety"] == "ita"
-    assert "sottotitoli ita attivati" in capsys.readouterr().err
 
 
 def test_run_explain_movie(monkeypatch, capsys):
@@ -187,19 +50,6 @@ def test_dispatch_explain_requires_query(monkeypatch):
     assert cli._dispatch(Config(torrentio_base="tb"), args, opts) == 2
 
 
-def test_display_title_movie():
-    assert cli.display_title("Dune", None) == "Dune"
-
-
-def test_display_title_series_with_name():
-    v = Video(season=1, episode=3, name="Ep")
-    assert cli.display_title("Show", v) == "Show · S01E03 · Ep"
-
-
-def test_display_title_series_without_name():
-    assert cli.display_title("Show", Video(season=2, episode=10)) == "Show · S02E10"
-
-
 def _ns(**kw):
     base = {"subs": False, "sub_menu": False, "sub_lang": None}
     base.update(kw)
@@ -220,58 +70,6 @@ def test_sub_options(ns, expected):
     assert cli._sub_options(ns) == expected
 
 
-# --- pick_subtitles --------------------------------------------------------
-
-
-CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
-
-
-@pytest.fixture
-def stub_subs(monkeypatch):
-    chosen = {}
-
-    def fake_download(sub, work_dir):
-        chosen["sub"] = sub
-        return f"{work_dir}/{sub.get('lang')}.srt"
-
-    monkeypatch.setattr(cli, "_download_subtitle", fake_download)
-    return chosen
-
-
-def test_pick_subtitles_auto_prefers_language(monkeypatch, stub_subs, tmp_path):
-    subs = [{"lang": "fre", "url": "u"}, {"lang": "ita", "url": "u"}, {"lang": "eng", "url": "u"}]
-    monkeypatch.setattr(cli.api, "subtitles", lambda *a, **k: list(subs))
-    out = cli.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="auto")
-    assert stub_subs["sub"]["lang"] == "ita"
-    assert out and out[0].endswith("ita.srt")
-
-
-def test_pick_subtitles_auto_no_preferred_returns_empty(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli.api, "subtitles", lambda *a, **k: [{"lang": "fre", "url": "u"}])
-    monkeypatch.setattr(cli, "_download_subtitle", lambda *a, **k: pytest.fail("must not download"))
-    assert cli.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="auto") == ()
-
-
-def test_pick_subtitles_lang_override(monkeypatch, stub_subs, tmp_path):
-    subs = [{"lang": "ita", "url": "u"}, {"lang": "eng", "url": "u"}]
-    monkeypatch.setattr(cli.api, "subtitles", lambda *a, **k: list(subs))
-    cli.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="auto", lang="eng")
-    assert stub_subs["sub"]["lang"] == "eng"
-
-
-def test_pick_subtitles_menu_uses_fzf(monkeypatch, stub_subs, tmp_path):
-    subs = [{"lang": "ita", "url": "u"}, {"lang": "eng", "url": "u"}]
-    monkeypatch.setattr(cli.api, "subtitles", lambda *a, **k: list(subs))
-    monkeypatch.setattr(cli, "fzf", lambda items, prompt: items[-1][1])  # pick last
-    cli.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="menu")
-    assert stub_subs["sub"]["lang"] == "eng"
-
-
-def test_pick_subtitles_none_available(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli.api, "subtitles", lambda *a, **k: [])
-    assert cli.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="auto") == ()
-
-
 # --- terminal clear --------------------------------------------------------
 
 
@@ -287,60 +85,7 @@ def test_clear_emits_escape_on_tty(monkeypatch, capsys):
     assert "\x1b[2J" in capsys.readouterr().out
 
 
-# --- release date + labels -------------------------------------------------
-
-
-def test_future_release_parsing():
-    assert cli._future_release("2999-12-18T00:00:00.000Z") is not None  # far future
-    assert cli._future_release("2000-01-01T00:00:00.000Z") is None  # past
-    assert cli._future_release(None) is None
-    assert cli._future_release("not-a-date") is None
-
-
-def test_no_streams_message_upcoming(monkeypatch):
-    monkeypatch.setattr(cli.api, "meta", lambda *a, **k: {"released": "2999-12-18T00:00:00.000Z"})
-    msg = cli._no_streams_message(Config(torrentio_base="tb"), "movie", "tt1", "Dune 3")
-    assert "non ancora disponibile" in msg and "18/12/2999" in msg
-
-
-def test_no_streams_message_released(monkeypatch):
-    monkeypatch.setattr(cli.api, "meta", lambda *a, **k: {"released": "2000-01-01T00:00:00.000Z"})
-    msg = cli._no_streams_message(Config(torrentio_base="tb"), "movie", "tt1", "Old Film")
-    assert "nessuno stream disponibile" in msg
-
-
-def test_meta_label_upcoming_future_year():
-    label = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2999"})
-    assert "in uscita" in label
-
-
-def test_meta_label_no_hint_past_year():
-    label = cli.meta_label({"type": "movie", "name": "X", "releaseInfo": "2000"})
-    assert "in uscita" not in label
-
-
-def test_meta_label_has_type_glyph():
-    movie = cli.meta_label(Meta(type="movie", name="X", releaseInfo="2000"))
-    series = cli.meta_label(Meta(type="series", name="Y", releaseInfo="2000"))
-    assert cli.ui.PORTABLE.movie in movie  # portable default in tests (no Nerd Font)
-    assert cli.ui.PORTABLE.series in series
-
-
-def test_episode_label_format():
-    label = cli.episode_label(Video(season=1, episode=3, name="Pilot"))
-    assert "S01E03" in label and "Pilot" in label
-
-
-def test_history_label_has_progress_bar():
-    e = HistoryEntry(title="Dune", type="movie", position=50.0, duration=100.0)
-    label = cli.history_label(e)
-    assert "50%" in label
-    assert "█" in label  # progress bar rendered
-
-
-def test_history_label_no_bar_without_duration():
-    label = cli.history_label(HistoryEntry(title="Dune", type="movie", duration=0.0))
-    assert "%" not in label and "█" not in label
+# --- preview tokens --------------------------------------------------------
 
 
 def test_meta_preview_token():
@@ -649,72 +394,6 @@ def test_choose_tracks_subs_none(monkeypatch):
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, "no", ())
 
 
-# --- stream ranking + curation (_pick_stream) ------------------------------
-
-
-def _ranked(n, *, reason=None):
-    from nstream.quality import RankedStream, StreamInfo
-
-    return [
-        RankedStream({"url": f"u{i}", "name": f"S{i}"}, StreamInfo(resolution=1080), reason)
-        for i in range(n)
-    ]
-
-
-def test_pick_stream_cap_and_show_all(monkeypatch):
-    cfg = Config(torrentio_base="tb", max_streams=20)
-    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps())
-    playable, excluded = _ranked(25), _ranked(2, reason="camrip (cam)")
-    monkeypatch.setattr(cli.quality, "rank_streams", lambda *a, **k: (playable, excluded))
-    calls = []
-
-    def fzf(items, prompt, *, header=None):
-        calls.append(items)  # both menus share the "stream> " prompt now
-        if len(calls) == 1:
-            return items[-1][1]  # capped menu → the "↓ mostra tutti" sentinel
-        return items[0][1]  # full menu → first stream
-
-    monkeypatch.setattr(cli, "fzf", fzf)
-    out = cli._pick_stream(cfg, [{"url": "x"}] * 27, auto=False)
-    # Capped menu = 20 streams + 1 "show all" entry; full menu = 25 playable + 2 excluded.
-    assert len(calls[0]) == 21
-    assert "mostra tutti" in calls[0][-1][0]
-    assert len(calls[1]) == 27
-    assert out is playable[0].stream
-
-
-def test_pick_stream_auto_picks_best(monkeypatch):
-    cfg = Config(torrentio_base="tb")
-    monkeypatch.setattr(cli.quality, "detect_caps", lambda *a, **k: cli.quality.Caps())
-    playable = _ranked(3)
-    monkeypatch.setattr(cli.quality, "rank_streams", lambda *a, **k: (playable, []))
-    assert cli._pick_stream(cfg, [{"url": "x"}], auto=True) is playable[0].stream
-
-
-def test_pick_stream_cast_uses_cast_caps_and_audio(monkeypatch):
-    """In cast mode rank against the Chromecast profile (not the laptop GPU) and pass
-    cast_audio=True so the receiver-incompatible audio is filtered."""
-    cfg = Config(torrentio_base="tb")
-
-    def boom(*a, **k):
-        raise AssertionError("detect_caps (GPU) must not be used when casting")
-
-    monkeypatch.setattr(cli.quality, "detect_caps", boom)
-    sentinel = cli.quality.Caps()
-    monkeypatch.setattr(cli.quality, "cast_caps", lambda: sentinel)
-    seen = {}
-    playable = _ranked(2)
-
-    def fake_rank(streams, caps, spec):
-        seen["caps"] = caps
-        seen["cast_audio"] = spec.cast_audio
-        return (playable, [])
-
-    monkeypatch.setattr(cli.quality, "rank_streams", fake_rank)
-    assert cli._pick_stream(cfg, [{"url": "x"}], auto=True, cast=True) is playable[0].stream
-    assert seen["caps"] is sentinel and seen["cast_audio"] is True
-
-
 # --- _play_video flow wiring -----------------------------------------------
 
 
@@ -740,7 +419,13 @@ def test_play_video_auto_skips_track_menu(monkeypatch):
 def test_play_video_interactive_calls_track_menu(monkeypatch):
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(
+        cli.stream_select,
+        "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
+            {"url": "http://u", "name": "S"}, auto, None
+        ),
+    )
     monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (2, 1, ()))
     seen = {}
     monkeypatch.setattr(
@@ -761,7 +446,13 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     """In cast mode choose_tracks is never called; cast() gets the resolved device."""
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(
+        cli.stream_select,
+        "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
+            {"url": "http://u", "name": "S"}, auto, None
+        ),
+    )
     monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
 
     def boom(*a, **k):
@@ -787,7 +478,13 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     """No Chromecast reachable → degrade to local mpv instead of failing."""
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(
+        cli.stream_select,
+        "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
+            {"url": "http://u", "name": "S"}, auto, None
+        ),
+    )
 
     def boom(_cfg, **k):
         raise cli.CastUnavailable("nessun Chromecast in rete")
@@ -814,7 +511,13 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
     """Alt-C in mpv (play() returns 'cast') re-casts from the current position."""
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "_pick_stream", lambda *a, **k: {"url": "http://u", "name": "S"})
+    monkeypatch.setattr(
+        cli.stream_select,
+        "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
+            {"url": "http://u", "name": "S"}, auto, None
+        ),
+    )
     monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
     monkeypatch.setattr(cli.shutil, "which", lambda _x: "/usr/bin/catt")
     monkeypatch.setattr(cli, "play", lambda *a, **k: (55.0, 100.0, "cast"))
@@ -834,42 +537,6 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
         cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
     )
     assert seen == {"start": 55.0, "device": "TV"} and advance is False
-
-
-# --- cast stream selection (language switch) --------------------------------
-
-from nstream.config import Stream as _Stream  # noqa: E402
-
-_S_ITA: _Stream = {
-    "url": "http://ita",
-    "name": "[RD+] Torrentio\n1080p",
-    "title": "Film.2020.iTA.1080p.BluRay.DDP5.1.x264-GRP\n👤 20 💾 8.0 GB ⚙️ x",
-}
-_S_ENG_REMUX: _Stream = {
-    "url": "http://eng-remux",
-    "name": "[RD+] Torrentio\n4k",
-    "title": "Film.2020.ENG.2160p.UHD.BluRay.REMUX.TrueHD-GRP\n👤 30 💾 60.0 GB ⚙️ x",
-}
-_S_ENG_WEBDL: _Stream = {
-    "url": "http://eng-webdl",
-    "name": "[RD+] Torrentio\n1080p",
-    "title": "Film.2020.ENG.1080p.WEB-DL.DDP5.1.x264-GRP\n👤 10 💾 6.0 GB ⚙️ x",
-}
-
-
-def test_cast_languages_lists_compatible(monkeypatch):
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
-    langs = cli._cast_languages(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
-    assert langs == ("ita", "eng")  # preferred order; eng present via the WEB-DL
-
-
-def test_cast_resolver_picks_compatible_release(monkeypatch):
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
-    resolve = cli._cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
-    # ITA → the ITA release; ENG → the WEB-DL, never the TrueHD remux; missing → None
-    assert resolve("ita") == "http://ita"
-    assert resolve("eng") == "http://eng-webdl"
-    assert resolve("ger") is None
 
 
 # --- leaf-list keys (Tab / Alt-C) ------------------------------------------
@@ -898,61 +565,3 @@ def test_pick_meta_alt_c_sets_cast(monkeypatch):
     )
     cli._pick_meta(items, CFG, opts)
     assert seen == {"cast": True, "choose": True}
-
-
-def test_ensure_playable_passthrough_when_reachable(monkeypatch):
-    monkeypatch.setattr(cli.api, "url_playable", lambda u, **k: True)
-    chosen: Stream = {"url": "https://rd/u"}
-    cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    assert cli._ensure_playable(cfg, [chosen], chosen, _gopts()) is chosen
-
-
-def test_ensure_playable_local_skips_check(monkeypatch):
-    monkeypatch.setattr(
-        cli.api, "url_playable", lambda u, **k: pytest.fail("no reachability check in local mode")
-    )
-    chosen: Stream = {"url": "http://127.0.0.1:8090/stream"}
-    cfg = Config(torrentio_base="tb", playback_backend="local")
-    assert cli._ensure_playable(cfg, [chosen], chosen, _gopts()) is chosen
-
-
-def test_ensure_playable_hybrid_falls_back_to_p2p(monkeypatch):
-    monkeypatch.setattr(cli.api, "url_playable", lambda u, **k: False)
-    monkeypatch.setattr(cli.engine, "resolve", lambda cfg, s: "http://192.168.1.5:8090/stream")
-    chosen: Stream = {"url": "https://rd/dead", "infoHash": "ABC"}
-    cfg = Config(torrentio_base="tb", playback_backend="auto")
-    out = cli._ensure_playable(cfg, [chosen], chosen, _gopts())
-    assert out["url"] == "http://192.168.1.5:8090/stream"  # fell back to local P2P
-
-
-def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
-    dead: Stream = {"url": "https://rd/dead"}
-    good: Stream = {"url": "https://rd/good"}
-    monkeypatch.setattr(cli.api, "url_playable", lambda u, **k: u == "https://rd/good")
-    monkeypatch.setattr(cli, "_auto_candidates", lambda *a, **k: [dead, good])
-    monkeypatch.setattr(cli, "_resolve_stream", lambda cfg, s: s)
-    cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    out = cli._ensure_playable(cfg, [dead, good], dead, _gopts())
-    assert out is good  # skipped the dead cached link for the next reachable candidate
-
-
-def test_p2p_guard_blocks_without_vpn_when_required(monkeypatch, capsys):
-    monkeypatch.setattr(cli.engine, "vpn_active", lambda: False)
-    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
-    assert cli._p2p_guard(cfg) is False
-    assert "bloccato" in capsys.readouterr().err
-
-
-def test_p2p_guard_warns_without_vpn_but_proceeds(monkeypatch, capsys):
-    monkeypatch.setattr(cli.engine, "vpn_active", lambda: False)
-    monkeypatch.setattr(cli, "_p2p_notice_once", lambda cfg: None)
-    cfg = Config(torrentio_base="tb", p2p_require_vpn=False)
-    assert cli._p2p_guard(cfg) is True
-    assert "nessuna VPN" in capsys.readouterr().err
-
-
-def test_p2p_guard_silent_with_vpn(monkeypatch, capsys):
-    monkeypatch.setattr(cli.engine, "vpn_active", lambda: True)
-    monkeypatch.setattr(cli, "_p2p_notice_once", lambda cfg: None)
-    assert cli._p2p_guard(Config(torrentio_base="tb")) is True
-    assert "VPN" not in capsys.readouterr().err

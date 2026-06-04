@@ -3,35 +3,25 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
-import gzip
 import os
-import re
 import shutil
 import sys
 import tempfile
-import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from dataclasses import replace
 from typing import cast as typecast
 
 from . import (
     __version__,
     api,
-    engine,
     explain,
-    languages,
     log,
     preview,
-    quality,
     settings,
     state,
+    stream_select,
     tracks,
     ui,
-)
-from . import (
-    config as config_mod,
 )
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
@@ -40,32 +30,29 @@ from .config import (
     ConfigError,
     HistoryEntry,
     Meta,
+    PlayOpts,
     Stream,
-    Subtitle,
     Video,
     config_path,
     load,
 )
+from .labels import (
+    audio_summary,
+    display_title,
+    episode_label,
+    history_label,
+    meta_label,
+    sub_summary,
+    track_label,
+)
 from .picker import fzf, fzf_key
 from .player import play
+from .subs import auto_subs, pick_subtitles
 
 # --browse keyword → Cinemeta catalog id.
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
 
 _log = log.get_logger("cli")
-
-
-@dataclass(frozen=True)
-class PlayOpts:
-    """Per-invocation playback preferences threaded through the flow."""
-
-    auto: bool  # auto-pick the top stream (skip the stream menu)
-    cast: bool  # send playback to a Chromecast (catt) instead of mpv
-    sub_mode: str | None  # None = no subs, "auto" = pick preferred lang, "menu" = fzf
-    sub_lang: str | None  # force this language for sub_mode="auto"
-    history: bool  # record/resume watch history
-    autoplay: bool  # offer the next-episode overlay for series
-    cast_choose: bool = False  # force the device picker (explicit "cast this" action)
 
 
 def _clear() -> None:
@@ -76,177 +63,13 @@ def _clear() -> None:
         sys.stdout.flush()
 
 
-# Active theme (glyphs + palette), resolved once in main() after config load and used by
-# the label builders. Sensible defaults keep direct calls (e.g. in tests) self-contained.
-_GLYPHS: ui.Glyphs = ui.PORTABLE
-_PAL: ui.Palette = ui.palette(ui.Caps())
-
-
 def _init_theme(cfg: Config) -> None:
-    global _GLYPHS, _PAL
-    caps = ui.detect_caps(cfg)
-    ui.set_active_caps(caps)
-    _GLYPHS = ui.glyphs(caps)
-    _PAL = ui.palette(caps)
-
-
-def meta_label(m: Meta) -> str:
-    g, pal = _GLYPHS, _PAL
-    icon = g.series if m.get("type") == "series" else g.movie
-    info = m.get("releaseInfo", "")
-    year = f"  {ui.ansi(f'({info})', pal.dim)}" if info else ""
-    label = f"{icon}  {ui.ansi(m.get('name', '?'), pal.accent)}{year}"
-    # Cheap hint from the slim catalog (year only): flag titles from a future year.
-    # Same-year-but-unreleased titles are caught precisely at selection time.
-    yr = re.match(r"(\d{4})", str(info))
-    if yr and int(yr.group(1)) > datetime.now(UTC).year:
-        label += "  " + ui.ansi(f"· {g.movie} in uscita", pal.warn)
-    return label
-
-
-def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
-    name = (s.get("name") or "").replace("\n", " ")
-    title = (s.get("title") or "").replace("\n", " · ")
-    base = f"{name}  |  {title}"[:200]
-    if info is None:
-        return base
-    tags = []
-    if info.resolution:
-        tags.append(f"{info.resolution}p")
-    if info.codec:
-        tags.append(info.codec)
-    if info.dv:
-        tags.append("DV")
-    elif info.hdr:
-        tags.append("HDR")
-    if info.source:
-        tags.append(info.source)
-    if info.audio:
-        tags.append(info.audio.upper())
-    if info.languages:
-        tags.append("/".join(sorted(info.languages)))
-    if info.size_gb:
-        tags.append(f"{info.size_gb:.1f}G")
-    prefix = (_GLYPHS.cached if info.cached else " ") + " " + " ".join(tags)
-    # Truncate the plain string first, then colour only the fixed-width prefix region so
-    # the alignment is exact and no ANSI escape is ever cut by the 200-char cap.
-    plain = f"{prefix:36s} {base}"[:200]
-    return ui.ansi(plain[:36], _PAL.good if info.cached else _PAL.dim) + plain[36:]
-
-
-def episode_label(v: Video) -> str:
-    g, pal = _GLYPHS, _PAL
-    tag = ui.ansi(f"S{v.get('season', 0):02d}E{v.get('episode', 0):02d}", pal.dim)
-    return f"{g.series}  {tag}  {v.get('name', '')}".rstrip()
-
-
-def history_label(e: HistoryEntry) -> str:
-    pal = _PAL
-    title = ui.ansi(e.get("title", "?"), pal.secondary)
-    if e.get("type") == "series" and e.get("season"):
-        title += "  " + ui.ansi(f"S{e.get('season', 0):02d}E{e.get('episode', 0):02d}", pal.dim)
-    dur = e.get("duration") or 0.0
-    pos = e.get("position", 0.0)
-    if dur:
-        bar = ui.progress_bar(pos, dur, width=12, caps=ui.active_caps())
-        title += "  " + ui.ansi(f"{bar} {pos / dur * 100:.0f}%", pal.accent)
-    return title
-
-
-def display_title(name: str, video: Video | None) -> str:
-    """The media title shown by mpv (OSC, window, taskbar)."""
-    if video is None:
-        return name
-    label = f"{name} · S{video.get('season', 0):02d}E{video.get('episode', 0):02d}"
-    epname = video.get("name")
-    return f"{label} · {epname}" if epname else label
-
-
-# --- subtitles ------------------------------------------------------------
-
-
-def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
-    url = sub.get("url")
-    if not url:
-        return None
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": api.UA})
-        with urllib.request.urlopen(req, timeout=api.TIMEOUT) as resp:
-            raw = resp.read()
-    except OSError:
-        print("nstream: download sottotitolo fallito", file=sys.stderr)
-        return None
-    if url.endswith(".gz") or raw[:2] == b"\x1f\x8b":
-        with contextlib.suppress(OSError):
-            raw = gzip.decompress(raw)
-    # Written into the per-play temp dir so it is cleaned up with everything else.
-    fd, path = tempfile.mkstemp(prefix=f"{sub.get('lang', 'sub')}-", suffix=".srt", dir=work_dir)
-    with os.fdopen(fd, "wb") as f:
-        f.write(raw)
-    return path
-
-
-def pick_subtitles(
-    cfg: Config,
-    typ: str,
-    video_id: str,
-    work_dir: str,
-    *,
-    mode: str = "auto",
-    lang: str | None = None,
-) -> tuple[str, ...]:
-    try:
-        subs = api.subtitles(cfg, typ, video_id)
-    except api.NetworkError as e:
-        print(f"nstream: {e}", file=sys.stderr)
-        return ()
-    if not subs:
-        print("nstream: nessun sottotitolo", file=sys.stderr)
-        return ()
-    langs = [lang] if lang else cfg.subtitle_langs
-    pref = {code: i for i, code in enumerate(langs)}
-    subs.sort(key=lambda s: pref.get(s.get("lang", ""), len(pref)))
-    if mode == "menu":
-        items = [(f"{s.get('lang', '?'):5s} {s.get('id', '')}", s) for s in subs]
-        chosen = fzf(items, "sottotitoli> ")
-    else:  # auto: take the best preferred-language track, else skip silently
-        chosen = subs[0] if subs[0].get("lang", "") in pref else None
-        if chosen is None:
-            print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
-    if not chosen:
-        return ()
-    path = _download_subtitle(chosen, work_dir)
-    return (path,) if path else ()
+    # Pin the active caps once; label builders (labels.py) and the menus below read them
+    # on demand via ui.active_caps(). Sensible defaults keep direct calls (tests) working.
+    ui.set_active_caps(ui.detect_caps(cfg))
 
 
 # --- pre-play audio/subtitle track menu ----------------------------------
-
-
-def track_label(t: tracks.Track) -> str:
-    parts = [t.lang or "und"]
-    if t.codec:
-        parts.append(t.codec)
-    if t.channels:
-        parts.append(f"{t.channels}ch")
-    if t.title:
-        parts.append(f'"{t.title}"')
-    return " · ".join(parts)
-
-
-def _audio_summary(aid: int | None, tr: tracks.Tracks) -> str:
-    if aid is None:
-        return "automatico (lingua preferita)"
-    t = next((a for a in tr.audio if a.id == aid), None)
-    return track_label(t) if t else f"traccia {aid}"
-
-
-def _sub_summary(sid: int | str | None, sub_paths: tuple[str, ...], tr: tracks.Tracks) -> str:
-    if sub_paths:
-        return "OpenSubtitles (esterni)"
-    if sid in (None, "no"):
-        return "nessuno"
-    t = next((s for s in tr.subs if s.id == sid), None)
-    return track_label(t) if t else f"traccia {sid}"
 
 
 def choose_tracks(
@@ -267,9 +90,9 @@ def choose_tracks(
     _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
     while True:
         items: list[tuple[str, object]] = [
-            (f"{_GLYPHS.play}  Avvia", _PLAY),
-            (f"🔊 Audio: {_audio_summary(aid, tr)}", _AUDIO),
-            (f"💬 Sottotitoli: {_sub_summary(sid, sub_paths, tr)}", _SUBS),
+            (f"{ui.glyphs(ui.active_caps()).play}  Avvia", _PLAY),
+            (f"🔊 Audio: {audio_summary(aid, tr)}", _AUDIO),
+            (f"💬 Sottotitoli: {sub_summary(sid, sub_paths, tr)}", _SUBS),
         ]
         chosen = fzf(items, "riproduzione> ")
         if chosen is None:
@@ -302,123 +125,6 @@ def choose_tracks(
 # --- flow ----------------------------------------------------------------
 
 
-def _future_release(iso: str | None) -> datetime | None:
-    """Parse a Cinemeta `released` ISO date; return it only if it's in the future."""
-    if not iso:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return dt if dt > datetime.now(UTC) else None
-
-
-def _no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
-    """A specific 'not released yet' notice when a title has no streams, else generic."""
-    released = _future_release(api.meta(cfg, typ, video_id).get("released"))
-    if released:
-        return f"🎬 «{title}» non ancora disponibile — uscita prevista il {released:%d/%m/%Y}"
-    return f"nessuno stream disponibile per «{title}»"
-
-
-def _pick_stream(
-    cfg: Config, results: list[Stream], *, auto: bool, cast: bool = False
-) -> Stream | None:
-    """Rank and curate streams, then auto-pick the best or show an fzf menu (top N
-    playable + a 'show all' entry that reveals the rest and the excluded ones ⚠).
-
-    When `cast`, rank against the Chromecast receiver's profile (not the laptop GPU)
-    and demote streams whose audio it can't decode (TrueHD/DTS/DTS-HD → silent)."""
-    if not cfg.hw_filter:
-        ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in results]
-        return results[0] if auto else fzf(ranked, "stream> ")
-
-    caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast)
-    playable, excluded = quality.rank_streams(results, caps, spec)
-    if excluded:
-        reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
-        print(f"nstream: {len(excluded)} stream filtrati ({reasons})", file=sys.stderr)
-    dupes = len(results) - len(playable) - len(excluded)
-    if dupes > 0:
-        print(f"nstream: {dupes} doppioni rimossi", file=sys.stderr)
-    if auto:
-        if playable:
-            return playable[0].stream
-        msg = (
-            "nessuno stream compatibile col Chromecast (prova Tab o --local)"
-            if cast
-            else "nessuno stream supportato dall'hardware"
-        )
-        print(f"nstream: {msg}", file=sys.stderr)
-        return None
-
-    def _full() -> Stream | None:
-        items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
-        items += [(f"⚠ {r.reason}  {stream_label(r.stream, r.info)}", r.stream) for r in excluded]
-        return fzf(items, "stream> ")
-
-    cap = cfg.max_streams
-    if not cap or len(playable) + len(excluded) <= cap:
-        return _full()  # nothing hidden → one flat menu
-    _ALL = object()
-    shown = playable[:cap]
-    hidden = len(playable) - len(shown) + len(excluded)
-    items: list[tuple[str, object]] = [(stream_label(r.stream, r.info), r.stream) for r in shown]
-    items.append((f"↓ mostra tutti ({hidden} altri)", _ALL))
-    chosen = fzf(items, "stream> ")
-    if chosen is _ALL:
-        return _full()
-    return typecast("Stream | None", chosen)
-
-
-def _cast_playable(cfg: Config, results: list[Stream]) -> list[quality.RankedStream]:
-    """Streams the Chromecast can play (cast profile + Cast-compatible audio), ignoring
-    the language filter so every available dub is offered for switching."""
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=True, lang_filter=False)
-    playable, _ = quality.rank_streams(results, quality.cast_caps(), spec)
-    return playable
-
-
-def _cast_languages(cfg: Config, results: list[Stream]) -> tuple[str, ...]:
-    """Audio languages available among Cast-compatible streams, preferred ones first."""
-    langs = {
-        lang for r in _cast_playable(cfg, results) for lang in r.info.languages if lang != "multi"
-    }
-    ordered = [lang for lang in cfg.audio_langs if lang in langs]
-    ordered += sorted(langs - set(ordered))
-    return tuple(ordered)
-
-
-def _cast_resolver(cfg: Config, results: list[Stream]) -> Callable[[str], str | None]:
-    """Return a fn picking the best Cast-compatible stream URL for a language, or None.
-    Closes over the already-fetched `results` so switching needs no extra network call."""
-    playable = _cast_playable(cfg, results)
-
-    def resolve(lang: str) -> str | None:
-        for r in playable:  # already ranked best-first
-            if lang in r.info.languages:
-                return _playable_url(cfg, r.stream)
-        return None
-
-    return resolve
-
-
-def _playable_url(cfg: Config, stream: Stream) -> str | None:
-    """Ready url for a stream, resolving a pure-torrent (infoHash) one through the P2P
-    engine on demand. Best-effort and silent: returns None if the engine can't serve it
-    (the caller already has a user-facing fallback)."""
-    if stream.get("url"):
-        return stream["url"]
-    if not stream.get("infoHash"):
-        return None
-    try:
-        stream["url"] = engine.resolve(cfg, stream)
-        return stream["url"]
-    except engine.EngineUnavailable:
-        return None
-
-
 def _resume_position(cfg: Config, video_id: str) -> float | None:
     """The position to resume from, or None if there's no usable resume point
     (no history entry, or the title is effectively finished — so we never restart
@@ -431,158 +137,6 @@ def _resume_position(cfg: Config, video_id: str) -> float | None:
     if start and dur > 0:
         return min(start, dur - 5)
     return start
-
-
-def _audio_langs_of(cfg: Config, chosen: Stream) -> set[str] | None:
-    """The audio languages actually in `chosen`, as canonical codes — for the auto-play
-    guard. Best-effort: returns None when it can't tell (no preference set, or ffprobe
-    missing/empty), so the caller never blocks playback on a probe failure.
-
-    Skips the ffprobe only when the release name explicitly tags a preferred language. A
-    bare "multi"/"dual" tag is NOT trusted: that token covers any language pair (e.g.
-    Latino+Eng with no Italian at all), so it is verified with a probe rather than assumed
-    to carry a preferred track. Track languages come from `languages.track_lang`, which
-    reads the ffprobe `title` (e.g. 'Italian [TrueHD]') when the `language` tag is `und`."""
-    pref = set(cfg.audio_langs)
-    if not pref:
-        return None
-    tagged = quality.parse_stream(chosen).languages
-    if tagged & pref:
-        return pref  # name explicitly names a preferred language → trust it (no probe)
-    tr = tracks.probe_tracks(chosen.get("url") or "")
-    if tr.empty():
-        return None  # unverifiable → don't block
-    return {code for t in tr.audio if (code := languages.track_lang(t.lang, t.title))}
-
-
-def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
-    """Make `chosen` playable: debrid/cached streams already carry a url, pure-torrent
-    streams (infoHash) are resolved to a local http url by the P2P engine. Returns None
-    for a stream with neither url nor infoHash, or an unservable engine."""
-    if chosen.get("url"):
-        return chosen  # debrid/cached: ready to play
-    if not chosen.get("infoHash"):
-        print("nstream: stream privo di url e infoHash, salto", file=sys.stderr)
-        return None
-    if not _p2p_guard(cfg):
-        return None
-    try:
-        chosen["url"] = engine.resolve(cfg, chosen)
-        return chosen
-    except engine.EngineUnavailable as e:
-        print(f"nstream: {e}", file=sys.stderr)
-        _log.info("engine P2P non disponibile: %s", e)
-        return None
-
-
-def _pick_and_resolve(
-    cfg: Config, results: list[Stream], *, auto: bool, cast: bool
-) -> Stream | None:
-    """Pick a stream and make it playable. Returns None on ESC or an unresolvable pick."""
-    chosen = _pick_stream(cfg, results, auto=auto, cast=cast)
-    if not chosen:
-        return None
-    return _resolve_stream(cfg, chosen)
-
-
-def _auto_candidates(cfg: Config, results: list[Stream], *, cast: bool) -> list[Stream]:
-    """Playable streams in auto-pick order (best first) — the same ranking `_pick_stream`
-    uses for `auto`, exposed as a list so the language guard can try the next-best when the
-    top pick lacks the primary audio language."""
-    if not cfg.hw_filter:
-        return list(results)
-    caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast)
-    playable, _ = quality.rank_streams(results, caps, spec)
-    return [r.stream for r in playable]
-
-
-def _reselect_for_primary(
-    cfg: Config, results: list[Stream], current: Stream, opts: PlayOpts, primary: str, *,
-    limit: int = 3,
-) -> Stream | None:  # fmt: skip
-    """Try the next-best candidates (after `current`) for one whose audio actually contains
-    `primary`, confirming each with a probe via `_audio_langs_of`. Returns the first match
-    (resolved, url-ready), or None when none of the top `limit` others qualifies."""
-    tried = 0
-    for s in _auto_candidates(cfg, results, cast=opts.cast):
-        if s is current or s.get("url") == current.get("url"):
-            continue
-        if tried >= limit:
-            break
-        tried += 1
-        ready = _resolve_stream(cfg, s)
-        if ready is None:
-            continue
-        avail = _audio_langs_of(cfg, ready)
-        if avail and primary in avail:
-            name_line = next(iter((ready.get("name") or "").splitlines()), "")
-            print(f"nstream: scelgo un'altra sorgente per l'audio {primary} — {name_line}",
-                  file=sys.stderr)  # fmt: skip
-            return ready
-    return None
-
-
-def _ensure_playable(cfg: Config, results: list[Stream], chosen: Stream, opts: PlayOpts) -> Stream:
-    """Debrid/auto only: the "cached" marker is a crowdsourced guess, so a ready url may be a
-    dead/expired link. If the chosen url isn't reachable, fall back — to local P2P when the
-    stream also carries an infoHash (hybrid 'auto'), else to the next-best reachable candidate.
-    Local backend urls are engine-served (`_wait_buffer` already gates them), so skip the check."""
-    if cfg.playback_backend == "local":
-        return chosen
-    url = chosen.get("url")
-    if not url or api.url_playable(url):
-        return chosen
-    print("nstream: la sorgente «cached» non risponde, ripiego…", file=sys.stderr)
-    if chosen.get("infoHash"):  # hybrid stream → local P2P fallback
-        with contextlib.suppress(engine.EngineUnavailable):
-            chosen["url"] = engine.resolve(cfg, chosen)
-            return chosen
-    tried = 0
-    for s in _auto_candidates(cfg, results, cast=opts.cast):
-        if tried >= 3:
-            break
-        if s is chosen or s.get("url") == url:
-            continue
-        tried += 1
-        ready = _resolve_stream(cfg, s)
-        if ready and (not ready.get("url") or api.url_playable(ready["url"])):
-            return ready
-    return chosen  # nothing better reachable — let the player try anyway
-
-
-def _p2p_guard(cfg: Config) -> bool:
-    """Privacy gate before serving a P2P stream. Returns False — blocking playback — only when
-    `p2p_require_vpn` is set and no VPN interface is detected; otherwise warns (when no VPN) and
-    proceeds. BP: P2P joins the swarm, so without a VPN the real IP is visible to peers."""
-    if not engine.vpn_active():
-        if cfg.p2p_require_vpn:
-            print(
-                "nstream: nessuna VPN rilevata e p2p_require_vpn=true — streaming P2P bloccato.\n"
-                "         Attiva la VPN, oppure usa un provider debrid.",
-                file=sys.stderr,
-            )
-            return False
-        print(
-            "nstream: ⚠ nessuna VPN rilevata — in P2P il tuo IP è visibile ai peer del torrent.",
-            file=sys.stderr,
-        )
-    _p2p_notice_once(cfg)
-    return True
-
-
-def _p2p_notice_once(cfg: Config) -> None:
-    """One-time privacy notice the first time a P2P stream is served: torrent peers see the
-    client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback."""
-    if cfg.p2p_ack:
-        return
-    print(
-        "nstream: streaming P2P locale attivo — il tuo IP è visibile ai peer del torrent.\n"
-        "         Valuta una VPN se è una preoccupazione. (avviso mostrato una sola volta)",
-        file=sys.stderr,
-    )
-    with contextlib.suppress(ConfigError, OSError):
-        config_mod.save({"p2p_ack": True})
 
 
 def _play_video(
@@ -609,58 +163,15 @@ def _play_video(
     print(f"▶ {title} — cerco la sorgente migliore…", file=sys.stderr)
     results = api.streams(cfg, typ, video_id)
     if not results:
-        notice = _no_streams_message(cfg, typ, video_id, title)
+        notice = stream_select.no_streams_message(cfg, typ, video_id, title)
         print(f"nstream: {notice}", file=sys.stderr)
         return (notice, False)
-    chosen = _pick_and_resolve(cfg, results, auto=auto, cast=opts.cast)
-    if not chosen:
-        return (None, False)
-
-    # Cached-miss fallback (debrid/auto): a "[RD+]" marker is a guess, so verify the ready url
-    # is reachable and fall back (local P2P for a hybrid stream, else the next candidate) before
-    # committing to it. Only in auto mode (manual picks are the user's explicit choice).
-    if auto:
-        chosen = _ensure_playable(cfg, results, chosen, opts)
-
-    # Auto-play language guard (local mpv only): the auto-pick can be a file whose audio
-    # isn't in the primary language — an untagged/mistagged foreign leak, or a "Dual"
-    # release that's actually a different language pair (e.g. Latino+Eng). Verify with
-    # ffprobe and act on the result instead of letting mpv silently play the wrong dub.
-    # Cast keeps its own language UX.
-    safety_sub_lang: str | None = None
-    if auto and not opts.cast:
-        primary = cfg.primary
-        avail = _audio_langs_of(cfg, chosen)
-        if avail is not None and primary and primary not in avail:
-            # Best pick lacks the primary language: try the next-best candidates for one
-            # that has it (probing each), per the user's "try next, then fallback+subs".
-            alt = _reselect_for_primary(cfg, results, chosen, opts, primary)
-            if alt is not None:
-                chosen, avail = alt, (_audio_langs_of(cfg, alt) or {primary})
-            elif set(cfg.audio_langs) & avail:
-                # Only a fallback language (e.g. eng) is available: play it, but turn on
-                # primary-language subtitles as a safety net (embedded or OpenSubtitles).
-                safety_sub_lang = primary
-                have = "/".join(sorted(avail))
-                print(
-                    f"nstream: audio non disponibile in {primary} (disponibili: {have}); "
-                    f"sottotitoli {primary} attivati",
-                    file=sys.stderr,
-                )
-            else:
-                # No preferred language at all: warn and (when interactive) let the user
-                # pick another source with full track control.
-                have = "/".join(sorted(avail)) or "?"
-                print(
-                    f"nstream: nessuna traccia audio {','.join(cfg.audio_langs)} "
-                    f"(disponibili: {have})",
-                    file=sys.stderr,
-                )
-                if reselect_on_wrong_audio:
-                    auto = False  # let choose_tracks give track control on the manual pick
-                    chosen = _pick_and_resolve(cfg, results, auto=False, cast=opts.cast)
-                    if not chosen:
-                        return (None, False)
+    vetted = stream_select.prepare_stream(
+        cfg, results, opts, auto=auto, reselect_on_wrong_audio=reselect_on_wrong_audio
+    )
+    if vetted is None:
+        return (None, False)  # no playable stream, or backed out of a (re)selection
+    chosen, auto, safety_sub_lang = vetted.stream, vetted.auto, vetted.safety_sub_lang
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
@@ -705,21 +216,6 @@ def _resolve_cast_device(cfg: Config, opts: PlayOpts) -> str | None:
         return None
 
 
-def _auto_subs(
-    cfg: Config, typ: str, video_id: str, work_dir: str, opts: PlayOpts,
-    *, safety_sub_lang: str | None = None,
-) -> tuple[str, ...]:  # fmt: skip
-    """Subtitle files for the no-menu paths (cast / --play / binge). When `safety_sub_lang`
-    is set (the audio isn't in the primary language), fetch that language's subtitles as a
-    safety net regardless of `--subs`. Otherwise: the preferred-language OpenSubtitles track
-    when subtitles were requested, else none."""
-    if safety_sub_lang:
-        return pick_subtitles(cfg, typ, video_id, work_dir, mode="auto", lang=safety_sub_lang)
-    if not opts.sub_mode:
-        return ()
-    return pick_subtitles(cfg, typ, video_id, work_dir, mode=opts.sub_mode, lang=opts.sub_lang)
-
-
 def _play_on_cast(
     cfg: Config,
     results: list[Stream],
@@ -741,14 +237,14 @@ def _play_on_cast(
     # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV as an
     # external file when requested (or as a safety net when audio isn't the primary
     # language), otherwise the receiver picks its own.
-    sub_paths = _auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
-    cast_langs = _cast_languages(cfg, results)
+    sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
+    cast_langs = stream_select.cast_languages(cfg, results)
     _log.info("cast '%s' → %s", title, device)
     return cast(
         cfg, title, chosen["url"],
         device=device, start=start, sub_paths=sub_paths, next_label=next_label,
         langs=cast_langs if len(cast_langs) > 1 else (),
-        resolve_lang=_cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
+        resolve_lang=stream_select.cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
     )  # fmt: skip
 
 
@@ -771,7 +267,7 @@ def _play_on_mpv(
     audio_id: int | None = None
     sub_id: str | int | None = None
     if auto:
-        sub_paths = _auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
+        sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
     else:
         sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
         if sel is None:
@@ -1046,7 +542,7 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
     notice: str | None = None
     while True:
         recent = state.recent(cfg) if opts.history else []
-        g = _GLYPHS
+        g = ui.glyphs(ui.active_caps())
         items: list[tuple[str, object]] = [(history_label(e), e) for e in recent]
         items += [
             (f"{g.search}  Cerca…", (_SEARCH, "")),

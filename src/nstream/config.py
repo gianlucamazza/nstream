@@ -82,6 +82,19 @@ class HistoryEntry(TypedDict, total=False):
 
 
 @dataclass(frozen=True)
+class PlayOpts:
+    """Per-invocation playback preferences threaded through the flow."""
+
+    auto: bool  # auto-pick the top stream (skip the stream menu)
+    cast: bool  # send playback to a Chromecast (catt) instead of mpv
+    sub_mode: str | None  # None = no subs, "auto" = pick preferred lang, "menu" = fzf
+    sub_lang: str | None  # force this language for sub_mode="auto"
+    history: bool  # record/resume watch history
+    autoplay: bool  # offer the next-episode overlay for series
+    cast_choose: bool = False  # force the device picker (explicit "cast this" action)
+
+
+@dataclass(frozen=True)
 class Config:
     # Torrentio config string. With a debrid segment (`…|realdebrid=TOKEN`) Torrentio
     # returns ready debrid urls; without one it returns pure-torrent streams that the
