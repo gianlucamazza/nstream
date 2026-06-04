@@ -20,7 +20,7 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import api, util
+from . import net, util
 from .config import DEBRID_PROVIDERS, Config
 
 CACHE_TTL = 86400  # re-fetch a user addon's manifest at most once a day
@@ -102,8 +102,8 @@ def load_addon(manifest_url: str, *, use_cache: bool = True) -> Addon | None:
         return _parse_manifest(manifest_url, entry["manifest"])
     try:
         # One try only: a dead user addon must not stall the flow for ~60s.
-        data = api.http_get_json(manifest_url, what="manifest addon", retries=1)
-    except api.NetworkError:
+        data = net.http_get_json(manifest_url, what="manifest addon", retries=1)
+    except net.NetworkError:
         # Fall back to a stale copy rather than dropping the addon entirely.
         return _parse_manifest(manifest_url, entry["manifest"]) if entry else None
     cache[key] = {"ts": int(time.time()), "manifest": data}

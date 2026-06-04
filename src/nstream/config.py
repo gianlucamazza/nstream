@@ -57,6 +57,9 @@ class Stream(TypedDict, total=False):
     infoHash: str
     fileIdx: int
     sources: list[str]
+    behaviorHints: (
+        dict  # Torrentio extra (e.g. {"filename": "..."}) — used for hybrid/native file match
+    )
 
 
 class Subtitle(TypedDict, total=False):
@@ -92,6 +95,7 @@ class PlayOpts:
     history: bool  # record/resume watch history
     autoplay: bool  # offer the next-episode overlay for series
     cast_choose: bool = False  # force the device picker (explicit "cast this" action)
+    audio_lang: str | None = None  # force this audio/dub language (headless --audio-lang)
 
 
 @dataclass(frozen=True)
@@ -182,16 +186,19 @@ class Config:
 # Debrid provider keys Torrentio understands, embedded in `torrentio_base` as `key=token`.
 # Single source of truth shared by settings (provider picker) and addons (strip for local
 # backend); kept provider-agnostic — code never special-cases an individual provider.
-DEBRID_PROVIDERS: tuple[str, ...] = (
-    "realdebrid",
-    "alldebrid",
-    "premiumize",
-    "torbox",
-    "debridlink",
-    "easydebrid",
-    "offcloud",
-    "putio",
-)
+# Single source of truth (key → display name); both the provider key set and the settings
+# picker derive from it, and log.py builds its redaction regex from the keys — no drift.
+DEBRID_PROVIDER_NAMES: dict[str, str] = {
+    "realdebrid": "RealDebrid",
+    "alldebrid": "AllDebrid",
+    "premiumize": "Premiumize",
+    "torbox": "TorBox",
+    "debridlink": "Debrid-Link",
+    "easydebrid": "EasyDebrid",
+    "offcloud": "Offcloud",
+    "putio": "Put.io",
+}
+DEBRID_PROVIDERS: tuple[str, ...] = tuple(DEBRID_PROVIDER_NAMES)
 
 
 # Allowed values for the enum-like string config fields (bad values fall back to default).

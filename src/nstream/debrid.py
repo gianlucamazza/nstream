@@ -115,6 +115,29 @@ def _chunks(seq: Sequence[str], n: int) -> Iterator[list[str]]:
         yield list(seq[i : i + n])
 
 
+def _basename(path: str) -> str:
+    return (path or "").replace("\\", "/").split("/")[-1]
+
+
+def _want_filename(stream: Stream) -> str | None:
+    """The release's target file name (Torrentio `behaviorHints.filename`), basename only.
+    This is the reliable key for picking the right file in a multi-file (series pack) torrent —
+    the provider's own file order is not guaranteed to match the torrent's `fileIdx`."""
+    fn = (stream.get("behaviorHints") or {}).get("filename")
+    return _basename(fn) if fn else None
+
+
+def _match_by_name(items: list[dict], want: str | None, name_of) -> dict | None:
+    """The item whose basename matches `want` (exact, else either-endswith), or None."""
+    if not want:
+        return None
+    for it in items:
+        n = _basename(name_of(it))
+        if n and (n == want or n.endswith(want) or want.endswith(n)):
+            return it
+    return None
+
+
 # --- TorBox --------------------------------------------------------------
 
 _TORBOX_API = "https://api.torbox.app/v1/api"
@@ -161,7 +184,10 @@ class TorBoxResolver:
         tid = (added.get("data") or {}).get("torrent_id")
         if tid is None:
             raise DebridUnavailable("torbox: torrent_id assente")
-        file_id = _torbox_file_id(self.token, tid, stream.get("fileIdx"))
+        file_id = _torbox_file_id(self.token, tid, stream)
+        # requestdl authenticates via the `token` query param — TorBox's documented permalink
+        # mechanism (it has no Bearer variant). The returned CDN url (`data`) carries no token
+        # and is what reaches the player; this request's token is scrubbed from logs (log.py).
         dl = _request(
             "GET",
             f"{_TORBOX_API}/torrents/requestdl",
@@ -190,10 +216,11 @@ def _torbox_cached_hashes(payload: object) -> set[str]:
     return set()
 
 
-def _torbox_file_id(token: str, torrent_id: object, file_idx: object) -> object:
-    """The TorBox file id to stream: the release's `fileIdx` when in range, else the largest
-    file (the feature video). Reads `mylist` for the just-added torrent, polling a few times
-    since a freshly-added (even cached) torrent may not list its files instantly."""
+def _torbox_file_id(token: str, torrent_id: object, stream: Stream) -> object:
+    """The TorBox file id to stream: match the release's filename first (correct for series
+    packs), then the `fileIdx` when in range, else the largest file (the feature video). Reads
+    `mylist` for the just-added torrent, polling a few times since a freshly-added (even cached)
+    torrent may not list its files instantly."""
     files: list[dict] = []
     for attempt in range(_MYLIST_TRIES):
         data = _request(
@@ -210,6 +237,10 @@ def _torbox_file_id(token: str, torrent_id: object, file_idx: object) -> object:
             time.sleep(_MYLIST_DELAY)
     if not files:
         raise DebridUnavailable("torbox: nessun file nel torrent")
+    match = _match_by_name(files, _want_filename(stream), lambda f: f.get("name") or "")
+    if match:
+        return match.get("id")
+    file_idx = stream.get("fileIdx")
     if isinstance(file_idx, int) and 0 <= file_idx < len(files):
         return files[file_idx].get("id")
     return max(files, key=lambda f: f.get("size", 0)).get("id")
@@ -240,7 +271,16 @@ class PremiumizeResolver:
                 token=self.token,
                 form={"items[]": chunk},
             )
-            for h, ok in zip(chunk, data.get("response") or [], strict=False):
+            # A bad token still returns HTTP 200 with status="error" — surface it instead of
+            # silently reporting everything as uncached (which would hide a misconfigured key).
+            if data.get("status") != "success":
+                raise DebridUnavailable(
+                    f"premiumize cache/check: {data.get('message') or 'errore'}"
+                )
+            resp = data.get("response") or []
+            if len(resp) != len(chunk):
+                _log.debug("premiumize cache/check: %d risposte per %d hash", len(resp), len(chunk))
+            for h, ok in zip(chunk, resp, strict=False):
                 if ok:
                     out.add(h.lower())
         return out
@@ -259,16 +299,21 @@ class PremiumizeResolver:
         content = data.get("content") or []
         if not content:
             raise DebridUnavailable("premiumize: nessun file (non in cache?)")
-        chosen = _pm_pick_file(content, stream.get("fileIdx"))
+        chosen = _pm_pick_file(content, stream)
         link = chosen.get("link") or chosen.get("stream_link")
         if not link:
             raise DebridUnavailable("premiumize: link assente")
         return str(link)
 
 
-def _pm_pick_file(content: list[dict], file_idx: object) -> dict:
-    """Pick the file to play from a directdl listing: the release's `fileIdx` when in range,
-    else the largest (the feature video)."""
+def _pm_pick_file(content: list[dict], stream: Stream) -> dict:
+    """Pick the file to play from a directdl listing: match the release's filename first
+    (correct for series packs), then the `fileIdx` when in range, else the largest file.
+    `content` is guaranteed non-empty by the caller."""
+    match = _match_by_name(content, _want_filename(stream), lambda c: c.get("path") or "")
+    if match:
+        return match
+    file_idx = stream.get("fileIdx")
     if isinstance(file_idx, int) and 0 <= file_idx < len(content):
         return content[file_idx]
     return max(content, key=lambda f: f.get("size", 0))

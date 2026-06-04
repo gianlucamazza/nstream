@@ -13,7 +13,7 @@ import urllib.request
 import pytest
 
 from nstream import debrid
-from nstream.config import Config, debrid_credentials
+from nstream.config import Config, Stream, debrid_credentials
 
 
 class FakeResp:
@@ -164,6 +164,70 @@ def test_premiumize_resolve_picks_largest_link(monkeypatch):
     ]
     monkeypatch.setattr(debrid, "_urlopen", _router(routes))
     assert debrid.PremiumizeResolver(token="T").resolve({"infoHash": "abcd"}) == "L2"
+
+
+def test_torbox_resolve_matches_file_by_filename(monkeypatch):
+    # The wanted episode (id 11) is smaller than a sample file (id 10): filename match must win
+    # over both "largest" and fileIdx=0 — the series-pack correctness fix.
+    seen: dict[str, str] = {}
+
+    def fake(req, timeout):
+        url = req.full_url
+        if "createtorrent" in url:
+            return FakeResp({"success": True, "data": {"torrent_id": 9}})
+        if "mylist" in url:
+            return FakeResp(
+                {
+                    "data": {
+                        "files": [
+                            {"id": 10, "name": "Sample.mkv", "size": 999},
+                            {"id": 11, "name": "Show.S01E02.1080p.mkv", "size": 500},
+                        ]
+                    }
+                }
+            )
+        if "requestdl" in url:
+            seen["url"] = url
+            return FakeResp({"data": "https://cdn/x.mkv"})
+        raise AssertionError(url)
+
+    monkeypatch.setattr(debrid, "_urlopen", fake)
+    stream: Stream = {
+        "infoHash": "abcd",
+        "behaviorHints": {"filename": "Show.S01E02.1080p.mkv"},
+        "fileIdx": 0,
+    }
+    assert debrid.TorBoxResolver(token="T").resolve(stream) == "https://cdn/x.mkv"
+    assert "file_id=11" in seen["url"]  # matched by name, not largest (10) nor fileIdx (0)
+
+
+def test_premiumize_resolve_matches_file_by_filename(monkeypatch):
+    routes = [
+        (
+            lambda u, m, d: "directdl" in u,
+            {
+                "status": "success",
+                "content": [
+                    {"path": "/sample.mkv", "size": 999, "link": "L_big"},
+                    {"path": "x/Show.S01E02.mkv", "size": 10, "link": "L_want"},
+                ],
+            },
+        )
+    ]
+    monkeypatch.setattr(debrid, "_urlopen", _router(routes))
+    stream: Stream = {
+        "infoHash": "abcd",
+        "behaviorHints": {"filename": "Show.S01E02.mkv"},
+        "fileIdx": 0,
+    }
+    assert debrid.PremiumizeResolver(token="T").resolve(stream) == "L_want"
+
+
+def test_premiumize_cached_auth_error_raises(monkeypatch):
+    routes = [(lambda u, m, d: "cache/check" in u, {"status": "error", "message": "Not logged in"})]
+    monkeypatch.setattr(debrid, "_urlopen", _router(routes))
+    with pytest.raises(debrid.DebridUnavailable):
+        debrid.PremiumizeResolver(token="T").cached(["aabb"])
 
 
 def test_premiumize_resolve_uncached_raises(monkeypatch):
