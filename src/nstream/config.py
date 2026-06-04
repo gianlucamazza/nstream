@@ -129,6 +129,22 @@ class Config:
     # `catt -d`; empty = resolve per-LAN via a fresh `catt scan` (see caster.py).
     prefer_cast: bool = False
     cast_device: str = ""
+    # Tier-2 cast: when the chosen stream's audio is one the Chromecast Default Media
+    # Receiver can't decode (AC-3/E-AC-3/DTS/TrueHD → silent), remux on the host (video
+    # `-c copy`, audio → cast_audio_codec) to a complete temp file and let catt serve it,
+    # so the original HEVC/4K/HDR video plays at native fidelity with audible audio. The
+    # whole file is remuxed before casting (this DMR only plays a complete, Range-served
+    # file — streaming-while-transcoding doesn't work on it), so it costs a prepare wait;
+    # AAC releases are preferred first (no remux). Off → Dolby/DTS titles are demoted as
+    # before.
+    cast_remux: bool = True
+    cast_audio_codec: str = "aac"  # target audio codec for the cast remux (DMR-decodable)
+    # A Tier-2 remux downloads + rewrites the whole file before playback, so a 4K Dolby
+    # title means a 30-60 GB fetch. A *direct* cast streams 4K for free (no host download),
+    # so this cap applies ONLY to releases that need remuxing: among them, prefer ≤ this
+    # resolution (default 1080p). 0 = no cap. A preference, not an exclusion — a sole 4K
+    # Dolby release is still cast.
+    cast_remux_max_resolution: int = 1080
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -231,6 +247,7 @@ def _enum_str(raw: dict, key: str, default: str) -> str:
 INT_BOUNDS: dict[str, tuple[int, int]] = {
     "autoplay_lead": (1, 120),
     "max_resolution": (0, 4320),
+    "cast_remux_max_resolution": (0, 4320),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
@@ -290,6 +307,11 @@ def load() -> Config:
         auto_play=bool(raw.get("auto_play", Config.auto_play)),
         prefer_cast=bool(raw.get("prefer_cast", Config.prefer_cast)),
         cast_device=str(raw.get("cast_device", Config.cast_device) or ""),
+        cast_remux=bool(raw.get("cast_remux", Config.cast_remux)),
+        cast_audio_codec=str(raw.get("cast_audio_codec", Config.cast_audio_codec) or "aac"),
+        cast_remux_max_resolution=_bounded_int(
+            raw, "cast_remux_max_resolution", Config.cast_remux_max_resolution
+        ),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=_bounded_int(raw, "autoplay_lead", Config.autoplay_lead),
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),

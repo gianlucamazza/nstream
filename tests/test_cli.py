@@ -581,6 +581,12 @@ def _hns(**kw):
         "season": None,
         "episode": None,
         "device": None,
+        "audio_lang": None,
+        "probe": False,
+        "stop": False,
+        "status": False,
+        "browse": None,
+        "volume": None,
         "follow": None,  # BooleanOptionalAction default → fire-and-return
     }
     base.update(kw)
@@ -611,7 +617,12 @@ def _wire_movie(monkeypatch, *, name="Dune", stream=None):
         cli.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
     )  # fmt: skip
+    # Keep audio-language discovery hermetic (no real rank_streams/vainfo in unit tests).
+    monkeypatch.setattr(
+        cli.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+    )
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "device_volume", lambda device: (0.4, False))
     return stream
 
 
@@ -784,3 +795,184 @@ def test_dispatch_json_skips_clear(monkeypatch):
     monkeypatch.setattr(cli, "run_auto", lambda cfg, args, opts: 0)
     cli._dispatch(CFG, _hns(query=["dune"], browse=None, explain=False, json=True), _hopts())
     assert "cleared" not in seen
+
+
+def test_run_auto_enriched_json_audio_fields(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    cli.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert out["available_audio"] == ["ita", "eng"]
+    assert out["audio_lang"] == CFG.primary  # no --audio-lang → expected/primary
+
+
+def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    seen = {}
+
+    def pick(cfg, results, lang, *, cast, probe_cap=4):
+        seen["lang"] = lang
+        return results[0], True  # (stream, verified) — track-accurate confirmed
+
+    monkeypatch.setattr(cli.stream_select, "pick_audio_stream_verified", pick)
+    # prepare_stream must NOT be used on the forced-audio path.
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("prepare_stream used")),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None,
+        history=False, autoplay=False, audio_lang="eng",
+    )  # fmt: skip
+    rc = cli.run_auto(CFG, _hns(query=["dune"], audio_lang="eng"), opts)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and seen["lang"] == "eng"
+    assert out["audio_lang"] == "eng"
+
+
+def test_run_auto_audio_lang_unavailable(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(
+        cli.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+    )
+    monkeypatch.setattr(
+        cli, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+    )
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None,
+        history=False, autoplay=False, audio_lang="jpn",
+    )  # fmt: skip
+    rc = cli.run_auto(CFG, _hns(query=["dune"], audio_lang="jpn"), opts)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "audio_lang_unavailable"
+    assert out["available_audio"] == ["ita", "eng"]
+
+
+def test_run_auto_probe_lists_audio_and_subs(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": "Dune"}]
+    )
+    monkeypatch.setattr(
+        cli.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
+    )
+    monkeypatch.setattr(
+        cli.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+    )
+    monkeypatch.setattr(cli, "available_subtitle_langs", lambda cfg, t, v: ["eng", "fre", "ita"])
+    monkeypatch.setattr(
+        cli, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+    )
+    rc = cli.run_auto(CFG, _hns(query=["dune"], probe=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "probe"
+    assert out["available_audio"] == ["ita", "eng"]
+    assert out["available_subtitles"] == ["eng", "fre", "ita"]
+
+
+def test_run_auto_cast_reports_volume(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cli, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cli, "device_volume", lambda device: (0.4, False))
+    cli.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["volume"] == 0.4 and out["muted"] is False and out["notice"] is None
+
+
+def test_run_auto_cast_warns_volume_zero(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cli, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cli, "device_volume", lambda device: (0.0, False))
+    cli.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["volume"] == 0.0 and out["notice"] and "volume" in out["notice"].lower()
+
+
+# --- completion: stop / status / browse / volume / track-accurate ----------
+
+
+def test_run_auto_stop(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cli.caster, "stop", lambda device: True)
+    rc = cli.run_auto(CFG, _hns(stop=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "stop" and out["device"] == "192.168.1.5"
+
+
+def test_run_auto_status(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        cli.caster, "status",
+        lambda device: {"player_state": "PLAYING", "title": "X", "position": 12.0,
+                        "duration": 100.0, "volume": 0.4, "muted": False},
+    )  # fmt: skip
+    rc = cli.run_auto(CFG, _hns(status=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "status" and out["player_state"] == "PLAYING"
+    assert out["title"] == "X" and out["volume"] == 0.4
+
+
+def test_run_auto_stop_device_not_found(monkeypatch, capsys):
+    def boom(cfg, **k):
+        raise cli.CastUnavailable("nessun Chromecast")
+
+    monkeypatch.setattr(cli, "_resolve_device", boom)
+    rc = cli.run_auto(CFG, _hns(stop=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "device_not_found"
+
+
+def test_run_auto_browse(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.api, "browse", lambda cfg, cat: [{"id": "tt1", "type": "movie", "name": "Popular"}]
+    )
+    monkeypatch.setattr(
+        cli.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
+    )
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cli.stream_select, "audio_languages", lambda cfg, results, *, cast: ("eng",)
+    )
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+    rc = cli.run_auto(CFG, _hns(browse="popolari"), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["title"] == "Popular" and out["selection"] == "browse"
+
+
+def test_run_auto_cast_sets_volume(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cli, "cast", lambda *a, **k: (0.0, 0.0, False))
+    seen = {}
+    monkeypatch.setattr(cli.caster, "set_volume", lambda device, level: seen.update(level=level))
+    monkeypatch.setattr(cli, "device_volume", lambda device: (0.35, False))
+    cli.run_auto(CFG, _hns(query=["dune"], volume=35), _hopts(cast=True))
+    assert seen["level"] == 35
+
+
+def test_run_auto_audio_lang_not_in_real_tracks(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(
+        cli.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+    )
+    # name tags claim ita, but ffprobe verification finds no candidate → reject (no wrong dub).
+    monkeypatch.setattr(
+        cli.stream_select, "pick_audio_stream_verified",
+        lambda cfg, results, lang, *, cast, probe_cap=4: (None, False),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cli, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+    )
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None,
+        history=False, autoplay=False, audio_lang="ita",
+    )  # fmt: skip
+    rc = cli.run_auto(CFG, _hns(query=["dune"], audio_lang="ita"), opts)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "audio_lang_unavailable"

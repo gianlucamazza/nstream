@@ -298,10 +298,21 @@ def test_cast_languages_lists_compatible():
 def test_cast_resolver_picks_compatible_release():
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
     resolve = stream_select.cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
-    # ITA → the ITA release; ENG → the WEB-DL, never the TrueHD remux; missing → None
+    # ITA → the ITA release; missing → None. For ENG both releases carry Dolby audio the
+    # DMR can't decode (TrueHD / DDP), so both are castable via Tier-2 remux (default on).
+    # The remux resolution cap (default 1080p) then prefers the 1080p WEB-DL over the 4K
+    # TrueHD remux — a 4K remux would download tens of GB; the 1080p one is far cheaper.
     assert resolve("ita") == "http://ita"
     assert resolve("eng") == "http://eng-webdl"
     assert resolve("ger") is None
+
+
+def test_cast_resolver_excludes_lossless_without_remux():
+    # With Tier-2 remux disabled, the old behaviour holds: TrueHD is dropped as unplayable,
+    # so ENG resolves to the (E-AC-3) WEB-DL instead of the 4K TrueHD remux.
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], cast_remux=False)
+    resolve = stream_select.cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
+    assert resolve("eng") == "http://eng-webdl"
 
 
 # --- cached-miss fallback (_ensure_playable) -------------------------------
@@ -440,3 +451,89 @@ def test_prepare_stream_safety_subtitles(monkeypatch, capsys):
     )
     assert v is not None and v.stream is chosen and v.safety_sub_lang == "ita"
     assert "sottotitoli ita attivati" in capsys.readouterr().err
+
+
+# --- audio language discovery / forced dub ---------------------------------
+
+
+def _rstream(url, langs):
+    from nstream.quality import RankedStream, StreamInfo
+
+    return RankedStream({"url": url, "name": "S"}, StreamInfo(languages=frozenset(langs)), "")
+
+
+def test_audio_languages_preferred_first(monkeypatch):
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    playable = [_rstream("u1", {"eng"}), _rstream("u2", {"fre"}), _rstream("u3", {"ita", "eng"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    langs = stream_select.audio_languages(cfg, [], cast=False)
+    assert langs[:2] == ("ita", "eng") and "fre" in langs  # preferred first, then rest
+
+
+def test_pick_audio_stream_returns_first_with_lang(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("u1", {"eng"}), _rstream("u2", {"ita"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    assert stream_select.pick_audio_stream(cfg, [], "ita", cast=False)["url"] == "u2"
+
+
+def test_pick_audio_stream_none_when_absent(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("u1", {"eng"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    assert stream_select.pick_audio_stream(cfg, [], "jpn", cast=False) is None
+
+
+# --- track-accurate audio (ffprobe) ----------------------------------------
+
+
+def test_stream_audio_langs_probes(monkeypatch):
+    from nstream import tracks as tr
+
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: "http://u")
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks",
+        lambda url: tr.Tracks(audio=[tr.Track(1, "ita"), tr.Track(2, "eng")]),
+    )  # fmt: skip
+    langs = stream_select.stream_audio_langs(Config(torrentio_base="tb"), {"url": "u"})
+    assert langs == frozenset({"ita", "eng"})
+
+
+def test_stream_audio_langs_none_when_und(monkeypatch):
+    from nstream import tracks as tr
+
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: "http://u")
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks", lambda url: tr.Tracks(audio=[tr.Track(1, "und")])
+    )
+    # single und track → no identifiable language → None (unverifiable, don't block)
+    assert stream_select.stream_audio_langs(Config(torrentio_base="tb"), {"url": "u"}) is None
+
+
+def test_pick_audio_stream_verified_confirms(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("u1", {"eng"}), _rstream("u2", {"ita"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    # real tracks of u2 confirm ita
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"ita"}))
+    stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
+    assert stream["url"] == "u2" and verified is True
+
+
+def test_pick_audio_stream_verified_rejects_mistag(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("u1", {"ita"})]  # name tags ita…
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    # …but the real tracks are eng only → mistag → no verified match
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
+    stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
+    assert stream is None and verified is False

@@ -270,3 +270,75 @@ def cast(
             subprocess.run([*base, "stop"], capture_output=True, text=True)
     advance = bool(next_label) and finished
     return (holder["position"], holder["duration"], advance)
+
+
+def _raw_info(device: str | None) -> dict:
+    """One `catt info -j`, parsed; {} on any failure (best-effort, never raises)."""
+    base = ["catt", *(["-d", device] if device else [])]
+    try:
+        res = subprocess.run([*base, "info", "-j"], capture_output=True, text=True)
+        return json.loads(res.stdout or "{}")
+    except (OSError, json.JSONDecodeError, subprocess.SubprocessError):
+        return {}
+
+
+def device_volume(device: str | None) -> tuple[float | None, bool]:
+    """Best-effort (volume_level, volume_muted) from one `catt info -j`. For headless
+    fire-and-return casts that skip the poll loop and would otherwise miss a muted or
+    zero-volume receiver (a silent cast that looks fine). Never raises."""
+    info = _raw_info(device)
+    raw = info.get("volume_level")
+    try:
+        vol = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        vol = None
+    return (vol, bool(info.get("volume_muted")))
+
+
+def status(device: str | None) -> dict:
+    """Best-effort normalized receiver status for the headless `--status` action:
+    player_state, title, position, duration, volume, muted. Empty player_state when the
+    receiver is idle/unreachable. Never raises."""
+    info = _raw_info(device)
+    pos, dur, state = _cast_progress(info)
+    title = (info.get("media_metadata") or {}).get("title") or info.get("title") or None
+    vol, muted = device_volume(device) if not info else _vol_muted(info)
+    return {
+        "player_state": state or "IDLE",
+        "title": title,
+        "position": round(pos, 1) if pos else 0.0,
+        "duration": round(dur, 1) if dur else 0.0,
+        "volume": vol,
+        "muted": muted,
+    }
+
+
+def _vol_muted(info: dict) -> tuple[float | None, bool]:
+    raw = info.get("volume_level")
+    try:
+        vol = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        vol = None
+    return (vol, bool(info.get("volume_muted")))
+
+
+def stop(device: str | None) -> bool:
+    """Stop whatever the receiver is playing (`catt stop`). True on success; best-effort."""
+    base = ["catt", *(["-d", device] if device else [])]
+    try:
+        return subprocess.run([*base, "stop"], capture_output=True, text=True).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def set_volume(device: str | None, level: int) -> bool:
+    """Set the receiver volume to `level` (0–100) via `catt volume`. Best-effort."""
+    level = max(0, min(100, level))
+    base = ["catt", *(["-d", device] if device else [])]
+    try:
+        return (
+            subprocess.run([*base, "volume", str(level)], capture_output=True, text=True).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False

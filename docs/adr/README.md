@@ -16,5 +16,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0002](0002-realdebrid-native-integration.md) | RealDebrid: stay on Torrentio, no native cache path | Accepted |
 | [0003](0003-torbox-native-integration.md) | TorBox native resolver | Accepted |
 | [0004](0004-premiumize-native-integration.md) | Premiumize native resolver | Accepted |
+| [0005](0005-cast-delivery-tier2-remux.md) | Cast delivery: Tier-2 on-host audio remux to a complete file | Accepted |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

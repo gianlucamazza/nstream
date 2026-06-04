@@ -1,0 +1,71 @@
+# 0005. Cast delivery: Tier-2 on-host audio remux to a complete file
+
+- **Status:** Accepted
+- **Date:** 2026-06-04
+- **Deciders:** project maintainer
+- **Implemented in:** `src/nstream/remux.py` (+ wiring in `quality.py`/`config.py`/`cli.py`)
+
+> Retrospective: this ADR formalises a delivery architecture that was decided interactively
+> (with the maintainer) and validated end-to-end during one session. It records the empirical
+> findings so the choice — and the alternatives ruled out — aren't re-litigated.
+
+## Context
+
+Casting a movie to the target TV (Philips 43PUS9235, Android TV with Chromecast built-in) must
+reach **native fidelity** (HEVC 10-bit, 4K, HDR10) by a **free-software, standard-protocol** path
+— no third-party player app, no Google receiver registration. Empirically verified against the
+device:
+
+- The **Default Media Receiver** (DMR) plays **HEVC Main10 4K HDR10 natively** (`PLAYING`
+  confirmed) but **does not pass through Dolby audio**: an AC-3 clip plays silently, an AAC clip is
+  audible. Per Google Cast docs, AC-3/E-AC-3/Atmos passthrough is a *Web Receiver SDK* feature, not
+  the bare DMR.
+- This makes Dolby/DTS titles (`quality._CAST_NEEDS_REMUX` = ac3/eac3/dts/dtshd/truehd) silent on a
+  direct cast — previously they were *excluded* from casting (`quality.unsupported_reason`).
+
+## Decision
+
+For a cast whose audio the DMR can't decode, **remux on the host** — keep the original video
+(`-c copy`, so HEVC/4K/HDR are preserved), transcode only the audio to AAC, write a **complete
+temp MP4**, and let **catt's own HTTP server serve it** (`remux.cast_file` spawns a detached
+`catt cast <file>`). Selection **prefers a native-AAC release** (`quality.score_components`,
+`cast=True`) so this Tier-2 path only triggers when no AAC alternative exists, and a
+**remux-only resolution cap** (`cast_remux_max_resolution`, default 1080p) avoids fetching a full
+4K just to cast. The H.264 1080p mirror (`skill-cast`/openscreen) remains the last resort.
+
+## Rationale
+
+The DMR **only plays a complete, `Content-Length`'d, Range-served file** — every
+streaming-while-transcoding delivery was tested and shows a black screen (the receiver does one
+GET without a `Range` header and gives up). So the file must be remuxed in full before casting,
+and catt's server (which elicits the `206`/Range exchange the DMR wants) is the delivery.
+
+| Alternative | Verdict |
+|-------------|---------|
+| **DMR + audio remux → complete file (chosen)** | Works. Native video; audio → AAC (≤5.1). Cost: a prepare wait (whole-file fetch). |
+| Cast **remoting** (openscreen sender) | Dead end: `cast_sender --probe-caps` shows the receiver advertises only `video=[h264 vp8 vp9] audio=[baseline-set aac opus]` — **no HEVC/4k/Dolby** over remoting; openscreen's standalone remoting is handshake-only (re-encodes). |
+| **Custom CAF receiver** | Non-libre: Google dev account ($5) + per-device registration + hosted app. |
+| **Streaming** the remux (on-the-fly fMP4 200, `--stream-type live`, HLS-fMP4, growing-file + Range/Content-Length) | All **black** / no segments on this DMR — it requires a complete file. |
+| **Native player** on the TV (Kodi/VLC via ADB/JointSpace) | Vendor-locked and/or a third-party app — rejected as the default for a libre project. |
+
+## Consequences
+
+- **Gain:** Dolby/DTS titles now cast at full **native video** fidelity (4K/HDR/HEVC) with audible
+  audio, all via the standard Cast media protocol — no third-party app, no registration.
+- **Cost — prepare wait:** the whole file is downloaded + remuxed before playback (this DMR can't
+  stream a transcode). Mitigated by preferring AAC (remux is rare) and the 1080p remux cap. Direct
+  (AAC) casts are unaffected and stream 4K for free.
+- **Cost — audio:** Atmos objects and DTS/TrueHD *lossless* are not preserved (audio → AAC ≤5.1);
+  this is a device limit (no libre passthrough path), not a project choice.
+- **New module + lifecycle:** `remux.py` owns a temp file on `$XDG_CACHE_HOME/nstream/remux/`
+  (disk, never `$XDG_RUNTIME_DIR` tmpfs) and a detached serving `catt`, tracked in a state file so
+  `--stop` (and the next run's GC) tear them down. `quality`/`config`/`cli` gain `cast_remux`,
+  `cast_audio_codec`, `cast_remux_max_resolution`.
+
+## References
+
+- `src/nstream/remux.py`, `src/nstream/quality.py` (`_CAST_NEEDS_REMUX`,
+  `score_components(cast=True)`), `src/nstream/config.py` (`cast_remux*`).
+- Protocol investigation + the rejected remoting path:
+  `~/Workspace/tooling/cast/native/docs/remoting-design.md`.
+- Google Cast supported media: <https://developers.google.com/cast/docs/media>.

@@ -36,6 +36,16 @@ def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
     return path
 
 
+def available_subtitle_langs(cfg: Config, typ: str, video_id: str) -> list[str]:
+    """Sorted list of subtitle languages available for a video (best-effort: [] on a
+    network error). Used by the headless `--probe` discovery — fetches, never downloads."""
+    try:
+        subs = api.subtitles(cfg, typ, video_id)
+    except api.NetworkError:
+        return []
+    return sorted({s.get("lang", "") for s in subs if s.get("lang")})
+
+
 def pick_subtitles(
     cfg: Config,
     typ: str,

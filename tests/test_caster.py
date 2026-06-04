@@ -284,3 +284,61 @@ def test_resolve_device_prefer_absent_raises(monkeypatch):
     monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1")]))
     with pytest.raises(caster.CastUnavailable):
         caster.resolve_device(CFG, prefer="Salotto")
+
+
+# --- lifecycle actions: stop / status / set_volume -------------------------
+
+
+def test_stop_runs_catt_stop(monkeypatch):
+    seen = {}
+
+    class _R:
+        returncode = 0
+
+    def run(cmd, **k):
+        seen["cmd"] = cmd
+        return _R()
+
+    monkeypatch.setattr(caster.subprocess, "run", run)
+    assert caster.stop("1.2.3.4") is True
+    assert seen["cmd"] == ["catt", "-d", "1.2.3.4", "stop"]
+
+
+def test_set_volume_clamps_and_calls(monkeypatch):
+    seen = {}
+
+    class _R:
+        returncode = 0
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda cmd, **k: seen.update(cmd=cmd) or _R())
+    assert caster.set_volume("1.2.3.4", 150) is True  # clamped to 100
+    assert seen["cmd"] == ["catt", "-d", "1.2.3.4", "volume", "100"]
+
+
+def test_status_normalizes(monkeypatch):
+    info = {
+        "player_state": "PLAYING",
+        "current_time": 12.0,
+        "duration": 100.0,
+        "media_metadata": {"title": "The Matrix"},
+        "volume_level": 0.4,
+        "volume_muted": False,
+    }
+
+    class _R:
+        returncode = 0
+        stdout = __import__("json").dumps(info)
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda cmd, **k: _R())
+    st = caster.status("1.2.3.4")
+    assert st["player_state"] == "PLAYING" and st["title"] == "The Matrix"
+    assert st["volume"] == 0.4 and st["muted"] is False
+
+
+def test_status_idle_on_failure(monkeypatch):
+    def boom(cmd, **k):
+        raise OSError("no catt")
+
+    monkeypatch.setattr(caster.subprocess, "run", boom)
+    st = caster.status(None)
+    assert st["player_state"] == "IDLE"

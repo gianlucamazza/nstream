@@ -103,8 +103,29 @@ _AUDIO_PATTERNS = (
     ("ac3", re.compile(r"\bAC-?3\b|\bDD5\.1\b|\bDOLBY\s?DIGITAL\b", re.I)),
     ("aac", re.compile(r"\bAAC\b", re.I)),
 )
-# Audio the Chromecast Default Media Receiver cannot decode (silent video).
+# Audio the Chromecast Default Media Receiver never decodes → excluded for cast (silent).
 _CAST_LOSSLESS = frozenset({"truehd", "dtshd", "dts"})
+# Audio the Default Media Receiver actually DECODES (not the TV hardware): per Google Cast
+# docs — HE/LC-AAC, MP3, Opus, FLAC, Vorbis, LPCM. AC-3/E-AC-3 are *passthrough only*
+# (sink-dependent, the DMR doesn't reliably enable it → often silent), so they rank below
+# decodable/unknown for cast instead of being chosen first. See cast-audio model (L1).
+_CAST_DECODABLE = frozenset({"aac", "mp3", "opus", "flac", "vorbis", "lpcm"})
+# Audio the receiver can't decode → a Tier-2 cast needs a host remux (mirrors
+# `remux._UNDECODABLE`). Used to apply the remux-only resolution cap (a 4K remux is a huge
+# download, while a direct 4K cast is free), so only these candidates are capped.
+_CAST_NEEDS_REMUX = frozenset({"ac3", "eac3", "dts", "dtshd", "truehd"})
+
+
+def _cast_audio_rank(info: StreamInfo) -> int:
+    """Cast audio preference for the score (higher = better): 2 = the receiver decodes it
+    natively (AAC…); 1 = untagged (unknown, benefit of the doubt); 0 = AC-3/E-AC-3
+    (passthrough-only, frequently silent on the Default Media Receiver)."""
+    if info.audio in _CAST_DECODABLE:
+        return 2
+    if not info.audio:
+        return 1
+    return 0
+
 
 # Torrentio marks an instantly-available (cached) debrid stream with a per-provider
 # prefix: [RD+] (RealDebrid), [AD+], [PM+], [TB+], [Putio+]… ("+" = cached, vs
@@ -306,6 +327,12 @@ class FilterSpec:
     min_seeders: int = 0
     dedup: bool = False  # collapse duplicate releases across trackers
     cast_audio: bool = False  # demote audio a Chromecast can't decode (TrueHD/DTS/REMUX)
+    # Tier-2 remux is enabled: Dolby/DTS audio is no longer a cast disqualifier (the host
+    # remuxes it to AAC), so `cast_audio` only *ranks* (AAC preferred) instead of excluding.
+    cast_remux: bool = False
+    # Resolution cap applied ONLY to releases that need remuxing (a remux downloads the
+    # whole file). 0 = no cap. A ranking preference, not an exclusion.
+    cast_remux_max_resolution: int = 0
 
     @classmethod
     def from_config(
@@ -323,6 +350,8 @@ class FilterSpec:
             min_seeders=cfg.min_seeders,
             dedup=cfg.dedup,
             cast_audio=cast_audio,
+            cast_remux=cast_audio and cfg.cast_remux,
+            cast_remux_max_resolution=cfg.cast_remux_max_resolution if cast_audio else 0,
         )
 
 
@@ -339,7 +368,9 @@ def unsupported_reason(info: StreamInfo, caps: Caps, spec: FilterSpec) -> str | 
     # Cast: the Default Media Receiver can't decode TrueHD/DTS/DTS-HD → silent audio.
     # A REMUX carries the lossless track even when the title omits the codec, so it's
     # demoted too; other unknown audio gets the benefit of the doubt (WEB-DLs rarely tag).
-    if spec.cast_audio:
+    # With Tier-2 remux enabled (`cast_remux`) these are castable (host remuxes audio to
+    # AAC), so they're only ranked below native-AAC, not excluded.
+    if spec.cast_audio and not spec.cast_remux:
         if info.audio in _CAST_LOSSLESS:
             return f"audio {info.audio.upper()}"
         if info.source == "remux":
@@ -412,15 +443,48 @@ def _source_rank(source: str) -> int:
 
 
 def score_components(
-    info: StreamInfo, audio_langs: tuple[str, ...] = ()
+    info: StreamInfo,
+    audio_langs: tuple[str, ...] = (),
+    *,
+    cast: bool = False,
+    cast_remux_cap: int = 0,
 ) -> dict[str, float | int | bool]:
     """The labelled score terms in precedence order (highest first). `_score` is just the
     tuple of these values; `explain` renders the dict — keeping both here keeps the
     auto-pick and its explanation in sync.
 
-    cached first (instant); then resolution; preferred audio language; better source
-    (remux/bluray > web > …); HEVC over H264; "well-seeded enough" (bucketed so popularity
-    doesn't force a huge file); finally the smaller file (faster start) among equals."""
+    Local (default): cached first (instant); then resolution; preferred audio language;
+    better source (remux/bluray > web > …); HEVC over H264; "well-seeded enough"; finally
+    the smaller file (faster start) among equals.
+
+    Cast (`cast=True`): models the Default Media Receiver, not the TV's decoder. After
+    cached, prefer audio the receiver decodes natively (AAC… over AC-3/E-AC-3) — so a
+    no-remux AAC release wins and the Tier-2 remux (a prepare wait) only triggers when no
+    AAC release exists. The receiver plays HEVC/4K/HDR natively, so resolution ranks next;
+    H.264 is only a tie-breaker (both decode here), not a constraint.
+
+    `cast_remux_cap` (>0): among releases that need a host remux (Dolby/DTS), prefer those at
+    or below this resolution — a remux downloads the whole file, so a 4K Dolby release is a
+    huge fetch while a direct 4K cast is free. Ranked just after audio (a native-AAC release
+    still wins) and before resolution (within the cap the best res still wins). A preference:
+    a sole 4K Dolby release is still chosen."""
+    if cast:
+        within_remux_cap = (
+            info.audio not in _CAST_NEEDS_REMUX
+            or cast_remux_cap == 0
+            or info.resolution <= cast_remux_cap
+        )
+        return {
+            "cached": info.cached,
+            "cast_audio": _cast_audio_rank(info),
+            "remux_within_cap": within_remux_cap,
+            "resolution": info.resolution,
+            "lang": _lang_rank(info, audio_langs),
+            "source": _source_rank(info.source),
+            "cast_h264": info.codec == "h264",
+            "seeders": min(info.seeders, _SEED_BUCKET),
+            "size": -info.size_gb,
+        }
     return {
         "cached": info.cached,
         "resolution": info.resolution,
@@ -432,8 +496,16 @@ def score_components(
     }
 
 
-def _score(info: StreamInfo, audio_langs: tuple[str, ...] = ()) -> tuple:
-    return tuple(score_components(info, audio_langs).values())
+def _score(
+    info: StreamInfo,
+    audio_langs: tuple[str, ...] = (),
+    *,
+    cast: bool = False,
+    cast_remux_cap: int = 0,
+) -> tuple:
+    return tuple(
+        score_components(info, audio_langs, cast=cast, cast_remux_cap=cast_remux_cap).values()
+    )
 
 
 @dataclass(frozen=True)
@@ -444,7 +516,7 @@ class RankedStream:
 
 
 def _dedup_by_release(
-    infos: list[tuple[Stream, StreamInfo]], audio_langs: tuple[str, ...]
+    infos: list[tuple[Stream, StreamInfo]], audio_langs: tuple[str, ...], *, cast: bool = False
 ) -> list[tuple[Stream, StreamInfo]]:
     """Collapse the same release seen on multiple trackers (identical release_name),
     keeping the best-scoring copy. Streams without a release_name are kept as-is."""
@@ -456,7 +528,9 @@ def _dedup_by_release(
             out.append((s, info))
             continue
         cur = best.get(key)
-        if cur is None or _score(info, audio_langs) > _score(cur[1], audio_langs):
+        if cur is None or _score(info, audio_langs, cast=cast) > _score(
+            cur[1], audio_langs, cast=cast
+        ):
             best[key] = (s, info)
     out.extend(best.values())
     return out
@@ -471,7 +545,7 @@ def rank_streams(
     reason; `spec.dedup` drops duplicate releases entirely (not in either list)."""
     infos = [(s, parse_stream(s)) for s in streams]
     if spec.dedup:
-        infos = _dedup_by_release(infos, spec.audio_langs)
+        infos = _dedup_by_release(infos, spec.audio_langs, cast=spec.cast_audio)
     playable: list[RankedStream] = []
     excluded: list[RankedStream] = []
     for s, info in infos:
@@ -484,5 +558,13 @@ def rank_streams(
             excluded.append(RankedStream(s, info, reason))
         else:
             playable.append(RankedStream(s, info))
-    playable.sort(key=lambda r: _score(r.info, spec.audio_langs), reverse=True)
+    playable.sort(
+        key=lambda r: _score(
+            r.info,
+            spec.audio_langs,
+            cast=spec.cast_audio,
+            cast_remux_cap=spec.cast_remux_max_resolution,
+        ),
+        reverse=True,
+    )
     return playable, excluded

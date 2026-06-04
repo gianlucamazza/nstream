@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from nstream import quality
-from nstream.config import Stream
+from nstream.config import Config, Stream
 from nstream.quality import Caps, FilterSpec
 
 # Real Torrentio samples (name, title) captured from "Superman" (2025).
@@ -342,6 +342,70 @@ def test_rank_no_cast_audio_keeps_lossless():
     assert len(playable) == 1
 
 
+# --- Tier-2 remux resolution cap -------------------------------------------
+
+_C_4K_DOLBY: Stream = {
+    "name": "[RD+] Torrentio\n4k",
+    "title": "Film.2024.2160p.UHD.BluRay.HEVC.TrueHD.7.1-GRP\n👤 20 💾 60.0 GB ⚙️ x",
+}
+_C_1080_DOLBY: Stream = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Film.2024.1080p.BluRay.x264.AC3-GRP\n👤 20 💾 8.0 GB ⚙️ x",
+}
+_C_4K_AAC: Stream = {
+    "name": "[RD+] Torrentio\n4k",
+    "title": "Film.2024.2160p.WEB-DL.HEVC.AAC-GRP\n👤 20 💾 10.0 GB ⚙️ x",
+}
+_C_1080_AAC: Stream = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Film.2024.1080p.WEB-DL.x264.AAC-GRP\n👤 20 💾 6.0 GB ⚙️ x",
+}
+
+
+def _cast_spec(cap: int) -> FilterSpec:
+    return FilterSpec(
+        max_resolution=2160, cast_audio=True, cast_remux=True, cast_remux_max_resolution=cap
+    )
+
+
+def test_remux_cap_prefers_1080_dolby_over_4k_dolby():
+    # Both need a remux (TrueHD / AC-3) → cap prefers the cheaper 1080p fetch over a 4K one.
+    playable, _ = quality.rank_streams(
+        [_C_4K_DOLBY, _C_1080_DOLBY], quality.cast_caps(), _cast_spec(1080)
+    )
+    assert playable[0].stream is _C_1080_DOLBY
+
+
+def test_remux_cap_does_not_override_native_aac():
+    # A direct 4K AAC cast (free, no host download) still beats a 1080p Dolby remux.
+    playable, _ = quality.rank_streams(
+        [_C_4K_AAC, _C_1080_DOLBY], quality.cast_caps(), _cast_spec(1080)
+    )
+    assert playable[0].stream is _C_4K_AAC
+
+
+def test_remux_cap_keeps_sole_4k_dolby():
+    # Preference, not exclusion: the only Dolby release (4K) is still playable/chosen.
+    playable, _ = quality.rank_streams([_C_4K_DOLBY], quality.cast_caps(), _cast_spec(1080))
+    assert len(playable) == 1 and playable[0].stream is _C_4K_DOLBY
+
+
+def test_remux_cap_zero_disables():
+    # cap=0 → no remux cap → 4K Dolby wins on resolution again.
+    playable, _ = quality.rank_streams(
+        [_C_4K_DOLBY, _C_1080_DOLBY], quality.cast_caps(), _cast_spec(0)
+    )
+    assert playable[0].stream is _C_4K_DOLBY
+
+
+def test_remux_cap_leaves_direct_aac_casts_untouched():
+    # AAC needs no remux, so the cap never applies: the 4K AAC still wins over 1080p AAC.
+    playable, _ = quality.rank_streams(
+        [_C_4K_AAC, _C_1080_AAC], quality.cast_caps(), _cast_spec(1080)
+    )
+    assert playable[0].stream is _C_4K_AAC
+
+
 def test_cached_marker_provider_agnostic():
     # Torrentio marks instant streams per-debrid: [RD+]/[AD+]/[PM+]/[TB+]/[Putio+].
     for mark in ("[RD+]", "[AD+]", "[PM+]", "[TB+]", "[Putio+]"):
@@ -481,3 +545,42 @@ def test_dual_does_not_outrank_explicit_primary():
     spec = FilterSpec(audio_langs=("ita", "eng"))
     playable, _ = quality.rank_streams([dual, ita], _CAPS_HW, spec)
     assert playable[0].stream is ita
+
+
+# --- cast profile: DMR-honest audio/video ranking (L1) ---------------------
+
+
+def _mk(name):
+    return {"name": name, "title": name, "url": "u"}
+
+
+def test_cast_prefers_h264_aac_over_4k_hevc_ac3():
+    # The Default Media Receiver can't decode AC-3 and HEVC is unreliable → a working
+    # 1080p H.264+AAC must outrank a silent 4K HEVC+AC3 for cast.
+    streams = [
+        _mk("[RD+] T\n2160p\nThe.Matrix.2160p.HEVC.AC3"),
+        _mk("[RD+] T\n1080p\nThe.Matrix.1080p.x264.AAC"),
+    ]
+    spec = quality.FilterSpec.from_config(Config(torrentio_base="tb"), cast_audio=True)
+    playable, _ = quality.rank_streams(streams, quality.cast_caps(), spec)
+    top = quality.parse_stream(playable[0].stream)
+    assert top.codec == "h264" and top.audio == "aac"
+
+
+def test_local_still_prefers_4k_hevc():
+    # Local mpv decodes everything → keep the original resolution/HEVC preference.
+    streams = [
+        _mk("[RD+] T\n2160p\nThe.Matrix.2160p.HEVC.AC3"),
+        _mk("[RD+] T\n1080p\nThe.Matrix.1080p.x264.AAC"),
+    ]
+    spec = quality.FilterSpec.from_config(Config(torrentio_base="tb"))
+    playable, _ = quality.rank_streams(streams, quality.detect_caps(), spec)
+    assert quality.parse_stream(playable[0].stream).resolution == 2160
+
+
+def test_cast_audio_rank_order():
+    aac = quality.StreamInfo(audio="aac")
+    untagged = quality.StreamInfo(audio="")
+    ac3 = quality.StreamInfo(audio="ac3")
+    assert quality._cast_audio_rank(aac) > quality._cast_audio_rank(untagged)
+    assert quality._cast_audio_rank(untagged) > quality._cast_audio_rank(ac3)
