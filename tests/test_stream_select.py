@@ -537,3 +537,116 @@ def test_pick_audio_stream_verified_rejects_mistag(monkeypatch):
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
     stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
     assert stream is None and verified is False
+
+
+# --- cast audio-language enforcement (vet_cast_audio) ----------------------
+
+from nstream.tracks import Track  # noqa: E402
+
+
+def _ccfg() -> Config:
+    return Config(torrentio_base="t", primary_lang="ita", audio_langs=["ita", "eng"])
+
+
+def _plan(audio, target="ita"):
+    return stream_select._cast_plan_for({"url": "u"}, list(audio), target)
+
+
+def test_cast_plan_direct_when_first_track_is_target_decodable():
+    p = _plan([Track(1, "ita", "aac"), Track(2, "eng", "aac")])
+    assert p.mode == "direct" and p.audio_index == 0 and p.real_lang == "ita" and p.verified
+
+
+def test_cast_plan_remux_when_first_track_target_but_undecodable():
+    # Italian is the first track but AC-3 → DMR can't decode → remux track 0 to AAC.
+    p = _plan([Track(1, "ita", "ac3", 6), Track(2, "eng", "ac3", 6)])
+    assert p.mode == "remux" and p.audio_index == 0 and p.real_lang == "ita"
+
+
+def test_cast_plan_remux_selects_nondefault_target_track():
+    # Default track is English; Italian is buried at index 3 → remux selects it.
+    audio = [
+        Track(1, "eng", "dts", 6),
+        Track(2, "spa", "eac3", 6),
+        Track(3, "fra", "aac"),
+        Track(4, "ita", "eac3", 6),
+    ]
+    p = _plan(audio)
+    assert p.mode == "remux" and p.audio_index == 3 and p.real_lang == "ita"
+
+
+def test_cast_plan_remux_selects_nondefault_aac_track():
+    # Italian present as a non-default AAC track → still remux (DMR plays track 0) but copy-able.
+    p = _plan([Track(1, "eng", "aac"), Track(2, "ita", "aac")])
+    assert p.mode == "remux" and p.audio_index == 1
+
+
+def test_cast_plan_uses_absolute_stream_index():
+    # With real ffprobe indices (video=0, audio start at 1), the plan maps the ABSOLUTE index
+    # of the target track — not its audio-relative position — so ffmpeg keeps exactly it.
+    audio = [Track(1, "eng", "aac", index=1), Track(2, "ita", "ac3", 6, index=2)]
+    p = _plan(audio)
+    assert (
+        p.mode == "remux" and p.audio_index == 2
+    )  # absolute index, == audio-relative 1 here + offset
+
+
+def test_cast_plan_absent_when_no_target_track():
+    p = _plan([Track(1, "eng", "aac"), Track(2, "fra", "aac")])
+    assert p.mode == "absent" and p.real_lang == "eng"
+
+
+def test_cast_plan_unprobeable_is_direct_unverified():
+    p = _plan([])
+    assert p.mode == "direct" and p.verified is False
+
+
+def test_cast_plan_no_preference_is_codec_only():
+    assert _plan([Track(1, "eng", "eac3", 6)], target="").mode == "remux"
+    assert _plan([Track(1, "eng", "aac")], target="").mode == "direct"
+
+
+def test_vet_cast_audio_returns_plan_without_reselect_when_present(monkeypatch):
+    monkeypatch.setattr(
+        stream_select, "_cast_audio_tracks", lambda cfg, s: [Track(1, "ita", "ac3", 6)]
+    )
+    called = []
+    monkeypatch.setattr(
+        stream_select, "_reselect_cast_for_lang", lambda *a, **k: called.append(1) or None
+    )
+    plan = stream_select.vet_cast_audio(_ccfg(), [], {"url": "u"}, "ita")
+    assert plan.mode == "remux" and called == []  # chosen had it → no reselect
+
+
+def test_vet_cast_audio_reselects_when_chosen_lacks_target(monkeypatch):
+    chosen: Stream = {"url": "eng-only"}
+    alt: Stream = {"url": "ita-rel"}
+
+    def tracks_of(cfg, s):
+        return [Track(1, "eng", "aac")] if s is chosen else [Track(1, "ita", "aac")]
+
+    monkeypatch.setattr(stream_select, "_cast_audio_tracks", tracks_of)
+    monkeypatch.setattr(
+        stream_select,
+        "_cast_playable",
+        lambda cfg, results: [_R(alt, frozenset({"ita"}))],
+    )
+    plan = stream_select.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita")
+    assert plan.mode == "direct" and plan.stream is alt and plan.real_lang == "ita"
+
+
+def test_vet_cast_audio_absent_when_nobody_has_target(monkeypatch):
+    monkeypatch.setattr(
+        stream_select, "_cast_audio_tracks", lambda cfg, s: [Track(1, "eng", "aac")]
+    )
+    monkeypatch.setattr(stream_select, "_cast_playable", lambda cfg, results: [])
+    plan = stream_select.vet_cast_audio(_ccfg(), [{"url": "u"}], {"url": "u"}, "ita")
+    assert plan.mode == "absent"
+
+
+class _R:
+    """Minimal RankedStream stand-in (stream + name-tag languages) for reselect tests."""
+
+    def __init__(self, stream, languages):
+        self.stream = stream
+        self.info = type("I", (), {"languages": languages})()

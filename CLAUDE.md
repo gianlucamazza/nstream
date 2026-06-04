@@ -114,6 +114,15 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
 - Playback: `caster.py:cast()` runs `catt cast <url> [-d ip] [-t start] [-s subs]`, polled via
   `catt info -j` every 15s.
 - In-cast audio switch ('a'): re-casts the same title with a different dub via already-fetched streams.
+- **Audio language is enforced at selection time** (`stream_select.vet_cast_audio`), because the
+  DMR plays a file's *first* audio track and **can't switch embedded audio tracks** — per Google
+  Cast docs only *text* tracks are selectable on the Default Media Receiver; audio selection needs
+  a custom (registered, non-libre) receiver. So `vet_cast_audio` ffprobes the chosen dub and returns
+  a `CastAudioPlan`: **direct** when the first track is already primary-language + decodable;
+  **remux** (keeping only the primary track, by its absolute ffprobe stream index) when the language
+  is present but not the playable first track; **absent** → reselect another dub, else cast with
+  primary-language safety subtitles. The remux *is* the cast's `--aid` (the only libre way to pick
+  an embedded audio track). `--audio-lang` overrides the target; default is `cfg.primary`.
 - Cast ranking ignores the language filter (show all dubs) and models the **Default Media
   Receiver**: it plays HEVC/4K/HDR natively but **doesn't decode Dolby** (AC-3/E-AC-3/DTS/TrueHD →
   silent). Two tiers:

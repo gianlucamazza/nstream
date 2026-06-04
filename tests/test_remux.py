@@ -1,8 +1,8 @@
-"""Unit tests for the Tier-2 cast remux module.
+"""Unit tests for the Tier-2 cast remux module (the executor).
 
 Process and disk I/O are mocked: tests never spawn ffmpeg/catt or touch the receiver.
-The module keeps a small on-disk state file (detached serving PID + temp path); the
-autouse fixture points it at a tmp path and clears it so tests don't leak state.
+The cast-language *decision* (which track, direct vs remux) lives in `stream_select`
+(`vet_cast_audio`) and is tested there; here we test the file-production executor.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _meta(audio=(), n_video=1, duration=0.0):
     return Tracks(audio=list(audio)), n_video, duration
 
 
-# --- needs_remux ----------------------------------------------------------
+# --- needs_remux / _decodable ---------------------------------------------
 
 
 @pytest.mark.parametrize("codec", ["ac3", "eac3", "dts", "dtshd", "truehd", "AC3", "TrueHD"])
@@ -45,40 +45,12 @@ def test_needs_remux_false_for_decodable(codec):
     assert remux.needs_remux(codec) is False
 
 
-# --- should_remux ---------------------------------------------------------
+@pytest.mark.parametrize("codec,ok", [("aac", True), ("opus", True), ("ac3", False), ("", False)])
+def test_decodable(codec, ok):
+    assert remux._decodable(codec) is ok
 
 
-def test_should_remux_off_when_disabled(monkeypatch):
-    monkeypatch.setattr(remux, "available", lambda: True)
-    monkeypatch.setattr(remux, "_probe_meta", lambda _u: _meta([Track(id=1, codec="ac3")]))
-    assert remux.should_remux("http://x", _cfg(cast_remux=False)) is False
-
-
-def test_should_remux_off_when_no_ffmpeg(monkeypatch):
-    monkeypatch.setattr(remux, "available", lambda: False)
-    assert remux.should_remux("http://x", _cfg(cast_remux=True), hint="ac3") is False
-
-
-def test_should_remux_skips_probe_on_decodable_hint(monkeypatch):
-    # A clearly-decodable name (AAC) is trusted: no probe, no remux (instant Tier-1).
-    monkeypatch.setattr(remux, "available", lambda: True)
-    probed = []
-    monkeypatch.setattr(remux, "_probe_meta", lambda _u: probed.append(1) or _meta())
-    assert remux.should_remux("http://x", _cfg(cast_remux=True), hint="aac") is False
-    assert probed == []  # probe skipped
-
-
-def test_should_remux_probes_when_hint_undecodable(monkeypatch):
-    # Name says AC-3 → still probe to confirm before a costly remux; probe says E-AC-3.
-    monkeypatch.setattr(remux, "available", lambda: True)
-    monkeypatch.setattr(remux, "_probe_meta", lambda _u: _meta([Track(id=1, codec="eac3")]))
-    assert remux.should_remux("http://x", _cfg(cast_remux=True), hint="ac3") is True
-
-
-def test_should_remux_falls_back_to_hint_when_probe_empty(monkeypatch):
-    monkeypatch.setattr(remux, "available", lambda: True)
-    monkeypatch.setattr(remux, "_probe_meta", lambda _u: _meta([]))
-    assert remux.should_remux("http://x", _cfg(cast_remux=True), hint="dts") is True
+# --- _probe_meta ----------------------------------------------------------
 
 
 def test_probe_meta_parses_streams(monkeypatch):
@@ -107,67 +79,33 @@ def test_probe_meta_parses_streams(monkeypatch):
     assert t.audio[0].codec == "EAC3" and t.audio[0].channels == 6
 
 
-# --- prepare_for_cast -----------------------------------------------------
+# --- remux_for_cast -------------------------------------------------------
 
 
-def test_prepare_for_cast_none_when_disabled(monkeypatch):
+def test_remux_for_cast_off_when_disabled(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
-    assert remux.prepare_for_cast("http://x", _cfg(cast_remux=False)) is None
+    assert remux.remux_for_cast("http://x", _cfg(cast_remux=False), audio_index=0) is None
 
 
-def test_prepare_for_cast_none_on_decodable_hint(monkeypatch):
-    monkeypatch.setattr(remux, "available", lambda: True)
-    called = []
-    monkeypatch.setattr(remux, "remux_to_file", lambda *a, **k: called.append(1) or "/tmp/x.mp4")
-    assert remux.prepare_for_cast("http://x", _cfg(), hint="aac") is None
-    assert called == []  # no probe, no remux
-
-
-def test_prepare_for_cast_none_when_decodable_probe(monkeypatch):
-    monkeypatch.setattr(remux, "available", lambda: True)
-    monkeypatch.setattr(remux, "_probe_meta", lambda _u: _meta([Track(id=1, codec="aac")]))
-    called = []
-    monkeypatch.setattr(remux, "remux_to_file", lambda *a, **k: called.append(1) or "/tmp/x.mp4")
-    assert remux.prepare_for_cast("http://x", _cfg()) is None
-    assert called == []
-
-
-def test_prepare_for_cast_remuxes_and_threads_probe(monkeypatch):
+def test_remux_for_cast_threads_index_and_meta(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(
-        remux,
-        "_probe_meta",
+        remux, "_probe_meta",
         lambda _u: _meta([Track(id=1, codec="eac3", channels=6)], n_video=2, duration=99.0),
-    )
+    )  # fmt: skip
     seen = {}
 
-    def fake_remux(url, cfg, *, audio, n_video, duration, size_gb):
-        seen.update(audio=audio, n_video=n_video, duration=duration, size_gb=size_gb)
+    def fake_remux(url, cfg, *, audio_index, audio, n_video, duration, size_gb):
+        seen.update(audio_index=audio_index, n_video=n_video, duration=duration, size_gb=size_gb)
         return "/tmp/cast-x.mp4"
 
     monkeypatch.setattr(remux, "remux_to_file", fake_remux)
-    out = remux.prepare_for_cast("http://x", _cfg(), hint="eac3", size_gb=12.0)
+    out = remux.remux_for_cast("http://x", _cfg(), audio_index=3, size_gb=12.0)
     assert out == "/tmp/cast-x.mp4"
-    assert seen["n_video"] == 2 and seen["duration"] == 99.0 and seen["size_gb"] == 12.0
-    assert seen["audio"][0].codec == "eac3"
+    assert seen == {"audio_index": 3, "n_video": 2, "duration": 99.0, "size_gb": 12.0}
 
 
-# --- audio track selection + bitrate --------------------------------------
-
-
-def test_select_audio_index_prefers_primary_language():
-    audio = [Track(id=1, lang="ita"), Track(id=2, lang="eng")]
-    assert remux._select_audio_index(audio, _cfg(primary_lang="eng")) == 1
-    assert remux._select_audio_index(audio, _cfg(primary_lang="ita")) == 0
-
-
-def test_select_audio_index_falls_back_to_zero():
-    audio = [Track(id=1, lang="jpn"), Track(id=2, lang="kor")]
-    assert remux._select_audio_index(audio, _cfg(primary_lang="eng", audio_langs=["eng"])) == 0
-
-
-def test_select_audio_index_single_track_is_zero():
-    assert remux._select_audio_index([Track(id=1, lang="ita")], _cfg(primary_lang="eng")) == 0
+# --- _audio_bitrate -------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -191,29 +129,36 @@ def _fake_ffmpeg_ok(seen):
     return run
 
 
-def test_remux_to_file_success(monkeypatch, tmp_path):
+def test_remux_to_file_encodes_undecodable(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
     seen = {}
     monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
-    path = remux.remux_to_file("http://x?token=secret", _cfg(cast_audio_codec="aac"))
-    assert path and path.endswith(".mp4")
+    audio = [Track(id=1, lang="ita", codec="eac3", channels=6, index=1)]
+    path = remux.remux_to_file("http://x?token=secret", _cfg(), audio_index=1, audio=audio)
     cmd = seen["cmd"]
-    assert "-c:v" in cmd and "copy" in cmd and "aac" in cmd
-    assert "0:a:0?" in cmd  # no track list → first-track fallback
+    assert path and path.endswith(".mp4")
+    assert "-c:v" in cmd and "copy" in cmd  # video always copied
+    assert "-c:a" in cmd and "aac" in cmd and "448k" in cmd  # 5.1 EAC3 → AAC 448k
+    assert "0:1?" in cmd  # absolute stream index of the chosen track
     assert "secret" not in path  # token-bearing url never returned
 
 
-def test_remux_to_file_picks_language_track_and_bitrate(monkeypatch, tmp_path):
+def test_remux_to_file_copies_decodable_track(monkeypatch, tmp_path):
+    # Selecting a non-default AAC track only drops the others → stream-copy, no re-encode.
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
     seen = {}
     monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
-    audio = [Track(id=1, lang="ita", channels=2), Track(id=2, lang="eng", channels=6)]
-    remux.remux_to_file("http://x", _cfg(primary_lang="eng"), audio=audio)
+    audio = [
+        Track(id=1, lang="eng", codec="aac", index=1),
+        Track(id=2, lang="ita", codec="aac", index=2),
+    ]
+    remux.remux_to_file("http://x", _cfg(), audio_index=2, audio=audio)
     cmd = seen["cmd"]
-    assert "0:a:1" in cmd  # English track selected
-    assert "448k" in cmd  # 6-channel bitrate
+    assert "0:2?" in cmd  # absolute index of the requested (Italian) track
+    assert cmd[cmd.index("-c:a") + 1] == "copy"  # already decodable → copy
+    assert "-b:a" not in cmd
 
 
 def test_remux_to_file_failure_cleans_up(monkeypatch, tmp_path):
@@ -259,16 +204,23 @@ def test_remux_to_file_size_cap_confirm_accepted(monkeypatch):
     assert out and "cmd" in seen
 
 
-def test_remux_to_file_warns_on_dv7_dual_layer(monkeypatch, capsys):
+def test_remux_to_file_warns_on_dv7_dual_layer(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
-    seen = {}
-    monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
+    monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok({}))
+    warns: list[str] = []
+    monkeypatch.setattr(remux._log, "warning", lambda msg, *a: warns.append(str(msg)))
     remux.remux_to_file("http://x", _cfg(), n_video=2)
-    assert "dual-layer" in capsys.readouterr().err
+    assert any("dual-layer" in w for w in warns)
 
 
 # --- stop / state ---------------------------------------------------------
+
+
+class _P:
+    def __init__(self, rc=0, stderr=""):
+        self.returncode = rc
+        self.stderr = stderr
 
 
 def test_stop_no_state_returns_false():
@@ -287,9 +239,3 @@ def test_stop_tears_down_tracked_server(monkeypatch, tmp_path):
     assert not f.exists()  # temp removed
     assert not (tmp_path / "remux.json").exists()  # state cleared
     assert any("stop" in c for c in stopped)  # receiver stopped
-
-
-class _P:
-    def __init__(self, rc=0, stderr=""):
-        self.returncode = rc
-        self.stderr = stderr

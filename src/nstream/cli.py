@@ -236,23 +236,39 @@ def _play_on_cast(
     next_label: str | None,
     safety_sub_lang: str | None = None,
 ) -> tuple[float, float, bool]:
-    """Cast the chosen stream. Offers an in-cast audio-language switch (re-cast a
-    differently-dubbed release from the current position) when more than one language
-    is available; the resolver closes over `results` so no extra fetch is needed."""
-    # Cast can't drive embedded track ids (mpv-only); subtitles go to the TV as an
-    # external file when requested (or as a safety net when audio isn't the primary
-    # language), otherwise the receiver picks its own.
+    """Cast the chosen stream in the primary audio language. The Default Media Receiver plays
+    a file's first audio track and can't switch tracks, so the language is enforced at selection
+    time (`vet_cast_audio`): cast directly when the first track is already primary+decodable,
+    remux to select the primary track otherwise, or reselect a dub that has it. Still offers the
+    in-cast audio switch (re-cast a differently-dubbed release) when several dubs exist."""
+    target_lang = opts.audio_lang or cfg.primary
+    plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
+    chosen = plan.stream
+    # No dub carries the primary language: cast the best pick anyway, with primary-language
+    # subtitles as a safety net (mirrors the local guard).
+    if plan.mode == "absent" and target_lang:
+        safety_sub_lang = target_lang
+        print(
+            f"nstream: audio {target_lang} non disponibile"
+            + (f" (casto {plan.real_lang})" if plan.real_lang else "")
+            + f"; sottotitoli {target_lang} attivati",
+            file=sys.stderr,
+        )
     sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
-    _log.info("cast '%s' → %s", title, device)
-    # Tier-2: if the audio is one the receiver can't decode, remux it (video kept native)
-    # and let catt serve the complete file. No in-cast audio switch on this path.
-    _info = quality.parse_stream(chosen)
-    remux_path = remux.prepare_for_cast(chosen["url"], cfg, hint=_info.audio, size_gb=_info.size_gb)
-    if remux_path:
-        return remux.cast_file(
-            cfg, title, remux_path,
-            device=device, start=start, sub_paths=sub_paths, follow=True,
+    _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
+    # Remux to select the primary-language track (and/or a DMR-decodable codec), then let catt
+    # serve the complete file. No in-cast audio switch on this path (single-track file).
+    if plan.mode == "remux":
+        remux_path = remux.remux_for_cast(
+            chosen["url"], cfg,
+            audio_index=plan.audio_index, size_gb=quality.parse_stream(chosen).size_gb,
         )  # fmt: skip
+        if remux_path:
+            return remux.cast_file(
+                cfg, title, remux_path,
+                device=device, start=start, sub_paths=sub_paths, follow=True,
+            )  # fmt: skip
+        # remux refused (size guard) or failed → degrade to a direct cast of the same pick
     cast_langs = stream_select.cast_languages(cfg, results)
     return cast(
         cfg, title, chosen["url"],
@@ -747,6 +763,11 @@ def _auto_play(
     muted: bool | None = None
     notice: str | None = None
     reencoded = False  # set when a Tier-2 audio remux was used for the cast
+    # Reported audio language/subtitles: defaults for the local path, overridden by the cast
+    # language decision (`vet_cast_audio`) so the JSON reflects what actually plays.
+    cast_audio_lang = opts.audio_lang or (cfg.primary or None)
+    cast_audio_verified = audio_verified
+    cast_sub_lang = vetted.safety_sub_lang or opts.sub_lang
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = _resume_position(cfg, video_id) if opts.history else None
         sub_paths = auto_subs(
@@ -759,12 +780,30 @@ def _auto_play(
                 _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
                 return 1
             device_name = args.device or cfg.cast_device or device
-            # Tier-2: remux Dolby/DTS audio (video kept native) and let catt serve the
-            # complete file; else cast the url directly. Default fire-and-return unless
-            # --follow (for a remux cast that leaves a detached catt serving the file).
-            _info = quality.parse_stream(chosen)
-            remux_path = remux.prepare_for_cast(
-                chosen["url"], cfg, hint=_info.audio, size_gb=_info.size_gb
+            # Enforce the primary audio language for the cast: the DMR plays a file's first
+            # track and can't switch, so decide direct vs remux-to-select-the-track (or reselect
+            # a dub that has it) up front. Default fire-and-return unless --follow.
+            target_lang = opts.audio_lang or cfg.primary
+            plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
+            chosen = plan.stream
+            stream_block = _stream_block(cfg, chosen)  # may have been reselected
+            if plan.real_lang:
+                cast_audio_lang, cast_audio_verified = plan.real_lang, plan.verified
+            if plan.mode == "absent" and target_lang:
+                # No dub carries the primary language: cast the best pick with primary subs.
+                cast_sub_lang = target_lang
+                sub_paths = auto_subs(
+                    cfg, typ, video_id, work_dir, opts, safety_sub_lang=target_lang
+                )
+            remux_path = (
+                remux.remux_for_cast(
+                    chosen["url"],
+                    cfg,
+                    audio_index=plan.audio_index,
+                    size_gb=quality.parse_stream(chosen).size_gb,
+                )  # fmt: skip
+                if plan.mode == "remux"
+                else None
             )
             if remux_path:
                 remux.cast_file(
@@ -811,10 +850,10 @@ def _auto_play(
             "device": device_name,
             "volume": volume,
             "muted": muted,
-            "audio_lang": opts.audio_lang or (cfg.primary or None),
-            "audio_verified": audio_verified,
+            "audio_lang": cast_audio_lang,
+            "audio_verified": cast_audio_verified,
             "available_audio": list(available_audio),
-            "subtitles": (vetted.safety_sub_lang or opts.sub_lang) if sub_paths else None,
+            "subtitles": cast_sub_lang if sub_paths else None,
             "notice": notice,
             "error": None,
         }
