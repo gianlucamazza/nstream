@@ -15,10 +15,12 @@ from typing import cast as typecast
 from . import (
     __version__,
     api,
+    bridge,
     caster,
     debrid,
     explain,
     log,
+    mirror,
     preview,
     quality,
     remux,
@@ -155,6 +157,7 @@ def _play_video(
     next_label: str | None,
     on_save: Callable[[float, float], None] | None,
     reselect_on_wrong_audio: bool = True,
+    cast_meta: caster.CastMeta | None = None,
 ) -> tuple[str | None, bool]:
     """Resolve streams for one video, play it, persist progress. Returns
     (notice, advance): `notice` is a user-facing message to surface (no streams /
@@ -191,6 +194,7 @@ def _play_video(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
                 start=start, next_label=next_label, safety_sub_lang=safety_sub_lang,
+                cast_meta=cast_meta,
             )  # fmt: skip
         else:
             print(f"▶ {title} — {name_line}", file=sys.stderr)
@@ -235,6 +239,7 @@ def _play_on_cast(
     start: float | None,
     next_label: str | None,
     safety_sub_lang: str | None = None,
+    cast_meta: caster.CastMeta | None = None,
 ) -> tuple[float, float, bool]:
     """Cast the chosen stream in the primary audio language. The Default Media Receiver plays
     a file's first audio track and can't switch tracks, so the language is enforced at selection
@@ -256,9 +261,16 @@ def _play_on_cast(
         )
     sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
     _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
-    # Remux to select the primary-language track (and/or a DMR-decodable codec), then let catt
-    # serve the complete file. No in-cast audio switch on this path (single-track file).
+    # Backend strategy. The DMR plays AAC/HEVC/4K/HDR natively and instantly — strictly better
+    # than the mirror (1080p SDR re-encode, latency) — so `--mirror` only actually mirrors when
+    # the audio is one the DMR can't decode (plan.mode == "remux"): there mirroring (mpv decodes
+    # Dolby/DTS locally → instant) beats the remux prepare-wait. For decodable audio, mirror is
+    # transparently downgraded to the direct cast.
     if plan.mode == "remux":
+        if opts.mirror and mirror.available():
+            return mirror.cast_via_mirror(
+                cfg, title, chosen["url"], device=device, start=start, sub_paths=sub_paths
+            )
         remux_path = remux.remux_for_cast(
             chosen["url"], cfg,
             audio_index=plan.audio_index, size_gb=quality.parse_stream(chosen).size_gb,
@@ -267,14 +279,21 @@ def _play_on_cast(
             return remux.cast_file(
                 cfg, title, remux_path,
                 device=device, start=start, sub_paths=sub_paths, follow=True,
+                meta=cast_meta,
             )  # fmt: skip
         # remux refused (size guard) or failed → degrade to a direct cast of the same pick
+    elif opts.mirror:
+        print(
+            "nstream: audio decodificabile dal TV → cast diretto nativo (mirror non necessario)",
+            file=sys.stderr,
+        )
     cast_langs = stream_select.cast_languages(cfg, results)
     return cast(
         cfg, title, chosen["url"],
         device=device, start=start, sub_paths=sub_paths, next_label=next_label,
         langs=cast_langs if len(cast_langs) > 1 else (),
         resolve_lang=stream_select.cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
+        meta=cast_meta,
     )  # fmt: skip
 
 
@@ -329,7 +348,13 @@ def _move_to_cast(
 
 
 def _play_series(
-    cfg: Config, series_id: str, name: str, eps: list[Video], start_video: Video, opts: PlayOpts
+    cfg: Config,
+    series_id: str,
+    name: str,
+    eps: list[Video],
+    start_video: Video,
+    opts: PlayOpts,
+    poster: str = "",
 ) -> str | None:
     """Play a series from `start_video`, auto-advancing through the overlay.
     Returns a notice (e.g. an episode with no streams) to surface, or None."""
@@ -353,6 +378,10 @@ def _play_series(
             cfg, "series", video_id, display_title(name, video), opts,
             auto=auto, next_label=next_label, on_save=on_save,
             reselect_on_wrong_audio=not binge,  # binge advances warn-and-proceed, don't block
+            cast_meta=caster.CastMeta(
+                poster=poster, series_title=name,
+                season=video.get("season", 0) or 0, episode=video.get("episode", 0) or 0,
+            ),
         )  # fmt: skip
         if notice:
             return notice
@@ -378,6 +407,7 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
         notice, _ = _play_video(
             cfg, typ, movie_id, display_title(name, None), opts,
             auto=opts.auto, next_label=None, on_save=on_save,
+            cast_meta=caster.CastMeta(poster=meta.get("poster") or ""),
         )  # fmt: skip
         return notice
 
@@ -397,7 +427,10 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
         if not chosen:
             return None
         key, start_video = chosen
-        header = _play_series(cfg, meta["id"], name, eps, start_video, _apply_key(opts, key))
+        header = _play_series(
+            cfg, meta["id"], name, eps, start_video, _apply_key(opts, key),
+            poster=meta.get("poster") or "",
+        )  # fmt: skip
 
 
 def _entry_video(entry: HistoryEntry) -> Video | None:
@@ -680,7 +713,18 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         )
         return 0
 
-    return _auto_play(cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection)
+    # Now-playing metadata for the castbridge LOAD (TV card + HUD widget). Poster is the public
+    # Cinemeta image URL; for a series the show name is the series title and `title` the episode.
+    poster = meta.get("poster") or ""
+    if typ == "series":
+        cast_meta = caster.CastMeta(
+            poster=poster, series_title=name, season=season or 0, episode=episode or 0
+        )
+    else:
+        cast_meta = caster.CastMeta(poster=poster)
+    return _auto_play(
+        cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection, cast_meta
+    )
 
 
 def _auto_play(
@@ -694,6 +738,7 @@ def _auto_play(
     season: int | None,
     episode: int | None,
     selection: str,
+    cast_meta: caster.CastMeta | None = None,
 ) -> int:
     """Resolve the best stream for one video and play/cast it headlessly, then emit JSON.
     Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
@@ -795,38 +840,71 @@ def _auto_play(
                 sub_paths = auto_subs(
                     cfg, typ, video_id, work_dir, opts, safety_sub_lang=target_lang
                 )
-            remux_path = (
-                remux.remux_for_cast(
-                    chosen["url"],
-                    cfg,
-                    audio_index=plan.audio_index,
-                    size_gb=quality.parse_stream(chosen).size_gb,
-                )  # fmt: skip
-                if plan.mode == "remux"
-                else None
-            )
-            if remux_path:
-                remux.cast_file(
-                    cfg, title, remux_path,
+            cm = cast_meta or caster.CastMeta()
+
+            def on_cast_event(ev: dict) -> None:
+                """Emit one JSONL line per castbridge event for `--json --cast --follow`."""
+                kind = ev.get("kind")
+                _emit_json(
+                    {
+                        "ok": kind != "failed",
+                        "action": "cast",
+                        "event": kind,
+                        **{k: v for k, v in ev.items() if k != "kind"},
+                    }
+                )
+
+            follow_cb = on_cast_event if args.follow else None
+            # Backend strategy (see _play_on_cast): mirror only when the audio is undecodable
+            # by the DMR (plan.mode == "remux") and --mirror is set — there it beats the remux
+            # prepare-wait. Decodable audio always goes DMR-direct (instant + native).
+            if opts.mirror and mirror.available() and plan.mode == "remux":
+                mirror.cast_via_mirror(
+                    cfg, title, chosen["url"],
                     device=device, start=start, sub_paths=sub_paths, follow=bool(args.follow),
                 )  # fmt: skip
-                reencoded = True
+                action = "mirror"
             else:
-                cast(
-                    cfg, title, chosen["url"],
-                    device=device, start=start, sub_paths=sub_paths,
-                    langs=(), resolve_lang=None, follow=bool(args.follow),
-                )  # fmt: skip
-            action = "cast"
-            # Optional explicit volume (closes the loop with the zero-volume detection).
-            if args.volume is not None:
-                caster.set_volume(device, args.volume)
-            # Fire-and-return skips the poll loop's volume guard — read it once so a muted
-            # or zero-volume receiver (a silent cast that looks fine) is surfaced.
-            volume, muted = device_volume(device)
-            if muted or volume == 0:
-                notice = "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'"
-                print(f"nstream: {notice}", file=sys.stderr)
+                if opts.mirror and plan.mode != "remux":
+                    print(
+                        "nstream: audio decodificabile dal TV → cast diretto "
+                        "(mirror non necessario)",
+                        file=sys.stderr,
+                    )
+                remux_path = (
+                    remux.remux_for_cast(
+                        chosen["url"],
+                        cfg,
+                        audio_index=plan.audio_index,
+                        size_gb=quality.parse_stream(chosen).size_gb,
+                    )  # fmt: skip
+                    if plan.mode == "remux"
+                    else None
+                )
+                if remux_path:
+                    remux.cast_file(
+                        cfg, title, remux_path,
+                        device=device, start=start, sub_paths=sub_paths, follow=bool(args.follow),
+                        meta=cm, on_event=follow_cb,
+                    )  # fmt: skip
+                    reencoded = True
+                else:
+                    cast(
+                        cfg, title, chosen["url"],
+                        device=device, start=start, sub_paths=sub_paths,
+                        langs=(), resolve_lang=None, follow=bool(args.follow),
+                        meta=cm, on_event=follow_cb,
+                    )  # fmt: skip
+                action = "cast"
+                # Optional explicit volume (closes the loop with the zero-volume detection).
+                if args.volume is not None:
+                    caster.set_volume(device, args.volume)
+                # Fire-and-return skips the poll loop's volume guard — read it once so a muted
+                # or zero-volume receiver (a silent cast that looks fine) is surfaced.
+                volume, muted = device_volume(device)
+                if muted or volume == 0:
+                    notice = "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'"
+                    print(f"nstream: {notice}", file=sys.stderr)
         else:
             # Local mpv blocks until the window closes (intended; the user is watching).
             play(
@@ -902,12 +980,22 @@ def _headless_device(cfg: Config, args: argparse.Namespace) -> str | None:
 
 def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     """`--json --stop`: stop the cast on the resolved device."""
+    # A mirror cast is self-contained (sender + headless mpv + null sink, no DMR session):
+    # tear it down first, independent of DMR device resolution.
+    mirror_stopped = mirror.stop()
     device = _headless_device(cfg, args)
     if device is None:
+        if mirror_stopped:
+            _emit_json({"ok": True, "action": "stop", "device": None, "error": None})
+            return 0
         return 1
     ok = caster.stop(device)
+    # A castbridge cast lives in the daemon (not in catt), so stop that session too.
+    if bridge.bridge_available():
+        ok = bridge.stop(device) or ok
     # Also tear down a detached Tier-2 remux server + its temp file, if one is serving.
     remux.stop(device)
+    ok = ok or mirror_stopped
     _emit_json(
         {"ok": ok, "action": "stop", "device": device, "error": None if ok else "stop_failed"}
     )
@@ -1066,6 +1154,11 @@ def main() -> int:
         "--cast", action="store_true", help="manda lo stream a un Chromecast (catt) invece di mpv"
     )
     parser.add_argument(
+        "--mirror",
+        action="store_true",
+        help="cast via mirror nativo (mpv su output headless → sender): parte subito, 1080p SDR",
+    )
+    parser.add_argument(
         "--local",
         action="store_true",
         help="forza la riproduzione locale in mpv (anche se il default è cast)",
@@ -1167,15 +1260,18 @@ def main() -> int:
         return 0
 
     sub_mode, sub_lang = _sub_options(args)
+    # Mirror is a cast backend: it implies cast routing (device resolution), unless local.
+    mirror = (args.mirror or cfg.cast_mode == "mirror") and not args.local
     opts = PlayOpts(
         # --json is headless: always auto-pick (no fzf stream menu).
         auto=cfg.auto_play or args.play or args.json,
-        cast=(cfg.prefer_cast or args.cast) and not args.local,
+        cast=(cfg.prefer_cast or args.cast or mirror) and not args.local,
         sub_mode=sub_mode,
         sub_lang=sub_lang,
         history=cfg.history_enabled and not args.no_history,
         autoplay=cfg.autoplay and not args.no_autoplay,
         audio_lang=args.audio_lang or None,
+        mirror=mirror,
     )
     try:
         return _dispatch(cfg, args, opts)

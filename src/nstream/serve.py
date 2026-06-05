@@ -1,0 +1,300 @@
+"""Tier-2 cast delivery: a minimal **Range-capable HTTP server** that serves one complete
+local file to the Chromecast Default Media Receiver. Replaces the detached `catt` file server
+of ADR 0005 on the castbridge path — catt is itself a Python Range server, so owning this is
+the correct implementation of exactly what the DMR needs (a complete, `Content-Length`'d,
+`Range`/206 delivery), not a workaround. castbridge then LOADs this server's URL with metadata.
+
+The DMR issues a GET with a `Range` header and expects a `206 Partial Content` with
+`Content-Range`; a single seek may issue further range requests, so the server is threaded.
+
+Two run modes:
+- in-process (`serve_file`) for the interactive `follow` path (server thread dies with nstream);
+- detached (`python -m nstream.serve <file> --bind <ip>`) for headless fire-and-return, where
+  the server must outlive the CLI — `remux.py` records its PID for `--stop`/GC teardown, the
+  same lifecycle the detached catt had.
+
+Leaf module: stdlib (`http.server`/`socket`/`socketserver`) + `log`, imports nothing from
+`cli`. The served path is local (no debrid token); request lines are logged only at debug.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from . import log
+
+_log = log.get_logger("serve")
+
+# A fixed URL path the receiver fetches; the actual file is fixed per-server, so the path is
+# cosmetic but kept stable so logs/URLs read sensibly.
+_URL_PATH = "/stream.mp4"
+
+# The receiver connects *back* to us over the LAN to fetch the file, so the bind port must be
+# one the host firewall lets in. A default-deny UFW/nftables drops a random ephemeral port; the
+# cast-serving range 45000-47000 is the one provisioned for this (the same band catt/skill-cast
+# use). Bind inside it so Tier-2 works behind the firewall without a new rule; fall back to an
+# ephemeral port only if the whole range is busy (then a firewall rule may be needed).
+_CAST_PORT_LO, _CAST_PORT_HI = 45000, 47000
+# ufw rule spec for the cast range — byte-identical to catt's range and skill-cast's
+# `cast-screen fw-setup`, so the three share ONE rule (ufw dedups identical rules).
+_CAST_RANGE_SPEC = f"{_CAST_PORT_LO}:{_CAST_PORT_HI}"
+
+
+def lan_ip(target_ip: str) -> str:
+    """The local IP on the interface that routes to `target_ip` (the TV). Uses the standard
+    UDP-connect trick — no packet is sent, the kernel just selects the source address — so it is
+    correct under multi-homing / VPN, unlike a hostname lookup. Falls back to 127.0.0.1 (which
+    the TV can't reach, surfacing a clean failure) if resolution fails."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((target_ip, 9))  # discard port; UDP connect only sets the route
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def served_url(ip: str, port: int) -> str:
+    return f"http://{ip}:{port}{_URL_PATH}"
+
+
+def _lan_subnet(host_ip: str) -> str:
+    """The /24 the host's LAN IP belongs to (e.g. 192.168.1.75 → 192.168.1.0/24), matching
+    skill-cast's `cast-screen lan_subnet()` so the ufw rule is scoped identically."""
+    return ".".join(host_ip.split(".")[:3]) + ".0/24"
+
+
+def ensure_firewall(bind_ip: str) -> None:
+    """Best-effort: make sure ufw lets the Chromecast reach our file server (inbound from the
+    LAN on the cast port range). The receiver connects *back* to us, so a default-deny ufw would
+    drop the cast (`cast_startup_failed`). Mirrors skill-cast's idempotent `fw_rule_present ||
+    fw_setup` with the **same rule string** (`from <subnet> to any port 45000:47000 proto tcp`),
+    so nstream/catt/skill-cast share one rule. No-op — never raising — when ufw isn't installed,
+    sudo isn't passwordless, or ufw is inactive (other firewalls / non-Linux): casting then relies
+    on a pre-existing rule, and a startup failure is surfaced via `firewall_hint`."""
+    if not shutil.which("ufw"):
+        return
+    subnet = _lan_subnet(bind_ip)
+    try:
+        status = subprocess.run(
+            ["sudo", "-n", "ufw", "status"], capture_output=True, text=True, timeout=5
+        )
+        if status.returncode != 0:
+            return  # no passwordless sudo, or ufw inactive → leave it to a pre-existing rule
+        # Idempotent: ufw also dedups, but avoid a needless privileged call when already open.
+        if _CAST_RANGE_SPEC in status.stdout and subnet in status.stdout:
+            return
+        add = subprocess.run(
+            ["sudo", "-n", "ufw", "allow", "from", subnet, "to", "any",
+             "port", _CAST_RANGE_SPEC, "proto", "tcp"],
+            capture_output=True, text=True, timeout=5,
+        )  # fmt: skip
+        if add.returncode == 0:
+            _log.info("ufw: aperto %s/tcp da %s per il cast serving", _CAST_RANGE_SPEC, subnet)
+        else:
+            _log.warning("ufw allow non riuscito: %s", (add.stderr or "").strip()[:160])
+    except (OSError, subprocess.SubprocessError) as e:
+        _log.debug("ensure_firewall best-effort fallita: %s", e)
+
+
+def firewall_hint(bind_ip: str, port: int | None = None) -> str:
+    """An actionable line to print when a Tier-2 cast fails to start: the receiver likely can't
+    reach our file server through the host firewall. Names the exact ufw rule to add."""
+    subnet = _lan_subnet(bind_ip)
+    where = f"su {bind_ip}:{port}" if port else f"su {bind_ip}"
+    return (
+        f"nstream: la TV non raggiunge il file server {where} — probabile firewall. "
+        f"Apri la porta dalla LAN: sudo ufw allow from {subnet} to any port "
+        f"{_CAST_RANGE_SPEC} proto tcp"
+    )
+
+
+def _parse_range(header: str, size: int) -> tuple[int, int] | None:
+    """Parse a single-range `bytes=start-end` header against a file of `size` bytes, returning an
+    inclusive `(start, end)` byte range, or None when the header is absent/unsatisfiable/multi-range
+    (the caller then serves the full 200 or a 416). Supports `start-`, `start-end`, `-suffix`."""
+    if not header or not header.startswith("bytes="):
+        return None
+    spec = header[len("bytes=") :]
+    if "," in spec:  # multi-range: not needed by the DMR, serve full
+        return None
+    first, _, last = spec.partition("-")
+    try:
+        if first == "":  # suffix range: last N bytes
+            n = int(last)
+            if n <= 0:
+                return None
+            start = max(0, size - n)
+            return (start, size - 1)
+        start = int(first)
+        end = int(last) if last else size - 1
+    except ValueError:
+        return None
+    if start > end or start >= size:
+        return None
+    return (start, min(end, size - 1))
+
+
+class RangeFileHandler(BaseHTTPRequestHandler):
+    """Serves the single file at `self.server.file_path` with Range support. GET and HEAD only."""
+
+    protocol_version = "HTTP/1.1"
+    _CHUNK = 256 * 1024
+    # Narrow the inherited `server` type so `self.server.file_path` resolves (lazy annotation
+    # via `from __future__ import annotations`; _FileServer is defined below).
+    server: _FileServer
+
+    @property
+    def _path(self) -> str:
+        return self.server.file_path
+
+    def log_message(self, format: str, *args) -> None:
+        _log.debug("serve %s", format % args)
+
+    def _content_type(self) -> str:
+        return "video/mp4" if self._path.lower().endswith(".mp4") else "application/octet-stream"
+
+    def do_HEAD(self) -> None:
+        self._respond(write_body=False)
+
+    def do_GET(self) -> None:
+        self._respond(write_body=True)
+
+    def _respond(self, *, write_body: bool) -> None:
+        try:
+            size = os.path.getsize(self._path)
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        rng = _parse_range(self.headers.get("Range", ""), size)
+        if self.headers.get("Range") and rng is None and self._unsatisfiable(size):
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        if rng is None:
+            start, end = 0, size - 1
+            status = HTTPStatus.OK
+        else:
+            start, end = rng
+            status = HTTPStatus.PARTIAL_CONTENT
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", self._content_type())
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if not write_body:
+            return
+        self._send_body(start, length)
+
+    def _unsatisfiable(self, size: int) -> bool:
+        """A Range header was present but unparsed: treat as 416 only when it's a well-formed but
+        out-of-bounds byte range (`bytes=<start>-`), not a malformed/multi-range header (→ 200)."""
+        spec = self.headers.get("Range", "")[len("bytes=") :]
+        if "," in spec or "-" not in spec:
+            return False
+        first = spec.partition("-")[0]
+        return first.isdigit() and int(first) >= size
+
+    def _send_body(self, start: int, length: int) -> None:
+        remaining = length
+        try:
+            with open(self._path, "rb") as f:
+                f.seek(start)
+                while remaining > 0:
+                    chunk = f.read(min(self._CHUNK, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            # The receiver closed the connection (seek / stop). Normal; not an error.
+            _log.debug("serve: client chiuso durante lo stream")
+        except OSError as e:
+            _log.warning("serve: errore I/O: %s", e)
+
+
+class _FileServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr, file_path: str):
+        super().__init__(addr, RangeFileHandler)
+        self.file_path = file_path
+
+
+def _make_server(bind_ip: str, file_path: str, preferred_port: int = 0) -> _FileServer:
+    """Bind a `_FileServer`, preferring the firewall-allowed cast port range so the receiver can
+    actually reach us. `preferred_port > 0` forces that exact port; otherwise scan the range and
+    fall back to an ephemeral port if it's fully busy."""
+    if preferred_port:
+        return _FileServer((bind_ip, preferred_port), file_path)
+    for port in range(_CAST_PORT_LO, _CAST_PORT_HI + 1):
+        try:
+            return _FileServer((bind_ip, port), file_path)
+        except OSError:
+            continue
+    _log.warning(
+        "nessuna porta libera in %d-%d; uso una effimera (può servire una regola firewall)",
+        _CAST_PORT_LO,
+        _CAST_PORT_HI,
+    )
+    return _FileServer((bind_ip, 0), file_path)
+
+
+def serve_file(file_path: str, bind_ip: str) -> tuple[_FileServer, int, threading.Thread]:
+    """Start a threaded Range server for `file_path` bound to `bind_ip:0` (ephemeral port).
+    Returns `(server, port, thread)`; the caller builds the URL via `served_url(bind_ip, port)`
+    and shuts down with `server.shutdown()`. The thread is a daemon (dies with the process), so
+    this is the in-process (follow) mode — headless uses the `__main__` detached entrypoint."""
+    server = _make_server(bind_ip, file_path)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, name="nstream-serve", daemon=True)
+    thread.start()
+    return server, port, thread
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """Detached entrypoint: `python -m nstream.serve <file> --bind <ip> [--port N]`. Binds, prints
+    a single `PORT=<n>` line on stdout (so the parent learns the ephemeral port), then serves
+    forever until killed (SIGTERM from `remux.stop`/GC). All other output goes to the log."""
+    ap = argparse.ArgumentParser(prog="nstream.serve")
+    ap.add_argument("file")
+    ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--port", type=int, default=0)
+    args = ap.parse_args(argv)
+    if not os.path.isfile(args.file):
+        print(f"serve: file non trovato: {args.file}", file=sys.stderr)
+        return 2
+    server = _make_server(args.bind, args.file, preferred_port=args.port)
+    port = server.server_address[1]
+    # The parent reads exactly this line to learn the port, then leaves us running.
+    sys.stdout.write(f"PORT={port}\n")
+    sys.stdout.flush()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

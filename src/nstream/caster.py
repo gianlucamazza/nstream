@@ -17,12 +17,32 @@ import termios
 import time
 import tty
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from . import languages, log, settings
+from . import bridge, languages, log, settings
 from .config import Config
 from .picker import fzf
 
 _log = log.get_logger("cast")
+
+
+@dataclass(frozen=True)
+class CastMeta:
+    """Now-playing metadata sent to the receiver (and surfaced on the HUD widget) when casting
+    via castbridge. Sourced from the Cinemeta meta in `cli`. Empty fields are omitted, so the
+    LOAD degrades to a Movie block (poster/subtitle) or a bare title as available."""
+
+    poster: str = ""
+    subtitle: str = ""
+    series_title: str = ""
+    season: int = 0
+    episode: int = 0
+    content_type: str = ""
+
+
+# Callback the headless `--follow` JSONL path passes in to receive normalized playback events
+# (started/playing/paused/ended/failed) as they happen; None for the interactive path.
+EventCb = Callable[[dict], None]
 
 
 class CastUnavailable(Exception):
@@ -177,6 +197,117 @@ def cast(
     langs: tuple[str, ...] = (),
     resolve_lang: Callable[[str], str | None] | None = None,
     follow: bool = True,
+    meta: CastMeta | None = None,
+    on_event: EventCb | None = None,
+) -> tuple[float, float, bool]:
+    """Cast `url` to a Chromecast and track playback so resume and series auto-advance work like
+    the mpv path. Returns (position, duration, advance). Prefers the **castbridge** native sender
+    (metadata-rich LOAD + a real event stream) when its binary is available; falls back to **catt**
+    (no metadata) otherwise, when castbridge can't start, or for the interactive in-cast audio
+    switch ('a'), which remains a catt-path capability (see docs/adr/0007). `on_event` receives
+    normalized events for the headless `--follow` JSONL path."""
+    can_switch = bool(langs) and resolve_lang is not None and follow and sys.stdin.isatty()
+    if device and bridge.bridge_available() and not can_switch:
+        result = _cast_via_bridge(
+            title,
+            url,
+            device=device,
+            start=start,
+            meta=meta or CastMeta(),
+            next_label=next_label,
+            follow=follow,
+            on_event=on_event,
+        )
+        if result is not None:
+            return result  # else castbridge couldn't start → fall back to catt below
+    return _cast_via_catt(
+        cfg,
+        title,
+        url,
+        device=device,
+        start=start,
+        sub_paths=sub_paths,
+        next_label=next_label,
+        langs=langs,
+        resolve_lang=resolve_lang,
+        follow=follow,
+        on_event=on_event,
+    )
+
+
+def _cast_via_bridge(
+    title: str,
+    url: str,
+    *,
+    device: str,
+    start: float | None,
+    meta: CastMeta,
+    next_label: str | None,
+    follow: bool,
+    on_event: EventCb | None,
+) -> tuple[float, float, bool] | None:
+    """Cast via castbridge with metadata, forwarding normalized events to `on_event`. Returns
+    (position, duration, advance), or **None** when the cast never started (transport/daemon
+    failure) so the caller falls back to catt. A media error the receiver reports (bad url/device)
+    ends as a `failed` event without a fallback (catt wouldn't fare better)."""
+    kwargs = {
+        "title": title,
+        "poster": meta.poster,
+        "subtitle": meta.subtitle,
+        "series_title": meta.series_title,
+        "season": meta.season,
+        "episode": meta.episode,
+        "content_type": meta.content_type,
+        "current_time": float(start or 0.0),
+    }
+    started = False
+    pos = dur = 0.0
+    finished = False
+    events = bridge.cast_load(device, url, follow=follow, **kwargs)
+    try:
+        for ev in events:
+            kind = ev.get("kind")
+            if kind == "failed" and not started:
+                _log.info("castbridge non partito (%s) → fallback catt", ev.get("error"))
+                return None
+            if kind == "started" and not started:
+                started = True
+                tail = "  (Ctrl-C per smettere di seguire)" if follow else ""
+                print(f"📺 {title} → {device}{tail}", file=sys.stderr)
+            if on_event:
+                on_event(ev)
+            if kind in ("playing", "paused", "ended"):
+                pos = float(ev.get("position") or pos)
+                dur = float(ev.get("duration") or dur)
+            if kind == "ended":
+                finished = bool(dur) and pos >= dur * _CAST_DONE
+    except KeyboardInterrupt:
+        bridge.stop(device)
+    finally:
+        events.close()
+    advance = bool(next_label) and finished
+    return (pos, dur, advance)
+
+
+def _emit(on_event: EventCb | None, kind: str, **fields) -> None:
+    """Forward a normalized event to the `--follow` JSONL callback, if any."""
+    if on_event:
+        on_event({"kind": kind, **fields})
+
+
+def _cast_via_catt(
+    cfg: Config,
+    title: str,
+    url: str,
+    *,
+    device: str | None,
+    start: float | None = None,
+    sub_paths: tuple[str, ...] = (),
+    next_label: str | None = None,
+    langs: tuple[str, ...] = (),
+    resolve_lang: Callable[[str], str | None] | None = None,
+    follow: bool = True,
+    on_event: EventCb | None = None,
 ) -> tuple[float, float, bool]:
     """Cast `url` to a Chromecast via `catt`, then poll its status so resume and
     series auto-advance work just like the mpv path. Returns (position, duration,
@@ -202,16 +333,19 @@ def cast(
         proc = subprocess.run(launch, capture_output=True, text=True)
     except FileNotFoundError:
         print("nstream: catt non trovato", file=sys.stderr)
+        _emit(on_event, "failed", error="catt_missing", message="catt non trovato")
         return (0.0, 0.0, False)
     if proc.returncode != 0:
         # catt prints the cause (e.g. device unreachable); never echo the URL/token.
         _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
         print("nstream: cast non riuscito", file=sys.stderr)
+        _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
         return (0.0, 0.0, False)
 
     if not follow:
         # Fire-and-return: the receiver has the media; don't poll for the whole runtime.
         print(f"📺 {title} → {dest}", file=sys.stderr)
+        _emit(on_event, "started", title=title)
         return (0.0, 0.0, False)
 
     can_switch = bool(langs) and resolve_lang is not None
@@ -254,6 +388,8 @@ def cast(
                     file=sys.stderr,
                 )
             if pstate in ("PLAYING", "PAUSED", "BUFFERING") or pos > 0:
+                if not started:
+                    _emit(on_event, "started", title=title)
                 started = True
                 idle = 0
             elif started and pstate in ("IDLE", "UNKNOWN", ""):
@@ -269,6 +405,13 @@ def cast(
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run([*base, "stop"], capture_output=True, text=True)
     advance = bool(next_label) and finished
+    if started:
+        _emit(
+            on_event,
+            "ended",
+            position=round(holder["position"], 1),
+            duration=round(holder["duration"], 1),
+        )
     return (holder["position"], holder["duration"], advance)
 
 

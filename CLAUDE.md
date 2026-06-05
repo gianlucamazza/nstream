@@ -107,7 +107,22 @@ are all handled generically (single regex), never per-provider. **When touching 
 keep it provider-agnostic** — don't special-case RealDebrid. A proposed native-resolver adapter
 layer that would narrow (not abandon) this principle is recorded in `docs/adr/` (ADR 0001–0004).
 
-### Casting (Chromecast via catt)
+### Casting (Chromecast)
+- **Sender backend (ADR 0007):** casting prefers the native **castbridge** daemon (built in the
+  `cast` repo's openscreen fork) over catt, because catt can't send media metadata. `bridge.py`
+  speaks castbridge's AF_UNIX IPC (stdlib only): a metadata-rich LOAD (title/poster/season/episode
+  → TV now-playing card + JARVIS HUD widget) plus a real `media-status`/`session` event stream that
+  drives `--follow` JSONL and resume/auto-advance. `caster.cast`/`remux.cast_file` use castbridge
+  when its binary is present (`CASTBRIDGE_BIN` or the openscreen-build path) and **fall back to catt**
+  (no metadata) otherwise, when it can't start, or for the interactive 'a' audio switch (catt-only).
+  Tier-2 remux is served by nstream's own stdlib **Range server** (`serve.py`), not catt, on the
+  castbridge path. `--follow` emits one JSON line per event (started/playing/paused/ended/failed).
+- **Tier-2 firewall:** the receiver fetches the remux file *inbound* from the host, so `serve.py`
+  binds catt's cast range (45000-47000) and `ensure_firewall` auto-adds the matching ufw rule
+  (`sudo -n ufw allow from <lan>/24 to any port 45000:47000 proto tcp`, idempotent, identical to
+  skill-cast's `cast-screen fw-setup` so they share one rule). Best-effort: a no-op without
+  ufw/passwordless-sudo, with a `firewall_hint` printed on a Tier-2 startup failure. Tier-1 and the
+  daemon channel are outbound — no rule, nstream stays unprivileged for ordinary casts.
 - Discovery: `settings.py:scan_devices()` runs `catt scan` → `(name, ip)` pairs.
 - Resolution: `caster.py:resolve_device()` honors `cfg.cast_device` only if present on the
   current LAN; otherwise re-discovers. Stored/resolved **by IP** (robust to mDNS flakiness).
