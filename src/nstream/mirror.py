@@ -1,0 +1,405 @@
+"""Realtime cast via the native Cast Streaming mirror sender.
+
+An alternative cast backend to the Default-Media-Receiver path (`caster`/`remux`):
+instead of handing the receiver a file, mpv decodes the stream locally and a custom
+openscreen sender mirrors it to the TV over RTP (hardware H.264, ~120ms). It starts
+instantly — no download/remux — at the cost of 1080p SDR (no 4K/HDR/Dolby passthrough).
+
+The correct, source-clean topology (validated live):
+  - mpv plays on a **headless virtual output** (`hyprctl output create headless`) — never
+    shown on a physical monitor, always composited, full 1080p. No visible window, no
+    occlusion, no screen real estate taken.
+  - the sender captures that mpv window **by Hyprland address** (`window:addr=`), the
+    reliable capture path (the sender's capture-by-output-name selects the wrong output).
+  - audio is routed to a dedicated **null sink** and captured from its monitor passively
+    (`--audio-sink`): no per-app graph coupling (which corrupts the source + desyncs), and
+    the laptop stays silent (the movie plays only on the TV).
+  - `--playout-delay 500`: a movie isn't interactive, so the tight 120ms mirror jitter
+    buffer (which starves the audio in-flight budget into constant drops at ~110ms RTT) is
+    replaced by a roomy one.
+
+Leaf module below `cli` (imports `player`/`caster`/`config`/`log` + stdlib), like `remux`.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from . import log, player
+from .config import Config
+
+_log = log.get_logger(__name__)
+
+# Fixed names for the per-cast PipeWire null sink and its mpv audio device.
+_SINK_NAME = "nstream_cast"
+_MPV_AUDIO_DEVICE = f"pipewire/{_SINK_NAME}"
+# A unique-ish mpv window title so we can find our own window if the PID lookup races.
+_MPV_TITLE = "nstream-mirror"
+_DEFAULT_BITRATE = 16_000_000
+_DEFAULT_PLAYOUT_MS = 500
+_CAST_PORT = 8009
+# How long to wait for mpv's window to appear in the Hyprland tree.
+_WINDOW_POLL_RETRIES = 40
+_WINDOW_POLL_DELAY = 0.1
+
+
+def _sender_bin() -> str:
+    """The openscreen Cast Streaming sender binary (not bundled — built separately)."""
+    env = os.environ.get("CAST_MIRROR_BIN")
+    if env:
+        return env
+    return os.path.expanduser(
+        "~/Workspace/tooling/openscreen-build/openscreen/out/Default/cast_sender"
+    )
+
+
+def available() -> bool:
+    """True when the mirror backend can run: the sender binary is executable and the
+    Wayland/PipeWire helpers it needs are present. A clean guard so the caller can degrade
+    to the DMR path with a clear message instead of failing mid-cast."""
+    bin_path = _sender_bin()
+    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        return False
+    return bool(shutil.which("hyprctl") and shutil.which("pactl"))
+
+
+# --- low-level helpers ----------------------------------------------------
+
+
+def _hypr(*args: str) -> str:
+    """Run `hyprctl <args>`; return stdout (empty on failure). Best-effort."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        proc = subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=5)
+        return proc.stdout
+    return ""
+
+
+def _hypr_json(*args: str) -> Any:
+    with contextlib.suppress(json.JSONDecodeError):
+        return json.loads(_hypr(*args, "-j") or "null")
+    return None
+
+
+def _headless_names() -> set[str]:
+    mons = _hypr_json("monitors")
+    if not isinstance(mons, list):
+        return set()
+    return {
+        str(m["name"])
+        for m in mons
+        if isinstance(m, dict) and str(m.get("name", "")).startswith("HEADLESS")
+    }
+
+
+def _create_headless() -> str | None:
+    """Create a headless virtual output and return its new name (HEADLESS-N), or None."""
+    before = _headless_names()
+    _hypr("output", "create", "headless")
+    # The name appears asynchronously; poll briefly for the new one.
+    for _ in range(20):
+        new = _headless_names() - before
+        if new:
+            return sorted(new)[0]
+        time.sleep(0.1)
+    return None
+
+
+def _headless_workspace(name: str) -> int | None:
+    mons = _hypr_json("monitors")
+    if isinstance(mons, list):
+        for m in mons:
+            if isinstance(m, dict) and m.get("name") == name:
+                aws = m.get("activeWorkspace")
+                ws = aws.get("id") if isinstance(aws, dict) else None
+                return int(ws) if ws is not None else None
+    return None
+
+
+def _window_addr(pid: int) -> str | None:
+    """Resolve the Hyprland address of the window owned by `pid`."""
+    clients = _hypr_json("clients")
+    if isinstance(clients, list):
+        for c in clients:
+            if isinstance(c, dict) and c.get("pid") == pid:
+                addr = c.get("address")
+                return str(addr) if addr else None
+    return None
+
+
+def _load_null_sink() -> int | None:
+    """Create the dedicated null sink; return its module id for later unload."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError, ValueError):
+        proc = subprocess.run(
+            [
+                "pactl", "load-module", "module-null-sink",
+                f"sink_name={_SINK_NAME}",
+                "sink_properties=node.description=nstream-cast",
+            ],
+            capture_output=True, text=True, timeout=5,
+        )  # fmt: skip
+        if proc.returncode == 0 and proc.stdout.strip():
+            return int(proc.stdout.strip())
+    return None
+
+
+def _unload_module(module_id: int | None) -> None:
+    if module_id is None:
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ["pactl", "unload-module", str(module_id)],
+            capture_output=True, text=True, timeout=5,
+        )  # fmt: skip
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    return True
+
+
+def _kill(pid: int | None) -> None:
+    if not pid:
+        return
+    with contextlib.suppress(OSError, ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+
+
+# --- state tracking (for headless --stop) ---------------------------------
+
+
+def _state_path() -> Path:
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    return Path(base) / "nstream-mirror.json"
+
+
+def _write_state(state: dict) -> None:
+    with contextlib.suppress(OSError):
+        _state_path().write_text(json.dumps(state))
+
+
+def _read_state() -> dict | None:
+    with contextlib.suppress(OSError, json.JSONDecodeError):
+        return json.loads(_state_path().read_text())
+    return None
+
+
+def _clear_state() -> None:
+    with contextlib.suppress(OSError):
+        _state_path().unlink(missing_ok=True)
+
+
+def _teardown(state: dict) -> None:
+    """Tear down everything a mirror cast created, in dependency order. Idempotent."""
+    _kill(state.get("sender_pid"))
+    _kill(state.get("mpv_pid"))
+    time.sleep(0.3)
+    headless = state.get("headless")
+    if headless:
+        _hypr("output", "remove", headless)
+    _unload_module(state.get("sink_module"))
+    _clear_state()
+
+
+def stop() -> bool:
+    """Tear down a mirror cast started by this module. Called by the CLI `--stop` path.
+    Best-effort; True if there was state to clear."""
+    st = _read_state()
+    if not st:
+        return False
+    _teardown(st)
+    return True
+
+
+# --- the cast ------------------------------------------------------------
+
+
+def _mpv_args(
+    cfg: Config,
+    url: str,
+    sock_path: str,
+    *,
+    start: float | None,
+    sub_paths: tuple[str, ...],
+    audio_id: int | None,
+    sub_id: int | str | None,
+) -> list[str]:
+    """Build the mpv command: same defaults as `player.play`, plus headless-mirror
+    specifics (route audio to the null sink, fullscreen, a known title, IPC socket)."""
+    args = [
+        "mpv",
+        f"--title={_MPV_TITLE}",
+        "--no-resume-playback",
+        "--fullscreen",
+        "--force-window=yes",
+        f"--audio-device={_MPV_AUDIO_DEVICE}",
+        # Small audio buffer: keeps the null-sink monitor delivery steady, avoiding the
+        # ~200ms re-anchor gaps mpv's default 200ms buffer causes.
+        "--audio-buffer=0.05",
+        *player._quiet_defaults(cfg),
+        *player._hwdec_defaults(cfg),
+        *player._lang_defaults(cfg),
+        *cfg.mpv_args,
+    ]
+    if start and start > 1:
+        args.append(f"--start={start:.0f}")
+    args += [f"--sub-file={p}" for p in sub_paths]
+    if audio_id is not None:
+        args.append(f"--aid={audio_id}")
+    if sub_id is not None:
+        args.append(f"--sid={sub_id}")
+    args.append(f"--input-ipc-server={sock_path}")
+    args.append(url)
+    return args
+
+
+def cast_via_mirror(
+    cfg: Config,
+    title: str,
+    url: str,
+    *,
+    device: str,
+    start: float | None = None,
+    sub_paths: tuple[str, ...] = (),
+    audio_id: int | None = None,
+    sub_id: int | str | None = None,
+    follow: bool = True,
+) -> tuple[float, float, bool]:
+    """Cast `url` to `device` (a TV IP) by mirroring a headless mpv. Returns
+    (position, duration, advance) like `caster.cast`.
+
+    `follow=True` (interactive): block until mpv exits, tracking position over IPC, then
+    tear everything down. `follow=False` (headless): leave mpv + sender detached and return;
+    `stop()` (CLI `--stop`) tears them down."""
+    if not available():
+        print(
+            "nstream: sender mirror non disponibile (build openscreen / $CAST_MIRROR_BIN)",
+            file=sys.stderr,
+        )
+        return (0.0, 0.0, False)
+
+    # A previous mirror left running? Clear it first (single active mirror).
+    old = _read_state()
+    if old:
+        _teardown(old)
+
+    state: dict = {"device": device}
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    work_dir = tempfile.mkdtemp(prefix="nstream-mirror-", dir=runtime)
+    sock_path = os.path.join(work_dir, "mpv.sock")
+
+    try:
+        state["sink_module"] = _load_null_sink()
+        headless = _create_headless()
+        if not headless:
+            print("nstream: impossibile creare l'output headless", file=sys.stderr)
+            _teardown(state)
+            return (0.0, 0.0, False)
+        state["headless"] = headless
+
+        args = _mpv_args(
+            cfg, url, sock_path,
+            start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
+        )  # fmt: skip
+        # Headless cast must outlive nstream's exit → detached session.
+        try:
+            proc = subprocess.Popen(args, start_new_session=not follow)
+        except FileNotFoundError:
+            print("nstream: mpv non trovato", file=sys.stderr)
+            _teardown(state)
+            return (0.0, 0.0, False)
+        state["mpv_pid"] = proc.pid
+
+        addr = _await_window(proc.pid)
+        if not addr:
+            print("nstream: la finestra mpv non è comparsa", file=sys.stderr)
+            _kill(proc.pid)
+            _teardown(state)
+            return (0.0, 0.0, False)
+
+        # Move mpv onto the headless output (off the user's monitors). mpv is already
+        # fullscreen (`--fullscreen`), and that state follows the window across the silent
+        # move — so we must NOT call `dispatch fullscreen` (it has no address arg and would
+        # toggle whatever window is *focused*, e.g. the user's terminal).
+        ws = _headless_workspace(headless)
+        if ws is not None:
+            _hypr("dispatch", "movetoworkspacesilent", f"{ws},address:{addr}")
+            time.sleep(0.2)
+        addr = _window_addr(proc.pid) or addr  # re-resolve (stable after the move)
+
+        sender_pid = _launch_sender(cfg, device, addr)
+        if sender_pid is None:
+            print("nstream: avvio sender mirror fallito", file=sys.stderr)
+            _kill(proc.pid)
+            _teardown(state)
+            return (0.0, 0.0, False)
+        state["sender_pid"] = sender_pid
+        _write_state(state)
+
+        print(f"📺 {title} → {device} (mirror 1080p)", file=sys.stderr)
+        if not follow:
+            return (0.0, 0.0, False)
+
+        # Interactive: track position over IPC and block until mpv exits.
+        holder = {"position": 0.0, "duration": 0.0}
+        tracker = threading.Thread(
+            target=player._track_position, args=(sock_path, holder, proc), daemon=True
+        )
+        tracker.start()
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            _kill(proc.pid)
+        tracker.join(timeout=player._TRACKER_JOIN_TIMEOUT)
+        return (holder["position"], holder["duration"], False)
+    finally:
+        if follow:
+            _teardown(_read_state() or state)
+            with contextlib.suppress(OSError):
+                shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _await_window(pid: int) -> str | None:
+    for _ in range(_WINDOW_POLL_RETRIES):
+        if not _pid_alive(pid):
+            return None
+        addr = _window_addr(pid)
+        if addr:
+            return addr
+        time.sleep(_WINDOW_POLL_DELAY)
+    return None
+
+
+def _launch_sender(cfg: Config, device: str, addr: str) -> int | None:
+    bitrate = getattr(cfg, "mirror_bitrate", 0) or _DEFAULT_BITRATE
+    playout = getattr(cfg, "mirror_playout_ms", 0) or _DEFAULT_PLAYOUT_MS
+    cmd = [
+        _sender_bin(), "-c", "h264", "-m", str(bitrate),
+        "--audio-sink", _SINK_NAME,
+        "--playout-delay", str(playout),
+        f"{device}:{_CAST_PORT}", f"window:addr={addr}",
+    ]  # fmt: skip
+    try:
+        # Detached: the sender serves for the whole runtime; it must outlive a headless
+        # return and not hold the foreground.
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+        )
+    except (OSError, FileNotFoundError):
+        return None
+    return proc.pid

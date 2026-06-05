@@ -96,6 +96,7 @@ class PlayOpts:
     autoplay: bool  # offer the next-episode overlay for series
     cast_choose: bool = False  # force the device picker (explicit "cast this" action)
     audio_lang: str | None = None  # force this audio/dub language (headless --audio-lang)
+    mirror: bool = False  # cast via the native mirror backend instead of the DMR (file) path
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,17 @@ class Config:
     # confirmation on an interactive tty before downloading (headless proceeds — it was the only
     # castable release). A free-disk pre-check always runs regardless. 0 = off (disk check only).
     cast_remux_max_size_gb: int = 20
+    # Cast backend: "dmr" (default) hands the file to the Chromecast Default Media Receiver
+    # (direct or Tier-2 remux); "mirror" decodes locally in mpv on a headless output and
+    # mirrors it to the TV via the native Cast Streaming sender (instant start, no download,
+    # but 1080p SDR — no 4K/HDR/Dolby). `--mirror` forces it per-invocation. Needs the
+    # openscreen sender (`$CAST_MIRROR_BIN`) + Hyprland + PipeWire.
+    cast_mode: str = "dmr"
+    # Mirror backend tuning. 0 = built-in default (16 Mbps ceiling; 500 ms playout — a movie
+    # isn't interactive, and the sender's 120 ms mirror buffer starves the audio in-flight
+    # budget into constant drops near 110 ms RTT).
+    mirror_bitrate: int = 0
+    mirror_playout_ms: int = 0
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
