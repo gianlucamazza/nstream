@@ -95,6 +95,14 @@ Notes:
 - **Cast is fire-and-return by default** (`--no-follow` implied): the command returns as soon as
   the receiver has the media. Add `--follow` only if the user wants resume/auto-advance tracking
   (it will hold the terminal for the whole runtime).
+- **`--follow` streams playback events as JSONL** (one JSON object per line) instead of a single
+  final object: `{"action":"cast","event":"started|playing|paused|ended|failed", ...}` with
+  `position`/`duration` on the playing/ended lines. Read lines until `event:"ended"` (or
+  `event:"failed"`). Without `--follow` you get the usual single summary object.
+- **Now-playing metadata on the TV + HUD**: when the native `castbridge` backend is built, the
+  cast sends the title, poster, and season/episode so the TV's now-playing card and the desktop
+  HUD widget show them — no extra flags. Without castbridge it transparently falls back to the
+  metadata-less path (catt). Nothing changes in how you invoke it.
 - **Local (`--local`) blocks** until the mpv window is closed and opens a window on the desktop —
   use it only when the user is physically at the machine. Prefer `--cast` otherwise. If you must
   run `--local` non-blocking, launch it in the background.

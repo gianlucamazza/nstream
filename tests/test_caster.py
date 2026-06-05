@@ -342,3 +342,57 @@ def test_status_idle_on_failure(monkeypatch):
     monkeypatch.setattr(caster.subprocess, "run", boom)
     st = caster.status(None)
     assert st["player_state"] == "IDLE"
+
+
+# --- cast() dispatch: castbridge vs catt -----------------------------------
+
+
+def test_cast_prefers_bridge_with_metadata(monkeypatch):
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
+
+    def fake_load(ip, url, *, follow=True, **meta):
+        assert meta["poster"] == "p.jpg" and meta["title"] == "Dune"
+        yield {"kind": "started", "title": "Dune"}
+        yield {"kind": "playing", "position": 10.0, "duration": 100.0}
+        yield {"kind": "ended", "position": 98.0, "duration": 100.0}
+
+    monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
+    seen = []
+    pos, dur, advance = caster.cast(
+        CFG, "Dune", "http://x", device="1.2.3.4", next_label="ep2",
+        meta=caster.CastMeta(poster="p.jpg"), on_event=seen.append,
+    )
+    assert (pos, dur) == (98.0, 100.0)
+    assert advance is True  # ended past _CAST_DONE with a queued next episode
+    assert [e["kind"] for e in seen] == ["started", "playing", "ended"]
+
+
+def test_cast_falls_back_to_catt_when_bridge_never_starts(monkeypatch):
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
+
+    def fake_load(ip, url, *, follow=True, **meta):
+        yield {"kind": "failed", "error": "bridge_unavailable", "message": "x"}
+
+    monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
+    called = {}
+
+    def fake_catt(*a, **k):
+        called["catt"] = True
+        return (1.0, 2.0, False)
+
+    monkeypatch.setattr(caster, "_cast_via_catt", fake_catt)
+    assert caster.cast(CFG, "Dune", "http://x", device="1.2.3.4") == (1.0, 2.0, False)
+    assert called.get("catt") is True
+
+
+def test_cast_uses_catt_when_bridge_absent(monkeypatch):
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    called = {}
+
+    def fake_catt(*a, **k):
+        called["catt"] = True
+        return (0.0, 0.0, False)
+
+    monkeypatch.setattr(caster, "_cast_via_catt", fake_catt)
+    caster.cast(CFG, "Dune", "http://x", device="1.2.3.4")
+    assert called.get("catt") is True

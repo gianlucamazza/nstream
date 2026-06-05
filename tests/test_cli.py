@@ -180,7 +180,17 @@ def _stub_play_video(monkeypatch, advance_until):
     calls = []
 
     def fake(
-        cfg, typ, video_id, title, opts, *, auto, next_label, on_save, reselect_on_wrong_audio=True
+        cfg,
+        typ,
+        video_id,
+        title,
+        opts,
+        *,
+        auto,
+        next_label,
+        on_save,
+        reselect_on_wrong_audio=True,
+        cast_meta=None,
     ):
         calls.append({"video_id": video_id, "auto": auto, "next_label": next_label})
         idx = len(calls)  # 1-based

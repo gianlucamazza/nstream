@@ -36,7 +36,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import caster, log
+from . import bridge, caster, log, serve
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -152,9 +152,14 @@ def _read_state() -> dict | None:
     return None
 
 
-def _write_state(pid: int, file: str, device: str | None) -> None:
+def _write_state(pid: int, file: str, device: str | None, mode: str = "catt") -> None:
+    """Track the serving process for `--stop`/GC. `mode` is "catt" (detached catt serves+casts)
+    or "serve" (our Range server serves, castbridge casts) so `stop()` tears down the right
+    receiver session."""
     with contextlib.suppress(OSError):
-        _state_path().write_text(json.dumps({"pid": pid, "file": file, "device": device}))
+        _state_path().write_text(
+            json.dumps({"pid": pid, "file": file, "device": device, "mode": mode})
+        )
 
 
 def _clear_state() -> None:
@@ -345,14 +350,29 @@ def cast_file(
     start: float | None = None,
     sub_paths: tuple[str, ...] = (),
     follow: bool = True,
+    meta: caster.CastMeta | None = None,
+    on_event: caster.EventCb | None = None,
 ) -> tuple[float, float, bool]:
-    """Cast the complete local `file_path` by letting catt serve it (the only delivery the
-    DMR accepts). Returns (position, duration, advance) like `caster.cast`.
+    """Cast the complete local `file_path` (a Tier-2 remux) to the DMR — the only delivery it
+    accepts is a complete, Range-served file. Returns (position, duration, advance).
 
-    `follow=False` (headless): spawn a detached `catt cast`, confirm the receiver started,
-    return — the detached catt keeps serving; `stop()` (or the next run's GC) cleans up the
-    server + temp file. `follow=True`: wait for the detached catt to exit (playback end),
-    then remove the temp file."""
+    Prefers the **native path** (ADR 0007): nstream's own Range HTTP server (`serve.py`) serves
+    the file and **castbridge** LOADs its URL with metadata (so the TV card + HUD widget light
+    up). Falls back to **catt** serving+casting (no metadata) when castbridge is unavailable or
+    can't start. `follow=False` (headless) leaves the server detached and records its PID for
+    `--stop`/GC; `follow=True` serves until playback ends, then removes the temp file."""
+    if device:
+        # The receiver fetches the file from us over the LAN, so the host firewall must let it
+        # in. Best-effort + idempotent; covers both the castbridge-serve and catt-serve paths.
+        serve.ensure_firewall(serve.lan_ip(device))
+    if device and bridge.bridge_available():
+        result = _cast_file_via_bridge(
+            title, file_path, device=device, start=start,
+            meta=meta or caster.CastMeta(), follow=follow, on_event=on_event,
+        )  # fmt: skip
+        if result is not None:
+            return result
+        # castbridge couldn't start → fall back to catt serving+casting below.
     base = ["catt", *(["-d", device] if device else [])]
     launch = [*base, "cast", file_path]
     if start and start > 1:
@@ -378,6 +398,8 @@ def cast_file(
     if not _await_start(device):
         _log.warning("il cast remux non è partito entro %ss", _START_TIMEOUT)
         print("nstream: il cast non è partito", file=sys.stderr)
+        if device:  # most common cause for a served file: the TV can't reach us (firewall)
+            print(serve.firewall_hint(serve.lan_ip(device)), file=sys.stderr)
         _teardown(proc.pid, file_path)
         return (0.0, 0.0, False)
 
@@ -395,6 +417,112 @@ def cast_file(
     finally:
         _teardown(proc.pid, file_path)
     return (0.0, 0.0, False)
+
+
+def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) -> dict:
+    """Metadata args for `bridge.cast_load` from a CastMeta (content type is always MP4 here)."""
+    return {
+        "title": title,
+        "poster": meta.poster,
+        "subtitle": meta.subtitle,
+        "series_title": meta.series_title,
+        "season": meta.season,
+        "episode": meta.episode,
+        "content_type": "video/mp4",
+        "current_time": float(start or 0.0),
+    }
+
+
+def _spawn_server(file_path: str, bind_ip: str) -> tuple[int, int] | None:
+    """Spawn a detached `python -m nstream.serve` for `file_path` on `bind_ip`, returning
+    (pid, port) once it prints its port, or None on failure. Detached so it outlives a headless
+    return — the receiver streams from it for the whole runtime."""
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "nstream.serve", file_path, "--bind", bind_ip],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError) as e:
+        _log.warning("serve detach fallito: %s", e)
+        return None
+    if proc.stdout is None:
+        _kill(proc.pid)
+        return None
+    line = proc.stdout.readline().strip()
+    if not line.startswith("PORT="):
+        _log.warning("serve: porta non annunciata (%r)", line[:40])
+        _kill(proc.pid)
+        return None
+    try:
+        port = int(line[len("PORT=") :])
+    except ValueError:
+        _kill(proc.pid)
+        return None
+    return proc.pid, port
+
+
+def _cast_file_via_bridge(
+    title: str,
+    file_path: str,
+    *,
+    device: str,
+    start: float | None,
+    meta: caster.CastMeta,
+    follow: bool,
+    on_event: caster.EventCb | None,
+) -> tuple[float, float, bool] | None:
+    """Serve the remux via the stdlib Range server and cast its URL with metadata via castbridge.
+    Returns (pos, dur, advance) — advance is always False (a remux is a single movie) — or **None**
+    when the cast never started, so `cast_file` falls back to catt (the temp file is kept)."""
+    bind_ip = serve.lan_ip(device)
+    kwargs = _bridge_meta_kwargs(title, meta, start)
+
+    if not follow:
+        spawned = _spawn_server(file_path, bind_ip)
+        if spawned is None:
+            return None
+        pid, port = spawned
+        started = False
+        for ev in bridge.cast_load(device, serve.served_url(bind_ip, port), follow=False, **kwargs):
+            kind = ev.get("kind")
+            if kind == "failed" and not started:
+                _kill(pid)  # keep the temp file for the catt fallback
+                return None
+            if kind == "started":
+                started = True
+            if on_event:
+                on_event(ev)
+        if not started:
+            _kill(pid)
+            return None
+        _write_state(pid, file_path, device, mode="serve")
+        print(f"📺 {title} → {device}", file=sys.stderr)
+        return (0.0, 0.0, False)
+
+    # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
+    server, port, _thread = serve.serve_file(file_path, bind_ip)
+    started = False
+    pos = dur = 0.0
+    try:
+        for ev in bridge.cast_load(device, serve.served_url(bind_ip, port), follow=True, **kwargs):
+            kind = ev.get("kind")
+            if kind == "failed" and not started:
+                return None  # keep the temp file for the catt fallback
+            if kind == "started":
+                started = True
+                print(f"📺 {title} → {device}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
+            if on_event:
+                on_event(ev)
+            if kind in ("playing", "paused", "ended"):
+                pos = float(ev.get("position") or pos)
+                dur = float(ev.get("duration") or dur)
+    except KeyboardInterrupt:
+        bridge.stop(device)
+    finally:
+        server.shutdown()
+        if started:  # a started cast ran to here → clean the temp file (fallback keeps it)
+            _rm(file_path)
+    return (pos, dur, False) if started else None
 
 
 def _await_start(device: str | None) -> bool:
@@ -422,10 +550,14 @@ def stop(device: str | None = None) -> bool:
     if not st:
         return False
     dev = st.get("device") if device is None else device
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(
-            ["catt", *(["-d", dev] if dev else []), "stop"], capture_output=True, text=True
-        )
+    if st.get("mode") == "serve":
+        # Native path: castbridge owns the receiver session; our process is the file server.
+        bridge.stop(dev)
+    else:
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["catt", *(["-d", dev] if dev else []), "stop"], capture_output=True, text=True
+            )
     _teardown(st.get("pid"), st.get("file"))
     return True
 
