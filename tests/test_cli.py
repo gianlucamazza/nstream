@@ -26,6 +26,13 @@ def test_main_preview_dispatch(monkeypatch):
     assert seen["argv"] == ["title", "movie", "tt1"]
 
 
+def test_main_layout_dispatch(monkeypatch):
+    # `nstream __layout` (fzf's resize transform) is forwarded to preview.run_layout.
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", "__layout"])
+    monkeypatch.setattr(cli.preview, "run_layout", lambda: 0)
+    assert cli.main() == 0
+
+
 def test_run_explain_movie(monkeypatch, capsys):
     # --explain ranks and prints WHY, without playing/casting.
     meta = {"id": "tt1", "type": "movie", "name": "Dune"}
@@ -1011,3 +1018,30 @@ def test_run_auto_audio_lang_not_in_real_tracks(monkeypatch, capsys):
     rc = cli.run_auto(CFG, _hns(query=["dune"], audio_lang="ita"), opts)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "audio_lang_unavailable"
+
+
+# --- headless title resolution (_select_meta) --------------------------------
+
+
+def test_select_meta_want_series_prefers_series():
+    # An explicit --season/--episode means a series: a same-named movie (e.g. the 2026
+    # Korean film "Mr. Robot") must not shadow the series the caller asks an episode of.
+    movie = Meta(id="tt2", type="movie", name="Mr. Robot")
+    series = Meta(id="tt1", type="series", name="Mr. Robot")
+    meta, how = cli._select_meta([movie, series], "mr robot", None, want_series=True)
+    assert meta["id"] == "tt1"
+    assert how == "exact"
+
+
+def test_select_meta_want_series_falls_back_to_movies():
+    # No series in the results → degrade to the normal pick instead of failing.
+    movie = Meta(id="tt2", type="movie", name="Mr. Robot")
+    meta, _ = cli._select_meta([movie], "mr robot", None, want_series=True)
+    assert meta["id"] == "tt2"
+
+
+def test_select_meta_default_keeps_first_exact():
+    movie = Meta(id="tt2", type="movie", name="Mr. Robot")
+    series = Meta(id="tt1", type="series", name="Mr. Robot")
+    meta, _ = cli._select_meta([movie, series], "mr robot", None)
+    assert meta["id"] == "tt2"  # no season/episode hint → existing behaviour unchanged
