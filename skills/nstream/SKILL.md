@@ -134,6 +134,21 @@ stdout is always a single JSON object. Read `ok`:
 - Missing debrid token / config error → nstream exits non-zero and prints to **stderr**; surface
   that line and point the user at `nstream --settings`.
 
+## HDR on the external monitor (local playback only)
+
+For `--local` playback of HDR content (4K/HDR/DV releases) on the docked external monitor
+(DP-2), pin the output to HDR for the whole session — `render:cm_auto_hdr` is intentionally
+OFF on this machine because every HDR↔SDR toggle full-modesets the output (~1s black on each
+workspace switch, i915 limitation):
+
+1. Before (or right after) starting playback: `jarvis-hdr-pin on`
+2. When the movie ends / mpv closes: `jarvis-hdr-pin off`
+3. `jarvis-hdr-pin status` shows live SDR/HDR per output (reads wp_color_manager_v1).
+
+mpv is already configured (`target-colorspace-hint-mode=source`); the pin costs one ~1s
+blank at on and one at off — never during the session. Skip the pin for SDR content and
+for `--cast` (the Chromecast handles HDR itself). The user can also toggle with SUPER+ALT+H.
+
 ## Safety rule (do not violate)
 
 The JSON **never** contains the stream/debrid URL or token — this is by design (the project
