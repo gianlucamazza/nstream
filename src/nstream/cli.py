@@ -166,6 +166,13 @@ def _play_video(
 
     `auto` overrides `opts.auto` for this single video: the binge loop forces it
     True from the second episode on, so use `auto` (not `opts.auto`) here."""
+    # Resolve the cast device BEFORE stream selection: ranking is profile-dependent
+    # (Chromecast receiver caps vs the local GPU), so when no device is reachable we
+    # must select for local mpv — not play a TV-filtered pick (e.g. AV1 dropped as
+    # "no-HW" even though the local GPU decodes it) on the laptop.
+    device = _resolve_cast_device(cfg, opts) if opts.cast else None
+    if opts.cast and device is None:
+        opts = replace(opts, cast=False)  # degrade: select and play with the local profile
     # Resolving streams (Torrentio + RD) can take a moment; without a menu to mask
     # the wait, say what's happening so the TUI doesn't look frozen.
     print(f"▶ {title} — cerco la sorgente migliore…", file=sys.stderr)
@@ -185,9 +192,6 @@ def _play_video(
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = _resume_position(cfg, video_id) if opts.history else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
-        # Resolve the cast device up front; if none is reachable on this LAN, degrade
-        # gracefully to local mpv instead of failing (network may have changed).
-        device = _resolve_cast_device(cfg, opts) if opts.cast else None
         if device is not None:
             print(f"▶ {title} — {name_line}", file=sys.stderr)
             pos, dur, advance = _play_on_cast(

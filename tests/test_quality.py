@@ -115,6 +115,17 @@ def test_reason_language():
     assert quality.unsupported_reason(info, CAPS, spec) == "lingua fra"
 
 
+def test_reason_language_czech_tagged():
+    """Regression: Czech (and CZ/SK-tracker friends) used to be absent from the registry,
+    so a Czech-tagged release parsed as untagged and slipped past the language filter."""
+    info = quality.parse_stream(
+        {"name": "Torrentio\n1080p", "title": "F.2015.CZ.1080p.WEB-DL\n👤 9 💾 2 GB"}
+    )
+    assert "ces" in info.languages
+    spec = FilterSpec(max_resolution=2160, audio_langs=("ita", "eng"), lang_filter=True)
+    assert quality.unsupported_reason(info, CAPS, spec) == "lingua ces"
+
+
 def test_reason_language_keeps_untagged_and_multi():
     unt = quality.parse_stream({"name": "Torrentio\n1080p", "title": "F.2025.1080p.WEB-DL\n👤 9"})
     mul = quality.parse_stream({"name": "Torrentio\n1080p", "title": "F.MULTI.1080p.WEB-DL\n👤 9"})
