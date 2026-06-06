@@ -220,12 +220,14 @@ def _play_video(
 
 def _resolve_cast_device(cfg: Config, opts: PlayOpts) -> str | None:
     """Resolve a Chromecast for this play, or None to fall back to local mpv when the
-    LAN has no reachable device (e.g. after a network change)."""
+    LAN has no reachable device (e.g. after a network change) or the user declines the
+    auto-cast confirmation. An explicit cast action (Alt-C → `cast_choose`) is its own
+    confirmation, so only the auto route (`prefer_cast`/`--cast`) asks."""
     try:
-        return _resolve_device(cfg, choose=opts.cast_choose)
+        return _resolve_device(cfg, choose=opts.cast_choose, confirm=not opts.cast_choose)
     except CastUnavailable as e:
         print(f"nstream: {e} — riproduco in locale", file=sys.stderr)
-        _log.info("nessun Chromecast → fallback locale")
+        _log.info("cast non attivo (%s) → fallback locale", e)
         return None
 
 
@@ -592,9 +594,17 @@ def _norm_title(s: str) -> str:
     return " ".join("".join(c if c.isalnum() else " " for c in s.casefold()).split())
 
 
-def _select_meta(metas: list[Meta], query: str, year: str | None) -> tuple[Meta, str]:
+def _select_meta(
+    metas: list[Meta], query: str, year: str | None, *, want_series: bool = False
+) -> tuple[Meta, str]:
     """Pick a title without fzf: an exact normalized-name match (optionally pinned by
-    release year) wins, else the first result. Returns (meta, "exact"|"first")."""
+    release year) wins, else the first result. Returns (meta, "exact"|"first").
+
+    `want_series` (an explicit --season/--episode) prefers series results — a same-named
+    movie must not shadow the series the caller is clearly asking an episode of."""
+    if want_series:
+        series = [m for m in metas if m.get("type") == "series"]
+        metas = series or metas
     q = _norm_title(query)
     # A trailing 4-digit year ("dune 2021") is a disambiguator, not part of the title: split it
     # off so the name match works, and let it pin the year when --year wasn't given.
@@ -666,7 +676,10 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
                 {"ok": False, "error": "no_result", "message": f"nessun risultato per «{query}»"}
             )
             return 1
-        meta, selection = _select_meta(metas, query, args.year)
+        meta, selection = _select_meta(
+            metas, query, args.year,
+            want_series=args.season is not None or args.episode is not None,
+        )  # fmt: skip
     typ = meta.get("type", "movie")
     name = meta.get("name", "?")
     imdb_id = meta.get("id", "")
@@ -1143,6 +1156,9 @@ def main() -> int:
     # before argparse (it must stay lightweight and not collide with the query positional).
     if sys.argv[1:2] == ["__preview"]:
         return preview.run_preview(sys.argv[2:])
+    # Same for `nstream __layout`: fzf's resize transform, re-derives the preview placement.
+    if sys.argv[1:2] == ["__layout"]:
+        return preview.run_layout()
 
     parser = argparse.ArgumentParser(
         prog="nstream",
