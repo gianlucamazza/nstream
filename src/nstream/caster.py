@@ -50,6 +50,27 @@ class CastUnavailable(Exception):
     """Raised when no Chromecast can be resolved (ambiguous / none / absent)."""
 
 
+# Session latch for the auto-cast confirmation: once the user okays casting, later plays
+# (binge auto-advance, next episode) don't re-ask. A refusal is per-play (asked again).
+_cast_confirmed = False
+
+
+def _confirm_device(name: str, ip: str) -> bool:
+    """Confirm the auto-resolved cast target on an interactive tty ([S/n], Enter = yes), so a
+    `prefer_cast` route to the TV is announced instead of silent. Non-interactive callers and
+    an already-confirmed session always pass."""
+    global _cast_confirmed
+    if _cast_confirmed or not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return True
+    try:
+        ans = input(f"📺 Chromecast trovato: {name} ({ip}) — casto lì? [S/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    ok = ans in ("", "s", "si", "sì", "y", "yes")
+    _cast_confirmed = ok
+    return ok
+
+
 # How often to poll `catt info -j` while casting (resume tracking + end detection).
 # Each poll spawns a `catt` process (new castv2 connection), so keep it coarse: 15s
 # costs ~240 polls over a 2h film and resume granularity of ≤15s is plenty.
@@ -62,7 +83,12 @@ _CAST_GIVEUP = 4
 
 
 def resolve_device(
-    cfg: Config, *, choose: bool = False, headless: bool = False, prefer: str | None = None
+    cfg: Config,
+    *,
+    choose: bool = False,
+    headless: bool = False,
+    prefer: str | None = None,
+    confirm: bool = False,
 ) -> str:
     """Resolve the value for `catt -d` — an **IP** from a fresh `catt scan`, so casting
     is robust to mDNS name-resolution flakiness after a network change. A configured
@@ -73,7 +99,12 @@ def resolve_device(
 
     `headless` (non-interactive callers) never opens the fzf picker: an explicit `prefer`
     name (or `cfg.cast_device`) must be on the LAN, else a single device is used, else it
-    raises CastUnavailable so the caller can surface a clean error instead of blocking."""
+    raises CastUnavailable so the caller can surface a clean error instead of blocking.
+
+    `confirm` asks once per session ([S/n] on a tty) before an **auto**-resolved device is
+    used — so a `prefer_cast` start announces where the video is going instead of silently
+    casting. Explicit picks (`prefer`, the fzf picker) never re-ask; a refusal raises
+    CastUnavailable so the caller falls back to local playback."""
     # A missing binary must not masquerade as an empty network: run_cmd swallows the
     # OSError, so an instant empty scan would read as "no Chromecast" when the real
     # problem is catt not being on PATH (e.g. a desktop session without ~/.local/bin).
@@ -93,6 +124,8 @@ def resolve_device(
     if cfg.cast_device and not choose:
         ip = by_name.get(cfg.cast_device)
         if ip:
+            if confirm and not _confirm_device(cfg.cast_device, ip):
+                raise CastUnavailable(f"cast su '{cfg.cast_device}' rifiutato")
             return ip
         _log.info("device preferito '%s' non in rete → ridiscovery", cfg.cast_device)
     if not devices:
@@ -101,7 +134,10 @@ def resolve_device(
         # that would cast to an absent device. The caller degrades to local playback.
         raise CastUnavailable("nessun Chromecast in rete")
     if len(devices) == 1 and not choose:
-        return devices[0][1]  # the IP
+        name, ip = devices[0]
+        if confirm and not _confirm_device(name, ip):
+            raise CastUnavailable(f"cast su '{name}' rifiutato")
+        return ip
     if headless:
         # Ambiguous LAN and no usable preference: a headless caller can't pick — surface
         # it as an error (the agent re-runs with --device) instead of opening fzf.

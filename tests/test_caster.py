@@ -58,6 +58,74 @@ def test_resolve_device_single_auto_ip(monkeypatch):
     assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.9"
 
 
+# --- auto-cast confirmation --------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_confirm_latch():
+    caster._cast_confirmed = False
+    yield
+    caster._cast_confirmed = False
+
+
+def test_resolve_device_confirm_accepted(monkeypatch):
+    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
+    monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: True)
+    assert caster.resolve_device(Config(torrentio_base="tb"), confirm=True) == "10.0.0.9"
+
+
+def test_resolve_device_confirm_declined_raises(monkeypatch):
+    # A declined confirmation must fall back like an absent device (local playback).
+    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
+    monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: False)
+    with pytest.raises(caster.CastUnavailable, match="rifiutato"):
+        caster.resolve_device(Config(torrentio_base="tb"), confirm=True)
+
+
+def test_resolve_device_confirm_preferred_device(monkeypatch):
+    monkeypatch.setattr(
+        caster.settings,
+        "scan_devices",
+        _scan([("Salotto", "192.168.1.5"), ("Camera", "192.168.1.6")]),
+    )
+    asked = []
+    monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: not asked.append((name, ip)))
+    cfg = Config(torrentio_base="tb", cast_device="Salotto")
+    assert caster.resolve_device(cfg, confirm=True) == "192.168.1.5"
+    assert asked == [("Salotto", "192.168.1.5")]
+
+
+class _Tty:
+    def isatty(self):
+        return True
+
+
+def test_confirm_device_default_yes_and_session_latch(monkeypatch):
+    monkeypatch.setattr(caster.sys, "stdin", _Tty())
+    monkeypatch.setattr(caster.sys, "stderr", _Tty())
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda msg: prompts.append(msg) or "")
+    assert caster._confirm_device("TV1", "10.0.0.9") is True  # Enter = yes
+    assert "TV1" in prompts[0] and "10.0.0.9" in prompts[0]
+    # Latched: the next play (binge advance) must not re-ask.
+    monkeypatch.setattr("builtins.input", lambda msg: pytest.fail("must not re-ask"))
+    assert caster._confirm_device("TV1", "10.0.0.9") is True
+
+
+def test_confirm_device_refusal_not_latched(monkeypatch):
+    monkeypatch.setattr(caster.sys, "stdin", _Tty())
+    monkeypatch.setattr(caster.sys, "stderr", _Tty())
+    monkeypatch.setattr("builtins.input", lambda msg: "n")
+    assert caster._confirm_device("TV1", "10.0.0.9") is False
+    assert caster._cast_confirmed is False  # a refusal is per-play, asked again next time
+
+
+def test_confirm_device_non_tty_passes(monkeypatch):
+    # Headless/piped callers must never block on input.
+    monkeypatch.setattr("builtins.input", lambda msg: pytest.fail("must not prompt"))
+    assert caster._confirm_device("TV1", "10.0.0.9") is True
+
+
 def test_resolve_device_multiple_prompts_ip(monkeypatch):
     monkeypatch.setattr(
         caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
