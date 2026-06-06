@@ -75,6 +75,8 @@ def test_preview_adds_three_field_rows_and_command(monkeypatch):
     assert "--preview" in cmd
     assert any("__preview {2}" in c for c in cmd)
     assert "--preview-window" in cmd
+    # resize re-derives the placement and re-renders the poster at the new size
+    assert any(c.startswith("resize:transform:") and c.endswith(" __layout") for c in cmd)
 
 
 def test_preview_none_emits_blank_field(monkeypatch):

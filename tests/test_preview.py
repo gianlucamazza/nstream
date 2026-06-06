@@ -177,3 +177,39 @@ def test_run_preview_never_raises(monkeypatch):
 def test_run_preview_bad_args_returns_zero():
     assert preview.run_preview([]) == 0
     assert preview.run_preview(["episode", "ttX", "notint", "1"]) == 0
+
+
+# --- run_layout (resize transform) -------------------------------------------
+
+
+def _run_layout(monkeypatch, capsys, cols, lines):
+    monkeypatch.setenv("FZF_COLUMNS", str(cols))
+    monkeypatch.setenv("FZF_LINES", str(lines))
+    monkeypatch.setattr(preview, "_load_cfg", lambda: CFG)
+    monkeypatch.setattr(preview.ui, "detect_caps", lambda cfg: CAPS_IMG)
+    assert preview.run_layout() == 0
+    return capsys.readouterr().out.strip()
+
+
+def test_run_layout_breakpoints(monkeypatch, capsys):
+    assert _run_layout(monkeypatch, capsys, 120, 40) == (
+        "change-preview-window(right:50%:wrap)+refresh-preview"
+    )
+    assert _run_layout(monkeypatch, capsys, 60, 30) == (
+        "change-preview-window(down:45%:wrap)+refresh-preview"
+    )
+    assert _run_layout(monkeypatch, capsys, 40, 10) == (
+        "change-preview-window(hidden)+refresh-preview"
+    )
+
+
+def test_run_layout_never_raises(monkeypatch, capsys):
+    def boom(cfg):
+        raise RuntimeError("caps detection down")
+
+    monkeypatch.setenv("FZF_COLUMNS", "100")
+    monkeypatch.setenv("FZF_LINES", "30")
+    monkeypatch.setattr(preview, "_load_cfg", lambda: CFG)
+    monkeypatch.setattr(preview.ui, "detect_caps", boom)
+    assert preview.run_layout() == 0
+    assert capsys.readouterr().out == ""  # empty output = fzf no-op, pane untouched
