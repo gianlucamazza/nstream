@@ -52,6 +52,11 @@ LANGUAGES: tuple[Language, ...] = (
     Language("pol", "Polski", ("POL", "POLISH"), ("🇵🇱",), ("pl",)),
     Language("hin", "हिन्दी", ("HIN", "HINDI"), ("🇮🇳",), ("hi",)),
     Language("ara", "العربية", ("ARA", "ARABIC"), ("🇸🇦",), ("ar",)),
+    Language("ces", "Čeština", ("CZE", "CZECH", "CZ"), ("🇨🇿",), ("cs", "cze")),
+    Language("slk", "Slovenčina", ("SVK", "SLOVAK", "SK"), ("🇸🇰",), ("sk", "slo")),
+    Language("hun", "Magyar", ("HUN", "HUNGARIAN"), ("🇭🇺",), ("hu",)),
+    Language("ukr", "Українська", ("UKR", "UKRAINIAN"), ("🇺🇦",), ("uk",)),
+    Language("tur", "Türkçe", ("TUR", "TURKISH"), ("🇹🇷",), ("tr",)),
     Language(
         "multi", "Multi", ("MULTI", "MULTILANG", "MULTI-LANG", "DUAL", "DUALAUDIO"), (), (), False
     ),

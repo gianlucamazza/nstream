@@ -153,6 +153,31 @@ def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
     assert (notice, advance) == (None, False)
 
 
+def test_play_video_cast_fallback_selects_local_profile(monkeypatch):
+    """Regression: when --cast resolves no device, stream selection must run with the
+    LOCAL profile — not the Chromecast caps (which e.g. drop AV1 as "no-HW" even though
+    the local GPU decodes it). The device is resolved BEFORE selection for this reason."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(cli, "_resolve_cast_device", lambda *a, **k: None)  # no TV on the LAN
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
+    seen = {}
+
+    def spy(cfg, results, opts, **kw):
+        seen["cast"] = opts.cast
+        return cli.stream_select.VettedStream(stream=results[0], auto=True, safety_sub_lang=None)
+
+    monkeypatch.setattr(cli.stream_select, "prepare_stream", spy)
+    opts = cli.PlayOpts(
+        auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+    )
+    assert seen["cast"] is False  # selection downgraded to the local profile
+    assert (notice, advance) == (None, False)
+
+
 def test_play_video_no_streams_returns_notice(monkeypatch):
     """No streams → return a user-facing notice (surfaced as the menu header)."""
     cfg = Config(torrentio_base="tb", hwdec="")

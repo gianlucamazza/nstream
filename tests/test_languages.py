@@ -44,6 +44,17 @@ def test_lat_token_maps_to_spanish():
     assert languages.normalize("LAT") == "spa"  # Latino releases
 
 
+def test_eastern_european_languages_registered():
+    # Regression: Czech-tracker releases used to parse as untagged (no registry entry).
+    assert languages.normalize("CZE") == "ces"
+    assert languages.normalize("cs") == "ces"
+    assert languages.normalize("czech") == "ces"
+    assert languages.normalize("SK") == "slk"
+    assert languages.normalize("hu") == "hun"
+    assert languages.normalize("ukrainian") == "ukr"
+    assert languages.normalize("tr") == "tur"
+
+
 def test_track_lang_from_tag():
     assert languages.track_lang("ita") == "ita"  # 3-letter tag
     assert languages.track_lang("it") == "ita"  # 2-letter tag

@@ -15,7 +15,9 @@ mkdir -p "$BIN" "$APPS" "$CFG_DIR"
 [[ -L "$BIN/nstream-fuzzel" ]] && rm -f "$BIN/nstream-fuzzel"
 
 # Install the CLI (zero runtime deps, but uv gives an isolated entry point).
-uv tool install --force "$REPO"
+# --reinstall: uv caches the built wheel by version, so without it an unchanged
+# version number silently deploys a STALE build of the local checkout.
+uv tool install --force --reinstall "$REPO"
 
 # Bash helper is not a Python entry point — install it directly.
 install -m755 "$REPO/nstream-fuzzel" "$BIN/nstream-fuzzel"
