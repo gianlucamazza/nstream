@@ -144,6 +144,8 @@ def _gc_stale() -> None:
         for f in _cache_dir().glob("cast-*.mp4"):
             if str(f) != keep:
                 f.unlink(missing_ok=True)
+        for f in _cache_dir().glob("catt-*.log"):  # startup-diagnosis stderr leftovers
+            f.unlink(missing_ok=True)
 
 
 def _read_state() -> dict | None:
@@ -381,27 +383,37 @@ def cast_file(
         launch += ["-s", sub_paths[0]]
     dest = device or "Chromecast"
     print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
+    # Capture catt's stderr to a temp file (a detached pipe would have no reader): if the
+    # cast never starts, its tail says why (device unreachable, refused media, …) — the
+    # diagnosis that was lost to DEVNULL. Removed once startup is confirmed (or by GC).
+    err_fd, err_path = tempfile.mkstemp(suffix=".log", prefix="catt-", dir=str(_cache_dir()))
     try:
         # Detached session: catt serves the file and blocks for the whole runtime, so it
         # must outlive a headless return / not hold the foreground during follow.
         proc = subprocess.Popen(  # noqa: S603
-            launch, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+            launch, stdout=subprocess.DEVNULL, stderr=err_fd, start_new_session=True
         )
     except (OSError, FileNotFoundError):
         print("nstream: catt non trovato", file=sys.stderr)
         _rm(file_path)
+        _rm(err_path)
         return (0.0, 0.0, False)
+    finally:
+        os.close(err_fd)
     _write_state(proc.pid, file_path, device)
 
     # Confirm the receiver actually started (the serving catt has no useful exit code until
     # playback ends, so poll its status instead).
     if not _await_start(device):
         _log.warning("il cast remux non è partito entro %ss", _START_TIMEOUT)
+        _log_catt_stderr(err_path)
         print("nstream: il cast non è partito", file=sys.stderr)
         if device:  # most common cause for a served file: the TV can't reach us (firewall)
             print(serve.firewall_hint(serve.lan_ip(device)), file=sys.stderr)
         _teardown(proc.pid, file_path)
+        _rm(err_path)
         return (0.0, 0.0, False)
+    _rm(err_path)  # startup confirmed: the capture served its (diagnosis-only) purpose
 
     if not follow:
         # Leave the detached catt serving; --stop / next-run GC tears it down.
@@ -431,6 +443,16 @@ def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) 
         "content_type": "video/mp4",
         "current_time": float(start or 0.0),
     }
+
+
+def _log_bridge_failed(ev: dict) -> None:
+    """Log WHY the castbridge LOAD failed before falling back to catt — the reason was
+    previously discarded, making a Tier-2 startup failure undiagnosable post-mortem."""
+    _log.warning(
+        "castbridge non partito (%s: %s) → fallback catt",
+        ev.get("error") or "?",
+        ev.get("message") or "?",
+    )
 
 
 def _spawn_server(file_path: str, bind_ip: str) -> tuple[int, int] | None:
@@ -486,6 +508,7 @@ def _cast_file_via_bridge(
         for ev in bridge.cast_load(device, serve.served_url(bind_ip, port), follow=False, **kwargs):
             kind = ev.get("kind")
             if kind == "failed" and not started:
+                _log_bridge_failed(ev)
                 _kill(pid)  # keep the temp file for the catt fallback
                 return None
             if kind == "started":
@@ -493,6 +516,7 @@ def _cast_file_via_bridge(
             if on_event:
                 on_event(ev)
         if not started:
+            _log.warning("castbridge: LOAD senza evento started → fallback catt")
             _kill(pid)
             return None
         _write_state(pid, file_path, device, mode="serve")
@@ -507,6 +531,7 @@ def _cast_file_via_bridge(
         for ev in bridge.cast_load(device, serve.served_url(bind_ip, port), follow=True, **kwargs):
             kind = ev.get("kind")
             if kind == "failed" and not started:
+                _log_bridge_failed(ev)
                 return None  # keep the temp file for the catt fallback
             if kind == "started":
                 started = True
@@ -525,14 +550,32 @@ def _cast_file_via_bridge(
     return (pos, dur, False) if started else None
 
 
+def _log_catt_stderr(path: str) -> None:
+    """Log the tail of the detached catt's captured stderr — why the cast never started.
+    The file holds a local path (no debrid token), so the tail is safe to log."""
+    with contextlib.suppress(OSError):
+        tail = Path(path).read_text(errors="replace")[-500:].strip()
+        if tail:
+            _log.warning("catt stderr: %s", tail)
+
+
 def _await_start(device: str | None) -> bool:
-    """Poll the receiver until it reports playback (or buffering), or time out."""
+    """Poll the receiver until it reports playback (or buffering), or time out. On timeout,
+    log the states observed so the failure mode is reconstructable: a receiver that never
+    answered ("unreachable") points at the network, one that stayed IDLE answered but never
+    fetched/played our file (firewall on the serve port, or refused media)."""
     deadline = time.monotonic() + _START_TIMEOUT
+    seen: list[str] = []
     while time.monotonic() < deadline:
-        state = caster.status(device).get("player_state") or ""
+        info = caster._raw_info(device)
+        state = str(info.get("player_state") or "") if info else ""
         if state in ("PLAYING", "PAUSED", "BUFFERING"):
             return True
+        mark = state or ("idle" if info else "unreachable")
+        if not seen or seen[-1] != mark:
+            seen.append(mark)
         time.sleep(_START_POLL)
+    _log.warning("receiver mai in riproduzione; stati osservati: %s", ",".join(seen) or "(nessuno)")
     return False
 
 

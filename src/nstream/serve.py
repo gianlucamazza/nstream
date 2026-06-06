@@ -170,6 +170,16 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         self._respond(write_body=True)
 
     def _respond(self, *, write_body: bool) -> None:
+        # The first request proves the receiver can reach us — the key discriminator when a
+        # Tier-2 cast fails to start (no request → network/firewall; request but no playback
+        # → media/receiver). One INFO line per server; later requests stay at debug.
+        if not self.server.got_request:
+            self.server.got_request = True
+            _log.info(
+                "serve: prima richiesta da %s: %s %s (Range=%s)",
+                self.client_address[0], self.command, self.path,
+                self.headers.get("Range") or "-",
+            )  # fmt: skip
         try:
             size = os.path.getsize(self._path)
         except OSError:
@@ -237,6 +247,7 @@ class _FileServer(ThreadingHTTPServer):
     def __init__(self, addr, file_path: str):
         super().__init__(addr, RangeFileHandler)
         self.file_path = file_path
+        self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
 
 
 def _make_server(bind_ip: str, file_path: str, preferred_port: int = 0) -> _FileServer:
@@ -279,6 +290,10 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=0)
     args = ap.parse_args(argv)
+    # Detached process: nothing has configured logging (cli._entry does it for the TUI), so
+    # without this the first-request INFO — the network-vs-media discriminator on a Tier-2
+    # startup failure — would be lost exactly in the headless case.
+    log.setup_logging()
     if not os.path.isfile(args.file):
         print(f"serve: file non trovato: {args.file}", file=sys.stderr)
         return 2
