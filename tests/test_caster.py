@@ -14,8 +14,26 @@ CFG = Config(torrentio_base="tb")
 # --- device resolution -----------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _catt_on_path(monkeypatch):
+    """resolve_device guards on catt's presence; keep tests hermetic (the makepkg
+    check() chroot, for one, has no catt installed)."""
+    monkeypatch.setattr(caster.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+
 def _scan(devs):
     return lambda: list(devs)  # devs: [(name, ip)]
+
+
+def test_resolve_device_missing_catt_says_so(monkeypatch):
+    """A missing catt binary must surface as such — not masquerade as an empty network
+    (run_cmd swallows the OSError, so the scan would just look instantly empty)."""
+    monkeypatch.setattr(caster.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(
+        caster.settings, "scan_devices", lambda *a, **k: pytest.fail("must not scan")
+    )
+    with pytest.raises(caster.CastUnavailable, match="catt non trovato"):
+        caster.resolve_device(CFG)
 
 
 def test_resolve_device_pref_present_returns_ip(monkeypatch):
@@ -359,8 +377,13 @@ def test_cast_prefers_bridge_with_metadata(monkeypatch):
     monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
     seen = []
     pos, dur, advance = caster.cast(
-        CFG, "Dune", "http://x", device="1.2.3.4", next_label="ep2",
-        meta=caster.CastMeta(poster="p.jpg"), on_event=seen.append,
+        CFG,
+        "Dune",
+        "http://x",
+        device="1.2.3.4",
+        next_label="ep2",
+        meta=caster.CastMeta(poster="p.jpg"),
+        on_event=seen.append,
     )
     assert (pos, dur) == (98.0, 100.0)
     assert advance is True  # ended past _CAST_DONE with a queued next episode
