@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import select
+import shutil
 import subprocess
 import sys
 import termios
@@ -73,6 +74,12 @@ def resolve_device(
     `headless` (non-interactive callers) never opens the fzf picker: an explicit `prefer`
     name (or `cfg.cast_device`) must be on the LAN, else a single device is used, else it
     raises CastUnavailable so the caller can surface a clean error instead of blocking."""
+    # A missing binary must not masquerade as an empty network: run_cmd swallows the
+    # OSError, so an instant empty scan would read as "no Chromecast" when the real
+    # problem is catt not being on PATH (e.g. a desktop session without ~/.local/bin).
+    if shutil.which("catt") is None:
+        _log.warning("catt non trovato nel PATH → cast non disponibile")
+        raise CastUnavailable("catt non trovato nel PATH (pipx install catt)")
     devices = settings.scan_devices()  # [(name, ip)] on the *current* LAN
     by_name = dict(devices)
     # An explicit target (--device) wins, but only if actually on this LAN.
