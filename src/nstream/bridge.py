@@ -90,7 +90,7 @@ def _connect(path: str | None = None) -> socket.socket | None:
 
 def ensure_daemon(timeout: float = _DAEMON_START_TIMEOUT) -> bool:
     """Ensure `castbridge --daemon` is running and its socket is reachable. Returns True if a
-    connection can be made. Spawns the daemon detached under the relay's `spawn.lock` flock so
+    connection can be made. Spawns the daemon under the relay's `spawn.lock` flock so
     concurrent starts (a relay + nstream) don't both launch it. Best-effort: any failure → False
     and the caller degrades to catt."""
     s = _connect()
@@ -109,17 +109,46 @@ def ensure_daemon(timeout: float = _DAEMON_START_TIMEOUT) -> bool:
         if s is not None:
             s.close()
             return True
+        # The daemon must outlive its client. start_new_session detaches the process
+        # SESSION but not the cgroup: spawned as a plain child it inherits the first
+        # caller's lifecycle domain (terminal scope, systemd service, ...) and gets
+        # killed at that supervisor's teardown. On systemd hosts, spawn it into its
+        # own transient user unit instead (--collect reaps the unit on exit; a name
+        # collision with a live unit is fine — the socket poll below decides). The
+        # detached Popen remains as the non-systemd fallback.
+        spawned = False
         try:
-            subprocess.Popen(
-                [_binary(), "--daemon"],
+            rc = subprocess.run(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--collect",
+                    "--quiet",
+                    "--unit=castbridge",
+                    "--",
+                    _binary(),
+                    "--daemon",
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except (OSError, subprocess.SubprocessError) as e:
-            _log.warning("impossibile avviare castbridge --daemon: %s", e)
-            return False
+                timeout=10,
+            ).returncode
+            spawned = rc == 0
+        except (OSError, subprocess.SubprocessError):
+            spawned = False
+        if not spawned:
+            try:
+                subprocess.Popen(
+                    [_binary(), "--daemon"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except (OSError, subprocess.SubprocessError) as e:
+                _log.warning("impossibile avviare castbridge --daemon: %s", e)
+                return False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             s = _connect()
