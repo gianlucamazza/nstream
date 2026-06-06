@@ -36,6 +36,19 @@ def run_preview(argv: list[str]) -> int:
     return 0
 
 
+def run_layout() -> int:
+    """Entry for `__layout`: fzf's resize transform. Re-derives the preview window
+    placement for the new terminal size and refreshes the pane so chafa re-renders
+    the poster at the new dimensions. Best-effort: prints nothing on failure (fzf
+    treats empty transform output as a no-op)."""
+    with contextlib.suppress(Exception):
+        cols = _int_env("FZF_COLUMNS", 80)
+        lines = _int_env("FZF_LINES", 24)
+        lay = ui.layout_for(cols, lines, ui.detect_caps(_load_cfg()))
+        print(f"change-preview-window({lay.preview_window})+refresh-preview")
+    return 0
+
+
 def _render(argv: list[str]) -> str:
     kind = argv[0] if argv else ""
     cfg = _load_cfg()

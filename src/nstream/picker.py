@@ -40,12 +40,16 @@ def _preview_exe() -> str:
 
 def _preview_args(preview_args: list[str | None]) -> list[str]:
     """fzf flags wiring the per-row preview: the command (field 2 carries the token), the
-    size-adaptive window placement, and a toggle key."""
+    size-adaptive window placement, and a toggle key. On terminal resize fzf re-runs
+    `nstream __layout` to re-derive the placement and re-render the poster at the new
+    size (fzf caches preview output and never re-runs it on its own)."""
+    exe = _preview_exe()
     lay = ui.layout_for(*shutil.get_terminal_size((80, 24)), ui.active_caps())
     return [
-        "--preview", f"{_preview_exe()} __preview {{2}}",
+        "--preview", f"{exe} __preview {{2}}",
         "--preview-window", lay.preview_window,
         "--bind", "ctrl-/:toggle-preview",
+        "--bind", f"resize:transform:{exe} __layout",
     ]  # fmt: skip
 
 
