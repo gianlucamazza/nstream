@@ -197,6 +197,129 @@ def test_audio_langs_of_no_preference_returns_none():
     assert stream_select._audio_langs_of(Config(torrentio_base="tb", audio_langs=[]), s) is None
 
 
+def test_audio_langs_of_fallback_tag_probes(monkeypatch):
+    # Regression: a release tagged only with a FALLBACK language (eng, primary ita) must be
+    # probed, not trusted — trusting it hid the primary's absence (played eng, no warning).
+    tr = stream_select.tracks
+    calls = []
+    monkeypatch.setattr(
+        tr,
+        "probe_tracks",
+        lambda url: calls.append(url) or tr.Tracks(audio=[tr.Track(1, "eng"), tr.Track(2, "rus")]),
+    )
+    s: Stream = {"url": "u", "title": "Mr.Robot.S01.BDRemux.ENG.RUS.1080p"}
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    assert stream_select._audio_langs_of(cfg, s) == {"eng", "rus"}  # no ita → guard can act
+    assert calls  # the probe actually ran
+
+
+def test_audio_langs_of_trusts_primary_tag_intersection(monkeypatch):
+    def boom(url):
+        raise AssertionError("ffprobe should be skipped when the name tags the primary")
+
+    monkeypatch.setattr(stream_select.tracks, "probe_tracks", boom)
+    s: Stream = {"url": "u", "title": "Movie.2024.1080p.ITA.ENG.x264-GRP"}
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    assert stream_select._audio_langs_of(cfg, s) == {"ita", "eng"}  # tagged ∩ pref, not all pref
+
+
+def test_audio_langs_of_fallback_tag_unverifiable_uses_name(monkeypatch):
+    # Probe impossible on a fallback-tagged name → the name's info still beats None,
+    # so the guard fires (reselect/safety-subs) instead of silently playing the fallback.
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks", lambda url: stream_select.tracks.Tracks()
+    )
+    s: Stream = {"url": "u", "title": "Movie.2024.1080p.ENG.x264-GRP"}
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    assert stream_select._audio_langs_of(cfg, s) == {"eng"}
+
+
+# --- primary-language reselect (_reselect_for_primary) ----------------------
+
+
+def _reselect_env(monkeypatch, candidates, *, real_langs, resolve_fail=()):
+    """Wire _reselect_for_primary's collaborators: candidates list, identity resolve
+    (None for urls in `resolve_fail`), and a name→langs map for stream_audio_langs."""
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda cfg, res, cast: candidates)
+    monkeypatch.setattr(
+        stream_select,
+        "_resolve_stream",
+        lambda cfg, s: None if s.get("url") in resolve_fail else s,
+    )
+    monkeypatch.setattr(
+        stream_select, "stream_audio_langs", lambda cfg, s: real_langs.get(s.get("url"))
+    )
+
+
+def test_reselect_for_primary_finds_deep_tagged(monkeypatch, capsys):
+    # The ita-tagged release ranks far below cached eng ones: the probe budget must be
+    # spent on name-tagged candidates, not burned on the next-best fallbacks.
+    eng = [{"url": f"e{i}", "title": f"Show.S01.ENG.{i}.1080p"} for i in range(6)]
+    ita: Stream = {"url": "i1", "title": "Show.S01.ITA.ENG.1080p"}
+    resolved = []
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [*eng, ita])
+    monkeypatch.setattr(
+        stream_select, "_resolve_stream", lambda cfg, s: resolved.append(s["url"]) or s
+    )
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"ita"}))
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    current: Stream = {"url": "cur", "title": "Show.S01.ENG.RUS.BDRemux"}
+    got = stream_select._reselect_for_primary(cfg, [], current, _gopts(), "ita")
+    assert got is ita
+    assert resolved == ["i1"]  # the eng candidates were never resolved/probed
+    assert "cerco una sorgente ita" in capsys.readouterr().err
+
+
+def test_reselect_for_primary_skips_mistag(monkeypatch):
+    a: Stream = {"url": "a", "title": "Show.ITA.fake.1080p"}
+    b: Stream = {"url": "b", "title": "Show.ITA.real.1080p"}
+    _reselect_env(
+        monkeypatch, [a, b], real_langs={"a": frozenset({"eng"}), "b": frozenset({"ita"})}
+    )
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    current: Stream = {"url": "cur", "title": "Show.ENG.1080p"}
+    assert stream_select._reselect_for_primary(cfg, [], current, _gopts(), "ita") is b
+
+
+def test_reselect_for_primary_unverifiable_tagged_accepted(monkeypatch):
+    a: Stream = {"url": "a", "title": "Show.ITA.1080p"}
+    _reselect_env(monkeypatch, [a], real_langs={})  # probe → None
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    current: Stream = {"url": "cur", "title": "Show.ENG.1080p"}
+    assert stream_select._reselect_for_primary(cfg, [], current, _gopts(), "ita") is a
+
+
+def test_reselect_for_primary_unverifiable_multi_skipped(monkeypatch):
+    a: Stream = {"url": "a", "title": "Show.Dual.1080p"}  # "multi" maybe, probe fails
+    _reselect_env(monkeypatch, [a], real_langs={})
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    current: Stream = {"url": "cur", "title": "Show.ENG.1080p"}
+    assert stream_select._reselect_for_primary(cfg, [], current, _gopts(), "ita") is None
+
+
+def test_reselect_for_primary_resolve_failure_continues(monkeypatch):
+    a: Stream = {"url": "a", "title": "Show.ITA.dead.1080p"}
+    b: Stream = {"url": "b", "title": "Show.ITA.alive.1080p"}
+    _reselect_env(monkeypatch, [a, b], real_langs={"b": frozenset({"ita"})}, resolve_fail=("a",))
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    current: Stream = {"url": "cur", "title": "Show.ENG.1080p"}
+    assert stream_select._reselect_for_primary(cfg, [], current, _gopts(), "ita") is b
+
+
+def test_reselect_for_primary_respects_limit(monkeypatch):
+    cands = [{"url": f"i{i}", "title": f"Show.ITA.{i}.1080p"} for i in range(6)]
+    tried = []
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: cands)
+    monkeypatch.setattr(
+        stream_select, "_resolve_stream", lambda cfg, s: tried.append(s["url"]) or s
+    )
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    current: Stream = {"url": "cur", "title": "Show.ENG.1080p"}
+    assert stream_select._reselect_for_primary(cfg, [], current, _gopts(), "ita") is None
+    assert len(tried) == 4  # limit, not the whole tagged list
+
+
 # --- stream ranking + curation (_pick_stream) ------------------------------
 
 

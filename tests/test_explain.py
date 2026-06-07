@@ -86,6 +86,17 @@ def test_explain_audio_no_preferred_track_warns(monkeypatch):
     assert "Nessuna traccia nelle lingue preferite" in out
 
 
+def test_explain_audio_guard_note_when_primary_missing(monkeypatch):
+    # The pick carries only fallback audio (eng): explain must surface the language guard
+    # (reselect toward a primary-tagged source, else safety subtitles) so --explain matches
+    # what playback would actually do.
+    pick = explain.auto_pick(CFG, [S_4K_ITA], cast=False)
+    fake = tracks.Tracks(audio=[tracks.Track(id=1, lang="eng", codec="eac3", channels=6)])
+    monkeypatch.setattr(explain.tracks, "probe_tracks", lambda url: fake)
+    out = explain.explain_audio(CFG, pick)
+    assert "Guardia lingua" in out and "sorgente taggata ita" in out
+
+
 def test_explain_audio_no_ffprobe(monkeypatch):
     pick = explain.auto_pick(CFG, [S_4K_ITA], cast=False)
     monkeypatch.setattr(explain.tracks, "probe_tracks", lambda url: tracks.Tracks())
