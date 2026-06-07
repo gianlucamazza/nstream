@@ -308,22 +308,25 @@ def _playable_url(cfg: Config, stream: Stream) -> str | None:
 def _audio_langs_of(cfg: Config, chosen: Stream) -> set[str] | None:
     """The audio languages actually in `chosen`, as canonical codes — for the auto-play
     guard. Best-effort: returns None when it can't tell (no preference set, or ffprobe
-    missing/empty), so the caller never blocks playback on a probe failure.
+    missing/empty on an untagged name), so the caller never blocks playback on a probe failure.
 
-    Skips the ffprobe only when the release name explicitly tags a preferred language. A
-    bare "multi"/"dual" tag is NOT trusted: that token covers any language pair (e.g.
-    Latino+Eng with no Italian at all), so it is verified with a probe rather than assumed
-    to carry a preferred track. Track languages come from `languages.track_lang`, which
-    reads the ffprobe `title` (e.g. 'Italian [TrueHD]') when the `language` tag is `und`."""
-    pref = set(cfg.audio_langs)
+    Skips the ffprobe only when the release name explicitly tags the PRIMARY language — a
+    fallback-only tag (e.g. ENG with primary ita) is not enough: trusting it would hide the
+    primary's absence and silently play the fallback dub with no reselect/warning. A bare
+    "multi"/"dual" tag is NOT trusted either: that token covers any language pair (e.g.
+    Latino+Eng with no Italian at all), so both are verified with a probe. When the probe is
+    impossible, a name-tagged preferred set still beats None — the guard acts on the name.
+    Track languages come from `languages.track_lang`, which reads the ffprobe `title`
+    (e.g. 'Italian [TrueHD]') when the `language` tag is `und`."""
+    pref = set(cfg.audio_langs) | ({cfg.primary} if cfg.primary else set())
     if not pref:
         return None
-    tagged = quality.parse_stream(chosen).languages
-    if tagged & pref:
-        return pref  # name explicitly names a preferred language → trust it (no probe)
+    tagged = set(quality.parse_stream(chosen).languages)
+    if cfg.primary and cfg.primary in tagged:
+        return tagged & pref  # name explicitly tags the primary language → trust it (no probe)
     tr = tracks.probe_tracks(chosen.get("url") or "")
     if tr.empty():
-        return None  # unverifiable → don't block
+        return (tagged & pref) or None  # unverifiable → fall back to the name, never block
     return {code for t in tr.audio if (code := languages.track_lang(t.lang, t.title))}
 
 
@@ -394,23 +397,40 @@ def _auto_candidates(cfg: Config, results: list[Stream], *, cast: bool) -> list[
 
 def _reselect_for_primary(
     cfg: Config, results: list[Stream], current: Stream, opts: PlayOpts, primary: str, *,
-    limit: int = 3,
+    limit: int = 4,
 ) -> Stream | None:  # fmt: skip
-    """Try the next-best candidates (after `current`) for one whose audio actually contains
-    `primary`, confirming each with a probe via `_audio_langs_of`. Returns the first match
-    (resolved, url-ready), or None when none of the top `limit` others qualifies."""
-    tried = 0
+    """Find another candidate whose audio actually contains `primary`, spending the probe
+    budget on releases whose NAME claims it: every candidate tagged `primary` (best-first,
+    anywhere in the ranked list — the right dub may rank far below cached fallbacks), then
+    the "multi" maybes. Each is resolved and confirmed with a real-track probe
+    (`stream_audio_langs`); an unverifiable probe is accepted on benefit of the doubt only
+    for an explicit `primary` tag, never for a bare "multi". Returns the first match
+    (resolved, url-ready), or None when no tagged candidate qualifies within `limit`."""
+    tagged: list[Stream] = []
+    maybe: list[Stream] = []
     for s in _auto_candidates(cfg, results, cast=opts.cast):
         if s is current or s.get("url") == current.get("url"):
             continue
+        langs = quality.parse_stream(s).languages
+        if primary in langs:
+            tagged.append(s)
+        elif "multi" in langs:
+            maybe.append(s)
+    if tagged or maybe:
+        print(f"nstream: il pick migliore non ha audio {primary}, cerco una sorgente {primary}…",
+              file=sys.stderr)  # fmt: skip
+    tried = 0
+    for s, trusted in [*((s, True) for s in tagged), *((s, False) for s in maybe)]:
         if tried >= limit:
             break
         tried += 1
         ready = _resolve_stream(cfg, s)
         if ready is None:
-            continue
-        avail = _audio_langs_of(cfg, ready)
-        if avail and primary in avail:
+            continue  # slow/unservable (non-cached → debrid/P2P) → next candidate
+        real = stream_audio_langs(cfg, ready)
+        if real is None and trusted:
+            real = frozenset({primary})  # unverifiable + explicit tag → benefit of the doubt
+        if real and primary in real:
             name_line = next(iter((ready.get("name") or "").splitlines()), "")
             print(f"nstream: scelgo un'altra sorgente per l'audio {primary} — {name_line}",
                   file=sys.stderr)  # fmt: skip

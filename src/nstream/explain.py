@@ -134,6 +134,14 @@ def explain_audio(cfg: Config, pick: quality.RankedStream | None) -> str:
         ch = f" {t.channels}ch" if t.channels else ""
         title = f' "{t.title}"' if t.title else ""
         lines.append(f"  aid={t.id} {t.lang or 'und'} {t.codec}{ch}{title}{mark}")
+    primary = cfg.primary
+    real = {code for t in tr.audio if (code := languages.track_lang(t.lang, t.title))}
+    if primary and real and primary not in real:
+        lines.append(
+            f"Guardia lingua: nessuna traccia {primary} nel pick → in riproduzione nstream "
+            f"cercherebbe una sorgente taggata {primary} (riselezione), altrimenti "
+            f"attiverebbe i sottotitoli {primary} di sicurezza."
+        )
     if chosen is None:
         lines.append(
             "Nessuna traccia nelle lingue preferite → mpv ripiega sulla default del file "
