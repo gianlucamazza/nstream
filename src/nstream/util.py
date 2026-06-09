@@ -24,6 +24,8 @@ from typing import IO
 FFPROBE_TIMEOUT = 20.0
 VAINFO_TIMEOUT = 10.0
 CATT_SCAN_TIMEOUT = 20.0  # headroom for a cold mDNS scan on hosts with many interfaces
+CATT_CAST_TIMEOUT = 30.0  # `catt cast` blocks while the receiver buffers the remote URL (~10s)
+CATT_INFO_TIMEOUT = 10.0  # one castv2 round-trip: `catt info -j` / `stop` / `volume`
 
 # HTTP retry tuning, shared by every retrying client (api addon fetch, native debrid).
 _BACKOFF_BASE = 0.5

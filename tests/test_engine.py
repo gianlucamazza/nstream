@@ -159,6 +159,35 @@ def test_wait_buffer_returns_when_preloaded(monkeypatch, capsys):
     assert "buffering" in capsys.readouterr().err
 
 
+def test_wait_buffer_timeout_with_zero_bytes_raises(monkeypatch):
+    # Dead torrent (0 peers, 0 bytes ever buffered): the timeout must raise EngineUnavailable
+    # so the caller degrades to the next candidate instead of playing an empty buffer.
+    monkeypatch.setattr(engine, "_torrent_stat", lambda base, h: {})
+    times = iter([0.0, 0.0, 1000.0])  # deadline calc, one loop pass, then expired
+    monkeypatch.setattr(engine.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(engine.time, "sleep", lambda _: None)
+    with pytest.raises(engine.EngineUnavailable, match="buffer vuoto"):
+        engine._wait_buffer("http://127.0.0.1:8090", "H")
+
+
+def test_wait_buffer_timeout_with_partial_buffer_returns(monkeypatch, capsys):
+    # Partial buffer at the deadline: returns anyway (play attempt) with an explicit notice;
+    # the progress line shows the % of the read-ahead target while waiting.
+    mb = 1024 * 1024
+    monkeypatch.setattr(
+        engine,
+        "_torrent_stat",
+        lambda base, h: {"preload_size": 100 * mb, "preloaded_bytes": mb, "active_peers": 1},
+    )
+    times = iter([0.0, 0.0, 1000.0])
+    monkeypatch.setattr(engine.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(engine.time, "sleep", lambda _: None)
+    engine._wait_buffer("http://127.0.0.1:8090", "H")  # no exception
+    err = capsys.readouterr().err
+    assert "buffer parziale" in err
+    assert "%" in err  # progress line includes preloaded/preload_size percentage
+
+
 def test_vpn_active_detects_wireguard(monkeypatch):
     import io
 
@@ -184,3 +213,43 @@ def test_vpn_active_false_when_iface_down(monkeypatch):
     monkeypatch.setattr(engine.os, "listdir", lambda p: ["tun0"])
     monkeypatch.setattr("builtins.open", lambda path, *a, **k: io.StringIO("down\n"))
     assert engine.vpn_active() is False
+
+
+class _FakeSpawned:
+    """Stand-in for the spawned TorrServer Popen handle, recording lifecycle calls."""
+
+    pid = 4242
+
+    def __init__(self):
+        self.calls = []
+
+    def poll(self):
+        return None  # still running
+
+    def terminate(self):
+        self.calls.append("terminate")
+
+    def wait(self, timeout=None):
+        self.calls.append("wait")
+
+
+def test_detach_spawned_clears_state_and_disarms_shutdown():
+    proc = _FakeSpawned()
+    engine._spawned = proc
+    engine.detach_spawned()
+    assert engine._spawned is None  # handle dropped → the server outlives nstream
+    engine._shutdown()  # the atexit hook must now terminate nothing
+    assert proc.calls == []
+
+
+def test_detach_spawned_noop_without_spawn():
+    engine._spawned = None
+    engine.detach_spawned()  # must not raise
+    assert engine._spawned is None
+
+
+def test_shutdown_without_detach_terminates():
+    proc = _FakeSpawned()
+    engine._spawned = proc
+    engine._shutdown()
+    assert "terminate" in proc.calls and engine._spawned is None

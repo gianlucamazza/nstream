@@ -12,6 +12,12 @@ subtitles). This holds for single-file containers (mkv/mp4), which is what we pl
 ffprobe is optional: if it's missing or the probe fails, this returns empty lists and the
 caller falls back to mpv's defaults. The command line (which embeds the RD token in the
 URL) is never logged.
+
+The probe is memoized per url for the process lifetime: a single play flows through up to
+three call sites that probe the SAME url (the audio-language guard, the cast vetting, the
+pre-remux metadata read), and each network ffprobe is a ranged HTTP read with a 20s budget.
+No TTL — the process lives one playback. Failures are cached too: retrying a url that just
+failed/timed out would re-pay the full timeout within the same run for no realistic gain.
 """
 
 from __future__ import annotations
@@ -35,17 +41,25 @@ class Track:
 class Tracks:
     audio: list[Track] = field(default_factory=list)
     subs: list[Track] = field(default_factory=list)
+    # Container-level metadata from the same probe, so the Tier-2 remux (`remux._probe_meta`)
+    # never needs a second ffprobe over the network: video-stream count (≥2 flags a
+    # Dolby-Vision dual-layer source) and duration in seconds (feeds the progress line).
+    n_video: int = 0
+    duration: float = 0.0
 
     def empty(self) -> bool:
         return not self.audio and not self.subs
 
 
 def _parse_ffprobe(data: dict) -> Tracks:
-    """Build per-type 1-based track lists from ffprobe's JSON stream list."""
+    """Build per-type 1-based track lists (plus video count / duration) from ffprobe's JSON."""
     audio: list[Track] = []
     subs: list[Track] = []
+    n_video = 0
     for s in data.get("streams", []):
         kind = s.get("codec_type")
+        if kind == "video":
+            n_video += 1
         if kind not in ("audio", "subtitle"):
             continue
         bucket = audio if kind == "audio" else subs
@@ -59,22 +73,43 @@ def _parse_ffprobe(data: dict) -> Tracks:
             title=str(tags.get("title") or ""),
         )
         bucket.append(track)
-    return Tracks(audio=audio, subs=subs)
+    try:
+        duration = float((data.get("format") or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    return Tracks(audio=audio, subs=subs, n_video=n_video, duration=duration)
+
+
+# Per-url probe memo (see module docstring): failures (empty Tracks) are cached on purpose.
+# `timeout` is not part of the key — every caller uses the default FFPROBE_TIMEOUT.
+_cache: dict[str, Tracks] = {}
+
+
+def clear_cache() -> None:
+    """Drop the per-url probe memo (used by tests; harmless to call anytime)."""
+    _cache.clear()
 
 
 def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
-    """Probe `url` for embedded audio/subtitle tracks. Returns empty lists if ffprobe
-    is unavailable or the probe fails (caller falls back to mpv defaults)."""
+    """Probe `url` for embedded audio/subtitle tracks (+ video count / duration). Returns
+    empty lists if ffprobe is unavailable or the probe fails (caller falls back to mpv
+    defaults). Memoized per url — one network ffprobe per stream per process."""
+    cached = _cache.get(url)
+    if cached is not None:
+        return cached
     cmd = [
-        "ffprobe", "-v", "error", "-of", "json",
-        "-show_entries", "stream=index,codec_type,codec_name,channels:stream_tags=language,title",
+        "ffprobe", "-v", "error", "-of", "json", "-show_entries",
+        "format=duration:stream=index,codec_type,codec_name,channels:stream_tags=language,title",
         url,
     ]  # fmt: skip
     proc = util.run_cmd(cmd, timeout=timeout)
     if proc is None:
-        return Tracks()  # ffprobe missing or timed out
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return Tracks()
-    return _parse_ffprobe(data if isinstance(data, dict) else {})
+        result = Tracks()  # ffprobe missing or timed out
+    else:
+        try:
+            data = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            data = {}
+        result = _parse_ffprobe(data if isinstance(data, dict) else {})
+    _cache[url] = result
+    return result

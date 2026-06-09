@@ -1,10 +1,11 @@
 """Logging for nstream: a rotating file log plus an optional debug console.
 
 stdlib-only. The single hard rule is that **secrets never reach the log**: Torrentio
-URLs embed the debrid token, so a `RedactFilter` scrubs every record (provider
-`key=token` segments and `/resolve/<provider>/<token>/` paths) regardless of what the
-caller passed. The file log exists so an unexpected crash — easy to lose when nstream
-runs inside the foot launcher — is captured for diagnosis.
+URLs embed the debrid token, so a `RedactFormatter` scrubs every fully formatted record
+— message *and* exception traceback (provider `key=token` segments and
+`/resolve/<provider>/<token>/` paths) — regardless of what the caller passed. The file
+log exists so an unexpected crash — easy to lose when nstream runs inside the foot
+launcher — is captured for diagnosis.
 """
 
 from __future__ import annotations
@@ -38,7 +39,11 @@ def redact(text: str) -> str:
 
 
 class RedactFilter(logging.Filter):
-    """Scrub secrets from a record's final message (after %-formatting)."""
+    """Scrub secrets from a record's final message (after %-formatting).
+
+    Note: a filter only sees the message — exception tracebacks are appended by the
+    Formatter *after* filtering, so handlers must use `RedactFormatter` to cover them.
+    """
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
@@ -47,6 +52,13 @@ class RedactFilter(logging.Filter):
             record.msg = scrubbed
             record.args = ()
         return True
+
+
+class RedactFormatter(logging.Formatter):
+    """Scrub secrets from the complete formatted output, traceback included."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(super().format(record))
 
 
 def log_path() -> Path:
@@ -67,7 +79,6 @@ def setup_logging(debug: bool = False) -> logging.Logger:
     if _configured:
         return logger
     logger.propagate = False
-    redactor = RedactFilter()
 
     path = log_path()
     try:
@@ -76,8 +87,7 @@ def setup_logging(debug: bool = False) -> logging.Logger:
             path, maxBytes=512 * 1024, backupCount=3, encoding="utf-8"
         )
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-        fh.addFilter(redactor)
+        fh.setFormatter(RedactFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
         logger.addHandler(fh)
     except OSError:
         pass  # file logging is best-effort; never block playback on it
@@ -85,8 +95,7 @@ def setup_logging(debug: bool = False) -> logging.Logger:
     if debug:
         sh = logging.StreamHandler(sys.stderr)
         sh.setLevel(logging.DEBUG)
-        sh.setFormatter(logging.Formatter("[%(name)s] %(levelname)s %(message)s"))
-        sh.addFilter(redactor)
+        sh.setFormatter(RedactFormatter("[%(name)s] %(levelname)s %(message)s"))
         logger.addHandler(sh)
 
     _configured = True

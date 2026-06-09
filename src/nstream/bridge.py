@@ -25,6 +25,7 @@ import fcntl
 import json
 import os
 import socket
+import stat
 import subprocess
 import time
 from collections.abc import Generator, Iterator
@@ -48,6 +49,29 @@ def _runtime_dir() -> str:
     if xdg:
         return os.path.join(xdg, "castbridge")
     return f"/tmp/castbridge-{os.getuid()}"
+
+
+def _ensure_runtime_dir() -> bool:
+    """Create the runtime dir (mode 0o700). On the predictable /tmp fallback (no
+    XDG_RUNTIME_DIR) an attacker on a multi-user host could pre-create it, so verify with
+    `os.lstat` that it is a real directory (not a symlink), owned by us, mode 0o700 —
+    otherwise False and the caller degrades to catt (best-effort, never crash the cast)."""
+    d = _runtime_dir()
+    try:
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        if not os.environ.get("XDG_RUNTIME_DIR"):
+            st = os.lstat(d)
+            if (
+                not stat.S_ISDIR(st.st_mode)
+                or st.st_uid != os.getuid()
+                or stat.S_IMODE(st.st_mode) != 0o700
+            ):
+                _log.warning("runtime dir %s non fidata (symlink/owner/permessi)", d)
+                return False
+        return True
+    except OSError as e:
+        _log.warning("runtime dir %s: %s", d, e)
+        return False
 
 
 def _socket_path() -> str:
@@ -99,10 +123,11 @@ def ensure_daemon(timeout: float = _DAEMON_START_TIMEOUT) -> bool:
         return True
     if not bridge_available():
         return False
-    os.makedirs(_runtime_dir(), exist_ok=True)
+    if not _ensure_runtime_dir():
+        return False
     lock_fd = None
     try:
-        lock_fd = os.open(_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
+        lock_fd = os.open(_lock_path(), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         # Re-check under the lock: another process may have started it meanwhile.
         s = _connect()
@@ -242,6 +267,10 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
         {"kind": "paused",  "position": float}
         {"kind": "ended",   "position": float, "duration": float}
         {"kind": "failed",  "error": str, "message": str}
+        {"kind": "disconnected", "position": float, "duration": float}  # daemon EOF mid-cast
+
+    `disconnected` (daemon socket EOF after `started`, without an explicit end) means the
+    daemon died/restarted — playback on the receiver may well continue; it is not `ended`.
 
     `meta` accepts title/poster/subtitle/series_title/season/episode/content_type/current_time.
     With `follow=False` it loads, confirms the handoff, emits `started`, and returns (the daemon
@@ -334,9 +363,13 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
                 yield {"kind": "playing", "position": round(pos, 1), "duration": round(dur, 1)}
             last_state = state or last_state
 
-        # Socket closed (EOF) before an explicit end.
+        # Socket closed (EOF) before an explicit end. A daemon crash/restart mid-cast is
+        # NOT a playback end: the receiver may still be streaming the media (e.g. from the
+        # Tier-2 Range server), so report an honest "disconnected" instead of a fake
+        # "ended" — a fake ended would make the caller tear the served file down under a
+        # still-playing TV and make the --follow JSONL lie.
         if started:
-            yield {"kind": "ended", "position": round(pos, 1), "duration": round(dur, 1)}
+            yield {"kind": "disconnected", "position": round(pos, 1), "duration": round(dur, 1)}
         elif not follow:
             # Non-follow that never observed a state but loaded ok: best-effort started.
             yield {"kind": "started", "title": title}

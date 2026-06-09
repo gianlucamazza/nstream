@@ -810,6 +810,27 @@ def test_run_auto_cast_emits_device(monkeypatch, capsys):
     assert seen["follow"] is False  # default fire-and-return
 
 
+def test_run_auto_cast_remux_failure_notice(monkeypatch, capsys):
+    """A failed Tier-2 remux must not degrade silently: the direct-cast fallback surfaces a
+    stderr warning and the JSON `notice` (first audio track may be silent/wrong-language)."""
+    stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    plan = cli.stream_select.CastAudioPlan("remux", stream, 1, "ita", verified=True)
+    monkeypatch.setattr(cli.stream_select, "vet_cast_audio", lambda *a, **k: plan)
+    monkeypatch.setattr(cli.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg failed
+    seen = {}
+    monkeypatch.setattr(cli, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False))
+    monkeypatch.setattr(cli.engine, "detach_spawned", lambda: seen.update(detached=True))
+    rc = cli.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    assert rc == 0 and seen.get("cast")  # degraded to a direct cast
+    assert out["notice"] and "remux non riuscito" in out["notice"]
+    assert "remux non riuscito" in cap.err
+    # Fire-and-return handoff leaves a spawned TorrServer alive for the ongoing cast.
+    assert seen.get("detached")
+
+
 def test_run_auto_no_debrid_url_leak(monkeypatch, capsys):
     _wire_movie(
         monkeypatch,

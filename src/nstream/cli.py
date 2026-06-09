@@ -18,6 +18,7 @@ from . import (
     bridge,
     caster,
     debrid,
+    engine,
     explain,
     log,
     mirror,
@@ -287,7 +288,13 @@ def _play_on_cast(
                 device=device, start=start, sub_paths=sub_paths, follow=True,
                 meta=cast_meta,
             )  # fmt: skip
-        # remux refused (size guard) or failed → degrade to a direct cast of the same pick
+        # remux refused (size guard) or failed → degrade to a direct cast of the same pick;
+        # the file's first audio track is then Dolby (silent on the DMR) or the wrong dub.
+        print(
+            "nstream: ⚠ remux non riuscito → cast diretto: "
+            "l'audio potrebbe risultare muto o in un'altra lingua",
+            file=sys.stderr,
+        )
     elif opts.mirror:
         print(
             "nstream: audio decodificabile dal TV → cast diretto nativo (mirror non necessario)",
@@ -906,6 +913,14 @@ def _auto_play(
                     )  # fmt: skip
                     reencoded = True
                 else:
+                    if plan.mode == "remux":
+                        # remux refused (size guard) or failed → direct cast of a file whose
+                        # first audio track is Dolby (silent on the DMR) or the wrong dub.
+                        notice = (
+                            "remux non riuscito → cast diretto: l'audio potrebbe "
+                            "risultare muto o in un'altra lingua"
+                        )
+                        print(f"nstream: ⚠ {notice}", file=sys.stderr)
                     cast(
                         cfg, title, chosen["url"],
                         device=device, start=start, sub_paths=sub_paths,
@@ -920,8 +935,16 @@ def _auto_play(
                 # or zero-volume receiver (a silent cast that looks fine) is surfaced.
                 volume, muted = device_volume(device)
                 if muted or volume == 0:
-                    notice = "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'"
-                    print(f"nstream: {notice}", file=sys.stderr)
+                    vol_notice = (
+                        "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'"
+                    )
+                    notice = f"{notice}; {vol_notice}" if notice else vol_notice
+                    print(f"nstream: {vol_notice}", file=sys.stderr)
+            if not args.follow:
+                # Fire-and-return handoff: a pure-torrent stream is served by the TorrServer
+                # we may have spawned — keep it alive past exit so the TV keeps playing
+                # (atexit would kill it mid-cast). No-op when the engine wasn't used.
+                engine.detach_spawned()
         else:
             # Local mpv blocks until the window closes (intended; the user is watching).
             play(
@@ -1281,17 +1304,17 @@ def main() -> int:
 
     sub_mode, sub_lang = _sub_options(args)
     # Mirror is a cast backend: it implies cast routing (device resolution), unless local.
-    mirror = (args.mirror or cfg.cast_mode == "mirror") and not args.local
+    mirror_mode = (args.mirror or cfg.cast_mode == "mirror") and not args.local
     opts = PlayOpts(
         # --json is headless: always auto-pick (no fzf stream menu).
         auto=cfg.auto_play or args.play or args.json,
-        cast=(cfg.prefer_cast or args.cast or mirror) and not args.local,
+        cast=(cfg.prefer_cast or args.cast or mirror_mode) and not args.local,
         sub_mode=sub_mode,
         sub_lang=sub_lang,
         history=cfg.history_enabled and not args.no_history,
         autoplay=cfg.autoplay and not args.no_autoplay,
         audio_lang=args.audio_lang or None,
-        mirror=mirror,
+        mirror=mirror_mode,
     )
     try:
         return _dispatch(cfg, args, opts)

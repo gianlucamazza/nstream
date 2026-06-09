@@ -3,6 +3,8 @@ loop (resume/auto-advance), and the in-cast audio-language switch."""
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from nstream import caster
@@ -255,6 +257,53 @@ def test_cast_gives_up_if_never_starts(monkeypatch):
     assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
     info_polls = sum(1 for c in calls if "info" in c)
     assert info_polls == caster._CAST_GIVEUP
+
+
+def test_cast_launch_timeout_degrades(monkeypatch):
+    """A catt hung on a half-dead device must not block forever: the launch carries an
+    explicit timeout and TimeoutExpired degrades to a clean failure (no exception)."""
+
+    def hang(cmd, **k):
+        assert k.get("timeout")  # the synchronous launch must have a deadline
+        raise subprocess.TimeoutExpired(cmd, k["timeout"])
+
+    monkeypatch.setattr(caster.subprocess, "run", hang)
+    events = []
+    result = caster.cast(CFG, "M", "http://u", device="TV", on_event=events.append)
+    assert result == (0.0, 0.0, False)
+    assert [e["kind"] for e in events] == ["failed"]
+
+
+def test_cast_poll_timeout_counts_as_unreachable(monkeypatch):
+    """An info poll that hangs (TimeoutExpired) counts as an unreachable device: the
+    loop gives up after _CAST_GIVEUP polls instead of raising or spinning forever."""
+    polls = []
+
+    class _P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake(cmd, **k):
+        if "info" in cmd:
+            polls.append(cmd)
+            raise subprocess.TimeoutExpired(cmd, k.get("timeout", 10))
+        return _P()  # the launch succeeds
+
+    monkeypatch.setattr(caster.subprocess, "run", fake)
+    monkeypatch.setattr(caster, "_poll_wait", lambda *_: None)
+    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
+    assert len(polls) == caster._CAST_GIVEUP
+
+
+def test_stop_and_volume_timeout_degrade(monkeypatch):
+    def hang(cmd, **k):
+        raise subprocess.TimeoutExpired(cmd, k.get("timeout", 10))
+
+    monkeypatch.setattr(caster.subprocess, "run", hang)
+    assert caster.stop("1.2.3.4") is False
+    assert caster.set_volume("1.2.3.4", 50) is False
+    assert caster.status("1.2.3.4")["player_state"] == "IDLE"  # _raw_info degrades too
 
 
 def test_cast_prints_preparing_before_launch(monkeypatch, capsys):

@@ -221,6 +221,55 @@ def test_int_fields_clamped_to_ceiling(tmp_path, monkeypatch, key, value, expect
     assert getattr(config.load(), key) == expected
 
 
+def test_cast_mirror_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb"})
+    cfg = config.load()
+    assert cfg.cast_mode == "dmr"
+    assert cfg.mirror_bitrate == 0
+    assert cfg.mirror_playout_ms == 0
+
+
+def test_cast_mirror_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(
+        tmp_path,
+        {
+            "torrentio_base": "tb",
+            "cast_mode": "mirror",
+            "mirror_bitrate": 8_000_000,
+            "mirror_playout_ms": 300,
+        },
+    )
+    cfg = config.load()
+    assert cfg.cast_mode == "mirror"
+    assert cfg.mirror_bitrate == 8_000_000
+    assert cfg.mirror_playout_ms == 300
+
+
+def test_cast_mode_invalid_falls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb", "cast_mode": "bogus"})
+    assert config.load().cast_mode == "dmr"
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("mirror_bitrate", -1, 0),  # clamped up
+        ("mirror_bitrate", 999_999_999, 100_000_000),  # clamped down to ceiling
+        ("mirror_bitrate", "bad", 0),  # invalid → default
+        ("mirror_playout_ms", -1, 0),  # clamped up
+        ("mirror_playout_ms", 99999, 5000),  # clamped down to ceiling
+        ("mirror_playout_ms", "bad", 0),  # invalid → default
+    ],
+)
+def test_mirror_int_coercion(tmp_path, monkeypatch, key, value, expected):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb", key: value})
+    assert getattr(config.load(), key) == expected
+
+
 def test_non_dict_root_raises(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     d = tmp_path / "nstream"
