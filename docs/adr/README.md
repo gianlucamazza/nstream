@@ -1,8 +1,8 @@
 # Architecture Decision Records
 
 Short, immutable notes recording an architectural decision: the context that forced it,
-the choice made, and the consequences accepted. They explain *why* the code is shaped the
-way it is — the companion to `docs/selection.md`, which explains *how* one subsystem behaves.
+the choice made, and the consequences accepted. They explain _why_ the code is shaped the
+way it is — the companion to `docs/selection.md`, which explains _how_ one subsystem behaves.
 
 Format: MADR-light (Context · Decision · Rationale · Consequences · References), kept terse
 and code-anchored (cite `src/nstream/<mod>.py:line`) in the project's documentation tone.
@@ -10,12 +10,16 @@ and code-anchored (cite `src/nstream/<mod>.py:line`) in the project's documentat
 An ADR is append-only: once **Accepted** it is not edited to reflect a later change of mind.
 A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 
-| # | Title | Status |
-|---|-------|--------|
-| [0001](0001-native-debrid-resolver-adapter-layer.md) | Native debrid resolver adapter layer (alongside Torrentio) | Accepted |
-| [0002](0002-realdebrid-native-integration.md) | RealDebrid: stay on Torrentio, no native cache path | Accepted |
-| [0003](0003-torbox-native-integration.md) | TorBox native resolver | Accepted |
-| [0004](0004-premiumize-native-integration.md) | Premiumize native resolver | Accepted |
-| [0005](0005-cast-delivery-tier2-remux.md) | Cast delivery: Tier-2 on-host audio remux to a complete file | Accepted |
+| #                                                    | Title                                                                              | Status   |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------- | -------- |
+| [0001](0001-native-debrid-resolver-adapter-layer.md) | Native debrid resolver adapter layer (alongside Torrentio)                         | Accepted |
+| [0002](0002-realdebrid-native-integration.md)        | RealDebrid: stay on Torrentio, no native cache path                                | Accepted |
+| [0003](0003-torbox-native-integration.md)            | TorBox native resolver                                                             | Accepted |
+| [0004](0004-premiumize-native-integration.md)        | Premiumize native resolver                                                         | Accepted |
+| [0005](0005-cast-delivery-tier2-remux.md)            | Cast delivery: Tier-2 on-host audio remux to a complete file                       | Accepted |
+| [0006](0006-cast-mirror-realtime-1080p.md)           | Cast realtime via headless mirror (1080p H.264)                                    | Accepted |
+| [0007](0007-cast-metadata-via-castbridge.md)         | Native cast delivery: castbridge sender + nstream Range server (metadata + events) | Accepted |
+| [0008](0008-castbridge-socket-activation.md)         | castbridge daemon: systemd socket activation (retire spawn code)                   | Proposed |
+| [0009](0009-movies-series-separation.md)             | Movies / TV-series separation: typed home sections, typed flows                    | Proposed |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

@@ -28,17 +28,21 @@ mpv setup.
 Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, `ffmpeg` (its `ffprobe`
 powers the pre-play track menu; nstream degrades gracefully without it), plus `foot` for the
 desktop launcher. Optional: `catt` to cast to a Chromecast (`--cast`; per-LAN device discovery
-is built in via a fresh `catt scan`), and `chafa` to render poster thumbnails in the fzf
-preview pane (falls back to text-only without it). Install/dev: `uv`. All native.
+is built in via a fresh `catt scan`), `chafa` to render poster thumbnails in the fzf
+preview pane (falls back to text-only without it), and `vainfo` (Arch: `libva-utils`) for the
+hardware-aware stream ranking. The native cast senders — **castbridge** (metadata + events)
+and the `--mirror` realtime sender — are separate openscreen-fork builds (`$CASTBRIDGE_BIN` /
+`$CAST_MIRROR_BIN`); nstream falls back to `catt` / the file path without them (see
+[Casting backends](#casting-backends)). Install/dev: `uv`. All native.
 
 ## Install
 
-| Method | Command | Notes |
-|--------|---------|-------|
-| Arch repo | `sudo pacman -Syu nstream` | from the `[gianluca]` personal repo |
-| Arch (local) | `cd packaging && makepkg -si` | builds from the tagged source tarball |
-| PyPI | `pipx install nstream` | or `pip install --user nstream` |
-| From source (dev) | `./install.sh` | `uv tool install` → `~/.local/bin/nstream` |
+| Method            | Command                       | Notes                                      |
+| ----------------- | ----------------------------- | ------------------------------------------ |
+| Arch repo         | `sudo pacman -Syu nstream`    | from the `[gianluca]` personal repo        |
+| Arch (local)      | `cd packaging && makepkg -si` | builds from the tagged source tarball      |
+| PyPI              | `pipx install nstream`        | or `pip install --user nstream`            |
+| From source (dev) | `./install.sh`                | `uv tool install` → `~/.local/bin/nstream` |
 
 The Arch package installs `nstream` + `nstream-fuzzel` to `/usr/bin`, the desktop entry, and
 `config.example.json` under `/usr/share/nstream/`. It does **not** touch `$HOME`: after install,
@@ -78,11 +82,11 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   and passed to mpv as `--slang` (non-overriding).
 - `audio_langs`: preferred audio languages, in order (default `["ita","eng"]`). Passed to mpv as
   `--alang` so your language is auto-selected when the file has multiple audio tracks — injected
-  only if you haven't set `alang` yourself. The **first** entry is the *primary* language and the
+  only if you haven't set `alang` yourself. The **first** entry is the _primary_ language and the
   rest are acceptable fallbacks (see `primary_lang`).
 - `primary_lang`: your native language (default `""` = first of `audio_langs`). It drives two
   guards on the auto-pick (local mpv): (1) a release whose name only says **"Dual"/"MULTI"** is
-  *not* trusted to contain it — that token can be any pair (e.g. Latino+Eng), so nstream confirms
+  _not_ trusted to contain it — that token can be any pair (e.g. Latino+Eng), so nstream confirms
   the real tracks with `ffprobe` (reading the track `title`, e.g. `Italian`, when the language tag
   is `und`); (2) if the chosen file has no primary-language audio, nstream first tries the next-best
   sources for one that does, and otherwise plays the best fallback (e.g. English) **with
@@ -97,7 +101,7 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   family (`auto`/`auto-safe`/…) is **auto-upgraded to the GPU's real method** (VAAPI, detected via
   `vainfo`) so mpv doesn't probe experimental Vulkan decode or a missing CUDA first — on a
   `gpu-api=vulkan` context that probing causes `VK_KHR_video_decode_queue`/`libcuda` errors and a
-  software fallback. nstream's CLI flag overrides `mpv.conf` *only* for that `auto`→vaapi upgrade.
+  software fallback. nstream's CLI flag overrides `mpv.conf` _only_ for that `auto`→vaapi upgrade.
   Set `""` to disable injection entirely.
 - `auto_play`: frictionless playback (`true` by default). Pressing **Enter** on a title plays the
   best stream immediately — no stream or track menu, since the format is already filtered for your
@@ -134,6 +138,21 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   single device is used directly, several prompt a picker). **If no Chromecast is reachable on the
   current network, nstream falls back to local mpv** (with a notice) instead of failing. (Note:
   `catt scan -j` is broken in current catt, so discovery parses the text `catt scan`.)
+- `cast_remux`: allow the Tier-2 on-host audio remux for Dolby/DTS-only releases (`true` by
+  default; with `false` they are cast directly — likely silent on the Default Media Receiver).
+- `cast_audio_codec`: target audio codec for the cast remux (default `"aac"`, DMR-decodable).
+- `cast_remux_max_resolution`: resolution cap applied **only** to remuxed (downloaded) releases
+  (default `1080`); direct casts are never capped.
+- `cast_remux_max_size_gb`: guard against a runaway download (default `20`): releases that would
+  need a remux above this size are demoted in ranking, and an interactive run asks for
+  confirmation before fetching one. A free-disk pre-check always runs (with a minimum-headroom
+  floor when the release size is unknown).
+- `cast_mode`: `"dmr"` (default) hands a file/URL to the Default Media Receiver (direct or
+  remux); `"mirror"` plays the stream in mpv on a hidden output and mirrors it to the TV in
+  realtime — instant start, no download, but 1080p SDR. `--mirror` forces it for one run. Needs
+  the openscreen Cast Streaming sender (`$CAST_MIRROR_BIN`) plus Hyprland + PipeWire.
+- `mirror_bitrate`, `mirror_playout_ms`: mirror tuning; `0` (default) = built-in defaults
+  (16 Mbps ceiling, 500 ms playout buffer).
 - `autoplay`: show the in-video next-episode overlay for series and auto-advance (`true` by
   default). The overlay is drawn by a bundled mpv Lua script loaded via `--script` — it does
   **not** touch your `mpv.conf`. During a binge, subtitles (`--subs`) and stream selection are
@@ -160,6 +179,9 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 - `max_streams`: how many streams the menu shows before a `↓ mostra tutti` entry reveals the rest
   and the `⚠` excluded ones (default `20`; `0` = no cap).
 - `mpv_args`: extra flags passed to mpv (e.g. `["--sub-auto=fuzzy"]`).
+- `nerd_font`: TUI glyph set — `"auto"` (env opt-in), `"on"`, `"off"`.
+- `posters`: render poster thumbnails in the fzf preview pane, needs `chafa` (`true` by default).
+- `image_mode`: `"auto"`, or `"off"` to force the terminal image protocol off.
 - `playback_backend`: how streams are played (default `"local"`).
   - `"debrid"`: Torrentio returns ready debrid URLs (needs a provider key in `torrentio_base`),
     resolved instantly — the classic path.
@@ -167,7 +189,7 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
     results, and stream them peer-to-peer through a local **TorrServer** instance nstream drives —
     no paid service. Set it from the settings menu (it warns if TorrServer isn't installed).
   - `"auto"`: hybrid — run **both** Torrentio queries (with and without the token) and merge them
-    by filename, so a release can play via debrid (cached = instant) *and* fall back to local P2P.
+    by filename, so a release can play via debrid (cached = instant) _and_ fall back to local P2P.
   - `"native"`: discover pure-torrent streams (token-less Torrentio) and resolve the chosen one
     through the provider's **own API** — independent of Torrentio's debrid resolution. Supports
     **TorBox** and **Premiumize** (they keep a live cache check); RealDebrid stays on the `debrid`
@@ -181,7 +203,7 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
 - `p2p_ack`: set to `true` once you've acknowledged the one-time P2P privacy notice (see below); it
   isn't shown again.
 - `p2p_require_vpn`: block local P2P streaming unless a VPN interface is detected (default `false` —
-  nstream only *warns*). With `true`, P2P is refused when no VPN is up (use debrid or enable the VPN).
+  nstream only _warns_). With `true`, P2P is refused when no VPN is up (use debrid or enable the VPN).
 
 ### Playback backend: debrid or local P2P
 
@@ -189,7 +211,7 @@ By default nstream needs no paid service: with `playback_backend = "local"` it s
 peer-to-peer via **TorrServer** — an external single-binary HTTP torrent server (like `mpv`/`fzf`,
 user-installed, never bundled; on Arch: `yay -S torrserver-bin`). nstream finds a running instance
 or spawns one on `engine_port`, adds the torrent by infoHash, waits for the initial read-ahead
-buffer, then hands mpv/`catt` a plain `http://…/stream?…` URL — the *same contract* as a debrid URL,
+buffer, then hands mpv/`catt` a plain `http://…/stream?…` URL — the _same contract_ as a debrid URL,
 so resume, casting and series auto-advance are unchanged. The stream host is the machine's LAN IP so
 a Chromecast can reach it too. If TorrServer isn't installed, nstream says so and you can switch to a
 debrid provider in the settings. Prefer instant, hands-off playback and already pay for a debrid
@@ -215,14 +237,29 @@ found interface-binding cut real-IP leaks from ~31% to ~0.4%):
 The file holds your debrid key, so it is created `chmod 600` and git-ignored.
 Watch history lives separately in `~/.local/state/nstream/history.json` (no secrets).
 
+### Casting backends
+
+Casting prefers the native **castbridge** sender daemon when its binary is present
+(`$CASTBRIDGE_BIN`, a separate openscreen-fork build): unlike `catt` it sends media metadata
+(title/poster/season/episode → the TV's now-playing card) and a real event stream that drives
+`--follow` and resume. Without it nstream falls back to `catt` transparently (same cast, no
+metadata). Dolby/DTS-only releases go through the Tier-2 **on-host remux** (see `prefer_cast`
+above), served to the TV by nstream's own Range HTTP server: the receiver fetches the file
+_inbound_ from your machine (ports 45000-47000), so on a default-deny `ufw` nstream auto-adds
+the matching LAN allow rule (best-effort, needs passwordless sudo; on failure it prints the rule
+to add by hand). Ordinary direct casts and the daemon channel are outbound-only — no firewall
+change needed. The third backend, `--mirror` / `cast_mode: "mirror"`, skips the file path
+entirely: mpv decodes locally on a hidden output and the openscreen sender mirrors it to the TV
+in realtime (instant start, 1080p SDR).
+
 ## Logging & diagnostics
 
 nstream writes a rotating log to `~/.local/state/nstream/nstream.log` (512 KB × 3). An unexpected
 crash is captured there (handy when running inside the foot launcher, where the traceback would
 otherwise scroll away) — on a crash nstream prints `errore inatteso — dettagli in <path>`. Run with
-`--debug` (or `NSTREAM_DEBUG=1`) to also echo verbose logs to stderr. A redaction filter scrubs the
-debrid token from **every** log record (`<provider>=…` segments and `/resolve/<provider>/<token>/`
-paths), so the log never contains secrets.
+`--debug` (or `NSTREAM_DEBUG=1`) to also echo verbose logs to stderr. A redacting formatter scrubs the
+debrid token from **every** log record, exception tracebacks included (`<provider>=…` segments and
+`/resolve/<provider>/<token>/` paths), so the log never contains secrets.
 
 ## Security & limitations
 
@@ -241,7 +278,8 @@ paths), so the log never contains secrets.
 ```sh
 nstream "the matrix"        # search → Enter plays the best stream; Tab picks source/tracks
 nstream                     # continue-watching menu (if any), else prompts for a query
-nstream --cast "dune"       # cast to a Chromecast (catt) instead of mpv
+nstream --cast "dune"       # cast to a Chromecast instead of mpv (castbridge, else catt)
+nstream --mirror "dune"     # realtime mirror cast (instant, 1080p; needs the openscreen sender)
 nstream --local "dune"      # force local mpv even when prefer_cast is on
 nstream --play "dune"       # force auto-pick even when auto_play is off
 nstream --subs "dune"       # auto-pick subtitles in your preferred language
@@ -253,6 +291,10 @@ nstream -c                  # continue watching from history (resumes + keeps bi
 nstream --settings          # open the settings menu (also: ⚙ entry in the startup menu)
 nstream --no-autoplay ...   # don't show the next-episode overlay
 nstream --no-history ...    # don't record this session
+nstream --json --cast --device TV "dune"  # headless: no fzf, one JSON object on stdout
+nstream --json --cast --follow ...        # follow the cast to the end (resume tracked)
+nstream --json --stop       # stop a cast started by nstream; --status shows its state
+nstream --json --audio-lang eng ...       # force the dub language for a headless play/cast
 ```
 
 From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
@@ -282,26 +324,41 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 
 ## Files
 
-| Path | Role |
-|------|------|
-| `src/nstream/cli.py` | argparse entry point, fzf/mpv orchestration, resume, series auto-advance |
-| `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards |
-| `src/nstream/subs.py` | subtitle fetch/rank/download (OpenSubtitles) |
-| `src/nstream/labels.py` | display-label formatting for the fzf/mpv UI |
-| `src/nstream/api.py` | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
-| `src/nstream/addons.py` | Stremio addon-protocol client (manifests, dispatch, cache) |
-| `src/nstream/debrid.py` | native debrid resolver (TorBox/Premiumize API: cache check + resolve) for the `native` backend |
-| `src/nstream/quality.py` | hardware-aware stream parsing/ranking (vainfo caps, filter) |
-| `src/nstream/settings.py` | native fzf settings menu (config + addons) |
-| `src/nstream/config.py` | config load/save (XDG, atomic 0600) + payload types |
-| `src/nstream/state.py` | watch-history persistence (resume / continue-watching) |
-| `src/nstream/log.py` | rotating file log + debug console; redaction filter (token never logged) |
-| `src/nstream/nstream.lua` | mpv overlay for the next-episode countdown (loaded via `--script`) |
-| `nstream-fuzzel` | thin launcher → opens the TUI home menu in foot |
-| `nstream.desktop` | app launcher entry |
-| `pyproject.toml` | metadata, entry point, ruff/ty config |
-| `config.example.json` | config template (no token) |
-| `install.sh` | uv tool install + desktop + config bootstrap |
+| Path                           | Role                                                                                                                                           |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, resume, series auto-advance                                                                       |
+| `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards                                     |
+| `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles)                                                                                                   |
+| `src/nstream/labels.py`        | display-label formatting for the fzf/mpv UI                                                                                                    |
+| `src/nstream/api.py`           | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
+| `src/nstream/addons.py`        | Stremio addon-protocol client (manifests, dispatch, cache)                                                                                     |
+| `src/nstream/net.py`           | retrying HTTP-JSON client (backoff, `Retry-After`) shared by `api`/`addons`                                                                    |
+| `src/nstream/debrid.py`        | native debrid resolver (TorBox/Premiumize API: cache check + resolve) for the `native` backend                                                 |
+| `src/nstream/engine.py`        | local P2P backend: drives an external TorrServer (spawn, add by infoHash, buffer wait)                                                         |
+| `src/nstream/quality.py`       | hardware-aware stream parsing/ranking (vainfo caps, filter)                                                                                    |
+| `src/nstream/player.py`        | local mpv playback: launch, IPC position tracking, hwdec/quiet/lang defaults                                                                   |
+| `src/nstream/caster.py`        | Chromecast playback: device resolution, cast (castbridge or catt), status poll                                                                 |
+| `src/nstream/bridge.py`        | IPC client for the castbridge daemon (metadata-rich LOAD + playback events)                                                                    |
+| `src/nstream/serve.py`         | Range-capable HTTP server delivering the Tier-2 remux file to the TV (+ ufw rule)                                                              |
+| `src/nstream/remux.py`         | Tier-2 cast: on-host audio remux (Dolby/DTS → AAC) to a complete temp MP4                                                                      |
+| `src/nstream/mirror.py`        | realtime cast backend: mpv on a headless output mirrored via the openscreen sender                                                             |
+| `src/nstream/tracks.py`        | ffprobe audio/subtitle track probing (memoized per url)                                                                                        |
+| `src/nstream/languages.py`     | single source of truth for language tokens/flags/display names                                                                                 |
+| `src/nstream/picker.py`        | shared fzf pickers (TUI flow + cast menus)                                                                                                     |
+| `src/nstream/preview.py`       | poster thumbnail + metadata card for the fzf preview pane (`__preview`)                                                                        |
+| `src/nstream/ui.py`            | TUI design system: capability detection, palette, fzf theme, layout                                                                            |
+| `src/nstream/explain.py`       | `--explain` diagnostic renderer (why a stream/audio was auto-picked)                                                                           |
+| `src/nstream/settings.py`      | native fzf settings menu (config + addons)                                                                                                     |
+| `src/nstream/config.py`        | config load/save (XDG, atomic 0600) + payload types                                                                                            |
+| `src/nstream/state.py`         | watch-history persistence (resume / continue-watching)                                                                                         |
+| `src/nstream/log.py`           | rotating file log + debug console; redacting formatter (token never logged)                                                                    |
+| `src/nstream/util.py`          | stdlib-only low-level helpers (atomic write, JSON load, subprocess)                                                                            |
+| `src/nstream/nstream.lua`      | mpv overlay for the next-episode countdown (loaded via `--script`)                                                                             |
+| `nstream-fuzzel`               | thin launcher → opens the TUI home menu in foot                                                                                                |
+| `nstream.desktop`              | app launcher entry                                                                                                                             |
+| `pyproject.toml`               | metadata, entry point, ruff/ty config                                                                                                          |
+| `config.example.json`          | config template (no token)                                                                                                                     |
+| `install.sh`                   | uv tool install + desktop + config bootstrap                                                                                                   |
 
 ## Possible extensions
 
