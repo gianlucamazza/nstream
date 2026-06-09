@@ -1229,3 +1229,398 @@ def test_main_movies_series_mutually_exclusive(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         cli.main()
     assert ei.value.code == 2
+
+
+# --- cast decision tree (_play_on_cast) — safety net for the cast_flow extraction ---
+#
+# These tests pin the interactive cast branch exactly as it behaves today, so a 1:1 move
+# to a cast_flow module keeps them green (at most the patched module changes). They patch
+# module attributes (cli.remux / cli.mirror / cli.stream_select / cli.engine); `cast`,
+# `play` and `auto_subs` are from-imported by cli and called via its own globals, so those
+# are patched as cli attributes — the only effective seam (matching the existing harness).
+
+_CAST_STREAM = {
+    "name": "[RD+] Torrentio\n1080p",
+    "title": "Dune.2024.1080p.WEB-DL.HEVC.ITA-GRP\n👤 9 💾 8 GB",
+    "url": "http://u/dune.mkv",
+}
+
+
+def _cast_opts(**kw):
+    base = dict(auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
+    base.update(kw)
+    return cli.PlayOpts(**base)
+
+
+def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
+    return cli.stream_select.CastAudioPlan(mode, stream, audio_index, real_lang, verified=verified)
+
+
+def _boom(msg):
+    def fail(*a, **k):
+        raise AssertionError(msg)
+
+    return fail
+
+
+def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
+    """Hermetic _play_on_cast: always stub vet_cast_audio (the real one ffprobes the url)
+    plus the in-cast switch helpers and auto_subs. Returns the spy dict."""
+    seen = {"subs": []}
+    monkeypatch.setattr(cli.stream_select, "vet_cast_audio", lambda *a, **k: plan)
+    monkeypatch.setattr(cli.stream_select, "cast_languages", lambda cfg, results: langs)
+    monkeypatch.setattr(
+        cli.stream_select, "cast_resolver", lambda cfg, results: lambda lang: "http://u2"
+    )
+    monkeypatch.setattr(
+        cli, "auto_subs",
+        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None: (
+            seen["subs"].append(safety_sub_lang) or ()
+        ),
+    )  # fmt: skip
+    return seen
+
+
+def _call_cast(opts, stream, *, start=None, results=None):
+    return cli._play_on_cast(
+        CFG, results if results is not None else [stream], stream, "/tmp", "192.168.1.5",
+        typ="movie", video_id="tt1", title="Dune", opts=opts, start=start, next_label=None,
+    )  # fmt: skip
+
+
+def test_play_on_cast_remux_success_uses_cast_file(monkeypatch):
+    """Tier-2 plan + remux OK → cast_file(follow=True) with the start threaded; the
+    direct cast must never run."""
+    stream = dict(_CAST_STREAM)
+    seen = _wire_cast_tree(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(
+        cli.remux, "remux_for_cast",
+        lambda url, cfg, *, audio_index, size_gb=0.0: (
+            seen.update(remux_url=url, idx=audio_index) or "/tmp/out.mp4"
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cli.remux, "cast_file",
+        lambda cfg, title, path, **k: (
+            seen.update(path=path, follow=k.get("follow"), start=k.get("start"))
+            or (0.0, 0.0, False)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "cast", _boom("direct cast must not run when the remux succeeds"))
+    _call_cast(_cast_opts(), stream, start=42.0)
+    assert seen["remux_url"] == stream["url"] and seen["idx"] == 1  # plan's track is mapped
+    assert seen["path"] == "/tmp/out.mp4"
+    assert seen["follow"] is True and seen["start"] == 42.0
+
+
+def test_play_on_cast_remux_failure_degrades_to_direct(monkeypatch, capsys):
+    """Interactive twin of the headless remux-failure test: stderr warns and the direct
+    cast still carries the ORIGINAL stream url."""
+    stream = dict(_CAST_STREAM)
+    seen = _wire_cast_tree(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cli.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg failed
+    monkeypatch.setattr(cli.remux, "cast_file", _boom("cast_file must not run without a remux"))
+    monkeypatch.setattr(
+        cli, "cast", lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False)
+    )
+    _call_cast(_cast_opts(), stream)
+    assert "remux non riuscito" in capsys.readouterr().err
+    assert seen["cast_url"] == stream["url"]
+
+
+def test_play_on_cast_absent_safety_subs_then_direct(monkeypatch, capsys):
+    """No dub carries the primary language → auto_subs gets the safety language ONCE,
+    stderr explains, then the pick is cast directly anyway."""
+    stream = dict(_CAST_STREAM)
+    seen = _wire_cast_tree(monkeypatch, _plan("absent", stream, real_lang="eng"))
+    monkeypatch.setattr(cli.remux, "remux_for_cast", _boom("no remux for an absent language"))
+    monkeypatch.setattr(
+        cli, "cast", lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False)
+    )
+    _call_cast(_cast_opts(), stream)
+    err = capsys.readouterr().err
+    assert seen["subs"] == [CFG.primary]  # interactive copy: ONE auto_subs call, safety lang set
+    assert "non disponibile" in err and f"sottotitoli {CFG.primary}" in err
+    assert seen["cast_url"] == stream["url"]
+
+
+def test_play_on_cast_mirror_gates_on_remux_audio(monkeypatch):
+    """--mirror + undecodable audio (plan remux) → cast_via_mirror; remux must not run."""
+    stream = dict(_CAST_STREAM)
+    seen = _wire_cast_tree(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cli.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cli.mirror, "cast_via_mirror",
+        lambda cfg, title, url, **k: (
+            seen.update(url=url, device=k.get("device"), start=k.get("start"))
+            or (0.0, 0.0, False)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cli.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
+    monkeypatch.setattr(cli, "cast", _boom("direct cast must not run on the mirror path"))
+    _call_cast(_cast_opts(mirror=True), stream, start=7.0)
+    assert seen["url"] == stream["url"]
+    assert seen["device"] == "192.168.1.5" and seen["start"] == 7.0
+
+
+def test_play_on_cast_mirror_downgraded_when_decodable(monkeypatch, capsys):
+    """--mirror with DMR-decodable audio (plan direct) → transparent direct cast + notice."""
+    stream = dict(_CAST_STREAM)
+    seen = _wire_cast_tree(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cli.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cli.mirror, "cast_via_mirror", _boom("mirror must not run for decodable audio")
+    )
+    monkeypatch.setattr(cli, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False))
+    _call_cast(_cast_opts(mirror=True), stream)
+    assert "mirror non necessario" in capsys.readouterr().err
+    assert seen.get("cast") is True
+
+
+def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
+    """Direct cast: the in-cast audio switch (langs + resolve_lang) is wired only when
+    several dubs exist; with a single language both stay empty."""
+    stream = dict(_CAST_STREAM)
+    seen = _wire_cast_tree(monkeypatch, _plan("direct", stream), langs=("ita", "eng"))
+    monkeypatch.setattr(
+        cli, "cast",
+        lambda *a, **k: (
+            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False)
+        ),
+    )  # fmt: skip
+    _call_cast(_cast_opts(), stream)
+    assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
+    monkeypatch.setattr(cli.stream_select, "cast_languages", lambda cfg, results: ("ita",))
+    _call_cast(_cast_opts(), stream)
+    assert seen["langs"] == () and seen["resolver"] is None
+
+
+# --- headless cast tree (_auto_play) — safety net for the headless extraction ---
+
+
+def test_run_auto_mirror_action(monkeypatch, capsys):
+    """Headless twin of the mirror gate: --json --cast --mirror + plan remux → action=mirror."""
+    stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        cli.stream_select, "vet_cast_audio", lambda *a, **k: _plan("remux", stream, audio_index=1)
+    )
+    monkeypatch.setattr(cli.mirror, "available", lambda: True)
+    seen = {}
+    monkeypatch.setattr(
+        cli.mirror, "cast_via_mirror",
+        lambda cfg, title, url, **k: (
+            seen.update(url=url, follow=k.get("follow")) or (0.0, 0.0, False)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cli.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
+    monkeypatch.setattr(cli, "cast", _boom("direct cast must not run on the mirror path"))
+    monkeypatch.setattr(cli.engine, "detach_spawned", lambda: None)
+    rc = cli.run_auto(CFG, _hns(query=["dune"]), _cast_opts(mirror=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "mirror" and out["reencoded"] is False
+    assert seen["url"] == stream["url"] and seen["follow"] is False  # fire-and-return default
+
+
+def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
+    """Headless Tier-2 success: JSON says reencoded; fire-and-return uses cast_file with
+    follow=False and no event callback, while --follow wires the JSONL callback in."""
+    stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        cli.stream_select, "vet_cast_audio", lambda *a, **k: _plan("remux", stream, audio_index=1)
+    )
+    monkeypatch.setattr(cli.remux, "remux_for_cast", lambda *a, **k: "/tmp/out.mp4")
+    seen = {"detached": 0}
+    monkeypatch.setattr(
+        cli.remux, "cast_file",
+        lambda cfg, title, path, **k: (
+            seen.update(path=path, follow=k.get("follow"), on_event=k.get("on_event"))
+            or (0.0, 0.0, False)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "cast", _boom("direct cast must not run when the remux succeeds"))
+    monkeypatch.setattr(
+        cli.engine, "detach_spawned", lambda: seen.update(detached=seen["detached"] + 1)
+    )
+    rc = cli.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["reencoded"] is True and out["action"] == "cast"
+    assert seen["path"] == "/tmp/out.mp4"
+    assert seen["follow"] is False and seen["on_event"] is None  # fire-and-return default
+    assert seen["detached"] == 1  # handoff keeps a spawned TorrServer alive
+    rc = cli.run_auto(CFG, _hns(query=["dune"], follow=True), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["reencoded"] is True
+    assert seen["follow"] is True and callable(seen["on_event"])  # JSONL events wired
+    assert seen["detached"] == 1  # --follow keeps ownership: no detach
+
+
+def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
+    """Headless absent dub: the JSON reports the real language + the safety subtitles."""
+    stream = _wire_movie(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        cli, "auto_subs",
+        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None: (
+            calls.append(safety_sub_lang) or ("/tmp/sub.srt",)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        cli.stream_select,
+        "vet_cast_audio",
+        lambda *a, **k: _plan("absent", stream, real_lang="eng"),
+    )
+    monkeypatch.setattr(cli.remux, "remux_for_cast", _boom("no remux for an absent language"))
+    seen = {}
+    monkeypatch.setattr(cli, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False))
+    monkeypatch.setattr(cli.engine, "detach_spawned", lambda: None)
+    rc = cli.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    assert rc == 0 and seen.get("cast") is True
+    assert out["audio_lang"] == "eng" and out["audio_verified"] is True
+    assert out["subtitles"] == CFG.primary  # safety subs reported in the JSON
+    # current behaviour: the headless copy calls auto_subs TWICE in the absent branch
+    # (pre-decision with the vetted safety lang, then again with the absent-target lang),
+    # while the interactive copy calls it once.
+    assert calls == [None, CFG.primary]
+    # current behaviour: unlike the interactive copy, headless prints no absent notice.
+    assert "non disponibile" not in cap.err
+
+
+def test_run_auto_follow_emits_event_jsonl(monkeypatch, capsys):
+    """--json --cast --follow: each castbridge event becomes one JSONL line on stdout."""
+    stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        cli.stream_select, "vet_cast_audio", lambda *a, **k: _plan("direct", stream)
+    )
+    seen = {}
+
+    def fake_cast(cfg, title, url, **k):
+        seen["follow"] = k.get("follow")
+        k["on_event"]({"kind": "playing", "position": 3.0})  # the callback IS the JSONL writer
+        return (0.0, 0.0, False)
+
+    monkeypatch.setattr(cli, "cast", fake_cast)
+    rc = cli.run_auto(CFG, _hns(query=["dune"], follow=True), _cast_opts())
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert rc == 0 and seen["follow"] is True
+    event, final = lines[0], lines[-1]
+    assert event["event"] == "playing" and event["ok"] is True and event["position"] == 3.0
+    assert final["action"] == "cast" and final["error"] is None
+
+
+# --- resume / headless-continue perimeter — safety net for the headless extraction ---
+
+
+def test_run_auto_resume_threads_history_entry(monkeypatch):
+    """--json -c with a query: the matched series entry's identity reaches _auto_play."""
+    entry = HistoryEntry(
+        video_id="tt2:1:2", title="Severance", type="series", series_id="tt2",
+        season=1, episode=2, position=100.0, duration=3000.0, ts=1.0,
+    )  # fmt: skip
+    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [entry])
+    seen = {}
+
+    def spy(cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection, **kw):
+        seen.update(
+            typ=typ, video_id=video_id, title=title, imdb_id=imdb_id,
+            season=season, episode=episode, selection=selection,
+        )  # fmt: skip
+        return 0
+
+    monkeypatch.setattr(cli, "_auto_play", spy)
+    rc = cli.run_auto(CFG, _hns(query=["severance"], cont=True), _hopts())
+    assert rc == 0
+    assert seen["typ"] == "series" and seen["video_id"] == "tt2:1:2"
+    assert seen["imdb_id"] == "tt2" and seen["season"] == 1 and seen["episode"] == 2
+    assert seen["selection"] == "resume" and seen["title"] == "Severance · S01E02"
+
+
+def test_run_auto_resume_no_result(monkeypatch, capsys):
+    """--json -c: empty history and a no-match query are both no_result (rc 1)."""
+    monkeypatch.setattr(cli, "_auto_play", _boom("nothing should play"))
+    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [])
+    rc = cli.run_auto(CFG, _hns(cont=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "no_result" and "cronologia vuota" in out["message"]
+    entry = HistoryEntry(video_id="tt3", title="Dune", type="movie", ts=1.0)
+    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [entry])
+    rc = cli.run_auto(CFG, _hns(query=["matrix"], cont=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "no_result" and "matrix" in out["message"]
+
+
+def test_run_continue_empty_history(monkeypatch, capsys):
+    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [])
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
+    assert cli.run_continue(CFG, opts) == 0
+    assert "cronologia vuota" in capsys.readouterr().err
+
+
+def test_run_continue_plays_picked_entry(monkeypatch):
+    entry = HistoryEntry(video_id="tt3", type="movie", title="Dune", ts=1.0)
+    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [entry])
+    fake_fzf, _ = _fzf_script([("", entry), None])  # pick the entry, then ESC out
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    seen = {}
+    monkeypatch.setattr(cli, "play_history", lambda cfg, e, o: seen.update(entry=e) or None)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
+    assert cli.run_continue(CFG, opts) == 0
+    assert seen["entry"] is entry
+
+
+def test_play_history_on_save_roundtrip(monkeypatch, tmp_path):
+    """After a stubbed play, the history holds the updated entry with the original
+    video_id/type/title — the on_save closure built by play_history round-trips."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    cfg = Config(torrentio_base="tb", hwdec="")
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 100.0, ""))
+    entry = HistoryEntry(video_id="tt3", type="movie", title="Dune")
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
+    assert cli.play_history(cfg, entry, opts) is None
+    saved = cli.state.load_history(cfg)["tt3"]
+    assert saved["video_id"] == "tt3" and saved["type"] == "movie" and saved["title"] == "Dune"
+    assert saved["position"] == 42.0 and saved["duration"] == 100.0
+
+
+def test_play_history_resume_start_threaded(monkeypatch, tmp_path):
+    """A stored position reaches the stubbed play() as --start via _resume_position."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    cfg = Config(torrentio_base="tb", hwdec="")
+    cli.state.save_entry(
+        cfg,
+        {"video_id": "tt3", "title": "Dune", "type": "movie",
+         "position": 500.0, "duration": 10000.0, "ts": 1.0},
+    )  # fmt: skip
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    seen = {}
+    monkeypatch.setattr(
+        cli, "play", lambda *a, **k: seen.update(start=k.get("start")) or (600.0, 10000.0, "")
+    )
+    entry = HistoryEntry(video_id="tt3", type="movie", title="Dune")
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
+    cli.play_history(cfg, entry, opts)
+    assert seen["start"] == 500.0
