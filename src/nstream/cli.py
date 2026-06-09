@@ -25,6 +25,7 @@ from . import (
     preview,
     quality,
     remux,
+    series,
     settings,
     state,
     stream_select,
@@ -40,7 +41,6 @@ from .config import (
     Meta,
     PlayOpts,
     Stream,
-    Video,
     config_path,
     load,
 )
@@ -360,129 +360,69 @@ def _move_to_cast(
     return (pos, dur, False)
 
 
-def _play_series(
-    cfg: Config,
-    series_id: str,
-    name: str,
-    eps: list[Video],
-    start_video: Video,
-    opts: PlayOpts,
-    poster: str = "",
-) -> str | None:
-    """Play a series from `start_video`, auto-advancing through the overlay.
-    Returns a notice (e.g. an episode with no streams) to surface, or None."""
-    idx = next((i for i, v in enumerate(eps) if v.get("id") == start_video.get("id")), None)
-    if idx is None:
-        return None
-    auto = opts.auto  # the first episode honours --play; binge episodes auto-pick
-    binge = False  # True once we're auto-advancing unattended (no blocking reselection)
-    while 0 <= idx < len(eps):
-        video = eps[idx]
-        video_id = video["id"]
-        nxt = eps[idx + 1] if idx + 1 < len(eps) else None
-        next_label = display_title(name, nxt) if (opts.autoplay and nxt is not None) else None
+def _series_player(cfg: Config) -> series.PlayVideo:
+    """Adapt `_play_video` to the series-flow callable (`series.PlayVideo`): cfg and
+    typ="series" pre-bound, so `series.py` plays episodes without importing cli."""
 
-        def on_save(pos: float, dur: float, vid: str = video_id, v: Video = video) -> None:
-            state.save_entry(
-                cfg, state.make_entry(vid, name, "series", pos, dur, series_id=series_id, video=v)
-            )
-
-        notice, advance = _play_video(
-            cfg, "series", video_id, display_title(name, video), opts,
+    def play_video(
+        video_id: str,
+        title: str,
+        opts: PlayOpts,
+        *,
+        auto: bool,
+        next_label: str | None,
+        on_save: Callable[[float, float], None],
+        reselect_on_wrong_audio: bool = True,
+        cast_meta: caster.CastMeta | None = None,
+    ) -> tuple[str | None, bool]:
+        return _play_video(
+            cfg, "series", video_id, title, opts,
             auto=auto, next_label=next_label, on_save=on_save,
-            reselect_on_wrong_audio=not binge,  # binge advances warn-and-proceed, don't block
-            cast_meta=caster.CastMeta(
-                poster=poster, series_title=name,
-                season=video.get("season", 0) or 0, episode=video.get("episode", 0) or 0,
-            ),
+            reselect_on_wrong_audio=reselect_on_wrong_audio, cast_meta=cast_meta,
         )  # fmt: skip
-        if notice:
-            return notice
-        if not advance or nxt is None:
-            return None
-        idx += 1
-        auto = True
-        binge = True
-        print(f"▶ Carico {display_title(name, eps[idx])}…", file=sys.stderr)
-    return None
+
+    return play_video
 
 
 def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
-    """Play a title; returns a notice to show above the list, or None."""
+    """Play a title; returns a notice to show above the list, or None.
+    Thin type dispatch: series (episode picker + binge) live in `series.py`."""
     typ = meta.get("type", "movie")
+    if typ == "series":
+        return series.play(
+            cfg, meta, opts,
+            play_video=_series_player(cfg), pick_hint=_pick_hint, apply_key=_apply_key,
+        )  # fmt: skip
+
     name = meta.get("name", "nstream")
-    if typ != "series":
-        movie_id = meta["id"]
+    movie_id = meta["id"]
 
-        def on_save(pos: float, dur: float) -> None:
-            state.save_entry(cfg, state.make_entry(movie_id, name, typ, pos, dur))
+    def on_save(pos: float, dur: float) -> None:
+        state.save_entry(cfg, state.make_entry(movie_id, name, typ, pos, dur))
 
-        notice, _ = _play_video(
-            cfg, typ, movie_id, display_title(name, None), opts,
-            auto=opts.auto, next_label=None, on_save=on_save,
-            cast_meta=caster.CastMeta(poster=meta.get("poster") or ""),
-        )  # fmt: skip
-        return notice
-
-    eps = api.episodes(cfg, meta["id"])
-    if not eps:
-        return f"nessun episodio per «{name}»"
-    items = [(episode_label(v), v) for v in eps]
-    sid = meta["id"]
-
-    def ep_preview(v: Video) -> str:
-        return f"episode {sid} {v.get('season', 0)} {v.get('episode', 0)}"
-
-    # Loop the episode picker so finishing/backing out returns here, not to the list.
-    header: str | None = None
-    while True:
-        chosen = fzf_key(items, "episodio> ", header=header or _pick_hint(opts), preview=ep_preview)
-        if not chosen:
-            return None
-        key, start_video = chosen
-        header = _play_series(
-            cfg, meta["id"], name, eps, start_video, _apply_key(opts, key),
-            poster=meta.get("poster") or "",
-        )  # fmt: skip
-
-
-def _entry_video(entry: HistoryEntry) -> Video | None:
-    if entry.get("type") != "series":
-        return None
-    return {"season": entry.get("season", 0), "episode": entry.get("episode", 0)}
+    notice, _ = _play_video(
+        cfg, typ, movie_id, display_title(name, None), opts,
+        auto=opts.auto, next_label=None, on_save=on_save,
+        cast_meta=caster.CastMeta(poster=meta.get("poster") or ""),
+    )  # fmt: skip
+    return notice
 
 
 def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None:
-    """Resume from a history entry; returns a notice to show, or None."""
+    """Resume from a history entry; returns a notice to show, or None.
+    Series entries (binge resume + single-episode fallback) dispatch to `series.py`."""
     typ = entry.get("type", "movie")
-    name = entry.get("title", "nstream")
-    series_id = entry.get("series_id", "")
-    # Resume a series and keep bingeing the rest of the season.
-    if typ == "series" and series_id and opts.autoplay:
-        eps = api.episodes(cfg, series_id)
-        cur = next((v for v in eps if v.get("id") == entry["video_id"]), None)
-        if cur is not None:
-            return _play_series(cfg, series_id, name, eps, cur, opts)
+    if typ == "series":
+        return series.resume(cfg, entry, opts, play_video=_series_player(cfg))
 
+    name = entry.get("title", "nstream")
     video_id = entry["video_id"]
 
     def on_save(pos: float, dur: float) -> None:
-        state.save_entry(
-            cfg,
-            state.make_entry(
-                video_id,
-                name,
-                typ,
-                pos,
-                dur,
-                series_id=series_id,
-                season=entry.get("season", 0),
-                episode=entry.get("episode", 0),
-            ),  # fmt: skip
-        )
+        state.save_entry(cfg, state.make_entry(video_id, name, typ, pos, dur))
 
     notice, _ = _play_video(
-        cfg, typ, video_id, display_title(name, _entry_video(entry)), opts,
+        cfg, typ, video_id, display_title(name, None), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
     )  # fmt: skip
     return notice
@@ -536,16 +476,17 @@ def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> in
         header = play_meta(cfg, meta, sel)
 
 
-def run_search(cfg: Config, query: str, opts: PlayOpts) -> int:
-    metas = api.search(cfg, query)
+def run_search(cfg: Config, query: str, opts: PlayOpts, typ: str | None = None) -> int:
+    metas = api.search(cfg, query, typ)
     if not metas:
         print("nstream: nessun risultato", file=sys.stderr)
         return 1
     return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
-def run_browse(cfg: Config, cat: str, opts: PlayOpts) -> int:
-    metas = api.browse(cfg, cat)  # movies + series, fetched concurrently
+def run_browse(cfg: Config, cat: str, opts: PlayOpts, typ: str | None = None) -> int:
+    # Typed → single-type catalog; None → movies + series, fetched concurrently.
+    metas = api.catalog(cfg, typ, cat) if typ else api.browse(cfg, cat)
     if not metas:
         print("nstream: catalogo vuoto", file=sys.stderr)
         return 1
@@ -657,6 +598,16 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             {"ok": False, "error": "usage", "message": "--sub-menu incompatibile con --json"}
         )
         return 2
+    typ_filter = _typ_filter(args)
+    if typ_filter == "movie" and (args.season is not None or args.episode is not None):
+        _emit_json(
+            {
+                "ok": False,
+                "error": "usage",
+                "message": "--movies incompatibile con --season/--episode",
+            }
+        )
+        return 2
     # Cast lifecycle actions: no title needed, no playback.
     if args.stop:
         return _run_stop(cfg, args)
@@ -664,11 +615,12 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         return _run_status(cfg, args)
     query = " ".join(args.query)
     if args.cont:
-        return _run_auto_resume(cfg, args, opts, query)
+        return _run_auto_resume(cfg, args, opts, query, typ_filter)
 
     # Meta source: a catalog (--browse) or a title search.
     if args.browse:
-        metas = api.browse(cfg, CAT_MAP[args.browse])
+        cat = CAT_MAP[args.browse]
+        metas = api.catalog(cfg, typ_filter, cat) if typ_filter else api.browse(cfg, cat)
         if not metas:
             _emit_json({"ok": False, "error": "no_result", "message": "catalogo vuoto"})
             return 1
@@ -678,14 +630,21 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             _emit_json({"ok": False, "error": "usage", "message": "--json richiede un titolo"})
             return 2
         metas = api.search(cfg, query)
+        # Explicit --movies/--series: drop the other type before the title match, so a
+        # same-named movie can never shadow the series the caller asked for (and vice versa).
+        if typ_filter:
+            metas = [m for m in metas if m.get("type", "movie") == typ_filter]
         if not metas:
-            _emit_json(
-                {"ok": False, "error": "no_result", "message": f"nessun risultato per «{query}»"}
+            what = {"movie": "nessun film", "series": "nessuna serie"}.get(
+                typ_filter or "", "nessun risultato"
             )
+            _emit_json({"ok": False, "error": "no_result", "message": f"{what} per «{query}»"})
             return 1
+        # The --season/--episode series inference stays only when no explicit flag is given.
         meta, selection = _select_meta(
             metas, query, args.year,
-            want_series=args.season is not None or args.episode is not None,
+            want_series=typ_filter is None
+            and (args.season is not None or args.episode is not None),
         )  # fmt: skip
     typ = meta.get("type", "movie")
     name = meta.get("name", "?")
@@ -979,10 +938,12 @@ def _auto_play(
     return 0
 
 
-def _run_auto_resume(cfg: Config, args: argparse.Namespace, opts: PlayOpts, query: str) -> int:
+def _run_auto_resume(
+    cfg: Config, args: argparse.Namespace, opts: PlayOpts, query: str, typ: str | None = None
+) -> int:
     """Headless resume (`--json -c`): pick a history entry by normalized title (or the most
-    recent when no query) and replay it, with no fzf."""
-    entries = state.recent(cfg)
+    recent when no query) and replay it, with no fzf. `typ` narrows to one content type."""
+    entries = state.recent(cfg, typ=typ)
     if not entries:
         _emit_json({"ok": False, "error": "no_result", "message": "cronologia vuota"})
         return 1
@@ -1002,7 +963,7 @@ def _run_auto_resume(cfg: Config, args: argparse.Namespace, opts: PlayOpts, quer
     typ = entry.get("type", "movie")
     return _auto_play(
         cfg, args, opts, typ, entry["video_id"],
-        display_title(entry.get("title", "?"), _entry_video(entry)),
+        display_title(entry.get("title", "?"), series.entry_video(entry)),
         entry.get("series_id") or entry["video_id"],
         entry.get("season") or None, entry.get("episode") or None, "resume",
     )  # fmt: skip
@@ -1052,9 +1013,10 @@ def _run_status(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
-def run_continue(cfg: Config, opts: PlayOpts) -> int:
-    """`-c`: resume from history, returning to the list after each play (ESC exits)."""
-    entries = state.recent(cfg)
+def run_continue(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
+    """`-c`: resume from history, returning to the list after each play (ESC exits).
+    `typ` (--movies/--series) narrows the list to one content type."""
+    entries = state.recent(cfg, typ=typ)
     if not entries:
         print("nstream: cronologia vuota", file=sys.stderr)
         return 0
@@ -1068,43 +1030,71 @@ def run_continue(cfg: Config, opts: PlayOpts) -> int:
             return 0
         key, entry = chosen
         header = play_history(cfg, entry, _apply_key(opts, key))
-        entries = state.recent(cfg)  # reflect updated positions, then re-show
+        entries = state.recent(cfg, typ=typ)  # reflect updated positions, then re-show
 
 
 # Home-menu action kinds (the value half of an fzf item; history entries are dicts).
 _SEARCH = "search"
 _BROWSE = "browse"
+_SECTION = "section"
 _SETTINGS = "settings"
+
+# Section type → fzf prompt (home itself uses "nstream> ").
+_SECTION_PROMPT = {"movie": "film> ", "series": "serie> "}
+
+
+def _home_preview(value: object) -> str | None:
+    """Action rows (tuples) have no preview; continue-watching entries (dicts) do."""
+    return None if isinstance(value, tuple) else _entry_preview(typecast("HistoryEntry", value))
+
+
+def _ask_query() -> str | None:
+    """Prompt for a search query on stdin; None on EOF (leave the menu)."""
+    try:
+        return input("cerca> ").strip()
+    except EOFError:
+        return None
 
 
 def run_home(cfg: Config, opts: PlayOpts) -> int:
-    """The TUI home: continue-watching + search + browse + settings, in one menu.
-    Loops until the user backs out (ESC). This is the rich entry surface — the
-    desktop/fuzzel launcher only opens it; no UI logic lives in fuzzel."""
+    """The TUI home: continue-watching + search + the typed sections (Film / Serie TV)
+    + settings, in one menu. Loops until the user backs out (ESC). This is the rich
+    entry surface — the desktop/fuzzel launcher only opens it; no UI logic in fuzzel."""
+    return _home_menu(cfg, opts, typ=None)
+
+
+def run_section(cfg: Config, typ: str, opts: PlayOpts) -> int:
+    """A type-scoped home section: type-filtered continue-watching, search and the
+    three Cinemeta catalogs, all pinned to `typ`. ESC returns to the home menu."""
+    return _home_menu(cfg, opts, typ=typ)
+
+
+def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
+    """Shared loop behind run_home (typ None: mixed rows + sections + settings) and
+    run_section (typ set: rows and catalogs pinned to one type)."""
     notice: str | None = None
     while True:
-        recent = state.recent(cfg) if opts.history else []
+        recent = state.recent(cfg, typ=typ) if opts.history else []
         g = ui.glyphs(ui.active_caps())
         items: list[tuple[str, object]] = [(history_label(e), e) for e in recent]
-        items += [
-            (f"{g.search}  Cerca…", (_SEARCH, "")),
-            (f"{g.fire}  Popolari", (_BROWSE, "popolari")),
-            (f"{g.new}  Novità", (_BROWSE, "nuovi")),
-            (f"{g.star}  Top IMDb", (_BROWSE, "top")),
-            (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
-        ]
-
-        def home_preview(value: object) -> str | None:
-            # Action rows (tuples) have no preview; continue-watching entries (dicts) do.
-            return (
-                None
-                if isinstance(value, tuple)
-                else _entry_preview(typecast("HistoryEntry", value))
-            )
+        items.append((f"{g.search}  Cerca…", (_SEARCH, "")))
+        if typ is None:  # home: the typed sections own the catalogs
+            items += [
+                (f"{g.movie}  Film", (_SECTION, "movie")),
+                (f"{g.series}  Serie TV", (_SECTION, "series")),
+                (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
+            ]
+        else:  # section: the three catalogs, served per-type by api.catalog
+            items += [
+                (f"{g.fire}  Popolari", (_BROWSE, "popolari")),
+                (f"{g.new}  Novità", (_BROWSE, "nuovi")),
+                (f"{g.star}  Top IMDb", (_BROWSE, "top")),
+            ]
 
         # The Tab hint only applies to the continue-watching rows.
         header = notice or (_pick_hint(opts) if recent else None)
-        chosen = fzf_key(items, "nstream> ", header=header, preview=home_preview)
+        prompt = _SECTION_PROMPT.get(typ or "", "nstream> ")
+        chosen = fzf_key(items, prompt, header=header, preview=_home_preview)
         notice = None
         if chosen is None:
             return 0
@@ -1114,17 +1104,27 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
             continue
         kind, value = value
         if kind == _SEARCH:
-            try:
-                query = input("cerca> ").strip()
-            except EOFError:
+            query = _ask_query()
+            if query is None:
                 return 0
             if query:
-                run_search(cfg, query, opts)
+                run_search(cfg, query, opts, typ)
+        elif kind == _SECTION:
+            run_section(cfg, typecast(str, value), opts)
         elif kind == _BROWSE:
-            run_browse(cfg, CAT_MAP[typecast(str, value)], opts)
+            run_browse(cfg, CAT_MAP[typecast(str, value)], opts, typ)
         elif kind == _SETTINGS:
             settings.run_settings(cfg)
             cfg = load()  # pick up any change for the next loop
+
+
+def _typ_filter(args: argparse.Namespace) -> str | None:
+    """Explicit content-type filter from --movies/--series, or None (mixed)."""
+    if args.movies:
+        return "movie"
+    if args.series:
+        return "series"
+    return None
 
 
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
@@ -1137,11 +1137,12 @@ def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         except api.NetworkError as e:
             _emit_json({"ok": False, "error": "network", "message": str(e)})
             return 1
+    typ = _typ_filter(args)
     _clear()  # start the interactive session on a clean screen (drop launcher banner)
     if args.cont:
-        return run_continue(cfg, opts)
+        return run_continue(cfg, opts, typ)
     if args.browse:
-        return run_browse(cfg, CAT_MAP[args.browse], opts)
+        return run_browse(cfg, CAT_MAP[args.browse], opts, typ)
     query = " ".join(args.query)
     if args.explain:
         if not query:
@@ -1149,8 +1150,8 @@ def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             return 2
         return run_explain(cfg, query)
     if query:
-        return run_search(cfg, query, opts)
-    return run_home(cfg, opts)
+        return run_search(cfg, query, opts, typ)
+    return run_home(cfg, opts)  # the home has the typed sections; flags don't apply
 
 
 def _sub_options(args: argparse.Namespace) -> tuple[str | None, str | None]:
@@ -1215,6 +1216,13 @@ def main() -> int:
         "--browse", nargs="?", const="popolari", choices=list(CAT_MAP),
         help="sfoglia un catalogo Cinemeta invece di cercare (default: popolari)",
     )  # fmt: skip
+    typ_group = parser.add_mutually_exclusive_group()
+    typ_group.add_argument(
+        "--movies", action="store_true", help="solo film (ricerca, catalogo, cronologia)"
+    )
+    typ_group.add_argument(
+        "--series", action="store_true", help="solo serie TV (ricerca, catalogo, cronologia)"
+    )
     parser.add_argument(
         "-c", "--continue", dest="cont", action="store_true",
         help="riprendi dalla cronologia (continua a guardare)",

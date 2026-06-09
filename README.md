@@ -287,6 +287,7 @@ nstream --sub-menu "dune"   # pick subtitles by hand (fzf)
 nstream --sub-lang eng ...  # force the auto-picked subtitle language
 nstream --browse            # browse the Popular catalog (movies + series)
 nstream --browse nuovi      # browse New; also: popolari, top
+nstream --series "fargo"    # only TV series (search/browse/continue); --movies for films only
 nstream -c                  # continue watching from history (resumes + keeps bingeing)
 nstream --settings          # open the settings menu (also: ⚙ entry in the startup menu)
 nstream --no-autoplay ...   # don't show the next-episode overlay
@@ -298,9 +299,11 @@ nstream --json --audio-lang eng ...       # force the dub language for a headles
 ```
 
 From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
-(continue-watching · 🔍 search · 🔥 popular · 🆕 new · ⭐ top · ⚙ settings). All UI lives in the
-TUI; the launcher only opens it. ESC steps back one level; after a title plays (or has no
-sources) you return to the list rather than the app quitting.
+(continue-watching · 🔍 search · 🎬 Film · 📺 Serie TV · ⚙ settings). The Film/Serie sections are
+type-scoped: their own continue-watching, search and catalogs (popular/new/top IMDb); the
+top-level search and continue-watching stay mixed. All UI lives in the TUI; the launcher only
+opens it. ESC steps back one level; after a title plays (or has no sources) you return to the
+list rather than the app quitting.
 
 By default a title plays straight away. Press **Tab** in any title/episode/continue list to enter
 manual mode for that pick: the curated **stream menu** followed by a **pre-play screen**
@@ -326,7 +329,8 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 
 | Path                           | Role                                                                                                                                           |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, resume, series auto-advance                                                                       |
+| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections, resume                                                                     |
+| `src/nstream/series.py`        | series-only flow: episode picker, binge auto-advance, per-episode resume (injected player)                                                     |
 | `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards                                     |
 | `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles)                                                                                                   |
 | `src/nstream/labels.py`        | display-label formatting for the fzf/mpv UI                                                                                                    |

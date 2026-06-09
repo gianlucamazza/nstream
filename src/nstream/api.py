@@ -141,11 +141,11 @@ def _catalog_tasks(cfg: Config, typ: str, path: str, what: str) -> list[Callable
     return tasks
 
 
-def search(cfg: Config, query: str) -> list[Meta]:
+def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     q = urllib.parse.quote(query)
     tasks: list[Callable[[], list]] = []
-    for typ in ("movie", "series"):
-        tasks += _catalog_tasks(cfg, typ, f"top/search={q}", f"ricerca {typ}")
+    for t in (typ,) if typ else ("movie", "series"):
+        tasks += _catalog_tasks(cfg, t, f"top/search={q}", f"ricerca {t}")
     return _dedup(_gather(tasks), lambda m: m.get("id") or id(m))
 
 

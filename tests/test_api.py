@@ -216,6 +216,35 @@ def test_browse_combines_movie_and_series(monkeypatch):
     assert set(ids) == {"movie1", "series1"}
 
 
+def test_search_typed_fetches_only_that_type(monkeypatch):
+    cine = _addon("Cine", "http://cine", "catalog", types=("movie", "series"))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+    seen = []
+
+    def fake_get(url, **k):
+        seen.append(url)
+        typ = "movie" if "/movie/" in url else "series"
+        return {"metas": [{"id": f"{typ}1", "name": typ}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    ids = [m["id"] for m in api.search(CFG, "dune", typ="series")]
+    assert ids == ["series1"]
+    assert all("/series/" in u for u in seen)
+
+
+def test_search_untyped_fetches_both_types(monkeypatch):
+    cine = _addon("Cine", "http://cine", "catalog", types=("movie", "series"))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+
+    def fake_get(url, **k):
+        typ = "movie" if "/movie/" in url else "series"
+        return {"metas": [{"id": f"{typ}1", "name": typ}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    ids = [m["id"] for m in api.search(CFG, "dune")]
+    assert set(ids) == {"movie1", "series1"}
+
+
 def test_catalog_caches_within_ttl(monkeypatch):
     cine = addons.Addon(
         base="http://cine",
