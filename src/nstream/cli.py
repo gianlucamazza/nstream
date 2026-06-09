@@ -16,9 +16,9 @@ from . import (
     __version__,
     api,
     bridge,
+    cast_flow,
     caster,
     debrid,
-    engine,
     explain,
     log,
     mirror,
@@ -248,66 +248,16 @@ def _play_on_cast(
     safety_sub_lang: str | None = None,
     cast_meta: caster.CastMeta | None = None,
 ) -> tuple[float, float, bool]:
-    """Cast the chosen stream in the primary audio language. The Default Media Receiver plays
-    a file's first audio track and can't switch tracks, so the language is enforced at selection
-    time (`vet_cast_audio`): cast directly when the first track is already primary+decodable,
-    remux to select the primary track otherwise, or reselect a dub that has it. Still offers the
-    in-cast audio switch (re-cast a differently-dubbed release) when several dubs exist."""
-    target_lang = opts.audio_lang or cfg.primary
-    plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
-    chosen = plan.stream
-    # No dub carries the primary language: cast the best pick anyway, with primary-language
-    # subtitles as a safety net (mirrors the local guard).
-    if plan.mode == "absent" and target_lang:
-        safety_sub_lang = target_lang
-        print(
-            f"nstream: audio {target_lang} non disponibile"
-            + (f" (casto {plan.real_lang})" if plan.real_lang else "")
-            + f"; sottotitoli {target_lang} attivati",
-            file=sys.stderr,
-        )
-    sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
-    _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
-    # Backend strategy. The DMR plays AAC/HEVC/4K/HDR natively and instantly — strictly better
-    # than the mirror (1080p SDR re-encode, latency) — so `--mirror` only actually mirrors when
-    # the audio is one the DMR can't decode (plan.mode == "remux"): there mirroring (mpv decodes
-    # Dolby/DTS locally → instant) beats the remux prepare-wait. For decodable audio, mirror is
-    # transparently downgraded to the direct cast.
-    if plan.mode == "remux":
-        if opts.mirror and mirror.available():
-            return mirror.cast_via_mirror(
-                cfg, title, chosen["url"], device=device, start=start, sub_paths=sub_paths
-            )
-        remux_path = remux.remux_for_cast(
-            chosen["url"], cfg,
-            audio_index=plan.audio_index, size_gb=quality.parse_stream(chosen).size_gb,
-        )  # fmt: skip
-        if remux_path:
-            return remux.cast_file(
-                cfg, title, remux_path,
-                device=device, start=start, sub_paths=sub_paths, follow=True,
-                meta=cast_meta,
-            )  # fmt: skip
-        # remux refused (size guard) or failed → degrade to a direct cast of the same pick;
-        # the file's first audio track is then Dolby (silent on the DMR) or the wrong dub.
-        print(
-            "nstream: ⚠ remux non riuscito → cast diretto: "
-            "l'audio potrebbe risultare muto o in un'altra lingua",
-            file=sys.stderr,
-        )
-    elif opts.mirror:
-        print(
-            "nstream: audio decodificabile dal TV → cast diretto nativo (mirror non necessario)",
-            file=sys.stderr,
-        )
-    cast_langs = stream_select.cast_languages(cfg, results)
-    return cast(
-        cfg, title, chosen["url"],
-        device=device, start=start, sub_paths=sub_paths, next_label=next_label,
-        langs=cast_langs if len(cast_langs) > 1 else (),
-        resolve_lang=stream_select.cast_resolver(cfg, results) if len(cast_langs) > 1 else None,
-        meta=cast_meta,
+    """Interactive cast: thin wrapper over the shared decision tree (`cast_flow.run_cast`),
+    with the interactive knobs on — blocking follow, next-episode label, and the in-cast
+    audio switch (re-cast a differently-dubbed release) when several dubs exist."""
+    outcome = cast_flow.run_cast(
+        cfg, results, chosen,
+        device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
+        opts=opts, start=start, follow=True, next_label=next_label,
+        allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
     )  # fmt: skip
+    return (outcome.pos, outcome.dur, outcome.advance)
 
 
 def _play_on_mpv(
@@ -798,9 +748,6 @@ def _auto_play(
     cast_sub_lang = vetted.safety_sub_lang or opts.sub_lang
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = _resume_position(cfg, video_id) if opts.history else None
-        sub_paths = auto_subs(
-            cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang
-        )
         if opts.cast:
             try:
                 device = _resolve_device(cfg, headless=True, prefer=args.device)
@@ -808,22 +755,6 @@ def _auto_play(
                 _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
                 return 1
             device_name = args.device or cfg.cast_device or device
-            # Enforce the primary audio language for the cast: the DMR plays a file's first
-            # track and can't switch, so decide direct vs remux-to-select-the-track (or reselect
-            # a dub that has it) up front. Default fire-and-return unless --follow.
-            target_lang = opts.audio_lang or cfg.primary
-            plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
-            chosen = plan.stream
-            stream_block = _stream_block(cfg, chosen)  # may have been reselected
-            if plan.real_lang:
-                cast_audio_lang, cast_audio_verified = plan.real_lang, plan.verified
-            if plan.mode == "absent" and target_lang:
-                # No dub carries the primary language: cast the best pick with primary subs.
-                cast_sub_lang = target_lang
-                sub_paths = auto_subs(
-                    cfg, typ, video_id, work_dir, opts, safety_sub_lang=target_lang
-                )
-            cm = cast_meta or caster.CastMeta()
 
             def on_cast_event(ev: dict) -> None:
                 """Emit one JSONL line per castbridge event for `--json --cast --follow`."""
@@ -837,56 +768,25 @@ def _auto_play(
                     }
                 )
 
-            follow_cb = on_cast_event if args.follow else None
-            # Backend strategy (see _play_on_cast): mirror only when the audio is undecodable
-            # by the DMR (plan.mode == "remux") and --mirror is set — there it beats the remux
-            # prepare-wait. Decodable audio always goes DMR-direct (instant + native).
-            if opts.mirror and mirror.available() and plan.mode == "remux":
-                mirror.cast_via_mirror(
-                    cfg, title, chosen["url"],
-                    device=device, start=start, sub_paths=sub_paths, follow=bool(args.follow),
-                )  # fmt: skip
-                action = "mirror"
-            else:
-                if opts.mirror and plan.mode != "remux":
-                    print(
-                        "nstream: audio decodificabile dal TV → cast diretto "
-                        "(mirror non necessario)",
-                        file=sys.stderr,
-                    )
-                remux_path = (
-                    remux.remux_for_cast(
-                        chosen["url"],
-                        cfg,
-                        audio_index=plan.audio_index,
-                        size_gb=quality.parse_stream(chosen).size_gb,
-                    )  # fmt: skip
-                    if plan.mode == "remux"
-                    else None
-                )
-                if remux_path:
-                    remux.cast_file(
-                        cfg, title, remux_path,
-                        device=device, start=start, sub_paths=sub_paths, follow=bool(args.follow),
-                        meta=cm, on_event=follow_cb,
-                    )  # fmt: skip
-                    reencoded = True
-                else:
-                    if plan.mode == "remux":
-                        # remux refused (size guard) or failed → direct cast of a file whose
-                        # first audio track is Dolby (silent on the DMR) or the wrong dub.
-                        notice = (
-                            "remux non riuscito → cast diretto: l'audio potrebbe "
-                            "risultare muto o in un'altra lingua"
-                        )
-                        print(f"nstream: ⚠ {notice}", file=sys.stderr)
-                    cast(
-                        cfg, title, chosen["url"],
-                        device=device, start=start, sub_paths=sub_paths,
-                        langs=(), resolve_lang=None, follow=bool(args.follow),
-                        meta=cm, on_event=follow_cb,
-                    )  # fmt: skip
-                action = "cast"
+            # Shared decision tree (see cast_flow.run_cast): vet the audio plan, then
+            # mirror / Tier-2 remux / direct. Default fire-and-return unless --follow;
+            # no in-cast switch (headless has no 'a' key) → allow_lang_switch stays False.
+            outcome = cast_flow.run_cast(
+                cfg, results, chosen,
+                device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
+                opts=opts, start=start, follow=bool(args.follow),
+                meta=cast_meta or caster.CastMeta(),
+                on_event=on_cast_event if args.follow else None,
+                safety_sub_lang=vetted.safety_sub_lang,
+            )  # fmt: skip
+            chosen = outcome.stream
+            stream_block = _stream_block(cfg, chosen)  # may have been reselected
+            if outcome.audio_lang:
+                cast_audio_lang, cast_audio_verified = outcome.audio_lang, outcome.audio_verified
+            cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang
+            sub_paths = outcome.sub_paths
+            action, reencoded, notice = outcome.action, outcome.reencoded, outcome.notice
+            if action == "cast":
                 # Optional explicit volume (closes the loop with the zero-volume detection).
                 if args.volume is not None:
                     caster.set_volume(device, args.volume)
@@ -899,12 +799,10 @@ def _auto_play(
                     )
                     notice = f"{notice}; {vol_notice}" if notice else vol_notice
                     print(f"nstream: {vol_notice}", file=sys.stderr)
-            if not args.follow:
-                # Fire-and-return handoff: a pure-torrent stream is served by the TorrServer
-                # we may have spawned — keep it alive past exit so the TV keeps playing
-                # (atexit would kill it mid-cast). No-op when the engine wasn't used.
-                engine.detach_spawned()
         else:
+            sub_paths = auto_subs(
+                cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang
+            )
             # Local mpv blocks until the window closes (intended; the user is watching).
             play(
                 cfg, title, chosen["url"],
