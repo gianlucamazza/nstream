@@ -50,6 +50,13 @@ Modules in `src/nstream/`:
   audio guard), returning a `VettedStream`. Also `cast_languages`/`cast_resolver` for the in-cast
   switch. Imports `api`/`debrid`/`engine`/`quality`/`remux`/`tracks`/`languages`/`picker`/
   `labels`/`config`/`log`; never `cli`.
+- `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the
+  interactive cast (`cli._play_on_cast`) and the headless `--json --cast` branch — vet the audio
+  plan (`vet_cast_audio`) → absent-dub safety subtitles → mirror gate → Tier-2 remux → direct cast,
+  returning a `CastOutcome` (action/stream/reencoded/notice/audio/subs) for the caller's JSON
+  accounting. Device resolution and the headless volume guard stay in `cli`. Same tier as
+  `stream_select`: imports `caster`/`engine`/`mirror`/`remux`/`quality`/`stream_select`/`subs`/
+  `config`/`log`; never `cli`.
 - `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download), `auto_subs`
   (no-menu paths + safety-subtitle net). Leaf below `cli`; imports `api`/`picker`/`config`.
 - `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
@@ -121,10 +128,9 @@ Modules in `src/nstream/`:
 
 **Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
 imports), `cli` orchestrates at the bottom; everything below `cli` —
-`player`/`caster`/`picker`/`stream_select`/`subs`/`series`/`labels`/`engine`/`debrid`/`remux`/
-`mirror`/`serve`/`bridge`/`net`/`preview`/`explain` — never imports `cli`. This is the recurring
-constraint
-that explains where logic lives — preserve it when moving code.
+`player`/`caster`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/`engine`/`debrid`/
+`remux`/`mirror`/`serve`/`bridge`/`net`/`preview`/`explain` — never imports `cli`. This is the
+recurring constraint that explains where logic lives — preserve it when moving code.
 
 ### Debrid: provider-agnostic
 
