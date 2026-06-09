@@ -12,7 +12,7 @@ import json
 import pytest
 
 from nstream import cli
-from nstream.config import Config, HistoryEntry, Meta, Video
+from nstream.config import Config, HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -50,7 +50,9 @@ def test_run_explain_movie(monkeypatch, capsys):
 
 
 def test_dispatch_explain_requires_query(monkeypatch):
-    args = argparse.Namespace(cont=False, browse=None, query=[], explain=True, json=False)
+    args = argparse.Namespace(
+        cont=False, browse=None, query=[], explain=True, json=False, movies=False, series=False
+    )
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
@@ -200,96 +202,84 @@ def test_play_video_no_streams_returns_notice(monkeypatch):
     assert notice and "Dune 3" in notice
 
 
-# --- binge loop (_play_series) ---------------------------------------------
+# --- series dispatch (the flow itself lives in series.py / test_series.py) --
 
 
-def _episodes(n):
-    return [Video(id=f"tt:{i}", season=1, episode=i, name=f"E{i}") for i in range(1, n + 1)]
-
-
-def _stub_play_video(monkeypatch, advance_until):
-    """Record each call; return advance=True while index < advance_until."""
-    calls = []
-
-    def fake(
-        cfg,
-        typ,
-        video_id,
-        title,
-        opts,
-        *,
-        auto,
-        next_label,
-        on_save,
-        reselect_on_wrong_audio=True,
-        cast_meta=None,
-    ):
-        calls.append({"video_id": video_id, "auto": auto, "next_label": next_label})
-        idx = len(calls)  # 1-based
-        # Mimic real play(): advancing requires the overlay, which requires a next_label.
-        return (None, next_label is not None and idx < advance_until)
-
-    monkeypatch.setattr(cli, "_play_video", fake)
-    return calls
-
-
-def test_binge_advances_then_stops(monkeypatch):
-    eps = _episodes(4)
-    calls = _stub_play_video(monkeypatch, advance_until=3)  # advance after ep1, ep2
-    opts = cli.PlayOpts(
-        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
+def test_play_meta_series_dispatches_to_series(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        cli.series, "play", lambda cfg, meta, opts, **kw: seen.update(meta=meta, kw=kw) or "hdr"
     )
-    assert cli._play_series(CFG, "tt", "Show", eps, eps[0], opts) is None
-    assert [c["video_id"] for c in calls] == ["tt:1", "tt:2", "tt:3"]
-    # first episode honours opts.auto (False); binge episodes force auto=True
-    assert [c["auto"] for c in calls] == [False, True, True]
-
-
-def test_binge_stops_at_last_episode(monkeypatch):
-    eps = _episodes(2)
-    calls = _stub_play_video(monkeypatch, advance_until=99)  # always wants to advance
+    meta = Meta(id="tt9", type="series", name="Show")
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
     )
-    cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
-    assert len(calls) == 2  # no episode 3 to go to
-    assert calls[-1]["next_label"] is None  # last episode offers no "next"
+    assert cli.play_meta(CFG, meta, opts) == "hdr"
+    assert seen["meta"] is meta
+    # cli injects its own leaf-list helpers + the player entry point.
+    assert seen["kw"]["pick_hint"] is cli._pick_hint
+    assert seen["kw"]["apply_key"] is cli._apply_key
+    assert callable(seen["kw"]["play_video"])
 
 
-def test_binge_no_next_label_when_autoplay_off(monkeypatch):
-    eps = _episodes(3)
-    calls = _stub_play_video(monkeypatch, advance_until=99)
+def test_play_meta_movie_skips_series(monkeypatch):
+    monkeypatch.setattr(cli.series, "play", lambda *a, **k: pytest.fail("series.play called"))
+    monkeypatch.setattr(cli, "_play_video", lambda *a, **k: ("notice", False))
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
-    assert len(calls) == 1  # advance never offered → plays one and stops
-    assert calls[0]["next_label"] is None
+    assert cli.play_meta(CFG, Meta(id="tt1", type="movie", name="Dune"), opts) == "notice"
 
 
-def test_binge_starts_from_chosen_episode(monkeypatch):
-    eps = _episodes(4)
-    calls = _stub_play_video(monkeypatch, advance_until=99)
-    opts = cli.PlayOpts(
-        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
+def test_play_history_series_dispatches_to_resume(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        cli.series, "resume", lambda cfg, entry, opts, **kw: seen.update(entry=entry) or None
     )
-    cli._play_series(CFG, "tt", "Show", eps, eps[2], opts)  # start at E3
-    assert [c["video_id"] for c in calls] == ["tt:3", "tt:4"]
+    entry = HistoryEntry(video_id="tt9:1:2", type="series", title="Show", series_id="tt9")
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=True
+    )
+    assert cli.play_history(CFG, entry, opts) is None
+    assert seen["entry"] is entry
 
 
-def test_binge_stops_and_propagates_notice(monkeypatch):
-    """An episode with no streams stops the binge and surfaces its notice."""
-    eps = _episodes(3)
+def test_play_history_movie_plays_directly(monkeypatch):
+    seen = {}
 
-    def fake(*a, **k):
-        return ("nessuno stream disponibile per «E1»", False)
+    def fake(cfg, typ, video_id, title, opts, **kw):
+        seen.update(typ=typ, video_id=video_id, title=title)
+        return (None, False)
+
+    monkeypatch.setattr(cli, "_play_video", fake)
+    monkeypatch.setattr(cli.series, "resume", lambda *a, **k: pytest.fail("series.resume called"))
+    entry = HistoryEntry(video_id="tt3", type="movie", title="Dune")
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.play_history(CFG, entry, opts) is None
+    assert seen == {"typ": "movie", "video_id": "tt3", "title": "Dune"}
+
+
+def test_series_player_binds_cfg_and_type(monkeypatch):
+    """The injected callable is _play_video with cfg and typ="series" pre-bound."""
+    seen = {}
+
+    def fake(cfg, typ, video_id, title, opts, **kw):
+        seen.update(cfg=cfg, typ=typ, video_id=video_id, kw=kw)
+        return ("n", True)
 
     monkeypatch.setattr(cli, "_play_video", fake)
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=True
     )
-    notice = cli._play_series(CFG, "tt", "Show", eps, eps[0], opts)
-    assert notice == "nessuno stream disponibile per «E1»"
+    play_video = cli._series_player(CFG)
+    out = play_video(
+        "tt9:1:1", "Show 1x01", opts, auto=False, next_label="nxt", on_save=lambda p, d: None
+    )
+    assert out == ("n", True)
+    assert seen["cfg"] is CFG and seen["typ"] == "series" and seen["video_id"] == "tt9:1:1"
+    assert seen["kw"]["next_label"] == "nxt" and seen["kw"]["auto"] is False
 
 
 # --- navigation: back-to-list + home menu ----------------------------------
@@ -342,28 +332,124 @@ def test_pick_meta_tab_flips_auto(monkeypatch):
 
 
 def test_run_home_dispatches_actions(monkeypatch):
-    """Home menu routes search/browse/settings then exits on ESC."""
+    """Home menu routes search (mixed), the typed sections and settings, then ESC exits."""
     actions = [
         ("", (cli._SEARCH, "")),
-        ("", (cli._BROWSE, "popolari")),
+        ("", (cli._SECTION, "series")),
         ("", (cli._SETTINGS, "")),
         None,
     ]
     fake_fzf, _ = _fzf_script(actions)
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     monkeypatch.setattr(cli, "input", lambda *a: "matrix", raising=False)
-    called = {"search": 0, "browse": [], "settings": 0}
-    monkeypatch.setattr(cli, "run_search", lambda c, q, o: called.__setitem__("search", q))
-    monkeypatch.setattr(cli, "run_browse", lambda c, cat, o: called["browse"].append(cat))
+    called: dict[str, object] = {}
+    sections: list[str] = []
+    monkeypatch.setattr(
+        cli, "run_search", lambda c, q, o, typ=None: called.__setitem__("search", (q, typ))
+    )
+    monkeypatch.setattr(cli, "run_section", lambda c, typ, o: sections.append(typ))
     monkeypatch.setattr(cli.settings, "run_settings", lambda c: called.__setitem__("settings", 1))
     monkeypatch.setattr(cli, "load", lambda: CFG)
     opts = cli.PlayOpts(
         auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
     assert cli.run_home(CFG, opts) == 0
-    assert called["search"] == "matrix"
-    assert called["browse"] == [cli.CAT_MAP["popolari"]]
+    assert called["search"] == ("matrix", None)  # the home search stays mixed
+    assert sections == ["series"]
     assert called["settings"] == 1
+
+
+def test_run_home_shows_typed_sections_not_mixed_browse(monkeypatch):
+    """The home offers the Film / Serie TV sections instead of the old mixed catalog rows."""
+    seen = {}
+
+    def fake(items, prompt, *, header=None, preview=None):
+        seen["values"] = [v for _, v in items]
+        seen["labels"] = [label for label, _ in items]
+        seen["prompt"] = prompt
+        return None  # ESC
+
+    monkeypatch.setattr(cli, "fzf_key", fake)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_home(CFG, opts) == 0
+    assert seen["prompt"] == "nstream> "
+    assert (cli._SECTION, "movie") in seen["values"]
+    assert (cli._SECTION, "series") in seen["values"]
+    assert not any(v[0] == cli._BROWSE for v in seen["values"])  # catalogs live in the sections
+    labels = " ".join(seen["labels"])
+    assert "Film" in labels and "Serie TV" in labels and "Popolari" not in labels
+
+
+def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
+    """A section menu shows the type-filtered continue-watching and routes typed
+    search/browse; its prompt names the section."""
+    recent_typs = []
+    entry = HistoryEntry(video_id="tt9:1:1", type="series", title="Show", ts=1.0)
+
+    def fake_recent(cfg, limit=30, typ=None):
+        recent_typs.append(typ)
+        return [entry]
+
+    monkeypatch.setattr(cli.state, "recent", fake_recent)
+    actions = [("", (cli._BROWSE, "popolari")), ("", (cli._SEARCH, "")), None]
+    it = iter(actions)
+    prompts = []
+
+    def fake_fzf(items, prompt, *, header=None, preview=None):
+        prompts.append(prompt)
+        assert items[0][1] is entry  # the filtered continue-watching row leads the menu
+        return next(it)
+
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    monkeypatch.setattr(cli, "input", lambda *a: "fargo", raising=False)
+    called = {}
+    monkeypatch.setattr(
+        cli, "run_browse", lambda c, cat, o, typ=None: called.__setitem__("browse", (cat, typ))
+    )
+    monkeypatch.setattr(
+        cli, "run_search", lambda c, q, o, typ=None: called.__setitem__("search", (q, typ))
+    )
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
+    assert cli.run_section(CFG, "series", opts) == 0
+    assert recent_typs == ["series"] * 3  # one per menu render
+    assert prompts == ["serie> "] * 3
+    assert called["browse"] == (cli.CAT_MAP["popolari"], "series")
+    assert called["search"] == ("fargo", "series")
+
+
+def test_run_browse_typed_uses_catalog(monkeypatch):
+    """With a type, run_browse goes through api.catalog (single-type); without, api.browse."""
+    seen = {}
+    monkeypatch.setattr(
+        cli.api, "catalog", lambda c, typ, cat: seen.setdefault("catalog", (typ, cat)) and []
+    )
+    monkeypatch.setattr(cli.api, "browse", lambda c, cat: seen.setdefault("browse", cat) and [])
+    monkeypatch.setattr(cli, "_pick_meta", lambda items, c, o: 0)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    cli.run_browse(CFG, "top", opts, typ="series")
+    assert seen == {"catalog": ("series", "top")}  # api.browse untouched
+    seen.clear()
+    cli.run_browse(CFG, "top", opts)
+    assert seen == {"browse": "top"}  # default stays mixed
+
+
+def test_run_search_forwards_type(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        cli.api, "search", lambda c, q, typ=None: seen.setdefault("call", (q, typ)) and []
+    )
+    monkeypatch.setattr(cli, "_pick_meta", lambda items, c, o: 0)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    cli.run_search(CFG, "fargo", opts, typ="movie")
+    assert seen["call"] == ("fargo", "movie")
 
 
 def test_pick_hint_reflects_default(monkeypatch):
@@ -630,6 +716,8 @@ def _hns(**kw):
         "browse": None,
         "volume": None,
         "follow": None,  # BooleanOptionalAction default → fire-and-return
+        "movies": False,
+        "series": False,
     }
     base.update(kw)
     return argparse.Namespace(**base)
@@ -1066,3 +1154,78 @@ def test_select_meta_default_keeps_first_exact():
     series = Meta(id="tt1", type="series", name="Mr. Robot")
     meta, _ = cli._select_meta([movie, series], "mr robot", None)
     assert meta["id"] == "tt2"  # no season/episode hint → existing behaviour unchanged
+
+
+# --- explicit --movies/--series type flags ----------------------------------
+
+_FARGO = [
+    {"id": "ttm", "type": "movie", "name": "Fargo"},
+    {"id": "tts", "type": "series", "name": "Fargo"},
+]
+
+
+def _wire_fargo(monkeypatch):
+    """Same-title movie + series, with enough plumbing to reach the final JSON."""
+    monkeypatch.setattr(cli.api, "search", lambda cfg, q: list(_FARGO))
+    monkeypatch.setattr(
+        cli.api, "episodes", lambda cfg, sid: [{"id": "tts:1:1", "season": 1, "episode": 1}]
+    )
+    monkeypatch.setattr(
+        cli.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
+    )
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, ""))
+
+
+def test_run_auto_series_flag_picks_series_over_same_title_movie(monkeypatch, capsys):
+    """--series drops the same-named movie before the title match (explicit beats order)."""
+    _wire_fargo(monkeypatch)
+    rc = cli.run_auto(CFG, _hns(query=["fargo"], series=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["imdb_id"] == "tts" and out["type"] == "series"
+
+
+def test_run_auto_movies_flag_picks_movie(monkeypatch, capsys):
+    _wire_fargo(monkeypatch)
+    rc = cli.run_auto(CFG, _hns(query=["fargo"], movies=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["imdb_id"] == "ttm" and out["type"] == "movie"
+
+
+def test_run_auto_season_inference_unchanged_without_flags(monkeypatch, capsys):
+    """No explicit flag → --season still infers the series (pre-flag behaviour)."""
+    _wire_fargo(monkeypatch)
+    rc = cli.run_auto(CFG, _hns(query=["fargo"], season=1, episode=1), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["imdb_id"] == "tts" and out["season"] == 1
+
+
+def test_run_auto_movies_with_season_is_usage_error(monkeypatch, capsys):
+    """--movies + --season/--episode is contradictory → usage error, nothing fetched."""
+    monkeypatch.setattr(
+        cli.api, "search", lambda *a, **k: (_ for _ in ()).throw(AssertionError("searched"))
+    )
+    rc = cli.run_auto(CFG, _hns(query=["fargo"], movies=True, season=1), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2 and out["error"] == "usage" and "--movies" in out["message"]
+
+
+def test_run_auto_series_flag_no_result_reflects_filter(monkeypatch, capsys):
+    """When the filter empties the results, the error message names the type."""
+    monkeypatch.setattr(
+        cli.api, "search", lambda cfg, q: [{"id": "ttm", "type": "movie", "name": "Fargo"}]
+    )
+    rc = cli.run_auto(CFG, _hns(query=["fargo"], series=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "no_result" and "serie" in out["message"]
+
+
+def test_main_movies_series_mutually_exclusive(monkeypatch):
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", "--movies", "--series", "fargo"])
+    with pytest.raises(SystemExit) as ei:
+        cli.main()
+    assert ei.value.code == 2

@@ -85,6 +85,24 @@ def test_recent_sorted_and_filtered(tmp_path, monkeypatch):
     assert [e["video_id"] for e in recent] == ["b", "a"]
 
 
+def test_recent_typed_filters_and_legacy_defaults_to_movie(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    e_movie = state.make_entry("m1", "Film", "movie", 10.0, 100.0)
+    e_series = state.make_entry(
+        "s1", "Serie", "series", 10.0, 100.0, series_id="s", season=1, episode=2
+    )
+    e_legacy = state.make_entry("l1", "Legacy", "movie", 10.0, 100.0)
+    del e_legacy["type"]  # pre-series entry without "type"
+    for e in (e_movie, e_series, e_legacy):
+        state.save_entry(CFG, e)
+    movies = {e["video_id"] for e in state.recent(CFG, typ="movie")}
+    series = {e["video_id"] for e in state.recent(CFG, typ="series")}
+    untyped = {e["video_id"] for e in state.recent(CFG)}
+    assert movies == {"m1", "l1"}  # legacy entry counts as movie
+    assert series == {"s1"}
+    assert untyped == {"m1", "s1", "l1"}  # default stays mixed
+
+
 def test_load_corrupt_history_is_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     d = tmp_path / "nstream"

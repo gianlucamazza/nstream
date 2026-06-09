@@ -86,7 +86,11 @@ def save_entry(cfg: Config, entry: HistoryEntry) -> None:
     )
 
 
-def recent(cfg: Config, limit: int = 30) -> list[HistoryEntry]:
+def recent(cfg: Config, limit: int = 30, typ: str | None = None) -> list[HistoryEntry]:
     entries = [e for e in load_history(cfg).values() if not _watched(e)]
+    if typ is not None:
+        # Legacy entries without "type" predate series support → treat as "movie"
+        # (same default the CLI uses when reading entry types).
+        entries = [e for e in entries if e.get("type", "movie") == typ]
     entries.sort(key=lambda e: e.get("ts", 0.0), reverse=True)
     return entries[:limit]

@@ -37,9 +37,14 @@ Each `src/nstream/<mod>.py` has a matching `tests/test_<mod>.py`.
 
 Modules in `src/nstream/`:
 
-- `cli.py` — orchestrator: argparse, TUI flow, resume, series auto-advance, `--explain`/`__preview`
-  commands. Delegates stream selection to `stream_select`, subtitles to `subs`, label formatting to
+- `cli.py` — orchestrator: argparse, TUI flow (home + typed Film/Serie sections), resume,
+  `--explain`/`__preview` commands, `--movies`/`--series` type filters. Delegates stream selection
+  to `stream_select`, subtitles to `subs`, the series flow to `series`, label formatting to
   `labels`; sits at the bottom of the import graph.
+- `series.py` — the series-only flow (ADR 0009): episode picker, binge auto-advance loop,
+  per-episode resume (`play`/`binge`/`resume`/`entry_video`). The player entry point is injected
+  as a callable (`PlayVideo` Protocol), so it never imports `cli`; imports
+  `api`/`state`/`labels`/`picker`/`config` (+ `caster.CastMeta`).
 - `stream_select.py` — stream selection + resolution + auto-play vetting guards. `prepare_stream()`
   is the single entry the orchestrator calls (pick+resolve → cached-miss fallback → primary-language
   audio guard), returning a `VettedStream`. Also `cast_languages`/`cast_resolver` for the in-cast
@@ -116,8 +121,9 @@ Modules in `src/nstream/`:
 
 **Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
 imports), `cli` orchestrates at the bottom; everything below `cli` —
-`player`/`caster`/`picker`/`stream_select`/`subs`/`labels`/`engine`/`debrid`/`remux`/`mirror`/
-`serve`/`bridge`/`net`/`preview`/`explain` — never imports `cli`. This is the recurring constraint
+`player`/`caster`/`picker`/`stream_select`/`subs`/`series`/`labels`/`engine`/`debrid`/`remux`/
+`mirror`/`serve`/`bridge`/`net`/`preview`/`explain` — never imports `cli`. This is the recurring
+constraint
 that explains where logic lives — preserve it when moving code.
 
 ### Debrid: provider-agnostic

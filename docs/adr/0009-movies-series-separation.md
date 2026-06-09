@@ -1,8 +1,10 @@
 # 0009. Movies / TV-series separation: typed home sections, typed flows
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-10
 - **Deciders:** project maintainer
+- **Implemented in:** `src/nstream/series.py` (new) + typed plumbing in `api.py`/`state.py`/`cli.py`
+  (`typ=None` params, `run_section`, `--movies`/`--series`), same day
 
 ## Context
 
