@@ -5,7 +5,9 @@ no network."""
 from __future__ import annotations
 
 import json
+import os
 import socket
+import stat
 import threading
 import time
 
@@ -71,6 +73,36 @@ def test_progress_extracts_fields():
     assert bridge._progress({}) == ("", 0.0, 0.0, "")
 
 
+def test_ensure_runtime_dir_tmp_fallback_creates_private_dir(monkeypatch, tmp_path):
+    """No XDG_RUNTIME_DIR → the fallback dir is created 0o700 and accepted."""
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    d = tmp_path / "castbridge-fake"
+    monkeypatch.setattr(bridge, "_runtime_dir", lambda: str(d))
+    assert bridge._ensure_runtime_dir() is True
+    st = os.lstat(d)
+    assert stat.S_ISDIR(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o700
+
+
+def test_ensure_daemon_degrades_on_untrusted_tmp_dir(monkeypatch, tmp_path):
+    """A pre-created symlink or loose-mode fallback dir (multi-user /tmp attack) must make
+    ensure_daemon return False — clean degradation to catt, never a crash."""
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(bridge, "_connect", lambda *a, **k: None)
+    monkeypatch.setattr(bridge, "bridge_available", lambda: True)
+    # Symlink in place of the dir (attacker redirects the socket/lock elsewhere).
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "castbridge-link"
+    link.symlink_to(target)
+    monkeypatch.setattr(bridge, "_runtime_dir", lambda: str(link))
+    assert bridge.ensure_daemon(timeout=0.1) is False
+    # Real dir but world-accessible (attacker pre-created it before us).
+    loose = tmp_path / "castbridge-loose"
+    loose.mkdir(mode=0o777)
+    monkeypatch.setattr(bridge, "_runtime_dir", lambda: str(loose))
+    assert bridge.ensure_daemon(timeout=0.1) is False
+
+
 def _fake_daemon(monkeypatch, frames):
     """Wire bridge to a socketpair; write `frames` (dicts) as the daemon's replies/events on the
     server side, return the server socket so the test can close it. cast_load reads them as if
@@ -133,6 +165,30 @@ def test_cast_load_failed_load(monkeypatch):
     finally:
         server.close()
     assert events == [{"kind": "failed", "error": "no_devices", "message": "device not found"}]
+
+
+def test_cast_load_eof_mid_cast_yields_disconnected(monkeypatch):
+    """A daemon crash (socket EOF after `started`, no explicit end) must NOT be normalized
+    into a fake `ended`: the receiver may still be streaming — emit `disconnected` so the
+    caller doesn't tear the served file down mid-playback and --follow doesn't lie."""
+    frames = [
+        {"id": 1, "action": "media-load", "ok": True, "data": {"loaded": True}},
+        {
+            "type": "media-status",
+            "data": {"state": "PLAYING", "title": "X", "position": 42.0, "duration": 100.0},
+        },
+    ]
+    server = _fake_daemon(monkeypatch, frames)
+    server.shutdown(socket.SHUT_WR)  # daemon dies: EOF without a media-session end
+    try:
+        events = list(bridge.cast_load("ip", "http://x", follow=True, title="X"))
+    finally:
+        server.close()
+    kinds = [e["kind"] for e in events]
+    assert kinds[0] == "started"
+    assert kinds[-1] == "disconnected"
+    assert "ended" not in kinds
+    assert events[-1]["position"] == 42.0 and events[-1]["duration"] == 100.0
 
 
 def test_cast_load_survives_read_timeout(monkeypatch):

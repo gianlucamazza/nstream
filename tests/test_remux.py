@@ -8,6 +8,7 @@ The cast-language *decision* (which track, direct vs remux) lives in `stream_sel
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -18,9 +19,13 @@ from nstream.tracks import Track, Tracks
 
 @pytest.fixture(autouse=True)
 def _state(tmp_path, monkeypatch):
+    from nstream import tracks
+
     monkeypatch.setattr(remux, "_state_path", lambda: tmp_path / "remux.json")
     monkeypatch.setattr(remux, "_cache_dir", lambda: tmp_path)
+    tracks.clear_cache()  # _probe_meta reads the per-url probe memo — keep tests isolated
     yield
+    tracks.clear_cache()
 
 
 def _cfg(**kw) -> Config:
@@ -77,6 +82,33 @@ def test_probe_meta_parses_streams(monkeypatch):
     assert n_video == 1
     assert duration == pytest.approx(1234.5)
     assert t.audio[0].codec == "EAC3" and t.audio[0].channels == 6
+
+
+def test_probe_meta_reuses_the_memoized_probe(monkeypatch):
+    """No third ffprobe: a url already probed (audio guard / cast vetting) is a cache hit."""
+    from nstream import tracks, util
+
+    payload = {
+        "format": {"duration": "10.0"},
+        "streams": [
+            {"codec_type": "video", "codec_name": "hevc"},
+            {"codec_type": "audio", "codec_name": "eac3", "channels": 6},
+        ],
+    }
+    calls = []
+
+    class _Proc:
+        stdout = json.dumps(payload)
+
+    def run_cmd(*a, **k):
+        calls.append(a)
+        return _Proc()
+
+    monkeypatch.setattr(util, "run_cmd", run_cmd)
+    tracks.probe_tracks("http://x")  # the earlier probe in the play flow
+    t, n_video, duration = remux._probe_meta("http://x")
+    assert len(calls) == 1  # _probe_meta did NOT spawn another ffprobe
+    assert n_video == 1 and duration == pytest.approx(10.0) and t.audio[0].codec == "eac3"
 
 
 # --- remux_for_cast -------------------------------------------------------
@@ -201,6 +233,28 @@ def test_remux_to_file_size_cap_confirm_accepted(monkeypatch):
     assert out and "cmd" in seen
 
 
+def test_remux_to_file_unknown_size_refused_on_low_disk(monkeypatch):
+    # size_gb=0 (unparsed release size) must NOT skip the free-disk pre-check:
+    # below the minimum headroom the remux is refused before ffmpeg launches.
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_free_gb", lambda _p: remux._MIN_FREE_GB - 1)
+    ran = []
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a: ran.append(1) or (0, ""))
+    assert remux.remux_to_file("http://x", _cfg()) is None
+    assert ran == []  # ffmpeg never launched
+
+
+def test_remux_to_file_unknown_size_proceeds_on_indeterminate_disk(monkeypatch):
+    # _free_gb's 0.0 is the "couldn't stat" sentinel, not a full disk: indeterminate
+    # must not block the cast (best-effort guard).
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_gc_stale", lambda: None)
+    monkeypatch.setattr(remux, "_free_gb", lambda _p: 0.0)
+    seen = {}
+    monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
+    assert remux.remux_to_file("http://x", _cfg()) is not None
+
+
 def test_remux_to_file_warns_on_dv7_dual_layer(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
@@ -209,6 +263,97 @@ def test_remux_to_file_warns_on_dv7_dual_layer(monkeypatch):
     monkeypatch.setattr(remux._log, "warning", lambda msg, *a: warns.append(str(msg)))
     remux.remux_to_file("http://x", _cfg(), n_video=2)
     assert any("dual-layer" in w for w in warns)
+
+
+# --- _run_ffmpeg ------------------------------------------------------------
+
+
+def test_run_ffmpeg_drains_big_stderr_without_deadlock():
+    """stderr must not be an undrained pipe: a fake ffmpeg writing well past the 64KB pipe
+    capacity on stderr would deadlock the stdout progress loop with the old PIPE capture."""
+    script = (
+        "import sys;"
+        "sys.stderr.write('E' * 262144 + 'MARKER');"
+        "sys.stdout.write('out_time_us=1000000\\n');"
+        "sys.exit(3)"
+    )
+    rc, stderr = remux._run_ffmpeg([sys.executable, "-c", script], duration=0.0)
+    assert rc == 3
+    assert stderr.endswith("MARKER")  # full stderr read back for the error message
+
+
+def test_run_ffmpeg_launch_failure_returns_none():
+    rc, stderr = remux._run_ffmpeg(["/nonexistent/ffmpeg-xyz"], duration=0.0)
+    assert rc is None and stderr
+
+
+# --- _cast_file_via_bridge --------------------------------------------------
+
+
+class _FakeServer:
+    def __init__(self):
+        self.down = False
+
+    def shutdown(self):
+        self.down = True
+
+
+def _bridge_scaffold(monkeypatch, cast_load):
+    """Wire cast_file's bridge path to fakes: castbridge present, no firewall/network,
+    a recording Range server, the given `cast_load` generator, a recording bridge.stop,
+    and a catt fallback that fails the test if launched."""
+    srv = _FakeServer()
+    stopped: list[str | None] = []
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(remux.bridge, "cast_load", cast_load)
+    monkeypatch.setattr(remux.bridge, "stop", lambda dev=None: stopped.append(dev) or True)
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b: (srv, 46000, None))
+    monkeypatch.setattr(
+        remux.subprocess, "Popen",
+        lambda *a, **k: pytest.fail("catt fallback launched"),
+    )  # fmt: skip
+    return srv, stopped
+
+
+def test_cast_file_ctrl_c_before_start_reraises_no_catt_fallback(monkeypatch, tmp_path):
+    """Ctrl-C during the startup wait is a user abort, not a bridge failure: it must
+    propagate (clean exit 130 upstream), tear down, and never degrade to a detached
+    catt re-casting the file the user just cancelled."""
+    f = tmp_path / "cast-x.mp4"
+    f.write_bytes(b"x")
+
+    def aborted(*a, **k):
+        raise KeyboardInterrupt  # Ctrl-C while waiting for `started`
+        yield  # pragma: no cover — make it a generator
+
+    srv, stopped = _bridge_scaffold(monkeypatch, aborted)
+    with pytest.raises(KeyboardInterrupt):
+        remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert stopped == ["10.0.0.5"]  # receiver session stopped
+    assert not f.exists()  # no fallback will use the temp → removed
+    assert srv.down  # Range server shut down
+
+
+def test_cast_file_bridge_disconnect_keeps_file_and_server(monkeypatch, tmp_path):
+    """A daemon `disconnected` mid-cast is NOT a playback end: the TV is still fetching
+    from the Range server, so neither the server nor the temp file may be torn down
+    (cleanup is the next run's _gc_stale / --stop)."""
+    f = tmp_path / "cast-x.mp4"
+    f.write_bytes(b"x")
+
+    def crashed(*a, **k):
+        yield {"kind": "started", "title": "T"}
+        yield {"kind": "playing", "position": 10.0, "duration": 100.0}
+        yield {"kind": "disconnected", "position": 42.0, "duration": 100.0}
+
+    srv, stopped = _bridge_scaffold(monkeypatch, crashed)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out == (42.0, 100.0, False)  # last known position reported, no advance
+    assert f.exists()  # temp left for the still-streaming receiver
+    assert not srv.down  # Range server kept serving
+    assert stopped == []  # the receiver session is NOT stopped
 
 
 # --- stop / state ---------------------------------------------------------

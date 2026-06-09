@@ -45,17 +45,22 @@ _log = log.get_logger("remux")
 # → playback is silent unless we remux the audio to something it decodes natively.
 _UNDECODABLE = frozenset({"ac3", "eac3", "dts", "dtshd", "truehd"})
 
-# Codecs the DMR decodes natively. When a release name *positively* advertises one of these
-# we trust it and skip the pre-cast ffprobe (the common Tier-1 path stays instant); the rare
-# AAC-mislabelled-Dolby release then casts silent until the user notices — an accepted trade
-# for not probing every cast. We still probe when the hint is empty or names an undecodable
-# codec (a costly remux shouldn't fire on a misparsed name).
+# Codecs the DMR decodes natively: a first track in one of these casts directly (Tier 1),
+# and a chosen track in one of these is stream-copied in a remux (no re-encode). The decision
+# always comes from a real ffprobe of the chosen url — never from the release name — probed
+# once and memoized per url (`tracks.probe_tracks`), so the audio guard, the cast vetting and
+# the pre-remux metadata read all share a single network probe.
 _DMR_DECODABLE = frozenset({"aac", "he-aac", "heaac", "mp3", "opus", "flac", "vorbis", "lpcm"})
 
 # How long to wait for the receiver to actually start playing the served file before
 # giving up (the remux already succeeded; this only confirms the cast handoff).
 _START_TIMEOUT = 40.0
 _START_POLL = 2.0
+
+# Minimum free disk (GB) demanded when the source size is UNKNOWN (no parsed release size):
+# ffmpeg fetches the whole remote stream, so an unsized remux on a nearly-full disk can
+# still fill it. With a known size the proportional `size_gb * 1.1` check applies instead.
+_MIN_FREE_GB = 5.0
 
 
 def needs_remux(audio_codec: str) -> bool:
@@ -75,32 +80,16 @@ def _decodable(codec: str) -> bool:
 
 
 def _probe_meta(url: str):
-    """One ffprobe over `url`: embedded audio/sub tracks + video-stream count + duration.
-    Returns `(Tracks, n_video, duration_s)`, all empty/zero if ffprobe is unavailable or the
-    probe fails (the caller then falls back to the name hint / a track-blind remux). The url
-    (which may embed a debrid token) is passed only to ffprobe, never logged."""
-    from . import tracks, util
+    """Remux metadata for `url`: embedded audio/sub tracks + video-stream count + duration,
+    all read from the single memoized ffprobe in `tracks.probe_tracks` — by the time a Tier-2
+    remux is decided the cast vetting already probed this url, so this is a cache hit, not a
+    third network read. Returns `(Tracks, n_video, duration_s)`, all empty/zero if ffprobe is
+    unavailable or the probe fails (the caller then falls back to a track-blind remux). The
+    url (which may embed a debrid token) is passed only to ffprobe, never logged."""
+    from . import tracks
 
-    cmd = [
-        "ffprobe", "-v", "error", "-of", "json", "-show_entries",
-        "format=duration:stream=index,codec_type,codec_name,channels:stream_tags=language,title",
-        url,
-    ]  # fmt: skip
-    proc = util.run_cmd(cmd, timeout=util.FFPROBE_TIMEOUT)
-    if proc is None:
-        return tracks.Tracks(), 0, 0.0
-    try:
-        data = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return tracks.Tracks(), 0, 0.0
-    data = data if isinstance(data, dict) else {}
-    t = tracks._parse_ffprobe(data)
-    n_video = sum(1 for s in data.get("streams", []) if s.get("codec_type") == "video")
-    try:
-        duration = float((data.get("format") or {}).get("duration") or 0.0)
-    except (TypeError, ValueError):
-        duration = 0.0
-    return t, n_video, duration
+    t = tracks.probe_tracks(url)
+    return t, t.n_video, t.duration
 
 
 def remux_for_cast(url: str, cfg: Config, *, audio_index: int, size_gb: float = 0.0) -> str | None:
@@ -231,31 +220,38 @@ def _confirm(msg: str) -> bool:
 def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
     """Run the ffmpeg remux, rendering a percentage line from its `-progress` stream so the
     (minutes-long) prepare isn't a silent wait. Returns `(returncode, stderr)`; rc is None if
-    ffmpeg couldn't be launched. Progress is best-effort — any parse hiccup just shows no bar."""
-    try:
-        proc = subprocess.Popen(  # noqa: S603
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        return None, str(e)
-    pct = -1
-    show = duration > 0 and sys.stderr.isatty()
-    if proc.stdout is not None:
-        for line in proc.stdout:
-            if show and line.startswith("out_time_us="):
-                try:
-                    cur = int(line.split("=", 1)[1]) / 1_000_000
-                except ValueError:
-                    continue
-                new = min(99, int(cur / duration * 100))
-                if new != pct:
-                    pct = new
-                    msg = f"\r📺 preparo l'audio per il cast… {pct}%"
-                    print(msg, end="", file=sys.stderr, flush=True)
-    proc.wait()
-    if pct >= 0:
-        print("\r📺 audio pronto, avvio il cast.        ", file=sys.stderr)
-    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    ffmpeg couldn't be launched. Progress is best-effort — any parse hiccup just shows no bar.
+
+    stderr goes to an unnamed temp file (read back after `wait()`), not a pipe: the progress
+    loop only drains stdout, so a chatty ffmpeg (>64KB of network/demux warnings on a long
+    remote remux) would fill an undrained stderr pipe and deadlock the whole remux — same
+    no-reader problem as the detached catt's stderr capture below."""
+    with tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(  # noqa: S603
+                cmd, stdout=subprocess.PIPE, stderr=err, text=True
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return None, str(e)
+        pct = -1
+        show = duration > 0 and sys.stderr.isatty()
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                if show and line.startswith("out_time_us="):
+                    try:
+                        cur = int(line.split("=", 1)[1]) / 1_000_000
+                    except ValueError:
+                        continue
+                    new = min(99, int(cur / duration * 100))
+                    if new != pct:
+                        pct = new
+                        msg = f"\r📺 preparo l'audio per il cast… {pct}%"
+                        print(msg, end="", file=sys.stderr, flush=True)
+        proc.wait()
+        if pct >= 0:
+            print("\r📺 audio pronto, avvio il cast.        ", file=sys.stderr)
+        err.seek(0)
+        stderr = err.read().decode("utf-8", errors="replace")
     return proc.returncode, stderr
 
 
@@ -287,8 +283,11 @@ def remux_to_file(
     if not available():
         _log.warning("ffmpeg assente: impossibile remuxare per il cast")
         return None
+    # Free-disk pre-check always runs (CLAUDE.md). `free == 0.0` is _free_gb's
+    # "couldn't stat" sentinel, NOT a really-full disk: indeterminate must not block
+    # the cast (best-effort), so both branches gate on a truthy `free`.
+    free = _free_gb(_cache_dir())
     if size_gb > 0:
-        free = _free_gb(_cache_dir())
         if free and free < size_gb * 1.1:
             _log.warning(
                 "spazio insufficiente per il remux: %.1fGB liberi < ~%.1fGB", free, size_gb
@@ -305,6 +304,20 @@ def remux_to_file(
             if not _confirm(ask):
                 print("nstream: remux annullato", file=sys.stderr)
                 return None
+    elif free and free < _MIN_FREE_GB:
+        # Unknown source size: no proportional check possible, but ffmpeg still fetches
+        # the whole stream — demand a minimum headroom so it can't fill the disk.
+        _log.warning(
+            "spazio quasi esaurito (%.1fGB liberi < %.0fGB) e dimensione sconosciuta: "
+            "remux rifiutato",
+            free,
+            _MIN_FREE_GB,
+        )
+        print(
+            f"nstream: spazio disco quasi esaurito ({free:.1f}GB liberi) — cast diretto",
+            file=sys.stderr,
+        )
+        return None
     if n_video >= 2:
         _log.warning(
             "sorgente Dolby Vision dual-layer (profile 7): l'enhancement layer cade → HDR10 base"
@@ -495,7 +508,10 @@ def _cast_file_via_bridge(
 ) -> tuple[float, float, bool] | None:
     """Serve the remux via the stdlib Range server and cast its URL with metadata via castbridge.
     Returns (pos, dur, advance) — advance is always False (a remux is a single movie) — or **None**
-    when the cast never started, so `cast_file` falls back to catt (the temp file is kept)."""
+    when the cast never started, so `cast_file` falls back to catt (the temp file is kept).
+
+    A Ctrl-C during the startup wait is a *user abort*, not a bridge failure: it tears down and
+    re-raises so `cast_file` does NOT fall back to catt re-casting what was just cancelled."""
     bind_ip = serve.lan_ip(device)
     kwargs = _bridge_meta_kwargs(title, meta, start)
 
@@ -526,6 +542,7 @@ def _cast_file_via_bridge(
     # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
     server, port, _thread = serve.serve_file(file_path, bind_ip)
     started = False
+    disconnected = False
     pos = dur = 0.0
     try:
         for ev in bridge.cast_load(device, serve.served_url(bind_ip, port), follow=True, **kwargs):
@@ -538,14 +555,40 @@ def _cast_file_via_bridge(
                 print(f"📺 {title} → {device}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
             if on_event:
                 on_event(ev)
-            if kind in ("playing", "paused", "ended"):
+            if kind in ("playing", "paused", "ended", "disconnected"):
                 pos = float(ev.get("position") or pos)
                 dur = float(ev.get("duration") or dur)
+            if kind == "disconnected":
+                # The daemon died mid-cast (socket EOF without an explicit end) — NOT a
+                # playback end: the TV is still fetching from our Range server. Stop
+                # following but leave the server up and the temp file on disk so playback
+                # isn't cut from under the receiver; the next run's `_gc_stale` (or
+                # `--stop`) reclaims the file. Honest limit: the server is an in-process
+                # daemon thread, so it still dies when this nstream process exits — the
+                # least-harmful option without re-architecting (vs. tearing it down NOW).
+                _log.warning("daemon castbridge disconnesso a metà cast (pos=%.0fs)", pos)
+                print(
+                    "nstream: daemon castbridge disconnesso; la riproduzione sul TV "
+                    "potrebbe interrompersi all'uscita di nstream",
+                    file=sys.stderr,
+                )
+                disconnected = True
+                break
     except KeyboardInterrupt:
         bridge.stop(device)
+        if not started:
+            # User abort during the startup wait — not a bridge failure: re-raise so
+            # `cast_file` does NOT degrade to a detached catt re-casting the cancelled
+            # file (`cli._entry` turns this into a clean exit 130). No fallback will
+            # use the temp file, so it is ours to remove (finally shuts the server).
+            _rm(file_path)
+            raise
     finally:
-        server.shutdown()
-        if started:  # a started cast ran to here → clean the temp file (fallback keeps it)
+        if not disconnected:
+            server.shutdown()
+        if started and not disconnected:
+            # A started cast ran to its end → clean the temp file (fallback keeps it,
+            # and a disconnect leaves it for the still-streaming receiver / GC).
             _rm(file_path)
     return (pos, dur, False) if started else None
 

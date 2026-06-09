@@ -20,7 +20,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, languages, log, settings
+from . import bridge, languages, log, settings, util
 from .config import Config
 from .picker import fzf
 
@@ -225,7 +225,12 @@ def _switch_cast_audio(
         return
     print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run([*base, "cast", new, "-t", str(int(pos))], capture_output=True, text=True)
+        subprocess.run(
+            [*base, "cast", new, "-t", str(int(pos))],
+            capture_output=True,
+            text=True,
+            timeout=util.CATT_CAST_TIMEOUT,
+        )
 
 
 def cast(
@@ -373,10 +378,18 @@ def _cast_via_catt(
     # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
     print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
     try:
-        proc = subprocess.run(launch, capture_output=True, text=True)
+        proc = subprocess.run(
+            launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT
+        )
     except FileNotFoundError:
         print("nstream: catt non trovato", file=sys.stderr)
         _emit(on_event, "failed", error="catt_missing", message="catt non trovato")
+        return (0.0, 0.0, False)
+    except subprocess.TimeoutExpired:
+        # A catt hung on a half-dead device must not block the caller forever.
+        _log.warning("catt cast bloccato oltre %.0fs → annullato", util.CATT_CAST_TIMEOUT)
+        print("nstream: cast non riuscito (timeout)", file=sys.stderr)
+        _emit(on_event, "failed", error="cast_timeout", message="cast non riuscito (timeout)")
         return (0.0, 0.0, False)
     if proc.returncode != 0:
         # catt prints the cause (e.g. device unreachable); never echo the URL/token.
@@ -405,9 +418,17 @@ def _cast_via_catt(
                 _switch_cast_audio(base, langs, resolve_lang, holder["position"], dest)
                 started, finished, idle = False, False, 0  # new media re-buffers
                 continue
-            res = subprocess.run([*base, "info", "-j"], capture_output=True, text=True)
+            try:
+                res = subprocess.run(
+                    [*base, "info", "-j"],
+                    capture_output=True,
+                    text=True,
+                    timeout=util.CATT_INFO_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                res = None  # a hung poll counts as an unreachable device
             info = None
-            if res.returncode == 0:
+            if res is not None and res.returncode == 0:
                 with contextlib.suppress(json.JSONDecodeError):
                     info = json.loads(res.stdout or "{}")
             if info is None:  # device idle/unreachable or unparseable status
@@ -446,7 +467,9 @@ def _cast_via_catt(
                     break
     except KeyboardInterrupt:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run([*base, "stop"], capture_output=True, text=True)
+            subprocess.run(
+                [*base, "stop"], capture_output=True, text=True, timeout=util.CATT_INFO_TIMEOUT
+            )
     advance = bool(next_label) and finished
     if started:
         _emit(
@@ -462,7 +485,9 @@ def _raw_info(device: str | None) -> dict:
     """One `catt info -j`, parsed; {} on any failure (best-effort, never raises)."""
     base = ["catt", *(["-d", device] if device else [])]
     try:
-        res = subprocess.run([*base, "info", "-j"], capture_output=True, text=True)
+        res = subprocess.run(
+            [*base, "info", "-j"], capture_output=True, text=True, timeout=util.CATT_INFO_TIMEOUT
+        )
         return json.loads(res.stdout or "{}")
     except (OSError, json.JSONDecodeError, subprocess.SubprocessError):
         return {}
@@ -512,7 +537,10 @@ def stop(device: str | None) -> bool:
     """Stop whatever the receiver is playing (`catt stop`). True on success; best-effort."""
     base = ["catt", *(["-d", device] if device else [])]
     try:
-        return subprocess.run([*base, "stop"], capture_output=True, text=True).returncode == 0
+        res = subprocess.run(
+            [*base, "stop"], capture_output=True, text=True, timeout=util.CATT_INFO_TIMEOUT
+        )
+        return res.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -522,9 +550,12 @@ def set_volume(device: str | None, level: int) -> bool:
     level = max(0, min(100, level))
     base = ["catt", *(["-d", device] if device else [])]
     try:
-        return (
-            subprocess.run([*base, "volume", str(level)], capture_output=True, text=True).returncode
-            == 0
+        res = subprocess.run(
+            [*base, "volume", str(level)],
+            capture_output=True,
+            text=True,
+            timeout=util.CATT_INFO_TIMEOUT,
         )
+        return res.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False

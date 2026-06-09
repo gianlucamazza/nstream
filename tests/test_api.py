@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from nstream import addons, api
@@ -54,6 +56,28 @@ def test_streams_one_addon_fails_does_not_block(monkeypatch, capsys):
     assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["u3"]
     # No per-addon error spam (avoids the double "stream … / nessuno stream" message).
     assert capsys.readouterr().err == ""
+
+
+def test_streams_stuck_addon_dropped_at_deadline(monkeypatch):
+    """One hung addon must not hold the gather hostage: past the shared _GATHER_BUDGET
+    its future is dropped (empty result, no crash) and the fast addon still answers."""
+    a = _addon("A", "http://a", "stream")
+    b = _addon("B", "http://b", "stream")
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a, b])
+    monkeypatch.setattr(api, "_GATHER_BUDGET", 0.1)
+    release = threading.Event()
+
+    def fake_get(url, **k):
+        if url.startswith("http://a"):
+            release.wait(5.0)  # hung addon: never answers within the budget
+            return {"streams": [{"url": "late"}]}
+        return {"streams": [{"url": "fast"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    try:
+        assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["fast"]
+    finally:
+        release.set()  # unblock the abandoned worker so the suite exits promptly
 
 
 def test_streams_skips_addon_not_serving_type(monkeypatch):

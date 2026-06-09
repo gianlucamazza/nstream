@@ -238,6 +238,7 @@ DEBRID_PROVIDERS: tuple[str, ...] = tuple(DEBRID_PROVIDER_NAMES)
 
 # Allowed values for the enum-like string config fields (bad values fall back to default).
 _ENUM_VALUES: dict[str, set[str]] = {
+    "cast_mode": {"dmr", "mirror"},
     "nerd_font": {"auto", "on", "off"},
     "image_mode": {"auto", "off"},
     "playback_backend": {"local", "debrid", "auto", "native"},
@@ -268,6 +269,8 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "max_resolution": (0, 4320),
     "cast_remux_max_resolution": (0, 4320),
     "cast_remux_max_size_gb": (0, 1000),
+    "mirror_bitrate": (0, 100_000_000),
+    "mirror_playout_ms": (0, 5000),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
@@ -335,6 +338,9 @@ def load() -> Config:
         cast_remux_max_size_gb=_bounded_int(
             raw, "cast_remux_max_size_gb", Config.cast_remux_max_size_gb
         ),
+        cast_mode=_enum_str(raw, "cast_mode", Config.cast_mode),
+        mirror_bitrate=_bounded_int(raw, "mirror_bitrate", Config.mirror_bitrate),
+        mirror_playout_ms=_bounded_int(raw, "mirror_playout_ms", Config.mirror_playout_ms),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=_bounded_int(raw, "autoplay_lead", Config.autoplay_lead),
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),

@@ -53,6 +53,28 @@ def test_setup_logging_writes_redacted_file(tmp_path, monkeypatch):
     assert "/resolve/realdebrid/<redacted>" in text
 
 
+def test_setup_logging_redacts_exception_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    # Force a fresh configuration for this test's handlers.
+    monkeypatch.setattr(log, "_configured", False)
+    logger = logging.getLogger("nstream")
+    monkeypatch.setattr(logger, "handlers", [])
+    log.setup_logging(debug=False)
+    try:
+        raise RuntimeError(
+            "fetch failed: realdebrid=SECRETTOKEN123 at /resolve/realdebrid/SECRETTOKEN123/x"
+        )
+    except RuntimeError:
+        logger.exception("unhandled crash")
+    for h in logger.handlers:
+        h.flush()
+    text = (tmp_path / "nstream" / "nstream.log").read_text()
+    assert "RuntimeError" in text  # the traceback itself is logged
+    assert "SECRETTOKEN123" not in text
+    assert "realdebrid=<redacted>" in text
+    assert "/resolve/realdebrid/<redacted>" in text
+
+
 def test_log_path_honours_xdg(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     assert log.log_path() == tmp_path / "nstream" / "nstream.log"

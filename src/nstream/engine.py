@@ -173,6 +173,9 @@ def ensure_running(cfg: Config) -> str:
                 [binpath, "--port", str(port), "--path", path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                # Own session: the server must be able to outlive nstream (detach_spawned
+                # hands it off to a fire-and-return cast) — no SIGHUP/SIGINT from our tty.
+                start_new_session=True,
             )
         except OSError as e:
             raise EngineUnavailable(f"avvio {BINARY} fallito: {e}") from e
@@ -208,6 +211,18 @@ def _shutdown() -> None:
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             _spawned.wait(timeout=5)
     _spawned = None
+
+
+def detach_spawned() -> None:
+    """Let a TorrServer we spawned outlive nstream's exit. A headless fire-and-return cast
+    (`--json --cast` without `--follow`) hands the engine url to the Chromecast and returns:
+    the atexit `_shutdown` would kill the server mid-playback, so drop our handle instead
+    (the process runs in its own session and survives). No-op when nothing was spawned."""
+    global _spawned
+    with _lock:
+        proc, _spawned = _spawned, None
+    if proc is not None:
+        _log.info("%s lasciato vivo (pid %d) per il cast in corso", BINARY, proc.pid)
 
 
 # --- torrent add / stream-url construction -------------------------------
@@ -263,9 +278,14 @@ def _torrent_stat(base: str, file_hash: str) -> dict:
 
 def _wait_buffer(base: str, file_hash: str) -> None:
     """Poll the torrent until its initial read-ahead buffer is filled, printing progress to
-    stderr (peers + preloaded MB). Returns as soon as it's playable; Ctrl-C or timeout aborts.
+    stderr (peers + preloaded MB, with a % of the read-ahead target when the server reports
+    one). Returns as soon as it's playable; Ctrl-C aborts. On timeout: with zero bytes ever
+    buffered (dead torrent) raises EngineUnavailable so the caller degrades to the next
+    candidate; with a partial buffer it returns anyway, after an explicit notice.
     Avoids the start-of-playback stutter you'd get launching mpv against an empty buffer."""
     deadline = time.monotonic() + _BUFFER_TIMEOUT
+    preloaded = 0
+    filled = False
     try:
         while time.monotonic() < deadline:
             st = _torrent_stat(base, file_hash)
@@ -273,12 +293,19 @@ def _wait_buffer(base: str, file_hash: str) -> None:
             preload = st.get("preload_size", 0)
             peers = st.get("active_peers", st.get("connected_seeders", 0))
             mb = preloaded / (1024 * 1024)
-            print(f"\r🌐 buffering P2P… peer {peers}  {mb:6.1f} MB", end="", file=sys.stderr)
+            pct = f" ({100 * preloaded / preload:3.0f}%)" if preload else ""
+            print(f"\r🌐 buffering P2P… peer {peers}  {mb:6.1f} MB{pct}", end="", file=sys.stderr)
             # Ready once the read-ahead window is full, or some data is buffered with peers.
             if (preload and preloaded >= preload) or (preloaded > 2 * 1024 * 1024 and peers):
+                filled = True
                 break
             time.sleep(0.5)
         print("", file=sys.stderr)  # newline after the \r progress line
     except KeyboardInterrupt:
         print("", file=sys.stderr)
         raise EngineUnavailable("buffering interrotto") from None
+    if filled:
+        return
+    if preloaded <= 0:  # dead torrent: never a single byte → let the caller degrade
+        raise EngineUnavailable(f"nessun peer / buffer vuoto dopo {_BUFFER_TIMEOUT:.0f}s di attesa")
+    print("nstream: ⚠ buffer parziale dopo il timeout, provo comunque…", file=sys.stderr)

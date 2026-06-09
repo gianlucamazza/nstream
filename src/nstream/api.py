@@ -33,6 +33,11 @@ _log = log.get_logger("api")
 __all__ = ["TIMEOUT", "UA", "NetworkError", "http_get_json", "url_playable"]
 
 _MAX_WORKERS = 8
+# Overall deadline (seconds) for one concurrent gather. A single stuck addon can take
+# ~80s alone (retries × per-request timeout); past this shared budget its future is
+# dropped — same best-effort spirit as `_safe` with NetworkError — so one hung addon
+# never holds the picker hostage.
+_GATHER_BUDGET = 25.0
 # In-process TTL cache for token-free metadata (search/catalog/meta/episodes). Each
 # CLI run is a fresh process, but the home TUI / browse / pick loops live in one
 # process, so this makes back-navigation and re-browse within a session instant.
@@ -57,16 +62,31 @@ def _dedup(items: list, key) -> list:
 def _gather(tasks: list[Callable[[], list]]) -> list:
     """Run per-addon/per-type fetch tasks concurrently, flattening results in task
     order (so the built-in providers keep priority for dedup). A task raising
-    NetworkError contributes nothing (best-effort aggregation). One task → run inline
-    (no thread overhead)."""
+    NetworkError contributes nothing (best-effort aggregation), and the whole gather
+    shares one `_GATHER_BUDGET` deadline: a future still pending past it is dropped
+    (cancelled best-effort, empty result) so a stuck addon can't block the TUI. One
+    task → run inline (no thread overhead)."""
     if not tasks:
         return []
     if len(tasks) == 1:
         results = [_safe(tasks[0])]
     else:
-        with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(tasks))) as ex:
+        deadline = time.monotonic() + _GATHER_BUDGET
+        ex = ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(tasks)))
+        try:
             futures = [ex.submit(_safe, t) for t in tasks]
-            results = [f.result() for f in futures]  # in submit order
+            results = []
+            for f in futures:  # in submit order
+                try:
+                    results.append(f.result(timeout=max(0.0, deadline - time.monotonic())))
+                except TimeoutError:
+                    f.cancel()  # best-effort: a task already running can't be cancelled
+                    _log.warning("addon oltre il budget di %.0fs → scartato", _GATHER_BUDGET)
+                    results.append([])
+        finally:
+            # Never wait for stragglers: their threads end on their own (http_get_json
+            # has a per-request timeout) and still-queued futures are cancelled.
+            ex.shutdown(wait=False, cancel_futures=True)
     out: list = []
     for r in results:
         out.extend(r)
