@@ -5,7 +5,7 @@ pkgname=nstream
 # (build-local.sh derives the tarball name from it; .SRCINFO follows).
 pkgver=1.12.6
 pkgrel=1
-pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/Real-Debrid + mpv)"
+pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/debrid or local P2P + mpv)"
 arch=('any')
 url="https://github.com/gianlucamazza/nstream"
 license=('MIT')
@@ -15,7 +15,11 @@ optdepends=(
   'catt: cast to a Chromecast with --cast (install via pipx; not in the repos)'
   'chafa: poster thumbnails in the fzf preview pane'
   'torrserver-bin: local P2P playback without a debrid provider (AUR)'
+  'libva-utils: GPU decode detection (vainfo) for hardware-aware stream ranking'
 )
+# The castbridge metadata sender and the --mirror realtime sender are separate
+# openscreen-fork builds (CASTBRIDGE_BIN / CAST_MIRROR_BIN), not packaged; nstream
+# falls back to catt / the DMR path without them.
 makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
 checkdepends=('python-pytest')
 install="$pkgname.install"
