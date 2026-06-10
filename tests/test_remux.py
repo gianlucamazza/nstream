@@ -7,7 +7,9 @@ The cast-language *decision* (which track, direct vs remux) lives in `stream_sel
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 
 import pytest
@@ -287,6 +289,154 @@ def test_run_ffmpeg_launch_failure_returns_none():
     assert rc is None and stderr
 
 
+# --- cast_file dispatch (catt fallback path) --------------------------------
+
+
+class _Proc:
+    """A fake detached serving process (catt / `python -m nstream.serve`)."""
+
+    def __init__(self, pid=4242, wait_exc=None):
+        self.pid = pid
+        self.wait_calls = 0
+        self._wait_exc = wait_exc
+
+    def wait(self):
+        self.wait_calls += 1
+        if self._wait_exc:
+            raise self._wait_exc
+
+
+def _catt_wiring(monkeypatch, *, await_start=True, proc=None):
+    """Wire cast_file's catt path to fakes: no firewall/sudo, no network, a recording
+    Popen/run/_kill, and a stubbed receiver-start poll. bridge_available is already
+    False (conftest), so cast_file goes straight to the catt fallback."""
+    rec = {"popen": [], "run": [], "killed": []}
+    proc = proc or _Proc()
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "firewall_hint", lambda ip, port=None: "FIREWALL-HINT")
+    monkeypatch.setattr(remux, "_await_start", lambda dev: await_start)
+    monkeypatch.setattr(remux, "_kill", lambda pid: rec["killed"].append(pid))
+
+    def popen(args, **kw):
+        rec["popen"].append((list(args), kw))
+        return proc
+
+    monkeypatch.setattr(remux.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        remux.subprocess, "run", lambda cmd, **kw: rec["run"].append(list(cmd)) or _P(0)
+    )
+    return rec, proc
+
+
+def _tmp_remux(tmp_path):
+    f = tmp_path / "cast-x.mp4"
+    f.write_bytes(b"x")
+    return f
+
+
+def test_cast_file_prefers_bridge_result_over_catt(monkeypatch, tmp_path):
+    """castbridge present and started → its result is returned and catt never launches;
+    the firewall pre-open covers the bridge-served path too."""
+    f = _tmp_remux(tmp_path)
+    fw: list[str] = []
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: fw.append(ip))
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(remux, "_cast_file_via_bridge", lambda *a, **k: (5.0, 99.0, False))
+    monkeypatch.setattr(
+        remux.subprocess, "Popen", lambda *a, **k: pytest.fail("catt fallback launched")
+    )
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5")
+    assert out == (5.0, 99.0, False)
+    assert fw == ["192.168.1.10"]
+
+
+def test_cast_file_bridge_none_falls_back_to_catt(monkeypatch, tmp_path):
+    """castbridge available but unable to start (None) → detached catt serves+casts."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(remux, "_cast_file_via_bridge", lambda *a, **k: None)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out == (0.0, 0.0, False)
+    assert rec["popen"][0][0][:4] == ["catt", "-d", "10.0.0.5", "cast"]
+
+
+def test_cast_file_catt_headless_detaches_and_keeps_state(monkeypatch, tmp_path):
+    """follow=False: the detached catt keeps serving (not killed, not waited), the state
+    file records pid/file/device in catt mode for --stop/GC, argv carries -t/-s."""
+    f = _tmp_remux(tmp_path)
+    rec, proc = _catt_wiring(monkeypatch)
+    out = remux.cast_file(
+        _cfg(), "T", str(f), device="10.0.0.5",
+        start=30.0, sub_paths=("/s.srt",), follow=False,
+    )  # fmt: skip
+    assert out == (0.0, 0.0, False)
+    args, kw = rec["popen"][0]
+    assert args == ["catt", "-d", "10.0.0.5", "cast", str(f), "-t", "30", "-s", "/s.srt"]
+    assert kw["start_new_session"] is True  # detached: outlives the headless return
+    assert remux._read_state() == {
+        "pid": 4242, "file": str(f), "device": "10.0.0.5", "mode": "catt",
+    }  # fmt: skip
+    assert proc.wait_calls == 0 and rec["killed"] == []
+    assert f.exists()
+    assert list(tmp_path.glob("catt-*.log")) == []  # diagnosis capture removed on startup
+
+
+def test_cast_file_catt_follow_waits_then_tears_down(monkeypatch, tmp_path):
+    f = _tmp_remux(tmp_path)
+    rec, proc = _catt_wiring(monkeypatch)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out == (0.0, 0.0, False)
+    assert proc.wait_calls == 1  # blocked until playback end
+    assert rec["killed"] == [4242]  # _teardown reaps the serving catt
+    assert not f.exists()
+    assert remux._read_state() is None
+
+
+def test_cast_file_catt_follow_ctrl_c_stops_receiver_and_tears_down(monkeypatch, tmp_path):
+    """Ctrl-C while following a catt cast: receiver stopped, full teardown, and the
+    call returns normally (the KeyboardInterrupt is swallowed on this path —
+    photographed; the bridge path re-raises instead)."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch, proc=_Proc(wait_exc=KeyboardInterrupt()))
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out == (0.0, 0.0, False)
+    assert ["catt", "-d", "10.0.0.5", "stop"] in rec["run"]
+    assert rec["killed"] == [4242]
+    assert not f.exists() and remux._read_state() is None
+
+
+def test_cast_file_catt_missing_cleans_temp(monkeypatch, tmp_path, capsys):
+    f = _tmp_remux(tmp_path)
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+
+    def boom(*a, **k):
+        raise FileNotFoundError("catt")
+
+    monkeypatch.setattr(remux.subprocess, "Popen", boom)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5")
+    assert out == (0.0, 0.0, False)
+    assert not f.exists()  # temp not leaked
+    assert list(tmp_path.glob("catt-*.log")) == []  # stderr capture not leaked
+    assert "catt non trovato" in capsys.readouterr().err
+
+
+def test_cast_file_start_timeout_tears_down_with_firewall_hint(monkeypatch, tmp_path, capsys):
+    """Receiver never starts playing the served file → kill the catt, remove the temp,
+    clear the state, and print the firewall hint (the most common cause)."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch, await_start=False)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out == (0.0, 0.0, False)
+    assert rec["killed"] == [4242]
+    assert not f.exists()
+    assert remux._read_state() is None
+    assert "FIREWALL-HINT" in capsys.readouterr().err
+
+
 # --- _cast_file_via_bridge --------------------------------------------------
 
 
@@ -354,6 +504,151 @@ def test_cast_file_bridge_disconnect_keeps_file_and_server(monkeypatch, tmp_path
     assert f.exists()  # temp left for the still-streaming receiver
     assert not srv.down  # Range server kept serving
     assert stopped == []  # the receiver session is NOT stopped
+
+
+def test_cast_file_bridge_follow_success_cleans_up(monkeypatch, tmp_path):
+    """Happy path: in-process Range server + castbridge events; a cast that ran to its
+    end reports the last position, shuts the server down and removes the temp file."""
+    f = _tmp_remux(tmp_path)
+
+    def played(*a, **k):
+        yield {"kind": "started", "title": "T"}
+        yield {"kind": "playing", "position": 10.0, "duration": 100.0}
+        yield {"kind": "ended", "position": 95.0, "duration": 100.0}
+
+    srv, stopped = _bridge_scaffold(monkeypatch, played)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out == (95.0, 100.0, False)
+    assert not f.exists()  # completed cast → temp removed
+    assert srv.down  # Range server shut down
+    assert stopped == []  # session ended by itself, no explicit stop
+
+
+def test_cast_file_headless_bridge_writes_serve_state(monkeypatch, tmp_path):
+    """follow=False on the bridge path: detached `nstream.serve` + castbridge LOAD;
+    the state records the server pid in `serve` mode so stop() tears down the right
+    receiver session (bridge.stop, not catt stop)."""
+    f = _tmp_remux(tmp_path)
+
+    def started(*a, **k):
+        yield {"kind": "started", "title": "T"}
+
+    _srv, _stopped = _bridge_scaffold(monkeypatch, started)
+    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001))
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out == (0.0, 0.0, False)
+    assert remux._read_state() == {
+        "pid": 777, "file": str(f), "device": "10.0.0.5", "mode": "serve",
+    }  # fmt: skip
+    assert f.exists()  # detached server still serving it
+
+
+def test_cast_file_headless_bridge_failed_falls_back_to_catt(monkeypatch, tmp_path):
+    """LOAD failed before `started` (follow=False): the spawned Range server is killed,
+    the temp file is KEPT, and cast_file degrades to the detached catt."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+
+    def failed(*a, **k):
+        yield {"kind": "failed", "error": "load_failed", "message": "nope"}
+
+    monkeypatch.setattr(remux.bridge, "cast_load", failed)
+    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001))
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out == (0.0, 0.0, False)
+    assert 777 in rec["killed"]  # bridge-path server reaped before the fallback
+    args, _kw = rec["popen"][0]
+    assert args[:5] == ["catt", "-d", "10.0.0.5", "cast", str(f)]  # same temp re-served
+    assert remux._read_state()["mode"] == "catt"
+
+
+def test_cast_file_headless_ctrl_c_propagates_no_catt_fallback(monkeypatch, tmp_path):
+    """Ctrl-C during the headless startup wait propagates (no catt re-cast of the
+    cancelled file). Photographed: unlike the follow path, nothing is torn down —
+    the detached server keeps running with NO state written (--stop can't find it)
+    and the temp file is left for the next run's GC. See report."""
+    f = _tmp_remux(tmp_path)
+
+    def aborted(*a, **k):
+        raise KeyboardInterrupt
+        yield  # pragma: no cover — make it a generator
+
+    _srv, stopped = _bridge_scaffold(monkeypatch, aborted)
+    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001))
+    with pytest.raises(KeyboardInterrupt):
+        remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert stopped == []  # receiver session not stopped
+    assert f.exists()  # temp left behind
+    assert remux._read_state() is None  # no state → invisible to --stop
+
+
+# --- _spawn_server ----------------------------------------------------------
+
+
+class _ServeProc:
+    def __init__(self, line, pid=777):
+        self.pid = pid
+        self.stdout = io.StringIO(line)
+
+
+def test_spawn_server_returns_pid_and_port(monkeypatch):
+    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\n"))
+    assert remux._spawn_server("/f.mp4", "192.168.1.10") == (777, 46001)
+
+
+def test_spawn_server_kills_on_bad_announcement(monkeypatch):
+    killed: list[int] = []
+    monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
+    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: _ServeProc("boom\n"))
+    assert remux._spawn_server("/f.mp4", "192.168.1.10") is None
+    assert killed == [777]  # no orphan server on a botched handshake
+
+
+# --- _await_start -----------------------------------------------------------
+
+
+def test_await_start_true_once_receiver_plays(monkeypatch):
+    states = iter([None, {"player_state": "BUFFERING"}])
+    monkeypatch.setattr(remux.caster, "_raw_info", lambda dev: next(states))
+    monkeypatch.setattr(remux.time, "sleep", lambda s: None)
+    assert remux._await_start("10.0.0.5") is True
+
+
+def test_await_start_false_when_receiver_stays_idle(monkeypatch):
+    """Timeout path: the states observed are logged so the failure is reconstructable."""
+    monkeypatch.setattr(remux.caster, "_raw_info", lambda dev: {"player_state": "IDLE"})
+    monkeypatch.setattr(remux, "_START_TIMEOUT", 0.02)
+    monkeypatch.setattr(remux, "_START_POLL", 0.0)
+    warns: list[str] = []
+    monkeypatch.setattr(remux._log, "warning", lambda msg, *a: warns.append(msg % a))
+    assert remux._await_start("10.0.0.5") is False
+    assert any("IDLE" in w for w in warns)
+
+
+# --- _gc_stale --------------------------------------------------------------
+
+
+def test_gc_stale_keeps_only_the_live_serve_file(tmp_path):
+    keep = tmp_path / "cast-live.mp4"
+    keep.write_bytes(b"x")
+    stale = tmp_path / "cast-old.mp4"
+    stale.write_bytes(b"x")
+    logf = tmp_path / "catt-old.log"
+    logf.write_text("e")
+    (tmp_path / "remux.json").write_text(json.dumps({"pid": os.getpid(), "file": str(keep)}))
+    remux._gc_stale()
+    assert keep.exists()  # its server (this test process) is alive
+    assert not stale.exists() and not logf.exists()
+
+
+def test_gc_stale_removes_all_when_server_dead(tmp_path, monkeypatch):
+    f = tmp_path / "cast-dead.mp4"
+    f.write_bytes(b"x")
+    (tmp_path / "remux.json").write_text(json.dumps({"pid": 12345, "file": str(f)}))
+    monkeypatch.setattr(remux, "_pid_alive", lambda pid: False)
+    remux._gc_stale()
+    assert not f.exists()
 
 
 # --- stop / state ---------------------------------------------------------

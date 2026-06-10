@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import random
+import signal
 import subprocess
 import tempfile
 import urllib.error
@@ -91,6 +92,59 @@ def load_json[T](path: Path, fallback: T) -> T:
     except (OSError, json.JSONDecodeError):
         return fallback
     return data if isinstance(data, type(fallback)) else fallback
+
+
+class RunState:
+    """Tiny JSON state file tracking a detached helper process across nstream runs
+    (`$XDG_RUNTIME_DIR/nstream-<name>.json`, falling back to the system temp dir) —
+    the persistence half of the runtime-state machinery shared by `remux` (detached
+    serving catt / Range server) and `mirror` (detached mpv + sender), so a later
+    `--stop`/GC can find what an earlier headless run left serving. Best-effort like
+    all nstream disk I/O: `read` returns None on any problem, `write`/`clear` never
+    raise."""
+
+    def __init__(self, name: str) -> None:
+        base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+        self.path = Path(base) / f"nstream-{name}.json"
+
+    def read(self) -> dict | None:
+        with contextlib.suppress(OSError, json.JSONDecodeError):
+            return json.loads(self.path.read_text())
+        return None
+
+    def write(self, data: dict) -> None:
+        with contextlib.suppress(OSError):
+            self.path.write_text(json.dumps(data))
+
+    def clear(self) -> None:
+        with contextlib.suppress(OSError):
+            self.path.unlink(missing_ok=True)
+
+
+def pid_alive(pid: int | None) -> bool:
+    """True when `pid` refers to a live process (signal-0 probe). Best-effort: any
+    refusal (gone, not ours) counts as not-alive."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def kill_pid(pid: int | None, *, pgroup: bool = False) -> None:
+    """Best-effort SIGTERM to `pid`; with `pgroup` the whole process group is signalled
+    first (for `start_new_session` helpers like the detached serving catt, whose own
+    children must die with it). The plain-kill always follows so a helper that did not
+    become a group leader is still terminated."""
+    if not pid:
+        return
+    if pgroup:
+        with contextlib.suppress(OSError):
+            os.killpg(pid, signal.SIGTERM)
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
 
 
 def run_cmd(
