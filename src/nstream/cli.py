@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from typing import cast as typecast
@@ -92,9 +93,9 @@ def choose_tracks(
     _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
     while True:
         items: list[tuple[str, object]] = [
-            (f"{ui.glyphs(ui.active_caps()).play}  Avvia", _PLAY),
-            (f"🔊 Audio: {audio_summary(aid, tr)}", _AUDIO),
-            (f"💬 Sottotitoli: {sub_summary(sid, sub_paths, tr)}", _SUBS),
+            (f"{ui.g().play}  Avvia", _PLAY),
+            (f"{ui.g().audio} Audio: {audio_summary(aid, tr)}", _AUDIO),
+            (f"{ui.g().subs} Sottotitoli: {sub_summary(sid, sub_paths, tr)}", _SUBS),
         ]
         chosen = fzf(items, "riproduzione> ")
         if chosen is None:
@@ -151,13 +152,35 @@ def _play_video(
     # (Chromecast receiver caps vs the local GPU), so when no device is reachable we
     # must select for local mpv — not play a TV-filtered pick (e.g. AV1 dropped as
     # "no-HW" even though the local GPU decodes it) on the laptop.
-    device = _resolve_cast_device(cfg, opts) if opts.cast else None
-    if opts.cast and device is None:
-        opts = replace(opts, cast=False)  # degrade: select and play with the local profile
     # Resolving streams (Torrentio + RD) can take a moment; without a menu to mask
     # the wait, say what's happening so the TUI doesn't look frozen.
-    print(f"▶ {title} — cerco la sorgente migliore…", file=sys.stderr)
-    results = api.streams(cfg, typ, video_id)
+    print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
+    if opts.cast:
+        # Overlap the stream fetch (profile-independent) with the catt scan (up to
+        # ~2×10s): only ranking/selection depends on the device, and that runs after
+        # the join. Daemon thread (same pattern as player/serve), NOT an executor:
+        # non-daemon workers would outlive a confirm prompt aborted with Ctrl-C.
+        fetched: list[list[Stream]] = []
+        fetch_err: list[BaseException] = []
+
+        def _fetch_streams() -> None:
+            try:
+                fetched.append(api.streams(cfg, typ, video_id))
+            except BaseException as e:  # noqa: BLE001 — re-raised in the main thread
+                fetch_err.append(e)
+
+        th = threading.Thread(target=_fetch_streams, name="streams-fetch", daemon=True)
+        th.start()
+        device = _resolve_cast_device(cfg, opts)
+        th.join()
+        if fetch_err:
+            raise fetch_err[0]  # preserve api.streams' propagation (e.g. NetworkError)
+        results = fetched[0] if fetched else []
+    else:
+        device = None
+        results = api.streams(cfg, typ, video_id)
+    if opts.cast and device is None:
+        opts = replace(opts, cast=False)  # degrade: select and play with the local profile
     if not results:
         notice = stream_select.no_streams_message(cfg, typ, video_id, title)
         print(f"nstream: {notice}", file=sys.stderr)
@@ -174,7 +197,7 @@ def _play_video(
         start = state.resume_position(cfg, video_id) if opts.history else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
         if device is not None:
-            print(f"▶ {title} — {name_line}", file=sys.stderr)
+            print(f"{ui.g().play} {title} — {name_line}", file=sys.stderr)
             pos, dur, advance = _play_on_cast(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
@@ -182,7 +205,7 @@ def _play_video(
                 cast_meta=cast_meta,
             )  # fmt: skip
         else:
-            print(f"▶ {title} — {name_line}", file=sys.stderr)
+            print(f"{ui.g().play} {title} — {name_line}", file=sys.stderr)
             res = _play_on_mpv(
                 cfg, chosen, work_dir,
                 typ=typ, video_id=video_id, title=title, opts=opts,

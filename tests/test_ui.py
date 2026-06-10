@@ -134,6 +134,23 @@ def test_glyphs_nerd_vs_portable():
     assert ui.glyphs(ui.Caps(nerd_font=False)) is ui.PORTABLE
 
 
+def test_glyphs_new_slots_portable_match_legacy_emoji():
+    """The 6 slots added for the hardcoded-glyph sweep: PORTABLE must equal the emoji
+    previously hardcoded at the call sites, so default output doesn't change."""
+    legacy = {"audio": "🔊", "subs": "💬", "globe": "🌐", "tv": "📺", "fail": "✗", "down": "↓"}
+    for slot, emoji in legacy.items():
+        assert getattr(ui.PORTABLE, slot) == emoji
+        assert getattr(ui.NERD, slot)  # present and non-empty in the Nerd Font set too
+    assert ui.NERD.tv != ui.NERD.series  # distinct icons in nerd mode
+
+
+def test_g_helper_follows_active_caps(monkeypatch):
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=True))
+    assert ui.g() is ui.NERD
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=False))
+    assert ui.g() is ui.PORTABLE
+
+
 def test_ansi_wraps_and_noops():
     assert ui.ansi("x", "31") == "\x1b[31mx\x1b[0m"
     assert ui.ansi("x", "") == "x"

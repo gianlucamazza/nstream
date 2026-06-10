@@ -36,7 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import log, player
+from . import log, player, ui
 from .config import Config
 
 _log = log.get_logger(__name__)
@@ -351,7 +351,7 @@ def cast_via_mirror(
         state["sender_pid"] = sender_pid
         _write_state(state)
 
-        print(f"📺 {title} → {device} (mirror 1080p)", file=sys.stderr)
+        print(f"{ui.g().tv} {title} → {device} (mirror 1080p)", file=sys.stderr)
         if not follow:
             return (0.0, 0.0, False)
 

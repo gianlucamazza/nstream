@@ -36,7 +36,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import bridge, caster, log, serve
+from . import bridge, caster, log, serve, ui
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -245,11 +245,11 @@ def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
                     new = min(99, int(cur / duration * 100))
                     if new != pct:
                         pct = new
-                        msg = f"\r📺 preparo l'audio per il cast… {pct}%"
+                        msg = f"\r{ui.g().tv} preparo l'audio per il cast… {pct}%"
                         print(msg, end="", file=sys.stderr, flush=True)
         proc.wait()
         if pct >= 0:
-            print("\r📺 audio pronto, avvio il cast.        ", file=sys.stderr)
+            print(f"\r{ui.g().tv} audio pronto, avvio il cast.        ", file=sys.stderr)
         err.seek(0)
         stderr = err.read().decode("utf-8", errors="replace")
     return proc.returncode, stderr
@@ -344,7 +344,7 @@ def remux_to_file(
         "-c:v", "copy", *acodec,
         "-movflags", "+faststart", path,
     ]  # fmt: skip
-    print("📺 preparo l'audio per il cast (può richiedere un po')…", file=sys.stderr)
+    print(f"{ui.g().tv} preparo l'audio per il cast (può richiedere un po')…", file=sys.stderr)
     rc, stderr = _run_ffmpeg(cmd, duration)
     if rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
         _log.warning("remux fallito (rc=%s): %s", rc, (stderr or "")[:300])
@@ -395,7 +395,7 @@ def cast_file(
     if sub_paths:
         launch += ["-s", sub_paths[0]]
     dest = device or "Chromecast"
-    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
+    print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     # Capture catt's stderr to a temp file (a detached pipe would have no reader): if the
     # cast never starts, its tail says why (device unreachable, refused media, …) — the
     # diagnosis that was lost to DEVNULL. Removed once startup is confirmed (or by GC).
@@ -430,10 +430,10 @@ def cast_file(
 
     if not follow:
         # Leave the detached catt serving; --stop / next-run GC tears it down.
-        print(f"📺 {title} → {dest}", file=sys.stderr)
+        print(f"{ui.g().tv} {title} → {dest}", file=sys.stderr)
         return (0.0, 0.0, False)
 
-    print(f"📺 {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
+    print(f"{ui.g().tv} {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
     try:
         proc.wait()  # catt exits when playback ends
     except KeyboardInterrupt:
@@ -536,7 +536,7 @@ def _cast_file_via_bridge(
             _kill(pid)
             return None
         _write_state(pid, file_path, device, mode="serve")
-        print(f"📺 {title} → {device}", file=sys.stderr)
+        print(f"{ui.g().tv} {title} → {device}", file=sys.stderr)
         return (0.0, 0.0, False)
 
     # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
@@ -552,7 +552,10 @@ def _cast_file_via_bridge(
                 return None  # keep the temp file for the catt fallback
             if kind == "started":
                 started = True
-                print(f"📺 {title} → {device}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
+                print(
+                    f"{ui.g().tv} {title} → {device}  (Ctrl-C per smettere di seguire)",
+                    file=sys.stderr,
+                )
             if on_event:
                 on_event(ev)
             if kind in ("playing", "paused", "ended", "disconnected"):

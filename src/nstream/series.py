@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable
 from typing import Protocol
 
-from . import api, state
+from . import api, state, ui
 from .caster import CastMeta
 from .config import Config, HistoryEntry, Meta, PlayOpts, Video
 from .labels import display_title, episode_label
@@ -88,7 +88,7 @@ def binge(
         idx += 1
         auto = True
         unattended = True
-        print(f"▶ Carico {display_title(name, eps[idx])}…", file=sys.stderr)
+        print(f"{ui.g().play} Carico {display_title(name, eps[idx])}…", file=sys.stderr)
     return None
 
 

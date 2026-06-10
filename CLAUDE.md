@@ -47,17 +47,17 @@ Modules in `src/nstream/`:
   JSONL `--follow` events, and the NetworkError → JSON-error guard. Exactly one JSON object per
   invocation; no stream url/token ever reaches stdout. Also home to `typ_filter` (shared with
   `cli`). Same tier as `cast_flow`: imports `api`/`bridge`/`cast_flow`/`caster`/`mirror`/`player`/
-  `quality`/`remux`/`series`/`state`/`stream_select`/`subs`/`labels`/`config`; never `cli`,
+  `quality`/`remux`/`series`/`state`/`stream_select`/`subs`/`labels`/`config`/`ui`; never `cli`,
   never `picker`/fzf.
 - `series.py` — the series-only flow (ADR 0009): episode picker, binge auto-advance loop,
   per-episode resume (`play`/`binge`/`resume`/`entry_video`). The player entry point is injected
   as a callable (`PlayVideo` Protocol), so it never imports `cli`; imports
-  `api`/`state`/`labels`/`picker`/`config` (+ `caster.CastMeta`).
+  `api`/`state`/`labels`/`picker`/`config`/`ui` (+ `caster.CastMeta`).
 - `stream_select.py` — stream selection + resolution + auto-play vetting guards. `prepare_stream()`
   is the single entry the orchestrator calls (pick+resolve → cached-miss fallback → primary-language
   audio guard), returning a `VettedStream`. Also `cast_languages`/`cast_resolver` for the in-cast
   switch. Imports `api`/`debrid`/`engine`/`quality`/`remux`/`tracks`/`languages`/`picker`/
-  `labels`/`config`/`log`; never `cli`.
+  `labels`/`config`/`log`/`ui`; never `cli`.
 - `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the
   interactive cast (`cli._play_on_cast`) and the headless `--json --cast` branch
   (`headless._auto_play`) — vet the audio plan (`vet_cast_audio`) → absent-dub safety subtitles →
@@ -65,7 +65,7 @@ Modules in `src/nstream/`:
   (action/stream/reencoded/notice/audio/subs) for the caller's JSON accounting. Device resolution
   and the headless volume guard stay in the callers (`cli`/`headless`). Same tier as
   `stream_select`: imports `caster`/`engine`/`mirror`/`remux`/`quality`/`stream_select`/`subs`/
-  `config`/`log`; never `cli`.
+  `config`/`log`/`ui`; never `cli`.
 - `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download), `auto_subs`
   (no-menu paths + safety-subtitle net). Leaf below `cli`; imports `api`/`picker`/`config`.
 - `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
@@ -84,8 +84,8 @@ Modules in `src/nstream/`:
   `*_defaults` helpers (hwdec/quiet/lang) that decide what to inject without overriding the user.
   **Imports nothing from `cli`** (no cycle).
 - `caster.py` — Chromecast playback: `resolve_device()`, `cast()` (castbridge LOAD when available,
-  else `catt`), status poll, in-cast audio switch (catt-only). Imports `bridge` and the picker from
-  `picker`, not `cli`.
+  else `catt`), status poll, in-cast audio switch (catt-only). Imports `bridge`, `ui` (glyphs) and
+  the picker from `picker`, not `cli`.
 - `bridge.py` — IPC client for the **castbridge** daemon (AF_UNIX newline-JSON, stdlib `socket` only):
   metadata-rich LOAD + normalized event stream (started/playing/paused/ended/failed/disconnected).
   The session lives in the daemon, so a fire-and-return load survives our exit (ADR 0007/0008).
@@ -99,15 +99,15 @@ Modules in `src/nstream/`:
   → AAC) on disk, then serves it: nstream's own Range server (`serve.py`) on the castbridge path,
   a **detached catt** as fallback (a complete, Range-served file is the only delivery this DMR
   accepts — see `docs/adr/0005`/`0007`). `needs_remux`/`remux_for_cast`/`remux_to_file`/`cast_file`/
-  `stop`. Leaf below `cli` (imports `bridge`/`caster`/`serve`/`config`/`log` + stdlib), like
+  `stop`. Leaf below `cli` (imports `bridge`/`caster`/`serve`/`config`/`log`/`ui` + stdlib), like
   `engine`/`player`.
 - `mirror.py` — realtime cast backend (`--mirror` / `cast_mode: "mirror"`, ADR 0006): mpv decodes
   the stream locally on a Hyprland **headless output** + PipeWire null sink, and the openscreen
   Cast Streaming sender (`$CAST_MIRROR_BIN`) mirrors that window to the TV (~120ms, 1080p SDR —
-  instant start, no download/remux). Leaf below `cli` (imports `player`/`config`/`log` + stdlib).
+  instant start, no download/remux). Leaf below `cli` (imports `player`/`config`/`log`/`ui` + stdlib).
 - `engine.py` — local P2P backend: drives an external **TorrServer** (find/spawn, add torrent by
   infoHash, wait for the read-ahead buffer) and returns a plain `http://…/stream?…` url — the same
-  contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util` + stdlib), like
+  contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util`/`ui` + stdlib), like
   `caster`/`player`. Best-effort: raises `EngineUnavailable` instead of crashing the picker.
   `magnet_from_stream()` is shared with `debrid`; `detach_spawned()` lets a spawned server outlive
   a headless fire-and-return cast (the Chromecast keeps streaming from it).
@@ -122,7 +122,7 @@ Modules in `src/nstream/`:
 - `ui.py` — TUI design system: capability detection, palette/glyph set/fzf theme, progress bars,
   layout breakpoints. Near the top of the import graph; must never import `api`/`picker`/`cli`/`quality`/`caster`.
 - `explain.py` — diagnostic renderer for `--explain`: reconstructs the auto-pick decision with the
-  same primitives the player uses. Read-only.
+  same primitives the player uses (`languages`/`player`/`quality`/`tracks`/`ui`). Read-only.
 - `languages.py` — **single source of truth** for languages (release tokens, flags, display names);
   formerly three hand-synced maps. Leaf module (imports nothing from nstream).
 - `config.py` — XDG config load/save (atomic temp+replace), typed schema (incl. `posters`, `nerd_font`);

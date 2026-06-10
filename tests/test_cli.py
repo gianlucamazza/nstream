@@ -7,6 +7,7 @@ test_picker.py; here we exercise cli's coordination, mocking play/cast/_resolve_
 from __future__ import annotations
 
 import argparse
+import threading
 
 import pytest
 
@@ -161,6 +162,55 @@ def test_play_video_cast_fallback_selects_local_profile(monkeypatch):
     )
     assert seen["cast"] is False  # selection downgraded to the local profile
     assert (notice, advance) == (None, False)
+
+
+def test_play_video_cast_fetch_overlaps_device_scan(monkeypatch):
+    """On the cast path the stream fetch runs in a background thread, started BEFORE
+    the (slow, up to ~20s) catt scan resolves the device, and joined before selection."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    order = []
+    fetch_started = threading.Event()
+
+    def fake_streams(*a, **k):
+        order.append("fetch-start")
+        fetch_started.set()
+        return [{"url": "http://u", "name": "S"}]
+
+    def fake_resolve(*a, **k):
+        # The fetch must already be in flight while the scan is still resolving.
+        assert fetch_started.wait(timeout=5), "stream fetch not started before device scan"
+        order.append("device-resolved")
+        return None  # degrade to local → plays via mocked mpv, no cast stack needed
+
+    monkeypatch.setattr(cli.api, "streams", fake_streams)
+    monkeypatch.setattr(cli, "_resolve_cast_device", fake_resolve)
+    monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
+    opts = cli.PlayOpts(
+        auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+    )
+    assert order == ["fetch-start", "device-resolved"]
+    assert (notice, advance) == (None, False)
+
+
+def test_play_video_cast_fetch_network_error_propagates(monkeypatch):
+    """A NetworkError from api.streams must propagate out of _play_video unchanged
+    (caught by main()'s top-level api.NetworkError handler), even when the fetch runs
+    in the overlapped background thread on the cast path."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+
+    def boom(*a, **k):
+        raise cli.api.NetworkError("rete giù")
+
+    monkeypatch.setattr(cli.api, "streams", boom)
+    monkeypatch.setattr(cli, "_resolve_cast_device", lambda *a, **k: "192.168.1.10")
+    opts = cli.PlayOpts(
+        auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    with pytest.raises(cli.api.NetworkError, match="rete giù"):
+        cli._play_video(cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None)
 
 
 def test_play_video_no_streams_returns_notice(monkeypatch):
