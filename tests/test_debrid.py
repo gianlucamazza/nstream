@@ -286,6 +286,67 @@ def test_request_4xx_fails_fast(monkeypatch):
     assert calls["n"] == 1  # 404 not retried
 
 
+# --- token never leaks (errors + logs) ------------------------------------
+
+
+def _http_error(url: str, code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, code, "err", email.message.Message(), None)
+
+
+def test_requestdl_error_never_contains_token(monkeypatch):
+    """The requestdl URL carries the token in its query; a failing call must surface a
+    DebridUnavailable built from `what=`, never from the URL (message, repr, or chain)."""
+    token = "SECRETTOK123"
+    routes = [
+        (lambda u, m, d: "createtorrent" in u, {"success": True, "data": {"torrent_id": 7}}),
+        (lambda u, m, d: "mylist" in u, {"data": {"files": [{"id": 1, "size": 9}]}}),
+        (
+            lambda u, m, d: "requestdl" in u,
+            _http_error(f"{debrid._TORBOX_API}/torrents/requestdl?token={token}", 403),
+        ),
+    ]
+    monkeypatch.setattr(debrid, "_urlopen", _router(routes))
+    with pytest.raises(debrid.DebridUnavailable) as exc:
+        debrid.TorBoxResolver(token=token).resolve({"infoHash": "abcd"})
+    leakable = f"{exc.value!s} {exc.value!r} {exc.value.__cause__!r} {exc.value.__context__!r}"
+    assert token not in leakable
+    assert "torbox requestdl" in str(exc.value)  # the what= name, not the URL
+
+
+def test_retry_log_and_exhausted_error_never_contain_token(monkeypatch):
+    """Transient 5xx retries log the exception at debug and chain it into the final
+    DebridUnavailable: neither path may carry the token from the query string."""
+    token = "SECRETTOK123"
+    msgs: list[str] = []
+    monkeypatch.setattr(debrid._log, "debug", lambda m, *a: msgs.append(m % a))
+    monkeypatch.setattr(debrid.time, "sleep", lambda _s: None)
+    err = _http_error(f"{debrid._TORBOX_API}/torrents/requestdl?token={token}", 500)
+    monkeypatch.setattr(debrid, "_urlopen", _router([(lambda u, m, d: True, err)]))
+    with pytest.raises(debrid.DebridUnavailable) as exc:
+        debrid._request(
+            "GET",
+            f"{debrid._TORBOX_API}/torrents/requestdl",
+            what="torbox requestdl",
+            params={"token": token},
+            retries=1,
+        )
+    assert token not in str(exc.value) and token not in repr(exc.value.__cause__)
+    assert msgs and all(token not in m for m in msgs)
+
+
+def test_log_redaction_covers_native_token_carriers():
+    """Belt and braces: even if a native-debrid URL or auth header ever reached the log,
+    log.py's redaction must scrub both carriers used here (?token= query, Bearer header)."""
+    from nstream import log
+
+    url = f"{debrid._TORBOX_API}/torrents/requestdl?token=SECRETTOK123&torrent_id=7"
+    assert "SECRETTOK123" not in log.redact(url)
+    assert "token=<redacted>" in log.redact(url)
+    hdr = "Authorization: Bearer SECRETTOK123"
+    assert "SECRETTOK123" not in log.redact(hdr)
+    assert "Bearer <redacted>" in log.redact(hdr)
+
+
 # --- selftest ------------------------------------------------------------
 
 

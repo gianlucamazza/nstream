@@ -443,6 +443,7 @@ def test_cast_file_start_timeout_tears_down_with_firewall_hint(monkeypatch, tmp_
 class _FakeServer:
     def __init__(self):
         self.down = False
+        self.token = "tok"  # per-cast capability token (serve.py URL hardening)
 
     def shutdown(self):
         self.down = True
@@ -534,7 +535,7 @@ def test_cast_file_headless_bridge_writes_serve_state(monkeypatch, tmp_path):
         yield {"kind": "started", "title": "T"}
 
     _srv, _stopped = _bridge_scaffold(monkeypatch, started)
-    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001))
+    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001, "tok"))
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert out == (0.0, 0.0, False)
     assert remux._read_state() == {
@@ -554,7 +555,7 @@ def test_cast_file_headless_bridge_failed_falls_back_to_catt(monkeypatch, tmp_pa
         yield {"kind": "failed", "error": "load_failed", "message": "nope"}
 
     monkeypatch.setattr(remux.bridge, "cast_load", failed)
-    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001))
+    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001, "tok"))
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert out == (0.0, 0.0, False)
     assert 777 in rec["killed"]  # bridge-path server reaped before the fallback
@@ -565,9 +566,9 @@ def test_cast_file_headless_bridge_failed_falls_back_to_catt(monkeypatch, tmp_pa
 
 def test_cast_file_headless_ctrl_c_propagates_no_catt_fallback(monkeypatch, tmp_path):
     """Ctrl-C during the headless startup wait propagates (no catt re-cast of the
-    cancelled file). Photographed: unlike the follow path, nothing is torn down —
-    the detached server keeps running with NO state written (--stop can't find it)
-    and the temp file is left for the next run's GC. See report."""
+    cancelled file) AND tears down like the follow path: receiver session stopped,
+    the already-spawned detached server reaped (it has no state yet, so --stop could
+    never find it), and the temp file removed (no fallback will use it)."""
     f = _tmp_remux(tmp_path)
 
     def aborted(*a, **k):
@@ -575,12 +576,15 @@ def test_cast_file_headless_ctrl_c_propagates_no_catt_fallback(monkeypatch, tmp_
         yield  # pragma: no cover — make it a generator
 
     _srv, stopped = _bridge_scaffold(monkeypatch, aborted)
-    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001))
+    killed: list[int] = []
+    monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
+    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001, "tok"))
     with pytest.raises(KeyboardInterrupt):
         remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
-    assert stopped == []  # receiver session not stopped
-    assert f.exists()  # temp left behind
-    assert remux._read_state() is None  # no state → invisible to --stop
+    assert stopped == ["10.0.0.5"]  # receiver session stopped
+    assert killed == [777]  # detached server reaped (no orphan invisible to --stop)
+    assert not f.exists()  # temp removed — no fallback will use it
+    assert remux._read_state() is None
 
 
 # --- _spawn_server ----------------------------------------------------------
@@ -592,9 +596,19 @@ class _ServeProc:
         self.stdout = io.StringIO(line)
 
 
-def test_spawn_server_returns_pid_and_port(monkeypatch):
+def test_spawn_server_returns_pid_port_and_token(monkeypatch):
+    monkeypatch.setattr(
+        remux.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\nTOKEN=abc\n")
+    )
+    assert remux._spawn_server("/f.mp4", "192.168.1.10") == (777, 46001, "abc")
+
+
+def test_spawn_server_kills_on_missing_token(monkeypatch):
+    killed: list[int] = []
+    monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
     monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\n"))
-    assert remux._spawn_server("/f.mp4", "192.168.1.10") == (777, 46001)
+    assert remux._spawn_server("/f.mp4", "192.168.1.10") is None
+    assert killed == [777]  # no orphan server when the token never arrives
 
 
 def test_spawn_server_kills_on_bad_announcement(monkeypatch):
