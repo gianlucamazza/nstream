@@ -118,7 +118,7 @@ def test_state_roundtrip_and_clear():
     assert mirror._read_state() is None
 
 
-def test_teardown_is_complete_and_idempotent(monkeypatch):
+def test_teardown_is_complete_and_idempotent(monkeypatch, tmp_path):
     killed: list[int] = []
     unloaded: list[int] = []
     removed: list[str] = []
@@ -129,23 +129,36 @@ def test_teardown_is_complete_and_idempotent(monkeypatch):
     )
     monkeypatch.setattr(mirror.time, "sleep", lambda _: None)
 
-    state = {"sender_pid": 2, "mpv_pid": 1, "headless": "HEADLESS-2", "sink_module": 99}
+    work_dir = tmp_path / "nstream-mirror-x"
+    work_dir.mkdir()
+    (work_dir / "mpv.sock").write_bytes(b"")
+    state = {
+        "sender_pid": 2, "mpv_pid": 1, "headless": "HEADLESS-2",
+        "sink_module": 99, "work_dir": str(work_dir),
+    }  # fmt: skip
     mirror._teardown(state)
     assert killed == [2, 1]
     assert unloaded == [99]
     assert removed == ["HEADLESS-2"]
+    assert not work_dir.exists()  # per-cast work dir reclaimed, no leak until logout
     assert mirror._read_state() is None
     # Second teardown: nothing left to clear, no crash.
     assert mirror.stop() is False
 
 
-def test_stop_tears_down_persisted_state(monkeypatch):
+def test_stop_tears_down_persisted_state(monkeypatch, tmp_path):
+    """stop() (detached path) also removes the per-cast work dir recorded in the state."""
     monkeypatch.setattr(mirror, "_kill", lambda pid: None)
     monkeypatch.setattr(mirror, "_unload_module", lambda mid: None)
     monkeypatch.setattr(mirror, "_hypr", lambda *a: "")
     monkeypatch.setattr(mirror.time, "sleep", lambda _: None)
-    mirror._write_state({"sender_pid": 5, "headless": "HEADLESS-1", "sink_module": 7})
+    work_dir = tmp_path / "nstream-mirror-y"
+    work_dir.mkdir()
+    mirror._write_state(
+        {"sender_pid": 5, "headless": "HEADLESS-1", "sink_module": 7, "work_dir": str(work_dir)}
+    )
     assert mirror.stop() is True
+    assert not work_dir.exists()
     assert mirror._read_state() is None
 
 
@@ -237,6 +250,23 @@ def test_cast_via_mirror_mpv_missing_unwinds_sink_and_headless(monkeypatch, tmp_
     assert "mpv_pid" not in st and "sender_pid" not in st
 
 
+def test_cast_via_mirror_mpv_oserror_unwinds_sink_and_headless(monkeypatch, tmp_path):
+    """Any OSError from the mpv Popen (not just FileNotFoundError — e.g. a
+    PermissionError on the binary) degrades cleanly: sink + headless unwound,
+    no orphans, no propagation."""
+    rec, _ = _wire(monkeypatch, tmp_path)
+
+    def boom(*a, **k):
+        raise PermissionError("mpv")
+
+    monkeypatch.setattr(mirror.subprocess, "Popen", boom)
+    out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
+    assert out == (0.0, 0.0, False)
+    st = rec["teardowns"][-1]
+    assert st["sink_module"] == 99 and st["headless"] == "HEADLESS-9"
+    assert "mpv_pid" not in st and "sender_pid" not in st
+
+
 def test_cast_via_mirror_window_timeout_kills_mpv_and_unwinds(monkeypatch, tmp_path):
     """Step 4 (window appears) fails → mpv is killed and everything mounted unwound."""
     rec, _ = _wire(monkeypatch, tmp_path)
@@ -272,14 +302,17 @@ def test_cast_via_mirror_headless_success_detaches_and_keeps_state(monkeypatch, 
     _args, kw = rec["popen"][0]
     assert kw["start_new_session"] is True  # detached session
     assert proc.wait_calls == 0
-    assert mirror._read_state() == {
+    st = mirror._read_state()
+    work_dir = st.pop("work_dir")  # dynamic mkdtemp path, checked separately below
+    assert st == {
         "device": "1.2.3.4", "sink_module": 99, "headless": "HEADLESS-9",
         "mpv_pid": 4242, "sender_pid": 555,
     }  # fmt: skip
     assert ("dispatch", "movetoworkspacesilent", "7,address:0xAAA") in rec["hypr"]
-    # Photographed: the per-cast work dir (mpv IPC socket) is NOT cleaned on the
-    # headless path — neither here nor by stop(). See report.
-    assert len(list(tmp_path.glob("nstream-mirror-*"))) == 1
+    # The per-cast work dir (mpv IPC socket) stays alive for the detached mpv, but is
+    # recorded in the state so stop() can reclaim it (it used to leak until logout).
+    dirs = list(tmp_path.glob("nstream-mirror-*"))
+    assert [str(d) for d in dirs] == [work_dir]
 
 
 def test_cast_via_mirror_follow_tracks_position_and_tears_down(monkeypatch, tmp_path):
