@@ -15,12 +15,18 @@ Two run modes:
 
 Leaf module: stdlib (`http.server`/`socket`/`socketserver`) + `log`, imports nothing from
 `cli`. The served path is local (no debrid token); request lines are logged only at debug.
+
+Hardening: the firewall opens 45000-47000 to the whole LAN, so the URL path carries a
+**per-cast random token** (`/cast/<token>/stream.mp4`) — the only client that needs it (the
+receiver) gets the full URL via LOAD, anyone scanning the port gets 404. The DMR sends no
+auth headers, so a capability URL is the strongest gate that keeps the cast contract intact.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -32,10 +38,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import log
 
 _log = log.get_logger("serve")
-
-# A fixed URL path the receiver fetches; the actual file is fixed per-server, so the path is
-# cosmetic but kept stable so logs/URLs read sensibly.
-_URL_PATH = "/stream.mp4"
 
 # The receiver connects *back* to us over the LAN to fetch the file, so the bind port must be
 # one the host firewall lets in. A default-deny UFW/nftables drops a random ephemeral port; the
@@ -63,8 +65,18 @@ def lan_ip(target_ip: str) -> str:
         s.close()
 
 
-def served_url(ip: str, port: int) -> str:
-    return f"http://{ip}:{port}{_URL_PATH}"
+def new_token() -> str:
+    """A fresh per-cast URL token (unguessable path segment)."""
+    return secrets.token_urlsafe(16)
+
+
+def url_path(token: str) -> str:
+    """The secret URL path the receiver must hit; everything else is 404."""
+    return f"/cast/{token}/stream.mp4"
+
+
+def served_url(ip: str, port: int, token: str) -> str:
+    return f"http://{ip}:{port}{url_path(token)}"
 
 
 def _lan_subnet(host_ip: str) -> str:
@@ -145,9 +157,13 @@ def _parse_range(header: str, size: int) -> tuple[int, int] | None:
 
 
 class RangeFileHandler(BaseHTTPRequestHandler):
-    """Serves the single file at `self.server.file_path` with Range support. GET and HEAD only."""
+    """Serves the single file at `self.server.file_path` with Range support. GET and HEAD only,
+    and only on the server's secret token path — anything else is 404 (no listing, no probing)."""
 
     protocol_version = "HTTP/1.1"
+    # Don't advertise the Python/stdlib versions to whoever scans the open cast port.
+    server_version = "nstream"
+    sys_version = ""
     _CHUNK = 256 * 1024
     # Narrow the inherited `server` type so `self.server.file_path` resolves (lazy annotation
     # via `from __future__ import annotations`; _FileServer is defined below).
@@ -157,8 +173,12 @@ class RangeFileHandler(BaseHTTPRequestHandler):
     def _path(self) -> str:
         return self.server.file_path
 
+    def _mask(self, text: str) -> str:
+        """The token is a capability: keep it out of the (local, but persistent) log."""
+        return text.replace(self.server.token, "<token>")
+
     def log_message(self, format: str, *args) -> None:
-        _log.debug("serve %s", format % args)
+        _log.debug("serve %s", self._mask(format % args))
 
     def _content_type(self) -> str:
         return "video/mp4" if self._path.lower().endswith(".mp4") else "application/octet-stream"
@@ -169,6 +189,11 @@ class RangeFileHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._respond(write_body=True)
 
+    def _method_not_allowed(self) -> None:
+        self.send_error(HTTPStatus.METHOD_NOT_ALLOWED)
+
+    do_POST = do_PUT = do_DELETE = do_PATCH = _method_not_allowed
+
     def _respond(self, *, write_body: bool) -> None:
         # The first request proves the receiver can reach us — the key discriminator when a
         # Tier-2 cast fails to start (no request → network/firewall; request but no playback
@@ -177,9 +202,14 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.server.got_request = True
             _log.info(
                 "serve: prima richiesta da %s: %s %s (Range=%s)",
-                self.client_address[0], self.command, self.path,
+                self.client_address[0], self.command, self._mask(self.path),
                 self.headers.get("Range") or "-",
             )  # fmt: skip
+        # Capability check: only the exact per-cast token path is served; the firewall lets
+        # the whole LAN in, so any other path (scanners, other hosts) gets a flat 404.
+        if not secrets.compare_digest(self.path.encode(), self.server.url_path.encode()):
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
         try:
             size = os.path.getsize(self._path)
         except OSError:
@@ -244,21 +274,25 @@ class _FileServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, addr, file_path: str):
+    def __init__(self, addr, file_path: str, token: str | None = None):
         super().__init__(addr, RangeFileHandler)
         self.file_path = file_path
+        self.token = token or new_token()  # per-cast capability (see module docstring)
+        self.url_path = url_path(self.token)
         self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
 
 
-def _make_server(bind_ip: str, file_path: str, preferred_port: int = 0) -> _FileServer:
+def _make_server(
+    bind_ip: str, file_path: str, preferred_port: int = 0, token: str | None = None
+) -> _FileServer:
     """Bind a `_FileServer`, preferring the firewall-allowed cast port range so the receiver can
     actually reach us. `preferred_port > 0` forces that exact port; otherwise scan the range and
     fall back to an ephemeral port if it's fully busy."""
     if preferred_port:
-        return _FileServer((bind_ip, preferred_port), file_path)
+        return _FileServer((bind_ip, preferred_port), file_path, token)
     for port in range(_CAST_PORT_LO, _CAST_PORT_HI + 1):
         try:
-            return _FileServer((bind_ip, port), file_path)
+            return _FileServer((bind_ip, port), file_path, token)
         except OSError:
             continue
     _log.warning(
@@ -266,14 +300,15 @@ def _make_server(bind_ip: str, file_path: str, preferred_port: int = 0) -> _File
         _CAST_PORT_LO,
         _CAST_PORT_HI,
     )
-    return _FileServer((bind_ip, 0), file_path)
+    return _FileServer((bind_ip, 0), file_path, token)
 
 
 def serve_file(file_path: str, bind_ip: str) -> tuple[_FileServer, int, threading.Thread]:
     """Start a threaded Range server for `file_path` bound to `bind_ip:0` (ephemeral port).
-    Returns `(server, port, thread)`; the caller builds the URL via `served_url(bind_ip, port)`
-    and shuts down with `server.shutdown()`. The thread is a daemon (dies with the process), so
-    this is the in-process (follow) mode — headless uses the `__main__` detached entrypoint."""
+    Returns `(server, port, thread)`; the caller builds the URL via
+    `served_url(bind_ip, port, server.token)` and shuts down with `server.shutdown()`. The
+    thread is a daemon (dies with the process), so this is the in-process (follow) mode —
+    headless uses the `__main__` detached entrypoint."""
     server = _make_server(bind_ip, file_path)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, name="nstream-serve", daemon=True)
@@ -283,8 +318,10 @@ def serve_file(file_path: str, bind_ip: str) -> tuple[_FileServer, int, threadin
 
 def _main(argv: list[str] | None = None) -> int:
     """Detached entrypoint: `python -m nstream.serve <file> --bind <ip> [--port N]`. Binds, prints
-    a single `PORT=<n>` line on stdout (so the parent learns the ephemeral port), then serves
-    forever until killed (SIGTERM from `remux.stop`/GC). All other output goes to the log."""
+    a `PORT=<n>` line then a `TOKEN=<t>` line on stdout (so the parent learns the ephemeral port
+    and the per-cast URL token — generated here, never on the command line where `ps` would show
+    it), then serves forever until killed (SIGTERM from `remux.stop`/GC). All other output goes
+    to the log."""
     ap = argparse.ArgumentParser(prog="nstream.serve")
     ap.add_argument("file")
     ap.add_argument("--bind", default="0.0.0.0")
@@ -299,8 +336,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
     server = _make_server(args.bind, args.file, preferred_port=args.port)
     port = server.server_address[1]
-    # The parent reads exactly this line to learn the port, then leaves us running.
-    sys.stdout.write(f"PORT={port}\n")
+    # The parent reads exactly these two lines to learn port+token, then leaves us running.
+    sys.stdout.write(f"PORT={port}\nTOKEN={server.token}\n")
     sys.stdout.flush()
     try:
         server.serve_forever()
