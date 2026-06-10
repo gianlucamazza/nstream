@@ -330,6 +330,7 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | Path                           | Role                                                                                                                                           |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections, resume                                                                     |
+| `src/nstream/headless.py`      | headless `--json` subsystem: non-interactive play/cast/probe/stop/status, one JSON object on stdout (no fzf, no TTY)                           |
 | `src/nstream/series.py`        | series-only flow: episode picker, binge auto-advance, per-episode resume (injected player)                                                     |
 | `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards                                     |
 | `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles)                                                                                                   |

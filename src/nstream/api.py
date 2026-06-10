@@ -176,6 +176,10 @@ def _extras(genre: str | None, skip: int) -> str:
     return extras
 
 
+# --browse keyword → Cinemeta catalog id (the CLI's --browse choices).
+CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
+
+
 def catalog(
     cfg: Config, typ: str, cat: str = "top", *, genre: str | None = None, skip: int = 0
 ) -> list[Meta]:

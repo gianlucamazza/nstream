@@ -153,6 +153,11 @@ def test_meta_cached_disk_empty_not_cached(monkeypatch, tmp_path):
     assert calls == ["tt9", "tt9"]  # empty result isn't persisted → re-fetched
 
 
+def test_cat_map_browse_keywords():
+    # --browse keyword → Cinemeta catalog id (consumed by api.catalog/browse).
+    assert api.CAT_MAP == {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
+
+
 # --- gzip, browse, cache (Fase 1p) -----------------------------------------
 
 import gzip as _gzip  # noqa: E402
