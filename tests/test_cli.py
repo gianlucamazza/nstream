@@ -994,3 +994,150 @@ def test_play_history_resume_start_threaded(monkeypatch, tmp_path):
     )
     cli.play_history(cfg, entry, opts)
     assert seen["start"] == 500.0
+
+
+# --- main() argparse wiring & _entry ---------------------------------------
+
+
+def _run_main(monkeypatch, argv, cfg, dispatch=None):
+    """Drive main() through real argparse with config/theme/dispatch stubbed; returns
+    (rc, captured) where captured holds the (cfg, args, opts) _dispatch received."""
+    captured = {}
+
+    def fake_dispatch(cfg, args, opts):
+        captured.update(cfg=cfg, args=args, opts=opts)
+        return 0
+
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", *argv])
+    monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: cfg)
+    monkeypatch.setattr(cli, "_init_theme", lambda c: None)
+    monkeypatch.setattr(cli, "_dispatch", dispatch or fake_dispatch)
+    return cli.main(), captured
+
+
+def test_main_bare_query_routed_to_dispatch(monkeypatch):
+    cfg = Config(torrentio_base="tb", auto_play=False)
+    rc, seen = _run_main(monkeypatch, ["the", "matrix"], cfg)
+    assert rc == 0
+    assert seen["cfg"] is cfg
+    assert seen["args"].query == ["the", "matrix"]
+    opts = seen["opts"]
+    assert opts.auto is False and opts.cast is False and opts.mirror is False
+    assert opts.history is True and opts.autoplay is True  # cfg defaults pass through
+
+
+def test_main_json_cast_flags_reach_dispatch(monkeypatch):
+    cfg = Config(torrentio_base="tb", auto_play=False)
+    rc, seen = _run_main(
+        monkeypatch,
+        ["--json", "--cast", "--device", "Salotto", "--audio-lang", "ita",
+         "--season", "2", "--episode", "5", "dune"],
+        cfg,
+    )  # fmt: skip
+    assert rc == 0
+    args, opts = seen["args"], seen["opts"]
+    assert args.json is True and args.device == "Salotto"
+    assert args.season == 2 and args.episode == 5
+    assert opts.auto is True  # --json is headless: always auto-pick
+    assert opts.cast is True
+    assert opts.audio_lang == "ita"
+
+
+def test_main_local_overrides_prefer_cast_and_mirror(monkeypatch):
+    cfg = Config(torrentio_base="tb", prefer_cast=True, cast_mode="mirror")
+    rc, seen = _run_main(monkeypatch, ["--local", "dune"], cfg)
+    assert rc == 0
+    opts = seen["opts"]
+    assert opts.cast is False and opts.mirror is False  # --local beats cfg cast prefs
+
+
+def test_main_mirror_implies_cast_routing(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    rc, seen = _run_main(monkeypatch, ["--mirror", "dune"], cfg)
+    assert rc == 0
+    opts = seen["opts"]
+    assert opts.mirror is True and opts.cast is True
+
+
+def test_main_no_history_no_autoplay_play_flags(monkeypatch):
+    cfg = Config(torrentio_base="tb", auto_play=False)
+    rc, seen = _run_main(monkeypatch, ["--play", "--no-history", "--no-autoplay", "dune"], cfg)
+    assert rc == 0
+    opts = seen["opts"]
+    assert opts.auto is True  # --play forces auto even with cfg.auto_play off
+    assert opts.history is False and opts.autoplay is False
+
+
+def test_main_settings_short_circuits_dispatch(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    ran = []
+    monkeypatch.setattr(cli.settings, "run_settings", lambda c: ran.append(c))
+    rc, seen = _run_main(
+        monkeypatch, ["--settings"], cfg,
+        dispatch=lambda *a, **k: pytest.fail("_dispatch must not run with --settings"),
+    )  # fmt: skip
+    assert rc == 0
+    assert ran == [cfg]
+
+
+def test_main_explain_without_query_is_usage_error(monkeypatch, capsys):
+    """Full wiring: `nstream --explain` (no query) goes through the REAL _dispatch and
+    exits 2 with the usage message (no network, no fzf)."""
+    cfg = Config(torrentio_base="tb")
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", "--explain"])
+    monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: cfg)
+    monkeypatch.setattr(cli, "_init_theme", lambda c: None)
+    assert cli.main() == 2
+    assert "--explain richiede un titolo" in capsys.readouterr().err
+
+
+def test_main_network_error_from_dispatch_returns_1(monkeypatch, capsys):
+    cfg = Config(torrentio_base="tb")
+
+    def boom(*a, **k):
+        raise cli.api.NetworkError("addon irraggiungibile")
+
+    rc, _ = _run_main(monkeypatch, ["dune"], cfg, dispatch=boom)
+    assert rc == 1
+    assert "addon irraggiungibile" in capsys.readouterr().err
+
+
+def test_main_config_error_returns_2(monkeypatch, capsys):
+    def bad_config():
+        raise cli.ConfigError("config rotta")
+
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", "dune"])
+    monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_config", bad_config)
+    monkeypatch.setattr(
+        cli, "_dispatch", lambda *a, **k: pytest.fail("_dispatch must not run without config")
+    )
+    assert cli.main() == 2
+    assert "config rotta" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("outcome", "code"),
+    [
+        ("ok", 7),  # main's return code is passed to sys.exit verbatim
+        ("interrupt", 130),  # Ctrl-C / EOF → conventional 130
+        ("crash", 1),  # unhandled exception → logged, friendly stderr, exit 1
+    ],
+)
+def test_entry_exit_codes(monkeypatch, capsys, outcome, code):
+    def fake_main():
+        if outcome == "interrupt":
+            raise KeyboardInterrupt
+        if outcome == "crash":
+            raise RuntimeError("boom")
+        return 7
+
+    monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "main", fake_main)
+    with pytest.raises(SystemExit) as e:
+        cli._entry()
+    assert e.value.code == code
+    if outcome == "crash":
+        assert "errore inatteso" in capsys.readouterr().err
