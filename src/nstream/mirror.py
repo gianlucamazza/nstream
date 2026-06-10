@@ -209,6 +209,11 @@ def _teardown(state: dict) -> None:
     if headless:
         _hypr("output", "remove", headless)
     _unload_module(state.get("sink_module"))
+    work_dir = state.get("work_dir")
+    if work_dir:
+        # Per-cast work dir (mpv IPC socket) under $XDG_RUNTIME_DIR: without this it
+        # leaks until logout on the detached path. Best-effort, never blocks teardown.
+        shutil.rmtree(work_dir, ignore_errors=True)
     _clear_state()
 
 
@@ -294,10 +299,12 @@ def cast_via_mirror(
     if old:
         _teardown(old)
 
-    state: dict = {"device": device}
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     work_dir = tempfile.mkdtemp(prefix="nstream-mirror-", dir=runtime)
     sock_path = os.path.join(work_dir, "mpv.sock")
+    # The work dir travels in the state so `stop()` (detached path) and `_teardown`
+    # (follow / failure paths) can remove it — it would otherwise leak until logout.
+    state: dict = {"device": device, "work_dir": work_dir}
 
     try:
         state["sink_module"] = _load_null_sink()
@@ -315,7 +322,9 @@ def cast_via_mirror(
         # Headless cast must outlive nstream's exit → detached session.
         try:
             proc = subprocess.Popen(args, start_new_session=not follow)
-        except FileNotFoundError:
+        except OSError:
+            # Not just FileNotFoundError: a PermissionError/other OSError from Popen
+            # must also unwind the already-mounted sink + headless output.
             print("nstream: mpv non trovato", file=sys.stderr)
             _teardown(state)
             return (0.0, 0.0, False)
