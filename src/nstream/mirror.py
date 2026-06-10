@@ -27,7 +27,6 @@ import contextlib
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -36,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import log, player, ui
+from . import log, player, ui, util
 from .config import Config
 
 _log = log.get_logger(__name__)
@@ -164,44 +163,41 @@ def _unload_module(module_id: int | None) -> None:
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
-    return True
+    return util.pid_alive(pid)
 
 
 def _kill(pid: int | None) -> None:
-    if not pid:
-        return
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.kill(pid, signal.SIGTERM)
+    # No pgroup here: mpv and the sender are signalled individually (unlike remux's
+    # detached catt, which owns a whole serving process group).
+    util.kill_pid(pid)
 
 
 # --- state tracking (for headless --stop) ---------------------------------
 
+# Persistence shared with `remux` via `util.RunState`; thin wrappers keep the call
+# sites and the test seams (`_state_path` monkeypatching) unchanged.
+
 
 def _state_path() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-    return Path(base) / "nstream-mirror.json"
+    return util.RunState("mirror").path
+
+
+def _runstate() -> util.RunState:
+    st = util.RunState("mirror")
+    st.path = _state_path()  # honor a repointed _state_path (tests)
+    return st
 
 
 def _write_state(state: dict) -> None:
-    with contextlib.suppress(OSError):
-        _state_path().write_text(json.dumps(state))
+    _runstate().write(state)
 
 
 def _read_state() -> dict | None:
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        return json.loads(_state_path().read_text())
-    return None
+    return _runstate().read()
 
 
 def _clear_state() -> None:
-    with contextlib.suppress(OSError):
-        _state_path().unlink(missing_ok=True)
+    _runstate().clear()
 
 
 def _teardown(state: dict) -> None:

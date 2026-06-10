@@ -26,17 +26,15 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
-from . import bridge, caster, log, serve, ui
+from . import bridge, caster, log, serve, ui, util
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -119,9 +117,19 @@ def _cache_dir() -> Path:
     return d
 
 
+# State persistence + process probes live in `util.RunState`/`pid_alive`/`kill_pid`
+# (shared with `mirror`); the thin module-level wrappers keep the call sites and the
+# test seams (`_state_path` monkeypatching) unchanged.
+
+
 def _state_path() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-    return Path(base) / "nstream-remux.json"
+    return util.RunState("remux").path
+
+
+def _runstate() -> util.RunState:
+    st = util.RunState("remux")
+    st.path = _state_path()  # honor a repointed _state_path (tests)
+    return st
 
 
 def _gc_stale() -> None:
@@ -138,34 +146,22 @@ def _gc_stale() -> None:
 
 
 def _read_state() -> dict | None:
-    with contextlib.suppress(OSError, json.JSONDecodeError):
-        return json.loads(_state_path().read_text())
-    return None
+    return _runstate().read()
 
 
 def _write_state(pid: int, file: str, device: str | None, mode: str = "catt") -> None:
     """Track the serving process for `--stop`/GC. `mode` is "catt" (detached catt serves+casts)
     or "serve" (our Range server serves, castbridge casts) so `stop()` tears down the right
     receiver session."""
-    with contextlib.suppress(OSError):
-        _state_path().write_text(
-            json.dumps({"pid": pid, "file": file, "device": device, "mode": mode})
-        )
+    _runstate().write({"pid": pid, "file": file, "device": device, "mode": mode})
 
 
 def _clear_state() -> None:
-    with contextlib.suppress(OSError):
-        _state_path().unlink(missing_ok=True)
+    _runstate().clear()
 
 
 def _pid_alive(pid: int | None) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return util.pid_alive(pid)
 
 
 def _rm(path: str | None) -> None:
@@ -176,12 +172,7 @@ def _rm(path: str | None) -> None:
 
 def _kill(pid: int | None) -> None:
     """Terminate the detached serving catt (its own process group)."""
-    if not pid:
-        return
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.killpg(pid, signal.SIGTERM)
-    with contextlib.suppress(OSError, ProcessLookupError):
-        os.kill(pid, signal.SIGTERM)
+    util.kill_pid(pid, pgroup=True)
 
 
 # --- remux ----------------------------------------------------------------
