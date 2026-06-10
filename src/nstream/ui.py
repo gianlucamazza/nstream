@@ -21,7 +21,7 @@ from pathlib import Path
 from . import util
 from .config import Config
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2  # v2: added the NO_COLOR-driven `color` capability
 
 # Terminals we treat as sixel-capable (sixel support isn't reliably env-detectable, so
 # this is an allowlist; NSTREAM_IMAGE_PROTO / image_mode let users override either way).
@@ -49,6 +49,7 @@ class Caps:
     truecolor: bool = False
     image_proto: ImageProto = ImageProto.NONE
     has_chafa: bool = False
+    color: bool = True  # False when NO_COLOR is set (no-color.org): no ANSI colour
 
 
 # --- capability detection (cached, mirrors quality.detect_caps) -------------
@@ -71,6 +72,8 @@ def _signature(cfg: Config | None) -> str:
             env.get("LC_TERMINAL", ""),
             env.get("NSTREAM_IMAGE_PROTO", ""),
             env.get("NSTREAM_NERD_FONT", ""),
+            # Presence (even empty) disables colour, so hash presence, not the value.
+            "1" if "NO_COLOR" in env else "0",
             "1" if shutil.which("chafa") else "0",
             cfg.nerd_font if cfg else "auto",
             cfg.image_mode if cfg else "auto",
@@ -119,6 +122,9 @@ def _detect(cfg: Config | None) -> Caps:
         truecolor=os.environ.get("COLORTERM") in {"truecolor", "24bit"},
         image_proto=proto,
         has_chafa=has_chafa,
+        # no-color.org: NO_COLOR present (any value) disables ANSI colour entirely.
+        # Affects colour only — glyphs, layout, and poster images are unchanged.
+        color="NO_COLOR" not in os.environ,
     )
 
 
@@ -137,6 +143,7 @@ def detect_caps(cfg: Config | None = None, *, use_cache: bool = True) -> Caps:
                     truecolor=bool(data["truecolor"]),
                     image_proto=ImageProto(data["image_proto"]),
                     has_chafa=bool(data["has_chafa"]),
+                    color=bool(data["color"]),
                 )
 
     caps = _detect(cfg)
@@ -151,6 +158,7 @@ def detect_caps(cfg: Config | None = None, *, use_cache: bool = True) -> Caps:
                     "truecolor": caps.truecolor,
                     "image_proto": caps.image_proto.value,
                     "has_chafa": caps.has_chafa,
+                    "color": caps.color,
                 }
             )
         )
@@ -304,9 +312,13 @@ _256 = Palette(
     good="38;5;42",
     warn="38;5;214",
 )
+# NO_COLOR: empty SGR strings make `ansi()` a no-op everywhere.
+_MONO = Palette(accent="", secondary="", dim="", good="", warn="")
 
 
 def palette(caps: Caps) -> Palette:
+    if not caps.color:
+        return _MONO
     return _TRUECOLOR if caps.truecolor else _256
 
 
@@ -320,8 +332,9 @@ _FZF_COLOR_SPEC = (
 
 def fzf_color_arg(caps: Caps) -> list[str]:
     """The `--color` flag pair giving fzf the Netflix-red-on-dark theme. `caps` is
-    accepted for symmetry/future tuning; the hex spec works on any colour depth."""
-    return ["--color", _FZF_COLOR_SPEC]
+    accepted for symmetry/future tuning; the hex spec works on any colour depth.
+    Under NO_COLOR, fzf's built-in monochrome theme (`bw`) replaces it."""
+    return ["--color", _FZF_COLOR_SPEC if caps.color else "bw"]
 
 
 def ansi(text: str, sgr: str) -> str:

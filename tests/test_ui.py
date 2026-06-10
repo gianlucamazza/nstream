@@ -16,6 +16,7 @@ _ENV_KEYS = (
     "LC_TERMINAL",
     "NSTREAM_IMAGE_PROTO",
     "NSTREAM_NERD_FONT",
+    "NO_COLOR",
 )
 
 
@@ -100,6 +101,48 @@ def test_nerd_font_config_off_wins_over_env(clean_env):
 def test_truecolor_from_colorterm(clean_env):
     clean_env.setenv("COLORTERM", "truecolor")
     assert ui.detect_caps(use_cache=False).truecolor is True
+
+
+# --- NO_COLOR (no-color.org) --------------------------------------------------
+
+
+def test_color_on_by_default(clean_env):
+    assert ui.detect_caps(use_cache=False).color is True
+
+
+@pytest.mark.parametrize("value", ["1", ""])  # presence counts, whatever the value
+def test_no_color_disables_color(clean_env, value):
+    clean_env.setenv("NO_COLOR", value)
+    assert ui.detect_caps(use_cache=False).color is False
+
+
+def test_no_color_palette_is_monochrome(clean_env):
+    clean_env.setenv("NO_COLOR", "1")
+    clean_env.setenv("COLORTERM", "truecolor")  # NO_COLOR must win over truecolor
+    pal = ui.palette(ui.detect_caps(use_cache=False))
+    assert all(getattr(pal, f) == "" for f in ("accent", "secondary", "dim", "good", "warn"))
+    assert ui.ansi("x", pal.accent) == "x"  # empty SGR → ansi() emits no escapes
+
+
+def test_no_color_fzf_theme_is_bw(clean_env):
+    clean_env.setenv("NO_COLOR", "1")
+    assert ui.fzf_color_arg(ui.detect_caps(use_cache=False)) == ["--color", "bw"]
+
+
+def test_no_color_leaves_glyphs_and_layout_alone(clean_env):
+    clean_env.setenv("NO_COLOR", "1")
+    clean_env.setenv("TERM", "foot")
+    caps = ui.detect_caps(use_cache=False)
+    assert ui.glyphs(caps) is ui.PORTABLE  # glyph set untouched
+    assert caps.image_proto is ui.ImageProto.SIXEL  # posters untouched
+    assert ui.layout_for(120, 40, caps).show_poster is True
+
+
+def test_no_color_invalidates_caps_cache(clean_env):
+    clean_env.setenv("TERM", "foot")
+    assert ui.detect_caps().color is True  # caches color=True
+    clean_env.setenv("NO_COLOR", "1")  # presence changes the signature → re-detect
+    assert ui.detect_caps().color is False
 
 
 # --- caching ----------------------------------------------------------------

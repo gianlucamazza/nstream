@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from nstream import subs
@@ -81,6 +83,44 @@ def test_available_subtitle_langs_sorted_unique(monkeypatch):
         lambda cfg, t, v: [{"lang": "ita"}, {"lang": "eng"}, {"lang": "ita"}, {"id": "x"}],
     )  # fmt: skip
     assert subs.available_subtitle_langs(CFG, "movie", "tt1") == ["eng", "ita"]
+
+
+def test_download_subtitle_sanitizes_external_lang(monkeypatch, tmp_path):
+    """`lang` comes from the OpenSubtitles response: separators/traversal in it must not
+    escape the per-play work dir (it lands in the mkstemp prefix)."""
+
+    class _Resp:
+        def read(self):
+            return b"1\n00:00:00,000 --> 00:00:01,000\nhi\n"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(subs.urllib.request, "urlopen", lambda req, timeout: _Resp())
+    out = subs._download_subtitle({"lang": "../../evil", "url": "http://x/s.srt"}, str(tmp_path))
+    assert out is not None
+    p = Path(out)
+    assert p.parent == tmp_path  # stayed inside the work dir
+    assert p.name.startswith("evil-") and p.suffix == ".srt"
+
+
+def test_download_subtitle_all_bad_chars_falls_back_to_sub(monkeypatch, tmp_path):
+    class _Resp:
+        def read(self):
+            return b"data"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(subs.urllib.request, "urlopen", lambda req, timeout: _Resp())
+    out = subs._download_subtitle({"lang": "../", "url": "http://x/s.srt"}, str(tmp_path))
+    assert out is not None and Path(out).name.startswith("sub-")
 
 
 def test_available_subtitle_langs_network_error(monkeypatch):
