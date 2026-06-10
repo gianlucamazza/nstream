@@ -3,8 +3,8 @@
 pkgname=nstream
 # Keep pkgver in sync with __version__ in src/nstream/__init__.py
 # (build-local.sh asserts they match; .SRCINFO follows).
-pkgver=1.14.0
-pkgrel=2
+pkgver=1.15.0
+pkgrel=1
 pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/debrid or local P2P + mpv)"
 arch=('any')
 url="https://github.com/gianlucamazza/nstream"
