@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build the Arch package from the current git HEAD, offline.
+# Build the Arch package for the current release tag.
 #
-# While the GitHub repo is private (Fase 2 publication paused) the PKGBUILD `source`
-# URL can't be fetched, so we hand makepkg a tarball produced from HEAD with the
-# exact name it expects (`nstream-<ver>.tar.gz`); makepkg then skips the download.
-# The package version is read from src/nstream/__init__.py so it can never drift
-# from the PKGBUILD's pkgver (the script asserts they match).
+# The PKGBUILD `source` is a git clone over SSH pinned to `v<pkgver>` (the GitHub
+# repo is private, so the anonymous tarball URL would 404): makepkg fetches by
+# itself as long as the tag is pushed and the builder's SSH key is loaded.
+# This wrapper only adds the guard rails: it asserts pkgver matches
+# src/nstream/__init__.py (so the two can never drift), checks the tag is on
+# origin, and regenerates .SRCINFO.
 #
 # Usage:  packaging/build-local.sh [--install]
 set -euo pipefail
@@ -20,24 +21,27 @@ ver="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$root/src/nstream/__init__.py")"
 }
 
 pkgver="$(sed -n 's/^pkgver=\(.*\)/\1/p' "$here/PKGBUILD")"
+pkgrel="$(sed -n 's/^pkgrel=\(.*\)/\1/p' "$here/PKGBUILD")"
 if [[ "$ver" != "$pkgver" ]]; then
 	echo "build-local: version drift — __init__.py=$ver but PKGBUILD pkgver=$pkgver" >&2
 	exit 1
 fi
 
-echo "==> archiving HEAD as nstream-$ver.tar.gz"
-git -C "$root" archive HEAD --prefix="nstream-$ver/" -o "$here/nstream-$ver.tar.gz"
+if ! git -C "$root" ls-remote --tags origin "v$ver" | grep -q .; then
+	echo "build-local: tag v$ver not on origin — push it first (the PKGBUILD clones it)" >&2
+	exit 1
+fi
 
 cd "$here"
 rm -rf src pkg
-echo "==> makepkg (build + check)"
+echo "==> makepkg (clone v$ver over SSH + build + check)"
 makepkg -f --noconfirm
 echo "==> regenerating .SRCINFO"
 makepkg --printsrcinfo >.SRCINFO
 
 if [[ "${1:-}" == "--install" ]]; then
 	echo "==> installing"
-	sudo pacman -U --noconfirm "nstream-$ver-1-any.pkg.tar.zst"
+	sudo pacman -U --noconfirm "nstream-$ver-$pkgrel-any.pkg.tar.zst"
 fi
 
-echo "==> done: $here/nstream-$ver-1-any.pkg.tar.zst"
+echo "==> done: $here/nstream-$ver-$pkgrel-any.pkg.tar.zst"
