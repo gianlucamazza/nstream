@@ -154,6 +154,65 @@ def test_cached_poster_download_failure_returns_none(monkeypatch, tmp_path):
     assert preview._cached_poster("http://x/p.jpg") is None
 
 
+# --- poster cache prune -------------------------------------------------------
+
+
+def _fill_posters(tmp_path, n, *, size=4):
+    """Create n fake posters with increasing (old) mtimes; returns the cache dir."""
+    cache_dir = tmp_path / "nstream" / "posters"
+    cache_dir.mkdir(parents=True)
+    import os as _os
+
+    for i in range(n):
+        p = cache_dir / f"old{i:03d}"
+        p.write_bytes(b"x" * size)
+        _os.utime(p, (1000 + i, 1000 + i))  # old0 is the oldest
+    return cache_dir
+
+
+def test_prune_on_new_poster_evicts_oldest_over_file_cap(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(preview, "_POSTER_CACHE_MAX_FILES", 5)
+    monkeypatch.setattr(preview, "_download", lambda url: b"BYTES")
+    cache_dir = _fill_posters(tmp_path, 7)
+    new = preview._cached_poster("http://x/new.jpg")
+    assert new and new.read_bytes() == b"BYTES"  # the new poster survives the prune
+    names = {p.name for p in cache_dir.iterdir()}
+    assert len(names) == 5
+    assert "old000" not in names and "old001" not in names and "old002" not in names
+    assert "old006" in names  # newest of the old ones kept
+
+
+def test_prune_enforces_byte_cap(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(preview, "_POSTER_CACHE_MAX_BYTES", 20)
+    monkeypatch.setattr(preview, "_download", lambda url: b"12345")
+    cache_dir = _fill_posters(tmp_path, 6, size=5)  # 30 bytes + 5 new = 35 > 20
+    assert preview._cached_poster("http://x/new.jpg") is not None
+    total = sum(p.stat().st_size for p in cache_dir.iterdir())
+    assert total <= 20
+
+
+def test_prune_noop_under_thresholds(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(preview, "_download", lambda url: b"BYTES")
+    cache_dir = _fill_posters(tmp_path, 3)
+    preview._cached_poster("http://x/new.jpg")
+    assert len(list(cache_dir.iterdir())) == 4  # nothing evicted
+
+
+def test_prune_failure_never_costs_the_poster(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(preview, "_download", lambda url: b"BYTES")
+
+    def boom(cache_dir):
+        raise RuntimeError("disk hiccup")
+
+    monkeypatch.setattr(preview, "_prune_posters", boom)
+    p = preview._cached_poster("http://x/p.jpg")
+    assert p is not None and p.read_bytes() == b"BYTES"
+
+
 # --- run_preview best-effort ------------------------------------------------
 
 

@@ -24,6 +24,12 @@ from .config import Config
 _POSTER_TIMEOUT = 4.0  # short: a slow CDN must never freeze the pane
 _CHAFA_TIMEOUT = 5.0
 
+# Poster cache bound: ~200 posters / 50 MB covers weeks of browsing (a poster is
+# ~50-300 KB) while keeping $XDG_CACHE_HOME from growing forever. Pruned oldest-first
+# (mtime) and only on a cache miss — never on the hot per-row preview path.
+_POSTER_CACHE_MAX_FILES = 200
+_POSTER_CACHE_MAX_BYTES = 50 * 1024 * 1024
+
 
 def run_preview(argv: list[str]) -> int:
     """Entry for `__preview`. argv is `title <typ> <id>` or `episode <series_id> <s> <e>`.
@@ -217,7 +223,8 @@ def _poster_cache_path(url: str) -> Path:
 
 def _cached_poster(url: str) -> Path | None:
     """Path to the cached poster bytes, downloading on first use. Posters are immutable
-    per URL, so the cache never expires."""
+    per URL, so entries never expire — the cache is instead size-bounded by a prune on
+    each new write (see `_prune_posters`)."""
     path = _poster_cache_path(url)
     if path.exists():
         return path
@@ -226,8 +233,34 @@ def _cached_poster(url: str) -> Path | None:
         return None
     with contextlib.suppress(OSError):
         util.atomic_write_bytes(path, data, prefix=".poster-")
+        with contextlib.suppress(Exception):  # a failed prune must never cost the pane
+            _prune_posters(path.parent)
         return path
     return None
+
+
+def _prune_posters(cache_dir: Path) -> None:
+    """Best-effort: evict the oldest posters (by mtime) until the cache is back under
+    `_POSTER_CACHE_MAX_FILES` / `_POSTER_CACHE_MAX_BYTES`. Called only after writing a
+    new poster (cache miss), so cache hits — the per-row hot path — pay nothing."""
+    entries = []
+    with contextlib.suppress(OSError):
+        for p in cache_dir.iterdir():
+            with contextlib.suppress(OSError):
+                if p.is_file():
+                    entries.append((p, p.stat()))
+    count = len(entries)
+    total = sum(st.st_size for _, st in entries)
+    if count <= _POSTER_CACHE_MAX_FILES and total <= _POSTER_CACHE_MAX_BYTES:
+        return
+    entries.sort(key=lambda e: e[1].st_mtime)  # oldest first; the just-written file is last
+    for p, st in entries:
+        if count <= _POSTER_CACHE_MAX_FILES and total <= _POSTER_CACHE_MAX_BYTES:
+            break
+        with contextlib.suppress(OSError):
+            p.unlink()
+            count -= 1
+            total -= st.st_size
 
 
 def _download(url: str) -> bytes | None:

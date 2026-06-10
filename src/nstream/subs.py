@@ -30,7 +30,10 @@ def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
         with contextlib.suppress(OSError):
             raw = gzip.decompress(raw)
     # Written into the per-play temp dir so it is cleaned up with everything else.
-    fd, path = tempfile.mkstemp(prefix=f"{sub.get('lang', 'sub')}-", suffix=".srt", dir=work_dir)
+    # `lang` comes from the OpenSubtitles response (external data): keep only alnum
+    # chars so a hostile value can't inject path separators / traversal into the prefix.
+    lang = "".join(c for c in sub.get("lang", "") if c.isalnum()) or "sub"
+    fd, path = tempfile.mkstemp(prefix=f"{lang}-", suffix=".srt", dir=work_dir)
     with os.fdopen(fd, "wb") as f:
         f.write(raw)
     return path
