@@ -9,7 +9,7 @@ status, the auto-pick, and the audio tracks mpv would choose. Read-only: it neve
 
 from __future__ import annotations
 
-from . import languages, player, quality, tracks
+from . import languages, player, quality, tracks, ui
 from .config import Config, Stream
 
 
@@ -102,12 +102,13 @@ def explain_streams(cfg: Config, results: list[Stream], *, cast: bool) -> str:
         "PLAYABLE (ordine di score, best-first):",
     ]
     for i, r in enumerate(playable):
-        lines.append(_row(i + 1, r, spec.audio_langs, "✓PICK" if i == 0 else "", cast=cast))
+        mark = f"{ui.g().cached}PICK" if i == 0 else ""
+        lines.append(_row(i + 1, r, spec.audio_langs, mark, cast=cast))
     if excluded:
         lines.append("")
         lines.append("ESCLUSI (motivo):")
         for i, r in enumerate(excluded):
-            lines.append(_row(i + 1, r, spec.audio_langs, "⚠", cast=cast))
+            lines.append(_row(i + 1, r, spec.audio_langs, ui.g().warn, cast=cast))
             lines[-1] = lines[-1].replace("[", f"[escluso: {r.reason}] [", 1)
     return "\n".join(lines)
 

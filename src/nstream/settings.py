@@ -48,7 +48,7 @@ def scan_devices(*, attempts: int = 2) -> list[tuple[str, str]]:
     bridges, VPNs, veth): a single cold `catt scan` can return empty even when the device
     is reachable. A *populated* scan is trustworthy and returned immediately; only an empty
     result is retried (up to `attempts`) before we trust the absence and fall back to local."""
-    print("🔍 cerco Chromecast…", file=sys.stderr)
+    print(f"{ui.g().search} cerco Chromecast…", file=sys.stderr)
     for attempt in range(1, attempts + 1):
         devices = _scan_once()
         if devices:
@@ -149,8 +149,8 @@ def _token_status(cfg: Config) -> str:
     for key, name in _PROVIDERS:
         m = re.search(rf"(?:^|\|){re.escape(key)}=([^|]*)", cfg.torrentio_base)
         if m and m.group(1):
-            return f"✓ {name} (••••)"
-    return "✗ assente"
+            return f"{ui.g().cached} {name} (••••)"
+    return f"{ui.g().fail} assente"
 
 
 def _backend_status(cfg: Config) -> str:
@@ -160,8 +160,13 @@ def _backend_status(cfg: Config) -> str:
         creds = config.debrid_credentials(cfg.torrentio_base)
         provider = creds[0] if creds else "?"
         ok = creds is not None and debrid.supports_native(provider)
-        return f"debrid nativo · {provider}" + ("" if ok else " ⚠ provider non supportato")
-    health = "TorrServer ✓" if engine.installed() else "TorrServer ✗ (installalo)"
+        warn = "" if ok else f" {ui.g().warn} provider non supportato"
+        return f"debrid nativo · {provider}" + warn
+    health = (
+        f"TorrServer {ui.g().cached}"
+        if engine.installed()
+        else f"TorrServer {ui.g().fail} (installalo)"
+    )
     return f"P2P locale · {health}"
 
 
@@ -254,7 +259,7 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Filtro hardware stream",
             "bool",
             "on" if cfg.hw_filter else "off",
-            "Auto-sceglie il miglior stream giocabile; 8K/DV P5/non-HW in fondo (⚠).",
+            f"Auto-sceglie il miglior stream giocabile; 8K/DV P5/non-HW in fondo ({ui.g().warn}).",
         ),
         (
             "max_resolution",
@@ -364,7 +369,7 @@ def run_settings(cfg: Config | None = None) -> None:
         cfg = config.load()
     while True:
         items = _items(cfg)
-        rows = [f"⚙ {label:24s} {value}" for (_, label, _, value, _) in items]
+        rows = [f"{ui.g().gear} {label:24s} {value}" for (_, label, _, value, _) in items]
         previews = [help for (*_, help) in items]
         idx = _fzf_select(
             rows, prompt="impostazioni> ", header="INVIO: modifica · ESC: esci", previews=previews
@@ -438,7 +443,7 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
                 )
         elif i == 1:
             config.save({"playback_backend": "debrid"})
-            if _token_status(cfg).startswith("✗"):
+            if _token_status(cfg).startswith(ui.g().fail):
                 print("nstream: imposta un token debrid qui sotto per usarlo", file=sys.stderr)
         else:
             config.save({"playback_backend": "native"})
@@ -471,7 +476,7 @@ def _addons_menu(cfg: Config) -> None:
         for a in eff:
             suffix = "  · built-in" if a.builtin else ""
             rows.append(f"🧩 {a.name:18s} {','.join(a.resources)}{suffix}")
-        rows.append("➕ Aggiungi addon…")
+        rows.append(f"{ui.g().add} Aggiungi addon…")
         idx = _fzf_select(
             rows, prompt="plugin> ", header="INVIO: aggiungi / rimuovi (solo extra) · ESC: indietro"
         )

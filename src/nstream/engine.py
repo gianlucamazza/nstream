@@ -31,7 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from . import log
+from . import log, ui
 from .config import Config, Stream
 
 _log = log.get_logger("engine")
@@ -294,7 +294,8 @@ def _wait_buffer(base: str, file_hash: str) -> None:
             peers = st.get("active_peers", st.get("connected_seeders", 0))
             mb = preloaded / (1024 * 1024)
             pct = f" ({100 * preloaded / preload:3.0f}%)" if preload else ""
-            print(f"\r🌐 buffering P2P… peer {peers}  {mb:6.1f} MB{pct}", end="", file=sys.stderr)
+            msg = f"\r{ui.g().globe} buffering P2P… peer {peers}  {mb:6.1f} MB{pct}"
+            print(msg, end="", file=sys.stderr)
             # Ready once the read-ahead window is full, or some data is buffered with peers.
             if (preload and preloaded >= preload) or (preloaded > 2 * 1024 * 1024 and peers):
                 filled = True
@@ -308,4 +309,7 @@ def _wait_buffer(base: str, file_hash: str) -> None:
         return
     if preloaded <= 0:  # dead torrent: never a single byte → let the caller degrade
         raise EngineUnavailable(f"nessun peer / buffer vuoto dopo {_BUFFER_TIMEOUT:.0f}s di attesa")
-    print("nstream: ⚠ buffer parziale dopo il timeout, provo comunque…", file=sys.stderr)
+    print(
+        f"nstream: {ui.g().warn} buffer parziale dopo il timeout, provo comunque…",
+        file=sys.stderr,
+    )

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import api, debrid, engine, languages, log, quality, remux, tracks
+from . import api, debrid, engine, languages, log, quality, remux, tracks, ui
 from . import config as config_mod
 from .config import Config, ConfigError, PlayOpts, Stream
 from .labels import stream_label
@@ -39,7 +39,10 @@ def no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
     """A specific 'not released yet' notice when a title has no streams, else generic."""
     released = _future_release(api.meta(cfg, typ, video_id).get("released"))
     if released:
-        return f"🎬 «{title}» non ancora disponibile — uscita prevista il {released:%d/%m/%Y}"
+        return (
+            f"{ui.g().movie} «{title}» non ancora disponibile — "
+            f"uscita prevista il {released:%d/%m/%Y}"
+        )
     return f"nessuno stream disponibile per «{title}»"
 
 
@@ -77,7 +80,10 @@ def _pick_stream(
 
     def _full() -> Stream | None:
         items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
-        items += [(f"⚠ {r.reason}  {stream_label(r.stream, r.info)}", r.stream) for r in excluded]
+        items += [
+            (f"{ui.g().warn} {r.reason}  {stream_label(r.stream, r.info)}", r.stream)
+            for r in excluded
+        ]
         return fzf(items, "stream> ")
 
     cap = cfg.max_streams
@@ -87,7 +93,7 @@ def _pick_stream(
     shown = playable[:cap]
     hidden = len(playable) - len(shown) + len(excluded)
     items: list[tuple[str, object]] = [(stream_label(r.stream, r.info), r.stream) for r in shown]
-    items.append((f"↓ mostra tutti ({hidden} altri)", _ALL))
+    items.append((f"{ui.g().down} mostra tutti ({hidden} altri)", _ALL))
     chosen = fzf(items, "stream> ")
     if chosen is _ALL:
         return _full()
@@ -479,7 +485,8 @@ def _p2p_guard(cfg: Config) -> bool:
             )
             return False
         print(
-            "nstream: ⚠ nessuna VPN rilevata — in P2P il tuo IP è visibile ai peer del torrent.",
+            f"nstream: {ui.g().warn} nessuna VPN rilevata — "
+            "in P2P il tuo IP è visibile ai peer del torrent.",
             file=sys.stderr,
         )
     _p2p_notice_once(cfg)

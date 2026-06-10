@@ -33,6 +33,7 @@ from . import (
     series,
     state,
     stream_select,
+    ui,
 )
 from .api import CAT_MAP
 from .caster import CastUnavailable, device_volume
@@ -260,7 +261,7 @@ def _auto_play(
     Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
     auto_subs → play/cast) but never opens fzf (auto=True, reselect_on_wrong_audio=False)
     and never silently falls back to local when a requested cast device is missing."""
-    print(f"▶ {title} — cerco la sorgente migliore…", file=sys.stderr)
+    print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
     results = api.streams(cfg, typ, video_id)
     if not results:
         _emit_json(

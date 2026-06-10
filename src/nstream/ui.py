@@ -194,6 +194,12 @@ class Glyphs:
     cast: str
     warn: str
     cached: str
+    audio: str
+    subs: str
+    globe: str
+    tv: str
+    fail: str
+    down: str
     clock: str
     calendar: str
     people: str
@@ -216,6 +222,12 @@ NERD = Glyphs(
     cast="",
     warn="",
     cached="",
+    audio="",
+    subs="",
+    globe="",
+    tv="",
+    fail="",
+    down="",
     clock="",
     calendar="",
     people="",
@@ -238,6 +250,12 @@ PORTABLE = Glyphs(
     cast="📡",
     warn="⚠",
     cached="✓",
+    audio="🔊",
+    subs="💬",
+    globe="🌐",
+    tv="📺",
+    fail="✗",
+    down="↓",
     clock="⏱",
     calendar="📅",
     people="👥",
@@ -250,6 +268,12 @@ PORTABLE = Glyphs(
 
 def glyphs(caps: Caps) -> Glyphs:
     return NERD if caps.nerd_font else PORTABLE
+
+
+def g() -> Glyphs:
+    """Glyph set for the active caps — the one-call helper for non-TUI modules
+    (engine/remux/caster/…) that only need a glyph in a printed message."""
+    return glyphs(active_caps())
 
 
 # --- colour palette + fzf theme ---------------------------------------------

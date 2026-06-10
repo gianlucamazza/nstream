@@ -20,7 +20,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, languages, log, settings, util
+from . import bridge, languages, log, settings, ui, util
 from .config import Config
 from .picker import fzf
 
@@ -63,7 +63,8 @@ def _confirm_device(name: str, ip: str) -> bool:
     if _cast_confirmed or not (sys.stdin.isatty() and sys.stderr.isatty()):
         return True
     try:
-        ans = input(f"📺 Chromecast trovato: {name} ({ip}) — casto lì? [S/n] ").strip().lower()
+        prompt = f"{ui.g().tv} Chromecast trovato: {name} ({ip}) — casto lì? [S/n] "
+        ans = input(prompt).strip().lower()
     except (EOFError, KeyboardInterrupt):
         return False
     ok = ans in ("", "s", "si", "sì", "y", "yes")
@@ -218,12 +219,12 @@ def _switch_cast_audio(
     lang = fzf(items, "audio> ")
     if lang is None:  # ESC → keep the current cast
         return
-    print(f"📺 cambio audio: {languages.name(lang)}…", file=sys.stderr)
+    print(f"{ui.g().tv} cambio audio: {languages.name(lang)}…", file=sys.stderr)
     new = resolve_lang(lang)
     if not new:
         print(f"nstream: nessuno stream {lang} compatibile col Chromecast", file=sys.stderr)
         return
-    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
+    print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(
             [*base, "cast", new, "-t", str(int(pos))],
@@ -321,7 +322,7 @@ def _cast_via_bridge(
             if kind == "started" and not started:
                 started = True
                 tail = "  (Ctrl-C per smettere di seguire)" if follow else ""
-                print(f"📺 {title} → {device}{tail}", file=sys.stderr)
+                print(f"{ui.g().tv} {title} → {device}{tail}", file=sys.stderr)
             if on_event:
                 on_event(ev)
             if kind in ("playing", "paused", "ended"):
@@ -376,7 +377,7 @@ def _cast_via_catt(
     dest = device or "Chromecast"
     _log.debug("catt launch: %s", " ".join(launch))  # token redacted by the log filter
     # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
-    print(f"📺 preparo il cast su {dest}…", file=sys.stderr)
+    print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     try:
         proc = subprocess.run(
             launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT
@@ -400,13 +401,13 @@ def _cast_via_catt(
 
     if not follow:
         # Fire-and-return: the receiver has the media; don't poll for the whole runtime.
-        print(f"📺 {title} → {dest}", file=sys.stderr)
+        print(f"{ui.g().tv} {title} → {dest}", file=sys.stderr)
         _emit(on_event, "started", title=title)
         return (0.0, 0.0, False)
 
     can_switch = bool(langs) and resolve_lang is not None
     hint = "a: lingua audio · Ctrl-C: stop" if can_switch else "Ctrl-C per smettere di seguire"
-    print(f"📺 {title} → {dest}  ({hint})", file=sys.stderr)
+    print(f"{ui.g().tv} {title} → {dest}  ({hint})", file=sys.stderr)
     holder = {"position": 0.0, "duration": 0.0}
     started = False
     finished = False

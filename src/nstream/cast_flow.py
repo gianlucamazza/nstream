@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from . import caster, engine, log, mirror, quality, remux, stream_select, subs
+from . import caster, engine, log, mirror, quality, remux, stream_select, subs, ui
 from .config import Config, PlayOpts, Stream
 
 _log = log.get_logger("cast_flow")
@@ -140,7 +140,7 @@ def run_cast(
                     "remux non riuscito → cast diretto: l'audio potrebbe "
                     "risultare muto o in un'altra lingua"
                 )
-                print(f"nstream: ⚠ {notice}", file=sys.stderr)
+                print(f"nstream: {ui.g().warn} {notice}", file=sys.stderr)
             # In-cast audio switch ('a'): only the interactive path pays the extra rank
             # passes; headless callers leave allow_lang_switch False.
             langs: tuple[str, ...] = ()
