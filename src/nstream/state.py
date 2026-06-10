@@ -67,6 +67,20 @@ def _watched(entry: HistoryEntry) -> bool:
     return position / duration > WATCHED_THRESHOLD or position >= duration - tail
 
 
+def resume_position(cfg: Config, video_id: str) -> float | None:
+    """The position to resume from, or None if there's no usable resume point
+    (no history entry, or the title is effectively finished — so we never restart
+    at the very end when mpv was left paused at EOF with keep-open)."""
+    entry = load_history(cfg).get(video_id)
+    if not entry or _watched(entry):
+        return None
+    start = entry.get("position")
+    dur = entry.get("duration") or 0.0
+    if start and dur > 0:
+        return min(start, dur - 5)
+    return start
+
+
 def save_entry(cfg: Config, entry: HistoryEntry) -> None:
     if not cfg.history_enabled:
         return

@@ -39,8 +39,16 @@ Modules in `src/nstream/`:
 
 - `cli.py` — orchestrator: argparse, TUI flow (home + typed Film/Serie sections), resume,
   `--explain`/`__preview` commands, `--movies`/`--series` type filters. Delegates stream selection
-  to `stream_select`, subtitles to `subs`, the series flow to `series`, label formatting to
-  `labels`; sits at the bottom of the import graph.
+  to `stream_select`, subtitles to `subs`, the series flow to `series`, the whole `--json` mode to
+  `headless`, label formatting to `labels`; sits at the bottom of the import graph.
+- `headless.py` — the `--json` subsystem: `run()` is the single seam `cli._dispatch` calls when
+  `--json` is set — non-interactive title/episode resolution (`_select_meta`), play/cast
+  (`_auto_play`, via `cast_flow.run_cast` + the volume guard), `--probe`/`--stop`/`--status`/`-c`,
+  JSONL `--follow` events, and the NetworkError → JSON-error guard. Exactly one JSON object per
+  invocation; no stream url/token ever reaches stdout. Also home to `typ_filter` (shared with
+  `cli`). Same tier as `cast_flow`: imports `api`/`bridge`/`cast_flow`/`caster`/`mirror`/`player`/
+  `quality`/`remux`/`series`/`state`/`stream_select`/`subs`/`labels`/`config`; never `cli`,
+  never `picker`/fzf.
 - `series.py` — the series-only flow (ADR 0009): episode picker, binge auto-advance loop,
   per-episode resume (`play`/`binge`/`resume`/`entry_video`). The player entry point is injected
   as a callable (`PlayVideo` Protocol), so it never imports `cli`; imports
@@ -51,10 +59,11 @@ Modules in `src/nstream/`:
   switch. Imports `api`/`debrid`/`engine`/`quality`/`remux`/`tracks`/`languages`/`picker`/
   `labels`/`config`/`log`; never `cli`.
 - `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the
-  interactive cast (`cli._play_on_cast`) and the headless `--json --cast` branch — vet the audio
-  plan (`vet_cast_audio`) → absent-dub safety subtitles → mirror gate → Tier-2 remux → direct cast,
-  returning a `CastOutcome` (action/stream/reencoded/notice/audio/subs) for the caller's JSON
-  accounting. Device resolution and the headless volume guard stay in `cli`. Same tier as
+  interactive cast (`cli._play_on_cast`) and the headless `--json --cast` branch
+  (`headless._auto_play`) — vet the audio plan (`vet_cast_audio`) → absent-dub safety subtitles →
+  mirror gate → Tier-2 remux → direct cast, returning a `CastOutcome`
+  (action/stream/reencoded/notice/audio/subs) for the caller's JSON accounting. Device resolution
+  and the headless volume guard stay in the callers (`cli`/`headless`). Same tier as
   `stream_select`: imports `caster`/`engine`/`mirror`/`remux`/`quality`/`stream_select`/`subs`/
   `config`/`log`; never `cli`.
 - `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download), `auto_subs`
@@ -128,9 +137,10 @@ Modules in `src/nstream/`:
 
 **Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
 imports), `cli` orchestrates at the bottom; everything below `cli` —
-`player`/`caster`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/`engine`/`debrid`/
-`remux`/`mirror`/`serve`/`bridge`/`net`/`preview`/`explain` — never imports `cli`. This is the
-recurring constraint that explains where logic lives — preserve it when moving code.
+`headless`/`player`/`caster`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/
+`engine`/`debrid`/`remux`/`mirror`/`serve`/`bridge`/`net`/`preview`/`explain` — never imports
+`cli`. This is the recurring constraint that explains where logic lives — preserve it when
+moving code.
 
 ### Debrid: provider-agnostic
 

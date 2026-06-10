@@ -103,6 +103,27 @@ def test_recent_typed_filters_and_legacy_defaults_to_movie(tmp_path, monkeypatch
     assert untyped == {"m1", "s1", "l1"}  # default stays mixed
 
 
+# --- resume / near-end (keep-open) -----------------------------------------
+
+
+def test_resume_position_skips_finished(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    # finished entry (near end) → no resume
+    state.save_entry(CFG, {"video_id": "v1", "position": 100.0, "duration": 100.0, "ts": 1.0})
+    assert state.resume_position(CFG, "v1") is None
+
+
+def test_resume_position_returns_and_clamps(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_entry(CFG, {"video_id": "v2", "position": 500.0, "duration": 10000.0, "ts": 1.0})
+    assert state.resume_position(CFG, "v2") == 500.0  # 5%, far from end → resume
+
+
+def test_resume_position_none_without_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert state.resume_position(CFG, "missing") is None
+
+
 def test_load_corrupt_history_is_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     d = tmp_path / "nstream"
