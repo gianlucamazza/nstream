@@ -96,67 +96,6 @@ def test_items_render_current_values():
     assert by_key["torrentio_base"][3] == "✓ RealDebrid (••••)"
 
 
-# --- device discovery (Fase 1s) --------------------------------------------
-
-
-def test_scan_devices_parses_catt_scan(monkeypatch):
-    class _P:
-        returncode = 0
-        stdout = (
-            "Scanning Chromecasts...\n"
-            "192.168.1.228 - 43PUS9235/12 - Philips TPM191E\n"
-            "192.168.1.50 - Soggiorno - Google Nest\n"
-            "192.168.1.228 - 43PUS9235/12 - Philips TPM191E\n"  # dup
-        )
-
-    monkeypatch.setattr(settings.util, "run_cmd", lambda *a, **k: _P())
-    assert settings.scan_devices() == [
-        ("43PUS9235/12", "192.168.1.228"),
-        ("Soggiorno", "192.168.1.50"),
-    ]
-
-
-def test_scan_devices_empty_on_failure(monkeypatch):
-    # run_cmd returns None when catt is missing or the scan fails.
-    monkeypatch.setattr(settings.util, "run_cmd", lambda *a, **k: None)
-    assert settings.scan_devices() == []
-
-
-def test_scan_devices_retries_on_empty(monkeypatch):
-    # A cold mDNS scan can come back empty; the next attempt finds the device.
-    class _P:
-        returncode = 0
-        stdout = "192.168.1.228 - 43PUS9235/12 - Philips TPM191E\n"
-
-    results = [None, _P()]  # first scan empty (None), second populated
-    calls = []
-
-    def fake_run(*a, **k):
-        calls.append(a)
-        return results[len(calls) - 1]
-
-    monkeypatch.setattr(settings.util, "run_cmd", fake_run)
-    assert settings.scan_devices() == [("43PUS9235/12", "192.168.1.228")]
-    assert len(calls) == 2  # retried once
-
-
-def test_scan_devices_no_retry_when_populated(monkeypatch):
-    # A populated scan is trustworthy and used immediately — no wasted second scan.
-    class _P:
-        returncode = 0
-        stdout = "192.168.1.50 - Soggiorno - Google Nest\n"
-
-    calls = []
-
-    def fake_run(*a, **k):
-        calls.append(a)
-        return _P()
-
-    monkeypatch.setattr(settings.util, "run_cmd", fake_run)
-    assert settings.scan_devices() == [("Soggiorno", "192.168.1.50")]
-    assert len(calls) == 1
-
-
 def test_cast_device_item_present():
     keys = [it[0] for it in settings._items(Config(torrentio_base="sort=x|realdebrid=T"))]
     assert "cast_device" in keys
@@ -258,7 +197,8 @@ def test_edit_maxres(monkeypatch):
 
 def test_edit_castdev_auto(monkeypatch):
     saved = _capture_save(monkeypatch)
-    monkeypatch.setattr(settings, "scan_devices", lambda: [("TV", "1.2.3.4")])
+    monkeypatch.setattr(settings.discovery, "scan_sync", lambda **k: [("TV", "1.2.3.4")])
+    monkeypatch.setattr(settings.discovery, "save_cache", lambda devices: None)
     monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: 0)  # (auto)
     settings._edit(RD, "cast_device", "castdev", "Dev")
     assert saved == [{"cast_device": ""}]
@@ -266,7 +206,8 @@ def test_edit_castdev_auto(monkeypatch):
 
 def test_edit_castdev_named(monkeypatch):
     saved = _capture_save(monkeypatch)
-    monkeypatch.setattr(settings, "scan_devices", lambda: [("TV", "1.2.3.4")])
+    monkeypatch.setattr(settings.discovery, "scan_sync", lambda **k: [("TV", "1.2.3.4")])
+    monkeypatch.setattr(settings.discovery, "save_cache", lambda devices: None)
     monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: 1)  # "TV"
     settings._edit(RD, "cast_device", "castdev", "Dev")
     assert saved == [{"cast_device": "TV"}]
@@ -274,7 +215,8 @@ def test_edit_castdev_named(monkeypatch):
 
 def test_edit_castdev_esc_no_save(monkeypatch):
     saved = _capture_save(monkeypatch)
-    monkeypatch.setattr(settings, "scan_devices", lambda: [])
+    monkeypatch.setattr(settings.discovery, "scan_sync", lambda **k: [])
+    monkeypatch.setattr(settings.discovery, "load_cache", lambda: [])
     monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: None)
     settings._edit(RD, "cast_device", "castdev", "Dev")
     assert saved == []

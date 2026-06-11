@@ -20,7 +20,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, languages, log, settings, ui, util
+from . import bridge, discovery, languages, log, ui, util
 from .config import Config
 from .picker import fzf
 
@@ -82,6 +82,13 @@ _CAST_DONE = 0.97
 # may be unreachable or the receiver refused the media — don't poll forever.
 _CAST_GIVEUP = 4
 
+# Wait budgets (seconds) on the background scan. The scan usually started at TUI
+# startup and is long done, so the default wait is short — cast is optional and must
+# not freeze the UX. An explicit picker (Alt-C / --cast-choose) asked for the device
+# list, so one full scan round is worth waiting for.
+_WAIT_RESOLVE = 6.0
+_WAIT_CHOOSE = 25.0
+
 
 def resolve_device(
     cfg: Config,
@@ -91,12 +98,14 @@ def resolve_device(
     prefer: str | None = None,
     confirm: bool = False,
 ) -> str:
-    """Resolve the value for `catt -d` — an **IP** from a fresh `catt scan`, so casting
-    is robust to mDNS name-resolution flakiness after a network change. A configured
-    `cast_device` (a stable *name*) is honoured only when present on the current LAN,
-    else we re-discover. One device → use it; several (or `choose`) → pick by name (cast
-    by IP). Raises CastUnavailable when the scan finds nothing reachable / the user
-    cancels (the caller then falls back to local mpv).
+    """Resolve the value for `catt -d` — an **IP** from discovery (verified cache or
+    the background `catt scan`), so casting is robust to mDNS name-resolution flakiness
+    after a network change. A configured `cast_device` (a stable *name*) is honoured
+    only when present on the current LAN, else we re-discover. One device → use it;
+    several (or `choose`) → pick by name (cast by IP). Raises CastUnavailable when
+    discovery finds nothing reachable / the user cancels (the caller then falls back to
+    local mpv). Cast is optional: this never blocks longer than a short wait budget on
+    interactive paths (Ctrl-C skips straight to local playback).
 
     `headless` (non-interactive callers) never opens the fzf picker: an explicit `prefer`
     name (or `cfg.cast_device`) must be on the LAN, else a single device is used, else it
@@ -112,7 +121,7 @@ def resolve_device(
     if shutil.which("catt") is None:
         _log.warning("catt non trovato nel PATH → cast non disponibile")
         raise CastUnavailable("catt non trovato nel PATH (pipx install catt)")
-    devices = settings.scan_devices()  # [(name, ip)] on the *current* LAN
+    devices = _discover(cfg, prefer=prefer, choose=choose, headless=headless)
     by_name = dict(devices)
     # An explicit target (--device) wins, but only if actually on this LAN.
     if prefer:
@@ -149,6 +158,42 @@ def resolve_device(
     if chosen is None:
         raise CastUnavailable("scelta dispositivo annullata")
     return chosen
+
+
+def _discover(
+    cfg: Config, *, prefer: str | None, choose: bool, headless: bool
+) -> list[discovery.Device]:
+    """Devices for `resolve_device`, without freezing the UX. A cache-verified target
+    (or the single cached device) is used instantly — a live TCP connection to the cast
+    port beats waiting on a fresh mDNS scan. Otherwise lean on the background scan
+    (kicked off at TUI startup; started here for Alt-C/headless), waiting only a short
+    budget on interactive paths — Ctrl-C skips the wait. An empty or late scan falls
+    back to cached devices that still answer before giving up."""
+    cached = discovery.load_cache()
+    target = prefer or cfg.cast_device
+    if target:
+        ip = dict(cached).get(target)
+        if ip and discovery.verify(ip):
+            return [(target, ip)]
+    elif not choose and len(cached) == 1 and discovery.verify(cached[0][1]):
+        # The common single-TV home: instant cast/--status/--stop across sessions.
+        # A multi-device cache with no preference falls through instead — only a
+        # fresh scan should feed the picker.
+        return list(cached)
+    discovery.start_background()
+    devices, state = discovery.get_devices(wait=0.0)
+    if state == "pending":
+        hint = "" if headless else " (Ctrl-C: riproduci in locale)"
+        print(f"{ui.g().search} cerco Chromecast…{hint}", file=sys.stderr)
+        wait = None if headless else (_WAIT_CHOOSE if choose else _WAIT_RESOLVE)
+        try:
+            devices, state = discovery.get_devices(wait=wait)
+        except KeyboardInterrupt:
+            raise CastUnavailable("ricerca dispositivi annullata") from None
+    if devices:
+        return devices
+    # Fresh scan empty (or out of budget): rescue any cached device that still answers.
+    return [(name, ip) for name, ip in cached if discovery.verify(ip)]
 
 
 def _cast_progress(info: dict) -> tuple[float, float, str]:
