@@ -14,10 +14,8 @@ import shlex
 import sys
 import tempfile
 
-from . import addons, config, debrid, engine, languages, log, picker, ui, util
+from . import addons, config, debrid, discovery, engine, languages, picker, ui, util
 from .config import Config
-
-_log = log.get_logger("settings")
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
 MAXRES_CHOICES = [
@@ -31,46 +29,6 @@ CHOICE_VALUES: dict[str, list[str]] = {
     "nerd_font": ["auto", "on", "off"],
     "image_mode": ["auto", "off"],
 }
-
-# `catt scan` text line: "192.0.2.10 - 43PUS9235/12 - Philips TPM191E". We parse
-# IP + name from text because `catt scan -j` is broken in current catt (CastInfo has
-# no _asdict). Shared by the settings device picker and cli's on-cast resolver.
-_SCAN_RE = re.compile(r"^([\d.]+) - (.+?) - ")
-
-
-def scan_devices(*, attempts: int = 2) -> list[tuple[str, str]]:
-    """Discover Chromecasts on the LAN via `catt scan` as (name, ip) pairs (deduped by
-    name, stable order). The IP lets callers cast with `catt -d <ip>`, which is robust
-    to mDNS name-resolution flakiness (e.g. right after a network change). Best-effort:
-    returns [] if catt is missing or every scan comes back empty.
-
-    mDNS discovery is probabilistic and degrades on hosts with many interfaces (docker
-    bridges, VPNs, veth): a single cold `catt scan` can return empty even when the device
-    is reachable. A *populated* scan is trustworthy and returned immediately; only an empty
-    result is retried (up to `attempts`) before we trust the absence and fall back to local."""
-    print(f"{ui.g().search} cerco Chromecast…", file=sys.stderr)
-    for attempt in range(1, attempts + 1):
-        devices = _scan_once()
-        if devices:
-            return devices
-        if attempt < attempts:
-            _log.debug("catt scan vuoto (tentativo %d/%d) → riprovo", attempt, attempts)
-    return []
-
-
-def _scan_once() -> list[tuple[str, str]]:
-    """One `catt scan`, parsed to deduped (name, ip) pairs; [] if catt is missing/failed."""
-    proc = util.run_cmd(["catt", "scan"], timeout=util.CATT_SCAN_TIMEOUT)
-    if proc is None:
-        return []
-    devices: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for line in proc.stdout.splitlines():
-        m = _SCAN_RE.match(line.strip())
-        if m and m.group(2) not in seen:
-            seen.add(m.group(2))
-            devices.append((m.group(2), m.group(1)))  # (name, ip)
-    return devices
 
 
 def _fzf_select(
@@ -416,7 +374,16 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         if i is not None:
             config.save({key: MAXRES_CHOICES[i][1]})
     elif kind == "castdev":
-        choices = ["(auto)"] + [name for name, _ in scan_devices()]
+        # The user is explicitly scanning → fresh sync scan (refreshing the disk cache,
+        # so this menu doubles as a manual cache refresh), but never show an empty list
+        # when the cache knows better (mDNS flakiness).
+        print(f"{ui.g().search} cerco Chromecast…", file=sys.stderr)
+        devices = discovery.scan_sync()
+        if devices:
+            discovery.save_cache(devices)
+        else:
+            devices = discovery.load_cache()
+        choices = ["(auto)"] + [name for name, _ in devices]
         i = _fzf_select(
             choices, prompt="dispositivo> ", header="Chromecast preferito · ESC: annulla"
         )

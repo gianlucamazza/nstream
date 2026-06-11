@@ -83,9 +83,15 @@ Modules in `src/nstream/`:
 - `player.py` — local mpv playback: launch, position tracking over the IPC socket, and the
   `*_defaults` helpers (hwdec/quiet/lang) that decide what to inject without overriding the user.
   **Imports nothing from `cli`** (no cycle).
-- `caster.py` — Chromecast playback: `resolve_device()`, `cast()` (castbridge LOAD when available,
-  else `catt`), status poll, in-cast audio switch (catt-only). Imports `bridge`, `ui` (glyphs) and
-  the picker from `picker`, not `cli`.
+- `caster.py` — Chromecast playback: `resolve_device()` (via `discovery`: verified cache → short
+  bounded wait on the background scan, Ctrl-C skips to local), `cast()` (castbridge LOAD when
+  available, else `catt`), status poll, in-cast audio switch (catt-only). Imports `bridge`,
+  `discovery`, `ui` (glyphs) and the picker from `picker`, not `cli`.
+- `discovery.py` — background Chromecast discovery (ADR 0010): the `catt scan` primitive
+  (`scan_sync`, moved out of `settings`), a daemon-thread singleton started at TUI startup
+  (`start_background`/`get_devices`), a 24h disk cache (`$XDG_CACHE_HOME/nstream/devices.json`)
+  and a ~1s TCP probe to the cast control port (`verify`). Leaf (imports only `log`/`util` +
+  stdlib); never prints — user-facing messaging stays in callers.
 - `bridge.py` — IPC client for the **castbridge** daemon (AF_UNIX newline-JSON, stdlib `socket` only):
   metadata-rich LOAD + normalized event stream (started/playing/paused/ended/failed/disconnected).
   The session lives in the daemon, so a fire-and-return load survives our exit (ADR 0007/0008).
@@ -129,7 +135,7 @@ Modules in `src/nstream/`:
   also home to the `PlayOpts` per-invocation value object (config-shaped, imported everywhere).
 - `state.py` — watch history (resume / continue-watching).
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
-- `settings.py` — fzf-based settings menu (debrid token, addons, hwdec…), `scan_devices()`.
+- `settings.py` — fzf-based settings menu (debrid token, addons, hwdec, cast device…).
 - `log.py` — rotating file log + crash capture + secret redaction.
 - `util.py` — low-level helpers: atomic write, best-effort JSON load, subprocess launch. Top of the
   import graph, stdlib-only.
@@ -138,7 +144,7 @@ Modules in `src/nstream/`:
 **Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
 imports), `cli` orchestrates at the bottom; everything below `cli` —
 `headless`/`player`/`caster`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/
-`engine`/`debrid`/`remux`/`mirror`/`serve`/`bridge`/`net`/`preview`/`explain` — never imports
+`engine`/`debrid`/`remux`/`mirror`/`serve`/`bridge`/`net`/`discovery`/`preview`/`explain` — never imports
 `cli`. This is the recurring constraint that explains where logic lives — preserve it when
 moving code.
 
@@ -171,7 +177,13 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
   skill-cast's `cast-screen fw-setup` so they share one rule). Best-effort: a no-op without
   ufw/passwordless-sudo, with a `firewall_hint` printed on a Tier-2 startup failure. Tier-1 and the
   daemon channel are outbound — no rule, nstream stays unprivileged for ordinary casts.
-- Discovery: `settings.py:scan_devices()` runs `catt scan` → `(name, ip)` pairs.
+- Discovery (ADR 0010): `discovery.py` runs `catt scan` → `(name, ip)` pairs in a **background
+  daemon thread** kicked off at TUI startup (`cli._dispatch`), refreshing a 24h disk cache
+  (`devices.json`). `resolve_device` uses a cache-verified device instantly (~1s TCP probe to
+  port 8009), waits at most 6s (25s for an explicit picker) on the pending scan — Ctrl-C skips
+  to local — and rescues from the cache when an mDNS scan is flaky. Cast never freezes the TUI;
+  headless callers block deterministically. The settings device picker scans synchronously
+  (explicit user action) and doubles as a manual cache refresh.
 - Resolution: `caster.py:resolve_device()` honors `cfg.cast_device` only if present on the
   current LAN; otherwise re-discovers. Stored/resolved **by IP** (robust to mDNS flakiness).
 - Playback: `caster.py:cast()` runs `catt cast <url> [-d ip] [-t start] [-s subs]`, polled via
@@ -261,5 +273,6 @@ the `what=` addon-name string in errors; `addons.py` caches manifests keyed by U
 
 - Config: `$XDG_CONFIG_HOME/nstream/config.json` (chmod 600; template `config.example.json`).
 - History: `$XDG_STATE_HOME/nstream/history.json`.
-- Caches: `$XDG_CACHE_HOME/nstream/` (`manifests.json`, `vainfo.json`, `meta/` disk metadata, `posters/` thumbnails).
+- Caches: `$XDG_CACHE_HOME/nstream/` (`manifests.json`, `vainfo.json`, `devices.json` Chromecast
+  discovery, `meta/` disk metadata, `posters/` thumbnails).
 - Runtime deps: `mpv`, `fzf` (required); `ffmpeg`/`ffprobe`, `catt`, `vainfo`, `chafa`, `foot` (optional).

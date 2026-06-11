@@ -21,5 +21,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0007](0007-cast-metadata-via-castbridge.md)         | Native cast delivery: castbridge sender + nstream Range server (metadata + events) | Accepted |
 | [0008](0008-castbridge-socket-activation.md)         | castbridge daemon: systemd socket activation (retire spawn code)                   | Proposed |
 | [0009](0009-movies-series-separation.md)             | Movies / TV-series separation: typed home sections, typed flows                    | Accepted |
+| [0010](0010-background-cast-discovery.md)            | Background Chromecast discovery with a verified disk cache                         | Accepted |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

@@ -18,6 +18,7 @@ from . import (
     cast_flow,
     caster,
     debrid,
+    discovery,
     explain,
     headless,
     log,
@@ -156,8 +157,9 @@ def _play_video(
     # the wait, say what's happening so the TUI doesn't look frozen.
     print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
     if opts.cast:
-        # Overlap the stream fetch (profile-independent) with the catt scan (up to
-        # ~2×10s): only ranking/selection depends on the device, and that runs after
+        # Overlap the stream fetch (profile-independent) with device resolution (near
+        # instant via the verified cache / background scan; a short bounded wait at
+        # worst): only ranking/selection depends on the device, and that runs after
         # the join. Daemon thread (same pattern as player/serve), NOT an executor:
         # non-daemon workers would outlive a confirm prompt aborted with Ctrl-C.
         fetched: list[list[Stream]] = []
@@ -590,6 +592,10 @@ def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         # Headless: no _clear, no fzf, JSON on stdout (incl. the NetworkError → JSON guard).
         return headless.run(cfg, args, opts)
     typ = headless.typ_filter(args)
+    if not args.explain:
+        # Warm device discovery + cache while the user browses, so a later cast resolves
+        # instantly (--explain never casts; --json returned above and scans on demand).
+        discovery.start_background()
     _clear()  # start the interactive session on a clean screen (drop launcher banner)
     if args.cont:
         return run_continue(cfg, opts, typ)

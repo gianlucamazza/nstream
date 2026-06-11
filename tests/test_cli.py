@@ -60,6 +60,32 @@ def test_dispatch_explain_requires_query(monkeypatch):
     assert cli._dispatch(Config(torrentio_base="tb"), args, opts) == 2
 
 
+def test_dispatch_warms_discovery_on_interactive_paths(monkeypatch):
+    # The background device scan must start for the TUI flows (so a later cast is
+    # instant) but not for --explain (never casts) or --json (scans on demand).
+    started = []
+    monkeypatch.setattr(cli.discovery, "start_background", lambda: started.append(1))
+    monkeypatch.setattr(cli, "_clear", lambda: None)
+    monkeypatch.setattr(cli, "run_home", lambda cfg, opts: 0)
+    monkeypatch.setattr(cli, "run_explain", lambda cfg, query: 0)
+    monkeypatch.setattr(cli.headless, "run", lambda cfg, args, opts: 0)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+
+    def ns(**kw):
+        base = dict(
+            cont=False, browse=None, query=[], explain=False, json=False, movies=False, series=False
+        )
+        return argparse.Namespace(**{**base, **kw})
+
+    assert cli._dispatch(Config(torrentio_base="tb"), ns(), opts) == 0
+    assert started == [1]  # home (interactive) warms discovery
+    cli._dispatch(Config(torrentio_base="tb"), ns(explain=True, query=["x"]), opts)
+    cli._dispatch(Config(torrentio_base="tb"), ns(json=True), opts)
+    assert started == [1]  # --explain / --json don't
+
+
 def _ns(**kw):
     base = {"subs": False, "sub_menu": False, "sub_lang": None}
     base.update(kw)

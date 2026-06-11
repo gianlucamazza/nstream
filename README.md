@@ -28,7 +28,8 @@ mpv setup.
 Runtime: `python3` (>=3.13, **zero third-party deps**), `mpv`, `fzf`, `ffmpeg` (its `ffprobe`
 powers the pre-play track menu; nstream degrades gracefully without it), plus `foot` for the
 desktop launcher. Optional: `catt` to cast to a Chromecast (`--cast`; per-LAN device discovery
-is built in via a fresh `catt scan`), `chafa` to render poster thumbnails in the fzf
+is built in — a background `catt scan` at startup plus a verified disk cache, so casting never
+stalls the TUI), `chafa` to render poster thumbnails in the fzf
 preview pane (falls back to text-only without it), and `vainfo` (Arch: `libva-utils`) for the
 hardware-aware stream ranking. The native cast senders — **castbridge** (metadata + events)
 and the `--mirror` realtime sender — are separate openscreen-fork builds (`$CASTBRIDGE_BIN` /
@@ -131,12 +132,16 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   position. **Device choice:** when casting, if more than one Chromecast is discovered (`catt scan`)
   or you used Alt-C, nstream shows a device picker instead of guessing.
 - `cast_device`: preferred Chromecast **name** (default `""`). Set it from the settings menu
-  (**Dispositivo cast** → discovery + pick) or here. Device resolution is **dynamic per-network**:
-  every cast runs a fresh `catt scan` and casts by the device's current **IP** (`catt -d <ip>`),
-  which is robust to mDNS name-resolution flakiness after a network change. A saved `cast_device` is
-  honoured only when that name is present on the current LAN, otherwise nstream re-discovers (a
-  single device is used directly, several prompt a picker). **If no Chromecast is reachable on the
-  current network, nstream falls back to local mpv** (with a notice) instead of failing. (Note:
+  (**Dispositivo cast** → discovery + pick) or here. Device resolution is **dynamic per-network**
+  and **never blocks the TUI**: a `catt scan` runs in a background thread at startup while you
+  browse, and its result feeds a 24h disk cache (`devices.json`). At cast time a cached device
+  that answers a ~1s reachability probe is used **instantly**; otherwise nstream waits briefly on
+  the pending scan (~6s, Ctrl-C skips straight to local playback) and casts by the device's
+  current **IP** (`catt -d <ip>`), which is robust to mDNS name-resolution flakiness after a
+  network change. A saved `cast_device` is honoured only when that device is actually reachable,
+  otherwise nstream re-discovers (a single device is used directly, several prompt a picker).
+  **If no Chromecast is reachable on the current network, nstream falls back to local mpv** (with
+  a notice) instead of failing — quickly, without sitting through a full scan timeout. (Note:
   `catt scan -j` is broken in current catt, so discovery parses the text `catt scan`.)
 - `cast_remux`: allow the Tier-2 on-host audio remux for Dolby/DTS-only releases (`true` by
   default; with `false` they are cast directly — likely silent on the Default Media Receiver).

@@ -23,8 +23,19 @@ def _catt_on_path(monkeypatch):
     monkeypatch.setattr(caster.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
 
 
+@pytest.fixture(autouse=True)
+def _no_discovery_io(monkeypatch):
+    """Keep tests hermetic: no disk cache, no background thread, no TCP probe.
+    Individual tests override get_devices (via _scan) / load_cache / verify."""
+    monkeypatch.setattr(caster.discovery, "load_cache", lambda: [])
+    monkeypatch.setattr(caster.discovery, "start_background", lambda: None)
+    monkeypatch.setattr(caster.discovery, "get_devices", lambda wait=0.0: ([], "fresh"))
+    monkeypatch.setattr(caster.discovery, "verify", lambda ip, **k: False)
+
+
 def _scan(devs):
-    return lambda: list(devs)  # devs: [(name, ip)]
+    # The background scan finished with `devs`: the seam resolve_device consults.
+    return lambda wait=0.0: (list(devs), "fresh")  # devs: [(name, ip)]
 
 
 def test_resolve_device_missing_catt_says_so(monkeypatch):
@@ -32,7 +43,7 @@ def test_resolve_device_missing_catt_says_so(monkeypatch):
     (run_cmd swallows the OSError, so the scan would just look instantly empty)."""
     monkeypatch.setattr(caster.shutil, "which", lambda cmd: None)
     monkeypatch.setattr(
-        caster.settings, "scan_devices", lambda *a, **k: pytest.fail("must not scan")
+        caster.discovery, "get_devices", lambda *a, **k: pytest.fail("must not scan")
     )
     with pytest.raises(caster.CastUnavailable, match="catt non trovato"):
         caster.resolve_device(CFG)
@@ -40,8 +51,8 @@ def test_resolve_device_missing_catt_says_so(monkeypatch):
 
 def test_resolve_device_pref_present_returns_ip(monkeypatch):
     monkeypatch.setattr(
-        caster.settings,
-        "scan_devices",
+        caster.discovery,
+        "get_devices",
         _scan([("Salotto", "192.168.1.5"), ("Camera", "192.168.1.6")]),
     )
     cfg = Config(torrentio_base="tb", cast_device="Salotto")
@@ -50,13 +61,13 @@ def test_resolve_device_pref_present_returns_ip(monkeypatch):
 
 def test_resolve_device_pref_absent_rediscovers(monkeypatch):
     # Pinned name not on this LAN (network changed) → re-discover, don't return it stale.
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("Camera", "192.168.1.6")]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("Camera", "192.168.1.6")]))
     cfg = Config(torrentio_base="tb", cast_device="Salotto")
     assert caster.resolve_device(cfg) == "192.168.1.6"
 
 
 def test_resolve_device_single_auto_ip(monkeypatch):
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
     assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.9"
 
 
@@ -71,14 +82,14 @@ def _reset_confirm_latch():
 
 
 def test_resolve_device_confirm_accepted(monkeypatch):
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
     monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: True)
     assert caster.resolve_device(Config(torrentio_base="tb"), confirm=True) == "10.0.0.9"
 
 
 def test_resolve_device_confirm_declined_raises(monkeypatch):
     # A declined confirmation must fall back like an absent device (local playback).
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.9")]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
     monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: False)
     with pytest.raises(caster.CastUnavailable, match="rifiutato"):
         caster.resolve_device(Config(torrentio_base="tb"), confirm=True)
@@ -86,8 +97,8 @@ def test_resolve_device_confirm_declined_raises(monkeypatch):
 
 def test_resolve_device_confirm_preferred_device(monkeypatch):
     monkeypatch.setattr(
-        caster.settings,
-        "scan_devices",
+        caster.discovery,
+        "get_devices",
         _scan([("Salotto", "192.168.1.5"), ("Camera", "192.168.1.6")]),
     )
     asked = []
@@ -130,14 +141,14 @@ def test_confirm_device_non_tty_passes(monkeypatch):
 
 def test_resolve_device_multiple_prompts_ip(monkeypatch):
     monkeypatch.setattr(
-        caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+        caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
     )
     monkeypatch.setattr(caster, "fzf", lambda items, prompt: "10.0.0.2")
     assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.2"
 
 
 def test_resolve_device_choose_forces_picker_by_name(monkeypatch):
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1")]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1")]))
     seen = {}
 
     def fk(items, prompt):
@@ -151,18 +162,107 @@ def test_resolve_device_choose_forces_picker_by_name(monkeypatch):
 
 def test_resolve_device_none_raises(monkeypatch):
     # Empty scan → trust it (no fall-through to a stale cast-resolve default).
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([]))
     with pytest.raises(caster.CastUnavailable):
         caster.resolve_device(Config(torrentio_base="tb"))
 
 
 def test_resolve_device_cancel_raises(monkeypatch):
     monkeypatch.setattr(
-        caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+        caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
     )
     monkeypatch.setattr(caster, "fzf", lambda items, prompt: None)
     with pytest.raises(caster.CastUnavailable):
         caster.resolve_device(Config(torrentio_base="tb"))
+
+
+# --- discovery cache fast paths / non-blocking guarantees -------------------
+
+
+def _must_not_wait(*a, **k):
+    pytest.fail("must not wait on the background scan")
+
+
+def test_resolve_device_cached_target_instant(monkeypatch):
+    # A cache-verified preferred device resolves instantly, no scan wait at all.
+    monkeypatch.setattr(caster.discovery, "load_cache", lambda: [("Salotto", "192.168.1.5")])
+    monkeypatch.setattr(caster.discovery, "verify", lambda ip, **k: True)
+    monkeypatch.setattr(caster.discovery, "get_devices", _must_not_wait)
+    cfg = Config(torrentio_base="tb", cast_device="Salotto")
+    assert caster.resolve_device(cfg) == "192.168.1.5"
+
+
+def test_resolve_device_cached_single_instant(monkeypatch):
+    # The common single-TV home: the lone cached device, verified, is used right away.
+    monkeypatch.setattr(caster.discovery, "load_cache", lambda: [("TV1", "10.0.0.9")])
+    monkeypatch.setattr(caster.discovery, "verify", lambda ip, **k: True)
+    monkeypatch.setattr(caster.discovery, "get_devices", _must_not_wait)
+    assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.9"
+
+
+def test_resolve_device_cached_target_dead_falls_to_scan(monkeypatch):
+    # Cached IP no longer answers (DHCP moved it) → trust the fresh scan instead.
+    monkeypatch.setattr(caster.discovery, "load_cache", lambda: [("Salotto", "192.168.1.5")])
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("Salotto", "192.168.1.99")]))
+    cfg = Config(torrentio_base="tb", cast_device="Salotto")
+    assert caster.resolve_device(cfg) == "192.168.1.99"
+
+
+def test_resolve_device_empty_scan_rescued_by_cache(monkeypatch):
+    # TV alive (TCP 8009 answers) but the fresh mDNS scan came back empty → the cache
+    # rescues the cast instead of failing it.
+    monkeypatch.setattr(
+        caster.discovery, "load_cache", lambda: [("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")]
+    )
+    monkeypatch.setattr(caster.discovery, "verify", lambda ip, **k: ip == "10.0.0.2")
+    assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.2"
+
+
+def test_resolve_device_empty_scan_dead_cache_raises(monkeypatch):
+    # Nothing scanned and nothing cached answers → fail fast (caller plays locally).
+    monkeypatch.setattr(
+        caster.discovery, "load_cache", lambda: [("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")]
+    )
+    with pytest.raises(caster.CastUnavailable, match="nessun Chromecast"):
+        caster.resolve_device(Config(torrentio_base="tb"))
+
+
+def test_resolve_device_ctrl_c_skips_to_local(monkeypatch):
+    # Ctrl-C while waiting on a pending scan = "skip the cast", not a process abort.
+    calls = []
+
+    def fake_get(wait=0.0):
+        calls.append(wait)
+        if len(calls) == 1:
+            return ([], "pending")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(caster.discovery, "get_devices", fake_get)
+    with pytest.raises(caster.CastUnavailable, match="annullata"):
+        caster.resolve_device(Config(torrentio_base="tb"))
+    assert calls == [0.0, caster._WAIT_RESOLVE]  # short interactive budget, not a full scan
+
+
+def test_resolve_device_pending_timeout_raises_fast(monkeypatch):
+    # Scan still pending after the short budget and no cache → fail fast, no 40s freeze.
+    monkeypatch.setattr(caster.discovery, "get_devices", lambda wait=0.0: ([], "pending"))
+    with pytest.raises(caster.CastUnavailable, match="nessun Chromecast"):
+        caster.resolve_device(Config(torrentio_base="tb"))
+
+
+def test_resolve_device_headless_blocks_until_done(monkeypatch):
+    # Headless callers wait for the full scan (deterministic for scripts): wait=None.
+    waits = []
+
+    def fake_get(wait=0.0):
+        waits.append(wait)
+        if len(waits) == 1:
+            return ([], "pending")
+        return ([("TV1", "10.0.0.1")], "fresh")
+
+    monkeypatch.setattr(caster.discovery, "get_devices", fake_get)
+    assert caster.resolve_device(CFG, headless=True) == "10.0.0.1"
+    assert waits == [0.0, None]
 
 
 # --- cast() poll loop ------------------------------------------------------
@@ -401,7 +501,7 @@ def test_resolve_device_headless_ambiguous_raises(monkeypatch):
     # ≥2 devices, no preference: headless must NOT open fzf — it raises so the caller
     # can surface a clean error and re-run with --device.
     monkeypatch.setattr(
-        caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+        caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
     )
     monkeypatch.setattr(caster, "fzf", lambda *a, **k: (_ for _ in ()).throw(AssertionError("fzf")))
     with pytest.raises(caster.CastUnavailable):
@@ -410,13 +510,13 @@ def test_resolve_device_headless_ambiguous_raises(monkeypatch):
 
 def test_resolve_device_headless_prefers_named(monkeypatch):
     monkeypatch.setattr(
-        caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1"), ("Salotto", "10.0.0.2")])
+        caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("Salotto", "10.0.0.2")])
     )
     assert caster.resolve_device(CFG, headless=True, prefer="Salotto") == "10.0.0.2"
 
 
 def test_resolve_device_prefer_absent_raises(monkeypatch):
-    monkeypatch.setattr(caster.settings, "scan_devices", _scan([("TV1", "10.0.0.1")]))
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1")]))
     with pytest.raises(caster.CastUnavailable):
         caster.resolve_device(CFG, prefer="Salotto")
 
