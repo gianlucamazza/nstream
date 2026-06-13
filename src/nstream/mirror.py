@@ -255,6 +255,7 @@ def _mpv_args(
         *player._quiet_defaults(cfg),
         *player._hwdec_defaults(cfg),
         *player._lang_defaults(cfg),
+        *player._stream_cache_defaults(cfg),
         *cfg.mpv_args,
     ]
     if start and start > 1:

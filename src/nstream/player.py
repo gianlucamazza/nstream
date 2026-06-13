@@ -1,6 +1,6 @@
 """Local playback in mpv: launch, position tracking over the IPC socket, and the
 mpv.conf / mpv_args inspection that decides which defaults (hwdec, msg-level, alang/
-slang) nstream may inject without overriding the user.
+slang, stream-cache) nstream may inject without overriding the user.
 
 Imports nothing from cli (so there's no cycle): cli calls `play()` and the *_defaults
 helpers. mpv is a long-lived process driven with subprocess.Popen, so it stays explicit
@@ -185,6 +185,24 @@ def _display_tags_defaults(cfg: Config) -> list[str]:
     return ["--display-tags="]
 
 
+def _stream_cache_defaults(cfg: Config) -> list[str]:
+    """Anti-desync defaults for network playback (every url nstream plays is one):
+    a bigger demuxer readahead bound (mpv's default 150MiB is ~15s of a 4K remux) and
+    pause-to-rebuffer at start/seek/underrun instead of letting A/V drift. Each flag
+    is skipped when the user manages that option; a user-managed cache-pause defers
+    the whole pause family (the mpv_args prefix check makes any --cache-pause-* there
+    trip the family gate too — over-conservative on purpose)."""
+    flags = []
+    if not _user_overrides(cfg, "demuxer-max-bytes"):
+        flags.append("--demuxer-max-bytes=512MiB")
+    if not _user_overrides(cfg, "cache-pause"):
+        if not _user_overrides(cfg, "cache-pause-initial"):
+            flags.append("--cache-pause-initial=yes")
+        if not _user_overrides(cfg, "cache-pause-wait"):
+            flags.append("--cache-pause-wait=3")
+    return flags
+
+
 def _lang_defaults(cfg: Config) -> list[str]:
     """Prefer the user's languages for audio/subtitle track selection, without
     overriding any alang/slang the user already set. `--subs-with-matching-audio=no`
@@ -241,6 +259,7 @@ def play(
             *_display_tags_defaults(cfg),
             *_hwdec_defaults(cfg),
             *_lang_defaults(cfg),
+            *_stream_cache_defaults(cfg),
             *cfg.mpv_args,
         ]
         if start and start > 1:

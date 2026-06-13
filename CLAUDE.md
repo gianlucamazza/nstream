@@ -81,7 +81,9 @@ Modules in `src/nstream/`:
   `what=` label, never the URL.
 - `quality.py` — stream parsing + hardware-aware ranking (GPU caps via `vainfo`, cached).
 - `player.py` — local mpv playback: launch, position tracking over the IPC socket, and the
-  `*_defaults` helpers (hwdec/quiet/lang) that decide what to inject without overriding the user.
+  `*_defaults` helpers (hwdec/quiet/lang/stream-cache) that decide what to inject without
+  overriding the user. The stream-cache defaults (bigger demuxer readahead +
+  pause-to-rebuffer) mitigate A/V desync on network streams; mirror inherits them too.
   **Imports nothing from `cli`** (no cycle).
 - `caster.py` — Chromecast playback: `resolve_device()` (via `discovery`: verified cache → short
   bounded wait on the background scan, Ctrl-C skips to local), `cast()` (castbridge LOAD when

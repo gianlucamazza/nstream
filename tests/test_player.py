@@ -222,3 +222,48 @@ def test_display_tags_not_when_user_sets_it(monkeypatch):
     monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
     cfg = Config(torrentio_base="tb", mpv_quiet=True, mpv_args=["--display-tags=Title"])
     assert player._display_tags_defaults(cfg) == []
+
+
+# --- anti-desync stream cache (_stream_cache_defaults) ----------------------
+
+
+def test_stream_cache_defaults_injected(monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    assert player._stream_cache_defaults(Config(torrentio_base="tb")) == [
+        "--demuxer-max-bytes=512MiB",
+        "--cache-pause-initial=yes",
+        "--cache-pause-wait=3",
+    ]
+
+
+def test_stream_cache_defaults_not_when_user_sets_demuxer_max_bytes(monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", mpv_args=["--demuxer-max-bytes=1GiB"])
+    flags = player._stream_cache_defaults(cfg)
+    assert not any(f.startswith("--demuxer-max-bytes") for f in flags)
+    assert "--cache-pause-initial=yes" in flags
+
+
+def test_stream_cache_defaults_defer_when_user_manages_cache_pause(monkeypatch):
+    # cache-pause in mpv.conf → the whole pause family is the user's.
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: opt == "cache-pause")
+    flags = player._stream_cache_defaults(Config(torrentio_base="tb"))
+    assert flags == ["--demuxer-max-bytes=512MiB"]
+
+
+def test_stream_cache_defaults_partial_when_user_sets_wait_in_conf(monkeypatch):
+    # mpv.conf keys are exact: managing only the wait keeps the initial-pause default.
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: opt == "cache-pause-wait")
+    flags = player._stream_cache_defaults(Config(torrentio_base="tb"))
+    assert "--cache-pause-initial=yes" in flags
+    assert not any(f.startswith("--cache-pause-wait") for f in flags)
+
+
+def test_play_stream_cache_injected(stub_mpv, monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", hwdec="")
+    player.play(cfg, "Movie", "http://u")
+    args = _FakePopen.last_args
+    assert "--demuxer-max-bytes=512MiB" in args
+    assert "--cache-pause-initial=yes" in args
+    assert "--cache-pause-wait=3" in args

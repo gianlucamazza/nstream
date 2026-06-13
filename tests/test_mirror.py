@@ -352,6 +352,7 @@ def _stub_player_defaults(monkeypatch):
     monkeypatch.setattr(mirror.player, "_quiet_defaults", lambda cfg: ["--quiet-x"])
     monkeypatch.setattr(mirror.player, "_hwdec_defaults", lambda cfg: ["--hwdec=vaapi"])
     monkeypatch.setattr(mirror.player, "_lang_defaults", lambda cfg: [])
+    monkeypatch.setattr(mirror.player, "_stream_cache_defaults", lambda cfg: ["--cache-x"])
 
 
 def test_mpv_args_route_audio_to_null_sink(monkeypatch):
@@ -365,6 +366,7 @@ def test_mpv_args_route_audio_to_null_sink(monkeypatch):
     assert f"--title={mirror._MPV_TITLE}" in args
     assert "--input-ipc-server=/run/mpv.sock" in args
     assert "--quiet-x" in args and "--hwdec=vaapi" in args  # player defaults inherited
+    assert "--cache-x" in args  # anti-desync stream-cache defaults inherited too
     assert not any(a.startswith(("--start", "--aid", "--sid", "--sub-file")) for a in args)
 
 
