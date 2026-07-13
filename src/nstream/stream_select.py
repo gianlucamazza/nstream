@@ -247,8 +247,17 @@ def _reselect_cast_for_lang(
     directly (target is the first decodable track) over one needing a remux. Probes up to
     `probe_cap` candidates whose NAME claims the language (tagged `target_lang` or `multi`) —
     spending the probe budget on releases that actually advertise it, rather than on untagged
-    ones that usually don't. None if none qualifies."""
-    fallback: CastAudioPlan | None = None
+    ones that usually don't. None if none qualifies.
+
+    Preference order: a *verified* direct cast (probed, target is the decodable first track) >
+    a *verified* remux (target present, not first) > a name-tagged-target release whose tracks
+    were unprobeable (benefit of the doubt). The last tier matters because non-cached releases
+    routinely can't be ffprobed cheaply, so a title's only `target_lang` dubs may all come back
+    unverified — and a release literally tagged `ITA` is a far better bet than falling back to
+    the wrong-language pick the caller would otherwise cast. This mirrors the benefit of the
+    doubt `pick_audio_stream_verified` already gives the forced `--audio-lang` path."""
+    remux_fallback: CastAudioPlan | None = None
+    tagged_guess: CastAudioPlan | None = None
     probed = 0
     for r in _cast_playable(cfg, results):
         s = r.stream
@@ -263,10 +272,18 @@ def _reselect_cast_for_lang(
         plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
         if plan.mode == "direct" and plan.verified:
             return plan  # cheapest *verified* correct option (no download) → take it
-        if plan.mode == "remux" and fallback is None:
-            fallback = plan  # remember, but keep looking for a direct one
-        # unverified direct (probe failed) is a guess, not a confident dub → skip it
-    return fallback
+        if plan.mode == "remux" and remux_fallback is None:
+            remux_fallback = plan  # remember, but keep looking for a direct one
+        elif (
+            plan.mode == "direct"
+            and not plan.verified
+            and target_lang in langs  # the NAME explicitly claims it (not just "multi")
+            and tagged_guess is None
+        ):
+            # Unprobeable but explicitly target-tagged → a benefit-of-the-doubt last resort,
+            # kept only if no verified option turns up (below any remux_fallback).
+            tagged_guess = plan
+    return remux_fallback or tagged_guess
 
 
 def vet_cast_audio(
