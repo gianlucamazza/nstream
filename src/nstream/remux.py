@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import bridge, caster, log, serve, ui, util
+from . import bridge, cast_delivery, caster, log, serve, ui, util
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -495,16 +495,6 @@ def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) 
     }
 
 
-def _log_bridge_failed(ev: dict) -> None:
-    """Log WHY the castbridge LOAD failed before falling back to catt — the reason was
-    previously discarded, making a Tier-2 startup failure undiagnosable post-mortem."""
-    _log.warning(
-        "castbridge non partito (%s: %s) → fallback catt",
-        ev.get("error") or "?",
-        ev.get("message") or "?",
-    )
-
-
 def _spawn_server(file_path: str, bind_ip: str) -> tuple[int, int, str] | None:
     """Spawn a detached `python -m nstream.serve` for `file_path` on `bind_ip`, returning
     (pid, port, token) once it announces them, or None on failure. Detached so it outlives a
@@ -564,33 +554,25 @@ def _cast_file_via_bridge(
         if spawned is None:
             return None
         pid, port, token = spawned
-        started = False
-        try:
-            for ev in bridge.cast_load(
-                device, serve.served_url(bind_ip, port, token), follow=False, **kwargs
-            ):
-                kind = ev.get("kind")
-                if kind == "failed" and not started:
-                    _log_bridge_failed(ev)
-                    _kill(pid)  # keep the temp file for the catt fallback
-                    return None
-                if kind == "started":
-                    started = True
-                if on_event:
-                    on_event(ev)
-        except KeyboardInterrupt:
-            # User abort during the headless startup wait — same teardown as the follow
-            # path: stop the receiver session, reap the detached server (no state is
-            # written yet, so `--stop` could never find it), remove the temp file (no
-            # fallback will use it), and re-raise so `cast_file` does NOT degrade to a
-            # detached catt re-casting what was just cancelled.
-            bridge.stop(device)
+
+        def abort(started: bool) -> bool:
+            # User abort during the headless startup wait — the driver already stopped
+            # the receiver session; reap the detached server (no state is written yet,
+            # so `--stop` could never find it), remove the temp file (no fallback will
+            # use it), and re-raise so `cast_file` does NOT degrade to a detached catt
+            # re-casting what was just cancelled.
             _kill(pid)
             _rm(file_path)
-            raise
-        if not started:
-            _log.warning("castbridge: LOAD senza evento started → fallback catt")
-            _kill(pid)
+            return True
+
+        out = cast_delivery.drive_bridge(
+            device, serve.served_url(bind_ip, port, token), follow=False,
+            load_kwargs=kwargs, on_event=on_event, on_interrupt=abort,
+        )  # fmt: skip
+        if out is None or not out.started:
+            if out is not None:
+                _log.warning("castbridge: LOAD senza evento started → fallback catt")
+            _kill(pid)  # keep the temp file for the catt fallback
             return None
         _write_state(pid, file_path, device, mode="serve")
         print(f"{ui.g().tv} {title} → {device}", file=sys.stderr)
@@ -598,60 +580,58 @@ def _cast_file_via_bridge(
 
     # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
     server, port, _thread = serve.serve_file(file_path, bind_ip)
-    started = False
-    disconnected = False
-    pos = dur = 0.0
+
+    def announce() -> None:
+        print(
+            f"{ui.g().tv} {title} → {device}  (Ctrl-C per smettere di seguire)",
+            file=sys.stderr,
+        )
+
+    def disconnect(pos: float) -> None:
+        # The daemon died mid-cast (socket EOF without an explicit end) — NOT a
+        # playback end: the TV is still fetching from our Range server. Stop
+        # following but leave the server up and the temp file on disk so playback
+        # isn't cut from under the receiver; the next run's `_gc_stale` (or
+        # `--stop`) reclaims the file. Honest limit: the server is an in-process
+        # daemon thread, so it still dies when this nstream process exits — the
+        # least-harmful option without re-architecting (vs. tearing it down NOW).
+        _log.warning("daemon castbridge disconnesso a metà cast (pos=%.0fs)", pos)
+        print(
+            "nstream: daemon castbridge disconnesso; la riproduzione sul TV "
+            "potrebbe interrompersi all'uscita di nstream",
+            file=sys.stderr,
+        )
+
+    def abort(started: bool) -> bool:
+        # Ctrl-C during the startup wait is a user abort, not a bridge failure: the
+        # temp file is ours to remove (no fallback will use it) and the re-raise stops
+        # `cast_file` degrading to a detached catt re-casting what was just cancelled
+        # (`cli._entry` turns it into a clean exit 130). After `started`, Ctrl-C just
+        # stops following — the receiver was already stopped by the driver.
+        if not started:
+            _rm(file_path)
+            return True
+        return False
+
+    out: cast_delivery.BridgeOutcome | None = None
     try:
         url = serve.served_url(bind_ip, port, server.token)
-        for ev in bridge.cast_load(device, url, follow=True, **kwargs):
-            kind = ev.get("kind")
-            if kind == "failed" and not started:
-                _log_bridge_failed(ev)
-                return None  # keep the temp file for the catt fallback
-            if kind == "started":
-                started = True
-                print(
-                    f"{ui.g().tv} {title} → {device}  (Ctrl-C per smettere di seguire)",
-                    file=sys.stderr,
-                )
-            if on_event:
-                on_event(ev)
-            if kind in ("playing", "paused", "ended", "disconnected"):
-                pos = float(ev.get("position") or pos)
-                dur = float(ev.get("duration") or dur)
-            if kind == "disconnected":
-                # The daemon died mid-cast (socket EOF without an explicit end) — NOT a
-                # playback end: the TV is still fetching from our Range server. Stop
-                # following but leave the server up and the temp file on disk so playback
-                # isn't cut from under the receiver; the next run's `_gc_stale` (or
-                # `--stop`) reclaims the file. Honest limit: the server is an in-process
-                # daemon thread, so it still dies when this nstream process exits — the
-                # least-harmful option without re-architecting (vs. tearing it down NOW).
-                _log.warning("daemon castbridge disconnesso a metà cast (pos=%.0fs)", pos)
-                print(
-                    "nstream: daemon castbridge disconnesso; la riproduzione sul TV "
-                    "potrebbe interrompersi all'uscita di nstream",
-                    file=sys.stderr,
-                )
-                disconnected = True
-                break
-    except KeyboardInterrupt:
-        bridge.stop(device)
-        if not started:
-            # User abort during the startup wait — not a bridge failure: re-raise so
-            # `cast_file` does NOT degrade to a detached catt re-casting the cancelled
-            # file (`cli._entry` turns this into a clean exit 130). No fallback will
-            # use the temp file, so it is ours to remove (finally shuts the server).
-            _rm(file_path)
-            raise
+        out = cast_delivery.drive_bridge(
+            device, url, follow=True, load_kwargs=kwargs,
+            on_event=on_event, on_started=announce,
+            on_disconnect=disconnect, on_interrupt=abort,
+        )  # fmt: skip
     finally:
+        disconnected = bool(out and out.disconnected)
         if not disconnected:
             server.shutdown()
-        if started and not disconnected:
+        if out and out.started and not disconnected:
             # A started cast ran to its end → clean the temp file (fallback keeps it,
             # and a disconnect leaves it for the still-streaming receiver / GC).
             _rm(file_path)
-    return (pos, dur, False) if started else None
+    if out is None:
+        return None  # failed before started → keep the temp file for the catt fallback
+    return (out.pos, out.dur, False) if out.started else None
 
 
 def _log_catt_stderr(path: str) -> None:

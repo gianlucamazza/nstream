@@ -54,6 +54,7 @@ def _hns(**kw):
         "status": False,
         "browse": None,
         "volume": None,
+        "explain": False,
         "pause": False,
         "resume": False,
         "seek": None,
@@ -1087,3 +1088,27 @@ def test_resume_prefers_in_progress_over_advance(monkeypatch, tmp_path, capsys):
     rc = headless.run_auto(CFG, _hns(cont=True, query=["show"]), _hopts())
     assert rc == 0
     assert played == {"video_id": "tt1:1:5", "selection": "resume"}
+
+
+def test_json_explain_is_read_only_and_structured(monkeypatch, capsys):
+    """--json --explain must diagnose, not play (it used to fall through to the cast
+    path), and emit the ranking as structured data."""
+    stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Dune.2024.1080p.WEB-DL.HEVC.ITA-GRP\n👤 9 💾 8 GB",
+        "url": "http://rd.example/secret-token-abc/dune.mkv",
+    }
+    monkeypatch.setattr(
+        headless.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": "Dune"}]
+    )
+    monkeypatch.setattr(headless.api, "streams", lambda cfg, t, v: [stream])
+    monkeypatch.setattr(headless, "play", _boom("explain must never play"))
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("explain must never cast"))
+    monkeypatch.setattr(headless.stream_select, "prepare_stream", _boom("no vetting either"))
+    rc = headless.run_auto(CFG, _hns(query=["dune"], explain=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "explain" and out["profile"] == "cast"
+    assert out["counts"]["total"] == 1
+    assert out["pick"] is None or "secret-token" not in json.dumps(out)  # never the url
+    row = (out["playable"] + out["excluded"])[0]
+    assert row["resolution"] == 1080 and "score" in row

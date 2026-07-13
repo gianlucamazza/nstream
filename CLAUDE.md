@@ -85,6 +85,11 @@ Modules in `src/nstream/`:
   overriding the user. The stream-cache defaults (bigger demuxer readahead +
   pause-to-rebuffer) mitigate A/V desync on network streams; mirror inherits them too.
   **Imports nothing from `cli`** (no cycle).
+- `cast_delivery.py` — shared castbridge delivery driver (ADR 0011): `drive_bridge` owns the
+  bridge event loop and its policy (failed-before-started → catt fallback, started announce,
+  pos/dur tracking, CAST_DONE finish heuristic, Ctrl-C: receiver stop + per-delivery hook).
+  `caster` and both `remux` bridge branches are thin adapters over it. Leaf (imports only
+  `bridge`/`log` + stdlib); home of the canonical `EventCb` and `CAST_DONE`.
 - `caster.py` — Chromecast playback: `resolve_device()` (via `discovery`: verified cache → short
   bounded wait on the background scan, Ctrl-C skips to local), `cast()` (castbridge LOAD when
   available, else `catt`), status poll, in-cast audio switch (catt-only). Imports `bridge`,
@@ -153,7 +158,7 @@ Modules in `src/nstream/`:
 
 **Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
 imports), `cli` orchestrates at the bottom; everything below `cli` —
-`headless`/`player`/`caster`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/
+`headless`/`player`/`caster`/`cast_delivery`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/
 `engine`/`debrid`/`remux`/`mirror`/`serve`/`bridge`/`net`/`discovery`/`preview`/`explain` — never imports
 `cli`. This is the recurring constraint that explains where logic lives — preserve it when
 moving code.

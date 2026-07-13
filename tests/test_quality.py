@@ -654,3 +654,20 @@ def test_cast_audio_rank_order():
     ac3 = quality.StreamInfo(audio="ac3")
     assert quality._cast_audio_rank(aac) > quality._cast_audio_rank(untagged)
     assert quality._cast_audio_rank(untagged) > quality._cast_audio_rank(ac3)
+
+
+def test_parse_stream_memoized_and_key_complete():
+    """parse_stream is cached per (name, title, infoHash, fileIdx): identical inputs share
+    one StreamInfo; ANY key field change (incl. fileIdx) re-parses."""
+    quality._PARSE_CACHE.clear()
+    s1: Stream = {
+        "name": "[RD+] X\n1080p",
+        "title": "Movie.2024.1080p\n👤 9 💾 8 GB",
+        "infoHash": "aa",
+    }
+    a = quality.parse_stream(s1)
+    b = quality.parse_stream(Stream(**s1))  # equal content, different dict → cache hit
+    assert a is b
+    c = quality.parse_stream({**s1, "fileIdx": 2})
+    assert c is not a and c.file_idx == 2
+    quality._PARSE_CACHE.clear()

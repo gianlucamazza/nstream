@@ -27,6 +27,7 @@ from . import (
     bridge,
     cast_flow,
     caster,
+    explain,
     mirror,
     quality,
     remux,
@@ -243,6 +244,35 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             return 1
         video_id = v["id"]
         title = display_title(name, v)
+
+    if args.explain:
+        # Read-only diagnosis, never plays: the machine-readable twin of the interactive
+        # --explain (fzf-driven, unreachable headless — worse, `--json --explain` used to
+        # fall through to the PLAY path and cast the title it was asked to explain).
+        results = api.streams(cfg, typ, video_id)
+        if not results:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "no_streams",
+                    "message": stream_select.no_streams_message(cfg, typ, video_id, title),
+                }
+            )
+            return 1
+        _emit_json(
+            {
+                "ok": True,
+                "action": "explain",
+                "title": title,
+                "type": typ,
+                "imdb_id": imdb_id,
+                "season": season,
+                "episode": episode,
+                **explain.explain_data(cfg, results, cast=opts.cast),
+                "error": None,
+            }
+        )
+        return 0
 
     if args.probe:
         # Discovery only: list available audio/subtitle languages, never play.

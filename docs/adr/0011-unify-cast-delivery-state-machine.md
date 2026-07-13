@@ -1,8 +1,11 @@
 # 0011. Unify the castbridge→catt cast-delivery state machine
 
-- **Status:** Proposed
-- **Date:** 2026-07-13
+- **Status:** Accepted
+- **Date:** 2026-07-13 (accepted same day — "niente debito tecnico" directive)
 - **Deciders:** project maintainer
+- **Implemented in:** `src/nstream/cast_delivery.py` (new: `drive_bridge` + `BridgeOutcome`);
+  `caster._cast_via_bridge` and both `remux._cast_file_via_bridge` branches are now thin
+  adapters, same day
 
 ## Context
 

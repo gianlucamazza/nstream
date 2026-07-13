@@ -349,6 +349,7 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/player.py`        | local mpv playback: launch, IPC position tracking, hwdec/quiet/lang defaults                                                                   |
 | `src/nstream/caster.py`        | Chromecast playback: device resolution, cast (castbridge or catt), status poll                                                                 |
 | `src/nstream/cast_flow.py`     | shared cast decision tree (`run_cast`): audio vetting → mirror gate → Tier-2 remux → direct cast                                               |
+| `src/nstream/cast_delivery.py` | shared castbridge event-loop driver (`drive_bridge`): fallback policy, pos/dur, Ctrl-C (ADR 0011)                                              |
 | `src/nstream/discovery.py`     | background Chromecast discovery: `catt scan` thread, 24h disk cache, TCP verify (ADR 0010)                                                     |
 | `src/nstream/bridge.py`        | IPC client for the castbridge daemon (metadata-rich LOAD + playback events)                                                                    |
 | `src/nstream/serve.py`         | Range-capable HTTP server delivering the Tier-2 remux file to the TV (+ ufw rule)                                                              |
