@@ -135,7 +135,11 @@ Modules in `src/nstream/`:
   formerly three hand-synced maps. Leaf module (imports nothing from nstream).
 - `config.py` — XDG config load/save (atomic temp+replace), typed schema (incl. `posters`, `nerd_font`);
   also home to the `PlayOpts` per-invocation value object (config-shaped, imported everywhere).
-- `state.py` — watch history (resume / continue-watching).
+- `state.py` — watch history (resume / continue-watching), inter-process locked writes, and
+  the fire-and-return **cast session** (`RunState("watch")`): a headless cast records what's
+  on the TV (`note_started`/`remember_cast`) so `--stop`/`--status` can merge the receiver's
+  real position back into history (`update_from_receiver`) — the headless surface writes
+  history on every path (`--follow`, `--local`, fire-and-return).
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
 - `settings.py` — fzf-based settings menu (debrid token, addons, hwdec, cast device…).
 - `log.py` — rotating file log + crash capture + secret redaction.

@@ -38,7 +38,7 @@ from . import (
 from .api import CAT_MAP
 from .caster import CastUnavailable, device_volume
 from .caster import resolve_device as _resolve_device
-from .config import Config, Meta, PlayOpts, Stream
+from .config import Config, HistoryEntry, Meta, PlayOpts, Stream
 from .labels import display_title
 from .player import play
 from .subs import auto_subs, available_subtitle_langs
@@ -240,8 +240,9 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     else:
         cast_meta = caster.CastMeta(poster=poster)
     return _auto_play(
-        cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection, cast_meta
-    )
+        cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection, cast_meta,
+        name=name,
+    )  # fmt: skip
 
 
 def _auto_play(
@@ -256,6 +257,8 @@ def _auto_play(
     episode: int | None,
     selection: str,
     cast_meta: caster.CastMeta | None = None,
+    *,
+    name: str | None = None,
 ) -> int:
     """Resolve the best stream for one video and play/cast it headlessly, then emit JSON.
     Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
@@ -330,6 +333,19 @@ def _auto_play(
     cast_audio_lang = opts.audio_lang or (cfg.primary or None)
     cast_audio_verified = audio_verified
     cast_sub_lang = vetted.safety_sub_lang or opts.sub_lang
+    subs_delivered = True  # local mpv always renders requested subs; cast paths override
+    # History bookkeeping: the plain show name (the decorated `title` would break the
+    # `-c <titolo>` normalized-title match), and the end position when a path can know it.
+    show_name = name or title
+    hist_pos = hist_dur = 0.0
+
+    def _hist_entry(pos: float, dur: float) -> HistoryEntry:
+        return state.make_entry(
+            video_id, show_name, typ, pos, dur,
+            series_id=imdb_id if typ == "series" else "",
+            season=season or 0, episode=episode or 0,
+        )  # fmt: skip
+
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = state.resume_position(cfg, video_id) if opts.history else None
         if opts.cast:
@@ -369,7 +385,19 @@ def _auto_play(
                 cast_audio_lang, cast_audio_verified = outcome.audio_lang, outcome.audio_verified
             cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang
             sub_paths = outcome.sub_paths
+            subs_delivered = outcome.subs_delivered
             action, reencoded, notice = outcome.action, outcome.reencoded, outcome.notice
+            if args.follow:
+                hist_pos, hist_dur = outcome.pos, outcome.dur
+            elif opts.history:
+                # Fire-and-return: no poll loop ever sees the end position, so at least
+                # record that this title/episode started (a later `-c` proposes it instead
+                # of restarting the series at S01E01); `--stop`/`--status` merge the real
+                # receiver position into it via the cast session.
+                started = _hist_entry(float(start or 0.0), 0.0)
+                state.note_started(cfg, started)
+                if action == "cast":  # mirror has no DMR media session to read back
+                    state.remember_cast(cfg, started, device_name)
             if action == "cast":
                 # Optional explicit volume (closes the loop with the zero-volume detection).
                 if args.volume is not None:
@@ -388,11 +416,16 @@ def _auto_play(
                 cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang
             )
             # Local mpv blocks until the window closes (intended; the user is watching).
-            play(
+            hist_pos, hist_dur, _sig = play(
                 cfg, title, chosen["url"],
                 start=start, sub_paths=sub_paths, cast_enabled=False, work_dir=work_dir,
             )  # fmt: skip
             action = "play"
+
+    # Same guard as the interactive flow: only persist a resume we can reason about —
+    # without a real duration the watched/near-end logic can't ever retire the entry.
+    if opts.history and hist_pos > 0 and hist_dur > 0:
+        state.save_entry(cfg, _hist_entry(hist_pos, hist_dur))
 
     _emit_json(
         {
@@ -412,7 +445,9 @@ def _auto_play(
             "audio_lang": cast_audio_lang,
             "audio_verified": cast_audio_verified,
             "available_audio": list(available_audio),
-            "subtitles": cast_sub_lang if sub_paths else None,
+            # Only claim subtitles the delivery actually attached: the castbridge LOAD has
+            # no subtitle field, so subs riding a bridge cast would be a false positive.
+            "subtitles": cast_sub_lang if (sub_paths and subs_delivered) else None,
             "notice": notice,
             "error": None,
         }
@@ -448,6 +483,7 @@ def _run_auto_resume(
         display_title(entry.get("title", "?"), series.entry_video(entry)),
         entry.get("series_id") or entry["video_id"],
         entry.get("season") or None, entry.get("episode") or None, "resume",
+        name=entry.get("title"),
     )  # fmt: skip
 
 
@@ -472,13 +508,21 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
             _emit_json({"ok": True, "action": "stop", "device": None, "error": None})
             return 0
         return 1
+    # Read the receiver position BEFORE stopping: it's the resume point of a
+    # fire-and-return cast, merged into history via the cast session below.
+    st = caster.status(device)
     ok = caster.stop(device)
     # A castbridge cast lives in the daemon (not in catt), so stop that session too.
     if bridge.bridge_available():
         ok = bridge.stop(device) or ok
     # Also tear down a detached Tier-2 remux server + its temp file, if one is serving.
-    remux.stop(device)
+    # Its success counts: with the TV already unreachable, reclaiming the server and the
+    # multi-GB temp file is a real stop, not a failure.
+    ok = remux.stop(device) or ok
     ok = ok or mirror_stopped
+    state.update_from_receiver(
+        cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0, clear=True
+    )
     _emit_json(
         {"ok": ok, "action": "stop", "device": device, "error": None if ok else "stop_failed"}
     )
@@ -491,5 +535,8 @@ def _run_status(cfg: Config, args: argparse.Namespace) -> int:
     if device is None:
         return 1
     st = caster.status(device)
+    # Keep the fire-and-return resume point fresh: every status poll merges the receiver
+    # position into the cast-session history entry (no-op without a session).
+    state.update_from_receiver(cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0)
     _emit_json({"ok": True, "action": "status", "device": device, **st, "error": None})
     return 0

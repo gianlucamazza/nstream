@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -311,7 +312,7 @@ def _move_to_cast(
     except CastUnavailable as e:
         print(f"nstream: {e}", file=sys.stderr)
         return (pos, dur, False)
-    pos, dur, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
+    pos, dur, _, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
     return (pos, dur, False)
 
 
@@ -622,12 +623,26 @@ def _sub_options(args: argparse.Namespace) -> tuple[str | None, str | None]:
     return (None, None)
 
 
-def _ensure_config() -> Config:
-    """Load config, running first-run onboarding if it's missing."""
+def _json_error(error: str, message: str) -> None:
+    """Emit the one JSON error object the `--json` contract promises on stdout, for
+    failure paths that die before (or outside) `headless.run` — a missing/corrupt
+    config, an unexpected crash. Without it an agent parsing stdout sees nothing."""
+    sys.stdout.write(json.dumps({"ok": False, "error": error, "message": message}) + "\n")
+    sys.stdout.flush()
+
+
+def _ensure_config(*, headless_mode: bool = False) -> Config:
+    """Load config, running first-run onboarding if it's missing. Headless (`--json`)
+    never onboards: the wizard is an interactive fzf/getpass flow, which would hang an
+    agent — it raises instead, and the caller emits the JSON error object."""
     try:
         return load()
     except ConfigError:
         if not config_path().exists():
+            if headless_mode:
+                raise ConfigError(
+                    "config assente — esegui `nstream --settings` per l'onboarding"
+                ) from None
             settings.onboard()  # prompts for the RD token, writes a minimal config
             return load()
         raise
@@ -753,8 +768,10 @@ def main() -> int:
     _log.debug("args: %r", vars(args))
 
     try:
-        cfg = _ensure_config()
+        cfg = _ensure_config(headless_mode=args.json)
     except ConfigError as e:
+        if args.json:
+            _json_error("config", str(e))
         print(f"nstream: {e}", file=sys.stderr)
         return 2
 
@@ -785,6 +802,7 @@ def main() -> int:
     try:
         return _dispatch(cfg, args, opts)
     except api.NetworkError as e:
+        # --json never lands here: headless.run has its own NetworkError → JSON guard.
         _log.warning("network: %s", e)
         print(f"nstream: {e}", file=sys.stderr)
         return 1
@@ -800,7 +818,10 @@ def _entry() -> None:
         sys.exit(130)
     except Exception:
         _log.exception("crash non gestito")
-        print(f"nstream: errore inatteso — dettagli in {log.log_path()}", file=sys.stderr)
+        message = f"errore inatteso — dettagli in {log.log_path()}"
+        if "--json" in sys.argv[1:]:  # pre-argparse: keep the JSON contract even on a crash
+            _json_error("internal", message)
+        print(f"nstream: {message}", file=sys.stderr)
         sys.exit(1)
 
 

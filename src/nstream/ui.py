@@ -14,6 +14,7 @@ import contextlib
 import enum
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +185,19 @@ def set_active_caps(caps: Caps) -> None:
 def active_caps() -> Caps:
     """The caps pinned by `set_active_caps`, or a config-less detection as a fallback."""
     return _active if _active is not None else detect_caps()
+
+
+# C0 control chars (minus \t and \n, which label builders handle explicitly) + DEL.
+# ESC (0x1b) is the one that matters: it opens ANSI/OSC sequences.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def sanitize(text: str) -> str:
+    """Strip terminal control characters from untrusted display text. Release names are
+    attacker-chosen (anyone can name a torrent): an embedded OSC/CSI sequence would be
+    interpreted by the terminal via fzf --ansi or the --explain output (title spoofing,
+    OSC 52 clipboard writes). JSON output doesn't need this — json.dumps escapes them."""
+    return _CONTROL.sub("", text)
 
 
 # --- glyphs -----------------------------------------------------------------

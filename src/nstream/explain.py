@@ -78,7 +78,8 @@ def _row(
     cast: bool = False,
 ) -> str:
     comp = quality.score_components(r.info, audio_langs, cast=cast)
-    name = (r.stream.get("title") or "").split("\n", 1)[0][:60]
+    # Release names are untrusted: strip control/ESC chars before they reach the terminal.
+    name = ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:60]
     return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {name}"
 
 

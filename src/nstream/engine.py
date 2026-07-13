@@ -303,8 +303,11 @@ def _wait_buffer(base: str, file_hash: str) -> None:
             time.sleep(0.5)
         print("", file=sys.stderr)  # newline after the \r progress line
     except KeyboardInterrupt:
+        # Ctrl-C while buffering aborts the whole flow. Converting it to EngineUnavailable
+        # would make the multi-candidate loops read it as "candidate failed → try the next"
+        # and start buffering ANOTHER torrent — the user asked to stop, not to try harder.
         print("", file=sys.stderr)
-        raise EngineUnavailable("buffering interrotto") from None
+        raise
     if filled:
         return
     if preloaded <= 0:  # dead torrent: never a single byte → let the caller degrade

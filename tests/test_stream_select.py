@@ -763,3 +763,31 @@ class _R:
     def __init__(self, stream, languages):
         self.stream = stream
         self.info = type("I", (), {"languages": languages})()
+
+
+def test_pick_audio_verified_cap_checked_before_resolving(monkeypatch):
+    """The probe cap must be enforced BEFORE `_playable_url`: resolving an over-cap
+    candidate can cost a P2P buffering wait / a debrid add for a stream we discard."""
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream(f"u{i}", {"ita"}) for i in range(6)]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    resolved = []
+    monkeypatch.setattr(
+        stream_select, "_playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
+    )
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
+    stream, verified = stream_select.pick_audio_stream_verified(
+        cfg, [], "ita", cast=False, probe_cap=2
+    )
+    assert stream is None and verified is False  # every probed name-match mistagged
+    assert len(resolved) == 2  # over-cap candidates were never resolved
+
+
+def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
+    """Every track `und`: mirror the local guard (unverifiable → cast it) instead of
+    declaring the dub absent — the single mistagged track was often already right."""
+    p = _plan([Track(1, "und", "aac")])
+    assert p.mode == "direct" and p.verified is False and p.real_lang == "ita"
+    p = _plan([Track(1, "und", "ac3")])
+    assert p.mode == "remux" and p.verified is False  # codec still decides the tier

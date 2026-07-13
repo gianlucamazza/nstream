@@ -113,8 +113,12 @@ class RunState:
         return None
 
     def write(self, data: dict) -> None:
+        # O_NOFOLLOW + 0600: on the world-writable /tmp fallback a pre-planted symlink
+        # must not redirect the write (same hardening as bridge's runtime-dir fallback).
         with contextlib.suppress(OSError):
-            self.path.write_text(json.dumps(data))
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data))
 
     def clear(self) -> None:
         with contextlib.suppress(OSError):

@@ -237,3 +237,11 @@ def test_layout_no_poster_without_image_proto():
     lay = ui.layout_for(120, 40, ui.Caps(image_proto=ui.ImageProto.NONE))
     assert lay.show_poster is False
     assert lay.preview_window == "right:50%:wrap"
+
+
+def test_sanitize_strips_terminal_control_chars():
+    hostile = "Movie \x1b]52;c;evil\x07 \x1b[31mRED\x1b[0m\rname"
+    clean = ui.sanitize(hostile)
+    assert "\x1b" not in clean and "\x07" not in clean and "\r" not in clean
+    assert "Movie" in clean and "name" in clean
+    assert ui.sanitize("keep\nlines\tand tabs") == "keep\nlines\tand tabs"

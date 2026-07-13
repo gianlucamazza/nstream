@@ -7,6 +7,7 @@ test_picker.py; here we exercise cli's coordination, mocking play/cast/_resolve_
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 
 import pytest
@@ -644,7 +645,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast",
-        lambda *a, **k: seen.update(device=k.get("device")) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(device=k.get("device")) or (0.0, 0.0, False, False),
     )  # fmt: skip
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
@@ -710,7 +711,7 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
         cli,
         "cast",
         lambda *a, **k: (
-            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False)
+            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False, False)
         ),
     )
     opts = cli.PlayOpts(
@@ -843,7 +844,7 @@ def test_play_on_cast_remux_success_uses_cast_file(monkeypatch):
         cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
             seen.update(path=path, follow=k.get("follow"), start=k.get("start"))
-            or (0.0, 0.0, False)
+            or (0.0, 0.0, False, False)
         ),
     )  # fmt: skip
     monkeypatch.setattr(
@@ -865,7 +866,9 @@ def test_play_on_cast_remux_failure_degrades_to_direct(monkeypatch, capsys):
         cast_flow.remux, "cast_file", _boom("cast_file must not run without a remux")
     )
     monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False)
+        cast_flow.caster,
+        "cast",
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
     )
     _call_cast(_cast_opts(), stream)
     assert "remux non riuscito" in capsys.readouterr().err
@@ -879,7 +882,9 @@ def test_play_on_cast_absent_safety_subs_then_direct(monkeypatch, capsys):
     seen = _wire_cast_tree(monkeypatch, _plan("absent", stream, real_lang="eng"))
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
     monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False)
+        cast_flow.caster,
+        "cast",
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
     )
     _call_cast(_cast_opts(), stream)
     err = capsys.readouterr().err
@@ -918,7 +923,7 @@ def test_play_on_cast_mirror_downgraded_when_decodable(monkeypatch, capsys):
         cast_flow.mirror, "cast_via_mirror", _boom("mirror must not run for decodable audio")
     )
     monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False)
+        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False, False)
     )
     _call_cast(_cast_opts(mirror=True), stream)
     assert "mirror non necessario" in capsys.readouterr().err
@@ -933,7 +938,7 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
     monkeypatch.setattr(
         cast_flow.caster, "cast",
         lambda *a, **k: (
-            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False)
+            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False, False)
         ),
     )  # fmt: skip
     _call_cast(_cast_opts(), stream)
@@ -1036,7 +1041,7 @@ def _run_main(monkeypatch, argv, cfg, dispatch=None):
 
     monkeypatch.setattr(cli.sys, "argv", ["nstream", *argv])
     monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "_ensure_config", lambda: cfg)
+    monkeypatch.setattr(cli, "_ensure_config", lambda **k: cfg)
     monkeypatch.setattr(cli, "_init_theme", lambda c: None)
     monkeypatch.setattr(cli, "_dispatch", dispatch or fake_dispatch)
     return cli.main(), captured
@@ -1113,7 +1118,7 @@ def test_main_explain_without_query_is_usage_error(monkeypatch, capsys):
     cfg = Config(torrentio_base="tb")
     monkeypatch.setattr(cli.sys, "argv", ["nstream", "--explain"])
     monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
-    monkeypatch.setattr(cli, "_ensure_config", lambda: cfg)
+    monkeypatch.setattr(cli, "_ensure_config", lambda **k: cfg)
     monkeypatch.setattr(cli, "_init_theme", lambda c: None)
     assert cli.main() == 2
     assert "--explain richiede un titolo" in capsys.readouterr().err
@@ -1131,7 +1136,7 @@ def test_main_network_error_from_dispatch_returns_1(monkeypatch, capsys):
 
 
 def test_main_config_error_returns_2(monkeypatch, capsys):
-    def bad_config():
+    def bad_config(**kwargs):
         raise cli.ConfigError("config rotta")
 
     monkeypatch.setattr(cli.sys, "argv", ["nstream", "dune"])
@@ -1167,3 +1172,36 @@ def test_entry_exit_codes(monkeypatch, capsys, outcome, code):
     assert e.value.code == code
     if outcome == "crash":
         assert "errore inatteso" in capsys.readouterr().err
+
+
+# --- M2: the --json contract on bootstrap/crash paths ------------------------
+
+
+def test_main_json_config_error_emits_json_object(monkeypatch, capsys):
+    def bad_config(**kwargs):
+        raise cli.ConfigError("config rotta")
+
+    monkeypatch.setattr(cli.sys, "argv", ["nstream", "--json", "dune"])
+    monkeypatch.setattr(cli.log, "setup_logging", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_ensure_config", bad_config)
+    assert cli.main() == 2
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)  # an agent parsing stdout still gets its one JSON object
+    assert out == {"ok": False, "error": "config", "message": "config rotta"}
+    assert "config rotta" in cap.err
+
+
+def test_ensure_config_headless_never_onboards(monkeypatch, tmp_path):
+    """--json is no-fzf by contract: a missing config must raise (→ JSON error),
+    never open the interactive onboarding wizard under an agent."""
+
+    def no_config():
+        raise cli.ConfigError("manca")
+
+    monkeypatch.setattr(cli, "load", no_config)
+    monkeypatch.setattr(cli, "config_path", lambda: tmp_path / "assente.json")
+    monkeypatch.setattr(
+        cli.settings, "onboard", lambda: pytest.fail("onboard must not run headless")
+    )
+    with pytest.raises(cli.ConfigError, match="--settings"):
+        cli._ensure_config(headless_mode=True)

@@ -149,12 +149,16 @@ def pick_audio_stream_verified(
     name_pick: Stream | None = None
     probed = 0
     for r in _playable_set(cfg, results, cast=cast):
-        if lang not in r.info.languages or not _playable_url(cfg, r.stream):
+        if lang not in r.info.languages:
+            continue
+        if probed >= probe_cap:
+            # Cap checked BEFORE resolving: `_playable_url` on an over-cap candidate can
+            # cost a P2P buffering wait (or a debrid add) for a stream we'd discard anyway.
+            break
+        if not _playable_url(cfg, r.stream):
             continue
         if name_pick is None:
             name_pick = r.stream
-        if probed >= probe_cap:
-            break
         probed += 1
         real = stream_audio_langs(cfg, r.stream)
         if real is None:
@@ -221,6 +225,13 @@ def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) 
     if not target_lang:  # no language preference: codec-only decision on the default track
         mode = "remux" if remux.needs_remux(c0) else "direct"
         return CastAudioPlan(mode, stream, 0, codes[0], verified=True)
+    if not any(codes):
+        # Every track's language is unknown (und/untagged): mirror the local guard's benefit
+        # of the doubt instead of declaring the dub absent — a single ita track tagged `und`
+        # was already right, and "absent" would force wrong subs + report the wrong lang.
+        # The codec still decides direct vs remux.
+        mode = "remux" if remux.needs_remux(c0) else "direct"
+        return CastAudioPlan(mode, stream, 0, target_lang or None, verified=False)
     if codes[0] == target_lang and remux._decodable(c0):
         return CastAudioPlan("direct", stream, 0, target_lang, verified=True)
     k = next((i for i, c in enumerate(codes) if c == target_lang), None)
