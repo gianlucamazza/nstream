@@ -54,6 +54,9 @@ def _hns(**kw):
         "status": False,
         "browse": None,
         "volume": None,
+        "pause": False,
+        "resume": False,
+        "seek": None,
         "follow": None,  # BooleanOptionalAction default → fire-and-return
         "movies": False,
         "series": False,
@@ -849,3 +852,238 @@ def test_subtitles_not_reported_when_delivery_drops_them(monkeypatch, capsys):
     out = json.loads(cap.out)
     assert rc == 0 and out["subtitles"] is None
     assert "sottotitoli non supportati" in cap.err  # honesty notice on stderr
+
+
+def test_auto_play_session_stores_resolved_ip(monkeypatch, tmp_path, capsys):
+    """Regression (cold review, HIGH): with cast_device configured the session must be
+    keyed by the resolved IP — --stop/--status compare against resolve_device()'s IP,
+    so a name key ("Salotto") would never match and the merge would be inert."""
+    cfg = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], cast_device="Salotto")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless, "_resolve_device", lambda c, **k: "192.168.1.9")
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
+    monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
+    rc = headless.run_auto(cfg, _hns(query=["dune"]), _hist_opts(cast=True))
+    assert rc == 0
+    session = headless.state.util.RunState(headless.state.CAST_SESSION).read()
+    assert session is not None
+    assert session["device"] == "192.168.1.9"  # the IP, not "Salotto"
+    # …and the loop closes: a later --stop with the resolved IP merges the position
+    monkeypatch.setattr(headless.mirror, "stop", lambda: False)
+    monkeypatch.setattr(
+        headless.caster, "status",
+        lambda device: {"player_state": "PLAYING", "title": "Dune", "position": 900.0,
+                        "duration": 5000.0, "volume": 0.4, "muted": False},
+    )  # fmt: skip
+    monkeypatch.setattr(headless.caster, "stop", lambda device: True)
+    monkeypatch.setattr(headless.remux, "stop", lambda device: False)
+    rc = headless.run_auto(cfg, _hns(stop=True), _hopts(cast=True))
+    assert rc == 0
+    assert headless.state.load_history(cfg)["tt1"]["position"] == 900.0
+
+
+def test_run_status_title_mismatch_no_merge(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    headless.state.remember_cast(
+        CFG, headless.state.make_entry("tt9", "Dune", "movie", 0.0, 0.0), "192.168.1.5"
+    )
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        headless.caster, "status",
+        lambda device: {"player_state": "PLAYING", "title": "Peppa Pig", "position": 300.0,
+                        "duration": 900.0, "volume": 0.4, "muted": False},
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(status=True), _hopts(cast=True))
+    assert rc == 0
+    assert headless.state.load_history(CFG) == {}  # foreign position NOT attributed
+    assert headless.state.util.RunState(headless.state.CAST_SESSION).read() is None
+
+
+# --- quick-win lifecycle actions (pause/resume/seek, standalone volume, episodes) ----
+
+
+def test_run_control_pause_via_bridge(monkeypatch, capsys):
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(headless.bridge, "bridge_available", lambda: True)
+    seen = {}
+    monkeypatch.setattr(
+        headless.bridge, "control",
+        lambda ip, cmd, value=0.0: seen.update(ip=ip, cmd=cmd, value=value) or True,
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(pause=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["ok"] is True and out["action"] == "pause"
+    assert seen == {"ip": "192.168.1.5", "cmd": "pause", "value": 0.0}
+
+
+def test_run_control_seek_falls_back_to_catt(monkeypatch, capsys):
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    # conftest: bridge_available is already False → catt path
+    calls = []
+
+    class _Res:
+        returncode = 0
+
+    monkeypatch.setattr(headless.util, "run_cmd", lambda a, **k: calls.append(a) or _Res())
+    rc = headless.run_auto(CFG, _hns(seek=125.0), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "seek" and out["seek"] == 125.0
+    assert calls == [["catt", "-d", "192.168.1.5", "seek", "125"]]
+
+
+def test_run_control_resume_failure_sets_error(monkeypatch, capsys):
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(headless.util, "run_cmd", lambda a, **k: None)  # catt missing
+    rc = headless.run_auto(CFG, _hns(resume=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False and out["error"] == "control_failed"
+
+
+def test_run_volume_standalone(monkeypatch, capsys):
+    """--json --volume N with no title acts on the current cast (it used to require
+    re-casting a whole title)."""
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    seen = {}
+    monkeypatch.setattr(
+        headless.caster, "set_volume", lambda device, n: seen.update(device=device, n=n) or True
+    )
+    rc = headless.run_auto(CFG, _hns(volume=35), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "volume" and out["volume"] == 35
+    assert seen == {"device": "192.168.1.5", "n": 35}
+
+
+def test_volume_with_title_still_casts(monkeypatch, capsys):
+    """--volume alongside a title keeps the historical start-volume semantics."""
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
+    monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
+    seen = {}
+    monkeypatch.setattr(headless.caster, "set_volume", lambda device, n: seen.update(n=n) or True)
+    rc = headless.run_auto(CFG, _hns(query=["dune"], volume=40), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "cast"
+    assert seen == {"n": 40}
+
+
+def test_probe_series_without_episode_lists_episodes(monkeypatch, capsys):
+    monkeypatch.setattr(
+        headless.api, "search", lambda cfg, q: [{"id": "tt1", "type": "series", "name": "Show"}]
+    )
+    monkeypatch.setattr(
+        headless.api, "episodes",
+        lambda cfg, sid: [
+            {"id": "tt1:1:1", "season": 1, "episode": 1, "name": "Pilot"},
+            {"id": "tt1:1:2", "season": 1, "episode": 2, "name": "Two"},
+            {"id": "tt1:2:1", "season": 2, "episode": 1, "name": "S2 opener"},
+        ],
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(query=["show"], probe=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "episodes"
+    assert [e["episode"] for e in out["episodes"]] == [1, 2, 1]
+    # --season narrows
+    rc = headless.run_auto(CFG, _hns(query=["show"], probe=True, season=2), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert [(e["season"], e["title"]) for e in out["episodes"]] == [(2, "S2 opener")]
+
+
+# --- auto-advance: -c on a finished episode casts the next one ---------------
+
+
+def _wire_advance(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    headless.state.save_entry(
+        CFG,
+        headless.state.make_entry(
+            "tt1:1:4", "Show", "series", 2950.0, 3000.0, series_id="tt1", season=1, episode=4
+        ),
+    )
+    monkeypatch.setattr(
+        headless.api, "episodes",
+        lambda cfg, sid: [
+            {"id": "tt1:1:4", "season": 1, "episode": 4, "name": "Four"},
+            {"id": "tt1:1:5", "season": 1, "episode": 5, "name": "Five"},
+        ],
+    )  # fmt: skip
+
+
+def test_resume_advances_to_next_episode(monkeypatch, tmp_path, capsys):
+    _wire_advance(monkeypatch, tmp_path)
+    played = {}
+
+    def fake_auto_play(
+        cfg,
+        args,
+        opts,
+        typ,
+        video_id,
+        title,
+        imdb_id,
+        season,
+        episode,
+        selection,
+        cast_meta=None,
+        *,
+        name=None,
+    ):
+        played.update(video_id=video_id, season=season, episode=episode, selection=selection)
+        return 0
+
+    monkeypatch.setattr(headless, "_auto_play", fake_auto_play)
+    rc = headless.run_auto(CFG, _hns(cont=True, query=["show"]), _hopts())
+    assert rc == 0
+    assert played == {"video_id": "tt1:1:5", "season": 1, "episode": 5, "selection": "next"}
+
+
+def test_resume_series_completed(monkeypatch, tmp_path, capsys):
+    _wire_advance(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        headless.api,
+        "episodes",
+        lambda cfg, sid: [{"id": "tt1:1:4", "season": 1, "episode": 4, "name": "Four"}],
+    )
+    rc = headless.run_auto(CFG, _hns(cont=True, query=["show"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "series_completed"
+    assert "S01E04" in out["message"]
+
+
+def test_resume_prefers_in_progress_over_advance(monkeypatch, tmp_path, capsys):
+    """A partially-watched episode still resumes itself; advance only kicks in when
+    the matched episode is finished."""
+    _wire_advance(monkeypatch, tmp_path)
+    headless.state.save_entry(
+        CFG,
+        headless.state.make_entry(
+            "tt1:1:5", "Show", "series", 600.0, 3000.0, series_id="tt1", season=1, episode=5
+        ),
+    )
+    played = {}
+
+    def fake_auto_play(
+        cfg,
+        args,
+        opts,
+        typ,
+        video_id,
+        title,
+        imdb_id,
+        season,
+        episode,
+        selection,
+        cast_meta=None,
+        *,
+        name=None,
+    ):
+        played.update(video_id=video_id, selection=selection)
+        return 0
+
+    monkeypatch.setattr(headless, "_auto_play", fake_auto_play)
+    rc = headless.run_auto(CFG, _hns(cont=True, query=["show"]), _hopts())
+    assert rc == 0
+    assert played == {"video_id": "tt1:1:5", "selection": "resume"}

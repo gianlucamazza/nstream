@@ -23,7 +23,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from . import caster, engine, log, mirror, quality, remux, stream_select, subs, ui
+from . import caster, engine, log, mirror, quality, remux, state, stream_select, subs, ui
 from .config import Config, PlayOpts, Stream
 
 _log = log.get_logger("cast_flow")
@@ -83,6 +83,9 @@ def run_cast(
     an extra rank pass) — leave it False on headless paths. `follow=False` (headless
     fire-and-return) also detaches a TorrServer the engine may have spawned, so the TV
     keeps streaming past process exit."""
+    # A new cast replaces the TV's content: a previous fire-and-return session no longer
+    # describes it (the headless caller re-writes a fresh one right after this returns).
+    state.clear_cast_session()
     target_lang = opts.audio_lang or cfg.primary
     plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
     chosen = plan.stream

@@ -295,15 +295,25 @@ def test_run_ffmpeg_launch_failure_returns_none():
 class _Proc:
     """A fake detached serving process (catt / `python -m nstream.serve`)."""
 
-    def __init__(self, pid=4242, wait_exc=None):
+    def __init__(self, pid=4242, wait_exc=None, polls_alive=1):
         self.pid = pid
         self.wait_calls = 0
+        self.poll_calls = 0
         self._wait_exc = wait_exc
+        self._polls_alive = polls_alive
 
     def wait(self):
         self.wait_calls += 1
         if self._wait_exc:
             raise self._wait_exc
+
+    def poll(self):
+        """None while "alive" for the first `polls_alive` checks, then 0 (exited).
+        `wait_exc` raises here too — models Ctrl-C during the follow poll loop."""
+        self.poll_calls += 1
+        if self._wait_exc:
+            raise self._wait_exc
+        return None if self.poll_calls <= self._polls_alive else 0
 
 
 def _catt_wiring(monkeypatch, *, await_start=True, proc=None):
@@ -317,6 +327,19 @@ def _catt_wiring(monkeypatch, *, await_start=True, proc=None):
     monkeypatch.setattr(remux.serve, "firewall_hint", lambda ip, port=None: "FIREWALL-HINT")
     monkeypatch.setattr(remux, "_await_start", lambda dev: await_start)
     monkeypatch.setattr(remux, "_kill", lambda pid: rec["killed"].append(pid))
+    monkeypatch.setattr(remux, "_STATUS_POLL", 0.0)  # the follow loop must not sleep 15s
+    monkeypatch.setattr(
+        remux.caster,
+        "status",
+        lambda dev: {
+            "player_state": "IDLE",
+            "title": None,
+            "position": 0.0,
+            "duration": 0.0,
+            "volume": None,
+            "muted": False,
+        },
+    )
 
     def popen(args, **kw):
         rec["popen"].append((list(args), kw))
@@ -389,7 +412,7 @@ def test_cast_file_catt_follow_waits_then_tears_down(monkeypatch, tmp_path):
     rec, proc = _catt_wiring(monkeypatch)
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
     assert out == (0.0, 0.0, False, False)
-    assert proc.wait_calls == 1  # blocked until playback end
+    assert proc.poll_calls >= 1  # followed until the serving catt exited
     assert rec["killed"] == [4242]  # _teardown reaps the serving catt
     assert not f.exists()
     assert remux._read_state() is None
@@ -751,3 +774,27 @@ def test_remux_to_file_ctrl_c_removes_partial(monkeypatch, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         remux.remux_to_file("http://u", _cfg())
     assert list(tmp_path.glob("cast-*.mp4")) == []
+
+
+def test_cast_file_follow_catt_reports_progress(monkeypatch, tmp_path):
+    """The catt follow branch must honour the (position, duration, …) contract like
+    caster.cast — without the poll a Tier-2 --follow cast left no resume point."""
+    f = _tmp_remux(tmp_path)
+    rec, proc = _catt_wiring(monkeypatch, proc=_Proc(polls_alive=2))
+    positions = iter([(300.0, 5000.0), (1200.0, 5000.0)])
+
+    def status(dev):
+        pos, dur = next(positions, (0.0, 0.0))
+        return {
+            "player_state": "PLAYING",
+            "title": "T",
+            "position": pos,
+            "duration": dur,
+            "volume": None,
+            "muted": False,
+        }
+
+    monkeypatch.setattr(remux.caster, "status", status)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out == (1200.0, 5000.0, False, False)  # last known position wins
+    assert rec["killed"] == [4242] and not f.exists()  # teardown unchanged

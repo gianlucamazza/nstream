@@ -11,8 +11,9 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import cast
 
 from . import util
@@ -105,7 +106,15 @@ def _history_lock() -> Iterator[None]:
         os.close(fd)
 
 
-def save_entry(cfg: Config, entry: HistoryEntry) -> None:
+# A "started" entry (duration 0, no real position ever merged) is clutter in
+# continue-watching past this age — pruned on every history write.
+STARTED_TTL = 7 * 86400.0
+
+
+def save_entry(cfg: Config, entry: HistoryEntry, *, drop: Iterable[str] = ()) -> None:
+    """Persist `entry` (or retire it when watched). `drop` retires additional video_ids
+    in the same locked write — used by `note_started` to replace a binge's stale
+    zero-progress siblings without a second read-modify-write cycle."""
     if not cfg.history_enabled:
         return
     vid = entry.get("video_id")
@@ -115,10 +124,28 @@ def save_entry(cfg: Config, entry: HistoryEntry) -> None:
         state_path().parent.mkdir(parents=True, exist_ok=True)
     with _history_lock():
         history = load_history(cfg)
-        if _watched(entry):
-            history.pop(vid, None)
-        else:
+        for stale in drop:
+            history.pop(stale, None)
+        now = time.time()
+        for aged in [
+            k
+            for k, e in history.items()
+            # Aged clutter: zero-progress "started" entries, and watched series episodes
+            # kept only for next-episode resume (a resume that never came in a week
+            # isn't coming — the binge is over or moved on).
+            if (not e.get("duration") or (e.get("type") == "series" and _watched(e)))
+            and now - (e.get("ts") or 0.0) > STARTED_TTL
+        ]:
+            history.pop(aged, None)
+        if not _watched(entry):
             history[vid] = entry
+        elif entry.get("type") == "series":
+            # Keep the finished episode (recent() hides it via _watched) so a headless
+            # resume can compute "next episode"; it is retired when the next one starts
+            # (note_started drops watched siblings).
+            history[vid] = entry
+        else:
+            history.pop(vid, None)
 
         util.atomic_write(
             state_path(),
@@ -131,16 +158,73 @@ def note_started(cfg: Config, entry: HistoryEntry) -> None:
     """Record that playback of `entry` started when the end position can't be known
     (headless fire-and-return cast: no poll loop runs). Keeps a previously known
     duration so the watched/near-end logic stays meaningful; the real position lands
-    later via `update_from_receiver` (`--stop`/`--status`)."""
-    prev = load_history(cfg).get(entry.get("video_id", ""))
+    later via `update_from_receiver` (`--stop`/`--status`). For a series, sibling
+    episodes still at zero progress are retired in the same write — a binge leaves
+    only the latest started episode, while siblings with real progress stay."""
+    history = load_history(cfg)
+    prev = history.get(entry.get("video_id", ""))
     if prev and not entry.get("duration"):
         entry["duration"] = prev.get("duration", 0.0)
-    save_entry(cfg, entry)
+    drop: tuple[str, ...] = ()
+    if entry.get("type") == "series" and entry.get("series_id"):
+        # Retire zero-progress siblings (a binge leaves only the latest started) AND
+        # watched ones (kept only so resume could advance — this start IS the advance).
+        drop = tuple(
+            vid
+            for vid, e in history.items()
+            if e.get("series_id") == entry["series_id"]
+            and vid != entry.get("video_id")
+            and (not e.get("duration") or _watched(e))
+        )
+    save_entry(cfg, entry, drop=drop)
 
 
 # RunState slot for the receiver-side session of a fire-and-return cast: which entry is
 # on the TV, so a later `--stop`/`--status` can attribute the receiver's position to it.
 CAST_SESSION = "watch"
+
+# Past this age a session no longer plausibly describes what's on the TV (any film plus
+# a generous pause fits well within it; every new cast rewrites the session anyway).
+CAST_SESSION_TTL = 6 * 3600.0
+
+
+def clear_cast_session() -> None:
+    """Drop the fire-and-return cast session, if any. Called at the start of every new
+    cast (`cast_flow.run_cast` / Alt-C): the new content replaces what the session
+    described, and a stale session would attribute the receiver's position to it."""
+    util.RunState(CAST_SESSION).clear()
+
+
+def expire_cast_session() -> None:
+    """Best-effort: drop the cast session once its TTL has passed. Called at every
+    headless entry, so an agent that never issues `--stop` doesn't leave a dead session
+    around for a later poll to trip on."""
+    run_state = util.RunState(CAST_SESSION)
+    session = run_state.read()
+    if session and time.time() - (session.get("ts") or 0.0) > CAST_SESSION_TTL:
+        run_state.clear()
+
+
+def _norm_title(s: str) -> str:
+    """Casefold + alnum-only for tolerant title comparison. Deliberate small duplicate
+    of `headless._norm_title`: state must not import headless (layering)."""
+    return "".join(c for c in s.casefold() if c.isalnum())
+
+
+def _session_title_matches(session_title: str, receiver_title: str) -> bool:
+    """Whether the receiver's now-playing title plausibly IS the session's content.
+    The receiver title varies by sender — castbridge reports the decorated display
+    title ("Mr. Robot · S01E04 · …"), catt the release filename, and the Tier-2 catt
+    fallback our own `cast-*.mp4` temp name — so match by normalized substring in
+    either direction, and treat an empty/artifact title as not-applicable (True:
+    the session TTL decides alone)."""
+    r = _norm_title(receiver_title)
+    if not r or re.fullmatch(r"cast[0-9a-z_]*mp4", r):
+        return True
+    s = _norm_title(session_title)
+    if not s:
+        return True
+    return s in r or r in s
 
 
 def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
@@ -152,17 +236,34 @@ def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
 
 
 def update_from_receiver(
-    cfg: Config, device: str | None, position: float, duration: float, *, clear: bool = False
+    cfg: Config,
+    device: str | None,
+    position: float,
+    duration: float,
+    *,
+    title: str | None = None,
+    clear: bool = False,
 ) -> bool:
     """Merge a receiver-reported position into the session entry saved by `remember_cast`,
-    if one exists for `device`. Returns True when an entry was persisted. `clear` drops
-    the session file afterwards (the `--stop` one-shot); a zero/idle position still clears
-    but persists nothing."""
+    if one exists for `device` and still plausibly describes what the TV is playing.
+    Returns True when the merged position was accepted (written, or the entry retired by
+    the watched logic). `clear` drops the session file afterwards (the `--stop` one-shot);
+    a zero/idle position still clears but persists nothing. Two staleness guards protect
+    the entry from a position that belongs to some other content: the session TTL, and an
+    opportunistic match of `title` (the receiver's now-playing title, when it carries one)
+    against the session's — a stale session is dropped so later polls can't corrupt it."""
     run_state = util.RunState(CAST_SESSION)
     session = run_state.read()
     if not session:
         return False
+    if time.time() - (session.get("ts") or 0.0) > CAST_SESSION_TTL:
+        run_state.clear()
+        return False
+    # No clear on a device mismatch: the session may belong to another (still live) TV.
     if device and session.get("device") and session["device"] != device:
+        return False
+    if title and not _session_title_matches(session.get("title") or "", title):
+        run_state.clear()  # the TV is playing something else: this session is dead
         return False
     if clear:
         run_state.clear()
@@ -172,6 +273,15 @@ def update_from_receiver(
     merged.update(position=position, duration=duration, ts=time.time())
     save_entry(cfg, cast(HistoryEntry, merged))
     return True
+
+
+def watched_series(cfg: Config) -> list[HistoryEntry]:
+    """Finished series episodes, most recent first. Kept in history (hidden from
+    `recent()` by the watched logic) exactly for this: a headless resume on a finished
+    episode advances to the next one instead of coming up empty."""
+    entries = [e for e in load_history(cfg).values() if e.get("type") == "series" and _watched(e)]
+    entries.sort(key=lambda e: e.get("ts", 0.0), reverse=True)
+    return entries
 
 
 def recent(cfg: Config, limit: int = 30, typ: str | None = None) -> list[HistoryEntry]:

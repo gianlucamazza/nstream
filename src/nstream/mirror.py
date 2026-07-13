@@ -18,7 +18,7 @@ The correct, source-clean topology (validated live):
     buffer (which starves the audio in-flight budget into constant drops at ~110ms RTT) is
     replaced by a roomy one.
 
-Leaf module below `cli` (imports `player`/`caster`/`config`/`log` + stdlib), like `remux`.
+Leaf module below `cli` (imports `player`/`config`/`log`/`ui`/`util` + stdlib), like `remux`.
 """
 
 from __future__ import annotations

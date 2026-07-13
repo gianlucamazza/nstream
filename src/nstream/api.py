@@ -238,7 +238,21 @@ def meta_cached_disk(cfg: Config, typ: str, video_id: str) -> dict:
                 lambda f: json.dump({"ts": time.time(), "meta": fresh}, f, ensure_ascii=False),
                 prefix=".meta-",
             )
+        _prune_meta_cache(path.parent)
     return fresh
+
+
+def _prune_meta_cache(cache_dir: Path) -> None:
+    """Best-effort: drop expired meta entries. The TTL is only checked on read, so files
+    for titles never revisited would accumulate forever (posters and remuxes have their
+    own GC; this closes the meta gap). Runs only on a cache-miss write — hits, the
+    per-row hot path, pay nothing."""
+    cutoff = time.time() - _META_TTL
+    with contextlib.suppress(OSError):
+        for p in cache_dir.iterdir():
+            with contextlib.suppress(OSError):
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink()
 
 
 def episodes(cfg: Config, series_id: str) -> list[Video]:

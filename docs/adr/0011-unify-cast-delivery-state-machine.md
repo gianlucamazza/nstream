@@ -60,6 +60,10 @@ Options considered:
   monkeypatch seams).
 - Until accepted and implemented, cross-cutting changes must be applied to all three copies
   — this ADR is the reminder of where they live.
+- Known single-slot limits to revisit here: `RunState("remux")` (a second Tier-2 cast to a
+  different TV reaps the first one's server) and `RunState("watch")` (one cast session) are
+  both single-slot by design — fine for one TV, wrong for multi-device. If multi-device ever
+  matters, per-device slots belong in the unified delivery layer.
 
 ## References
 

@@ -27,23 +27,29 @@ object on stdout**; parse it and confirm the outcome to the user.
 
 Always pass `--json`. Quote the title.
 
-| Intent | Command |
-|--------|---------|
-| "metti X sul TV" / "casta X" | `nstream --json --cast "X"` |
-| "guarda X" / "riproduci X in locale" | `nstream --json --local "X"` |
-| disambiguate by year | `nstream --json --cast --year 1999 "X"` |
-| a specific series episode | `nstream --json --cast --season 1 --episode 3 "X"` |
-| target a specific TV | `nstream --json --cast --device "Salotto" "X"` |
-| with subtitles | add `--subs` (preferred lang) or `--sub-lang ita` |
-| force the audio/dub language | add `--audio-lang eng` (e.g. original audio + `--sub-lang ita`) |
-| list available audio/subs (no play) | `nstream --json --probe "X"` |
-| resume last watched | `nstream --json -c "X"` (or no title for the most recent) |
-| something popular / new / top-rated | `nstream --json --cast --browse popolari\|nuovi\|top` |
-| stop what's casting | `nstream --json --stop` |
-| what's casting now | `nstream --json --status` |
-| set the TV volume | `nstream --json --cast --volume 35 "X"` (0–100) |
+| Intent                               | Command                                                                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| "metti X sul TV" / "casta X"         | `nstream --json --cast "X"`                                                                                                 |
+| "guarda X" / "riproduci X in locale" | `nstream --json --local "X"`                                                                                                |
+| disambiguate by year                 | `nstream --json --cast --year 1999 "X"`                                                                                     |
+| a specific series episode            | `nstream --json --cast --season 1 --episode 3 "X"`                                                                          |
+| target a specific TV                 | `nstream --json --cast --device "Salotto" "X"`                                                                              |
+| with subtitles                       | add `--subs` (preferred lang) or `--sub-lang ita`                                                                           |
+| force the audio/dub language         | add `--audio-lang eng` (e.g. original audio + `--sub-lang ita`)                                                             |
+| list available audio/subs (no play)  | `nstream --json --probe "X"`                                                                                                |
+| resume last watched                  | `nstream --json -c "X"` (or no title for the most recent)                                                                   |
+| next episode after finishing one     | `nstream --json --cast -c "X"` (auto-advances when the last episode is finished; `error: series_completed` past the finale) |
+| list a series' episodes              | `nstream --json --probe "X"` without `--episode` (add `--season N` to narrow)                                               |
+| something popular / new / top-rated  | `nstream --json --cast --browse popolari\|nuovi\|top`                                                                       |
+| stop what's casting                  | `nstream --json --stop`                                                                                                     |
+| what's casting now                   | `nstream --json --status`                                                                                                   |
+| pause / resume the cast              | `nstream --json --pause` / `nstream --json --resume`                                                                        |
+| jump to a position                   | `nstream --json --seek 1250` (seconds)                                                                                      |
+| set the TV volume (cast in progress) | `nstream --json --volume 35` (0–100, no title needed)                                                                       |
+| set the start volume of a new cast   | `nstream --json --cast --volume 35 "X"`                                                                                     |
 
 ### Audio & subtitles
+
 - **Subtitles**: `--sub-lang ita` forces Italian subs; `--subs` picks your preferred language.
   The play result reports the active `subtitles` lang.
 - **Audio/dub**: `--audio-lang CODE` forces a specific dub (e.g. `eng` for original audio). If no
@@ -63,6 +69,7 @@ Always pass `--json`. Quote the title.
   wrong dub.
 
 ### Tier-2 remux (Dolby/DTS audio → native-fidelity cast)
+
 - The Chromecast plays HEVC/4K/HDR video natively but **can't decode AC-3/E-AC-3/DTS/TrueHD**
   (silent). nstream now **remuxes on the host** for those titles — keeps the original video
   (`-c copy`, so 4K/HDR/HEVC are preserved) and transcodes only the audio to AAC, then casts the
@@ -74,7 +81,7 @@ Always pass `--json`. Quote the title.
 - The play result adds **`reencoded: true`** when a Tier-2 remux was used (video native, audio→AAC);
   `false` for a direct cast. Mention it if the user asks why a Dolby title took a moment to start.
 - To avoid a pathological fetch, the selector **caps remuxed releases to 1080p by default** (a 4K
-  remux means a 30-60 GB download, while a *direct* 4K cast streams for free): among Dolby-only
+  remux means a 30-60 GB download, while a _direct_ 4K cast streams for free): among Dolby-only
   titles it prefers a 1080p release over a 4K one. It's a preference — a sole 4K Dolby release is
   still cast — and lifts to whatever `cast_remux_max_resolution` is (0 = no cap). Native-AAC titles
   are never capped (they cast direct, no download).
@@ -84,6 +91,7 @@ Always pass `--json`. Quote the title.
   stopped, the next run garbage-collects the stale temp file.
 
 ### Cast lifecycle (nstream is now self-sufficient)
+
 - `nstream --json --status` → `player_state`, `title`, `position`, `duration`, `volume`, `muted`
   of the receiver (use for "what's playing / is it still on?"). Also refreshes the resume
   point of a fire-and-return cast in the watch history (cast session).
@@ -94,6 +102,7 @@ Always pass `--json`. Quote the title.
 - (For mirroring the desktop or casting an arbitrary file/URL, still use the `skill-cast` skill.)
 
 Notes:
+
 - **Cast is fire-and-return by default** (`--no-follow` implied): the command returns as soon as
   the receiver has the media. The cast is still recorded in the watch history (a "started"
   entry + cast session): prefer `--json --stop` to end it so the position is persisted, and
@@ -124,6 +133,7 @@ stdout is always a single JSON object. Read `ok`:
 - `ok: false` → handle by `error` code (below).
 
 ### Error codes
+
 - `no_result` — nothing matched the title. Offer to retry with a different spelling or add a year.
 - `no_streams` — title found but no sources (often "not released yet"); surface `message`.
 - `no_playable_stream` — sources exist but none pass the hardware/cast filters; suggest `--local`

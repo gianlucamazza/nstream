@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from nstream import cast_flow
-from nstream.config import Config, PlayOpts
+from nstream.config import Config, PlayOpts, Stream
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -259,3 +259,26 @@ def test_detach_spawned_gated_on_follow(monkeypatch, follow, expected):
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     _run(_opts(), stream, follow=follow)
     assert seen["detached"] == expected
+
+
+def test_run_cast_clears_previous_session(monkeypatch, tmp_path):
+    """A new cast replaces the TV's content: the previous fire-and-return session must
+    not survive to swallow the new content's position (cold review #4)."""
+    from nstream import state
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.remember_cast(
+        Config(torrentio_base="tb"),
+        state.make_entry("tt-old", "Old", "movie", 0.0, 0.0),
+        "192.168.1.9",
+    )
+    stream: Stream = {"url": "http://u", "name": "S", "title": "T"}
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
+    cast_flow.run_cast(
+        Config(torrentio_base="tb"), [stream], stream,
+        device="192.168.1.9", title="T", typ="movie", video_id="tt1",
+        work_dir=str(tmp_path), opts=_opts(), start=None, follow=False,
+    )  # fmt: skip
+    assert state.util.RunState(state.CAST_SESSION).read() is None
+    assert seen is not None  # wiring sanity
