@@ -112,7 +112,7 @@ Modules in `src/nstream/`:
 - `mirror.py` — realtime cast backend (`--mirror` / `cast_mode: "mirror"`, ADR 0006): mpv decodes
   the stream locally on a Hyprland **headless output** + PipeWire null sink, and the openscreen
   Cast Streaming sender (`$CAST_MIRROR_BIN`) mirrors that window to the TV (~120ms, 1080p SDR —
-  instant start, no download/remux). Leaf below `cli` (imports `player`/`config`/`log`/`ui` + stdlib).
+  instant start, no download/remux). Leaf below `cli` (imports `player`/`config`/`log`/`ui`/`util` + stdlib).
 - `engine.py` — local P2P backend: drives an external **TorrServer** (find/spawn, add torrent by
   infoHash, wait for the read-ahead buffer) and returns a plain `http://…/stream?…` url — the same
   contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util`/`ui` + stdlib), like
@@ -136,10 +136,14 @@ Modules in `src/nstream/`:
 - `config.py` — XDG config load/save (atomic temp+replace), typed schema (incl. `posters`, `nerd_font`);
   also home to the `PlayOpts` per-invocation value object (config-shaped, imported everywhere).
 - `state.py` — watch history (resume / continue-watching), inter-process locked writes, and
-  the fire-and-return **cast session** (`RunState("watch")`): a headless cast records what's
-  on the TV (`note_started`/`remember_cast`) so `--stop`/`--status` can merge the receiver's
-  real position back into history (`update_from_receiver`) — the headless surface writes
-  history on every path (`--follow`, `--local`, fire-and-return).
+  the fire-and-return **cast session** (`RunState("watch")`, keyed by the **resolved IP**):
+  a headless cast records what's on the TV (`note_started`/`remember_cast`) so
+  `--stop`/`--status` can merge the receiver's real position back into history
+  (`update_from_receiver`) — the headless surface writes history on every path (`--follow`,
+  `--local`, fire-and-return). Staleness guards: session TTL (6h) + opportunistic receiver
+  title match; zero-progress "started" entries are pruned after 7 days and a series binge
+  retires its started siblings; every new cast clears the previous session
+  (`clear_cast_session` in `cast_flow.run_cast` / Alt-C).
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
 - `settings.py` — fzf-based settings menu (debrid token, addons, hwdec, cast device…).
 - `log.py` — rotating file log + crash capture + secret redaction.

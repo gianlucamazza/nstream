@@ -53,6 +53,8 @@ _DMR_DECODABLE = frozenset({"aac", "he-aac", "heaac", "mp3", "opus", "flac", "vo
 # How long to wait for the receiver to actually start playing the served file before
 # giving up (the remux already succeeded; this only confirms the cast handoff).
 _START_TIMEOUT = 40.0
+# Receiver-status cadence while following the detached catt (same as caster._CAST_POLL).
+_STATUS_POLL = 15.0
 _START_POLL = 2.0
 
 # Minimum free disk (GB) demanded when the source size is UNKNOWN (no parsed release size):
@@ -130,6 +132,14 @@ def _runstate() -> util.RunState:
     st = util.RunState("remux")
     st.path = _state_path()  # honor a repointed _state_path (tests)
     return st
+
+
+def gc_stale() -> None:
+    """Public, best-effort cleanup of previous-run leftovers (temp remuxes whose serving
+    process is gone + stderr captures). Safe to call opportunistically — headless entry
+    does, so an unattended fire-and-return that ended on its own is collected without
+    waiting for the next remux."""
+    _gc_stale()
 
 
 def _gc_stale() -> None:
@@ -453,14 +463,22 @@ def cast_file(
         return (0.0, 0.0, False, bool(sub_paths))
 
     print(f"{ui.g().tv} {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
+    pos = dur = 0.0
     try:
-        proc.wait()  # catt exits when playback ends
+        # catt exits when playback ends; poll the receiver meanwhile so this branch
+        # honours the (position, duration, …) contract like `caster.cast` — without it
+        # a Tier-2 + --follow cast would leave no resume point in the history.
+        while proc.poll() is None:
+            time.sleep(_STATUS_POLL)
+            st = caster.status(device)
+            pos = st.get("position") or pos
+            dur = st.get("duration") or dur
     except KeyboardInterrupt:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run([*base, "stop"], capture_output=True, text=True)
     finally:
         _teardown(proc.pid, file_path)
-    return (0.0, 0.0, False, bool(sub_paths))
+    return (pos, dur, False, bool(sub_paths))
 
 
 def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) -> dict:

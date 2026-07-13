@@ -34,11 +34,12 @@ from . import (
     state,
     stream_select,
     ui,
+    util,
 )
 from .api import CAT_MAP
 from .caster import CastUnavailable, device_volume
 from .caster import resolve_device as _resolve_device
-from .config import Config, HistoryEntry, Meta, PlayOpts, Stream
+from .config import Config, HistoryEntry, Meta, PlayOpts, Stream, Video
 from .labels import display_title
 from .player import play
 from .subs import auto_subs, available_subtitle_langs
@@ -142,12 +143,22 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             }
         )
         return 2
+    # Opportunistic hygiene at every headless entry: a cast session whose TTL passed dies
+    # even if --stop never came, and Tier-2 leftovers are collected not only when the
+    # next remux happens to run.
+    state.expire_cast_session()
+    remux.gc_stale()
     # Cast lifecycle actions: no title needed, no playback.
     if args.stop:
         return _run_stop(cfg, args)
     if args.status:
         return _run_status(cfg, args)
+    if args.pause or args.resume or args.seek is not None:
+        return _run_control(cfg, args)
     query = " ".join(args.query)
+    if args.volume is not None and not query and not args.browse and not args.cont:
+        # Standalone volume: act on the current cast instead of demanding a re-cast.
+        return _run_volume(cfg, args)
     if args.cont:
         return _run_auto_resume(cfg, args, opts, query, tfilter)
 
@@ -190,6 +201,30 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
 
     if typ == "series":
         eps = api.episodes(cfg, imdb_id)
+        if args.probe and args.episode is None:
+            # Episode discovery: `--probe` on a series without --episode lists what
+            # exists (callers used to provoke an episode_not_found just to read
+            # `available`). --season narrows the list.
+            avail = [e for e in eps if not args.season or e.get("season") == args.season]
+            _emit_json(
+                {
+                    "ok": True,
+                    "action": "episodes",
+                    "title": name,
+                    "type": typ,
+                    "imdb_id": imdb_id,
+                    "episodes": [
+                        {
+                            "season": e.get("season", 0),
+                            "episode": e.get("episode", 0),
+                            "title": e.get("name") or "",
+                        }
+                        for e in avail
+                    ][:500],
+                    "error": None,
+                }
+            )
+            return 0
         season = args.season or 1
         episode = args.episode or 1
         v = next(
@@ -397,7 +432,10 @@ def _auto_play(
                 started = _hist_entry(float(start or 0.0), 0.0)
                 state.note_started(cfg, started)
                 if action == "cast":  # mirror has no DMR media session to read back
-                    state.remember_cast(cfg, started, device_name)
+                    # Session key = the resolved IP (`device`), NOT `device_name`: --stop
+                    # and --status compare against resolve_device()'s IP, so a configured
+                    # name ("Salotto") would never match and the merge would be inert.
+                    state.remember_cast(cfg, started, device)
             if action == "cast":
                 # Optional explicit volume (closes the loop with the zero-volume detection).
                 if args.volume is not None:
@@ -455,29 +493,60 @@ def _auto_play(
     return 0
 
 
+def _next_episode(cfg: Config, entry: HistoryEntry) -> Video | None:
+    """The episode right after `entry` in its series, or None past the finale.
+    Same ordering as the interactive binge advance (`series.binge`): episodes sorted
+    by (season, episode), next = first strictly greater tuple — season boundaries work."""
+    eps = api.episodes(cfg, entry.get("series_id") or "")
+    cur = (entry.get("season") or 0, entry.get("episode") or 0)
+    return next((e for e in eps if (e.get("season", 0), e.get("episode", 0)) > cur), None)
+
+
 def _run_auto_resume(
     cfg: Config, args: argparse.Namespace, opts: PlayOpts, query: str, typ: str | None = None
 ) -> int:
     """Headless resume (`--json -c`): pick a history entry by normalized title (or the most
-    recent when no query) and replay it, with no fzf. `typ` narrows to one content type."""
+    recent when no query) and replay it, with no fzf. `typ` narrows to one content type.
+    A FINISHED series episode advances: `-c "show"` after the S01E04 credits casts S01E05
+    (watched episodes are kept in history exactly for this)."""
     entries = state.recent(cfg, typ=typ)
-    if not entries:
-        _emit_json({"ok": False, "error": "no_result", "message": "cronologia vuota"})
-        return 1
-    entry = entries[0]
+    finished = state.watched_series(cfg) if typ in (None, "series") else []
+    entry: HistoryEntry | None = None
+    advance = False
     if query:
         q = _norm_title(query)
         entry = next((e for e in entries if _norm_title(e.get("title", "")) == q), None)
         if entry is None:
+            entry = next((e for e in finished if _norm_title(e.get("title", "")) == q), None)
+            advance = entry is not None
+    elif entries and (not finished or entries[0].get("ts", 0.0) >= finished[0].get("ts", 0.0)):
+        entry = entries[0]
+    elif finished:
+        entry, advance = finished[0], True
+    if entry is None:
+        message = f"nessuna cronologia per «{query}»" if query else "cronologia vuota"
+        _emit_json({"ok": False, "error": "no_result", "message": message})
+        return 1
+    typ = entry.get("type", "movie")
+    if advance:
+        nxt = _next_episode(cfg, entry)
+        if nxt is None:
             _emit_json(
                 {
                     "ok": False,
-                    "error": "no_result",
-                    "message": f"nessuna cronologia per «{query}»",
+                    "error": "series_completed",
+                    "message": f"«{entry.get('title', '?')}» è finita: nessun episodio dopo "
+                    f"S{entry.get('season', 0):02d}E{entry.get('episode', 0):02d}",
                 }
             )
             return 1
-    typ = entry.get("type", "movie")
+        series_id = entry.get("series_id") or entry["video_id"]
+        return _auto_play(
+            cfg, args, opts, "series", nxt["id"],
+            display_title(entry.get("title", "?"), nxt),
+            series_id, nxt.get("season"), nxt.get("episode"), "next",
+            name=entry.get("title"),
+        )  # fmt: skip
     return _auto_play(
         cfg, args, opts, typ, entry["video_id"],
         display_title(entry.get("title", "?"), series.entry_video(entry)),
@@ -521,10 +590,63 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     ok = remux.stop(device) or ok
     ok = ok or mirror_stopped
     state.update_from_receiver(
-        cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0, clear=True
-    )
+        cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0,
+        title=st.get("title"), clear=True,
+    )  # fmt: skip
     _emit_json(
         {"ok": ok, "action": "stop", "device": device, "error": None if ok else "stop_failed"}
+    )
+    return 0 if ok else 1
+
+
+def _run_control(cfg: Config, args: argparse.Namespace) -> int:
+    """`--json --pause/--resume/--seek S`: media control on the resolved device.
+    Prefers the castbridge daemon (`bridge.control`, the capability was implemented but
+    had no caller); falls back to `catt play/pause/seek` so control works on catt-only
+    sessions too."""
+    device = _headless_device(cfg, args)
+    if device is None:
+        return 1
+    if args.seek is not None:
+        action, cmd, value = "seek", "seek", float(args.seek)
+        catt_args = ["seek", str(int(args.seek))]
+    elif args.pause:
+        action, cmd, value = "pause", "pause", 0.0
+        catt_args = ["pause"]
+    else:
+        action, cmd, value = "resume", "play", 0.0
+        catt_args = ["play"]
+    ok = bridge.bridge_available() and bridge.control(device, cmd, value)
+    if not ok:
+        res = util.run_cmd(["catt", "-d", device, *catt_args], timeout=util.CATT_INFO_TIMEOUT)
+        ok = bool(res and res.returncode == 0)
+    _emit_json(
+        {
+            "ok": ok,
+            "action": action,
+            "device": device,
+            "seek": args.seek,
+            "error": None if ok else "control_failed",
+        }
+    )
+    return 0 if ok else 1
+
+
+def _run_volume(cfg: Config, args: argparse.Namespace) -> int:
+    """`--json --volume N` without a title: set the receiver volume on the cast in
+    progress (it used to require re-casting a whole title just to change volume)."""
+    device = _headless_device(cfg, args)
+    if device is None:
+        return 1
+    ok = caster.set_volume(device, args.volume)
+    _emit_json(
+        {
+            "ok": ok,
+            "action": "volume",
+            "device": device,
+            "volume": args.volume,
+            "error": None if ok else "volume_failed",
+        }
     )
     return 0 if ok else 1
 
@@ -537,6 +659,9 @@ def _run_status(cfg: Config, args: argparse.Namespace) -> int:
     st = caster.status(device)
     # Keep the fire-and-return resume point fresh: every status poll merges the receiver
     # position into the cast-session history entry (no-op without a session).
-    state.update_from_receiver(cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0)
+    state.update_from_receiver(
+        cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0,
+        title=st.get("title"),
+    )  # fmt: skip
     _emit_json({"ok": True, "action": "status", "device": device, **st, "error": None})
     return 0

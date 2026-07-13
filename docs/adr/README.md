@@ -23,5 +23,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0009](0009-movies-series-separation.md)             | Movies / TV-series separation: typed home sections, typed flows                    | Accepted |
 | [0010](0010-background-cast-discovery.md)            | Background Chromecast discovery with a verified disk cache                         | Accepted |
 | [0011](0011-unify-cast-delivery-state-machine.md)    | Unify the castbridge→catt cast-delivery state machine                              | Proposed |
+| [0012](0012-cast-subtitles-webvtt-text-track.md)     | Cast subtitles as a WebVTT text track on the castbridge path                       | Proposed |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

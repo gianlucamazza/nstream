@@ -349,3 +349,17 @@ def test_url_playable_optimistic_on_method_rejection(monkeypatch):
 
     monkeypatch.setattr(api.urllib.request, "urlopen", reject)
     assert api.url_playable("http://x") is True  # HEAD/Range rejected, resource still exists
+
+
+def test_prune_meta_cache_drops_only_expired(tmp_path):
+    import os
+    import time as _t
+
+    fresh = tmp_path / "fresh.json"
+    fresh.write_text("{}")
+    aged = tmp_path / "aged.json"
+    aged.write_text("{}")
+    old = _t.time() - api._META_TTL - 60
+    os.utime(aged, (old, old))
+    api._prune_meta_cache(tmp_path)
+    assert fresh.exists() and not aged.exists()

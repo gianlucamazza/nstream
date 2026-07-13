@@ -312,6 +312,7 @@ def _move_to_cast(
     except CastUnavailable as e:
         print(f"nstream: {e}", file=sys.stderr)
         return (pos, dur, False)
+    state.clear_cast_session()  # Alt-C bypasses run_cast, which normally does this
     pos, dur, _, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
     return (pos, dur, False)
 
@@ -748,7 +749,17 @@ def main() -> int:
         "--volume",
         type=int,
         metavar="N",
-        help="--json+cast: imposta il volume del Chromecast (0-100)",
+        help="--json: volume del Chromecast (0-100); senza titolo agisce sul cast in corso",
+    )
+    parser.add_argument(
+        "--pause", action="store_true", help="--json: mette in pausa il cast in corso"
+    )
+    parser.add_argument("--resume", action="store_true", help="--json: riprende il cast in pausa")
+    parser.add_argument(
+        "--seek",
+        type=float,
+        metavar="SEC",
+        help="--json: salta alla posizione SEC (secondi) del cast in corso",
     )
     parser.add_argument(
         "--follow",

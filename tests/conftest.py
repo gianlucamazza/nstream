@@ -6,6 +6,20 @@ from nstream import bridge
 
 
 @pytest.fixture(autouse=True)
+def _isolated_runtime_dir(monkeypatch, tmp_path):
+    """Point RunState files (cast session, remux/mirror slots) at a per-test dir.
+
+    `cast_flow.run_cast` clears the cast session as a side effect: without this,
+    running the suite on a dev machine would delete the REAL
+    `$XDG_RUNTIME_DIR/nstream-watch.json` of a cast in progress. Tests that care
+    about the exact path still set the env themselves.
+    """
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(exist_ok=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+
+@pytest.fixture(autouse=True)
 def _no_real_castbridge(monkeypatch):
     """Unit tests must never reach (or spawn) the real castbridge daemon.
 

@@ -227,3 +227,147 @@ def test_history_lock_degrades_when_unopenable(tmp_path, monkeypatch):
     monkeypatch.setattr(state.os, "open", deny)
     state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10.0, 100.0))
     assert state.load_history(CFG)["tt1"]["position"] == 10.0  # unlocked but not blocked
+
+
+# --- staleness guards + binge hygiene (round 2) ------------------------------
+
+
+def _session(tmp_path, monkeypatch, entry, device="192.168.1.9"):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.remember_cast(CFG, entry, device)
+
+
+def test_update_from_receiver_stale_ttl_clears(tmp_path, monkeypatch):
+    _session(tmp_path, monkeypatch, state.make_entry("tt1", "A", "movie", 0.0, 0.0))
+    rs = state.util.RunState(state.CAST_SESSION)
+    old = rs.read()
+    assert old is not None
+    old["ts"] = old["ts"] - state.CAST_SESSION_TTL - 3600
+    rs.write(old)
+    assert state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0) is False
+    assert rs.read() is None  # dead session dropped, not left to corrupt later polls
+    assert state.load_history(CFG) == {}
+
+
+def test_update_from_receiver_title_mismatch_clears(tmp_path, monkeypatch):
+    _session(tmp_path, monkeypatch, state.make_entry("tt1", "Mr. Robot", "movie", 0.0, 0.0))
+    ok = state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0, title="Big Buck Bunny")
+    assert ok is False
+    assert state.util.RunState(state.CAST_SESSION).read() is None
+    assert state.load_history(CFG) == {}
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "receiver_title",
+    [
+        "Mr. Robot · S01E04 · eps1.3_da3m0ns.mp4",  # castbridge decorated display title
+        "Mr.Robot.S01E04.1080p.WEB-DL.mkv",  # catt: release filename
+    ],
+)
+def test_update_from_receiver_title_variants_match(tmp_path, monkeypatch, receiver_title):
+    _session(tmp_path, monkeypatch, state.make_entry("tt1", "Mr. Robot", "movie", 0.0, 0.0))
+    ok = state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0, title=receiver_title)
+    assert ok is True
+    assert state.load_history(CFG)["tt1"]["position"] == 500.0
+
+
+def test_update_from_receiver_artifact_title_skips_guard(tmp_path, monkeypatch):
+    # Tier-2 catt fallback: the receiver reports our own temp name → guard not applicable
+    _session(tmp_path, monkeypatch, state.make_entry("tt1", "Mr. Robot", "movie", 0.0, 0.0))
+    ok = state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0, title="cast-a1b2.mp4")
+    assert ok is True
+
+
+def test_note_started_retires_series_started_sibling(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    e1 = state.make_entry(
+        "tt1:1:1", "Show", "series", 0.0, 0.0, series_id="tt1", season=1, episode=1
+    )
+    state.note_started(CFG, e1)
+    e2 = state.make_entry(
+        "tt1:1:2", "Show", "series", 0.0, 0.0, series_id="tt1", season=1, episode=2
+    )
+    state.note_started(CFG, e2)
+    assert list(state.load_history(CFG)) == ["tt1:1:2"]  # binge leaves only the latest
+
+
+def test_note_started_keeps_sibling_with_progress(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_entry(
+        CFG,
+        state.make_entry(
+            "tt1:1:1", "Show", "series", 600.0, 3000.0, series_id="tt1", season=1, episode=1
+        ),
+    )
+    e2 = state.make_entry(
+        "tt1:1:2", "Show", "series", 0.0, 0.0, series_id="tt1", season=1, episode=2
+    )
+    state.note_started(CFG, e2)
+    assert set(state.load_history(CFG)) == {"tt1:1:1", "tt1:1:2"}  # real progress survives
+
+
+def test_save_entry_prunes_aged_started_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    aged = state.make_entry("tt-old", "Old", "movie", 0.0, 0.0)
+    aged["ts"] = aged["ts"] - state.STARTED_TTL - 86400
+    state.save_entry(CFG, aged)
+    keeper = state.make_entry("tt-real", "Real", "movie", 100.0, 3000.0)
+    keeper["ts"] = keeper["ts"] - state.STARTED_TTL - 86400  # old but with real progress
+    state.save_entry(CFG, keeper)
+    state.save_entry(CFG, state.make_entry("tt-new", "New", "movie", 10.0, 100.0))
+    assert set(state.load_history(CFG)) == {"tt-real", "tt-new"}  # aged started pruned
+
+
+def test_clear_cast_session_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.clear_cast_session()  # nothing to clear: no error
+    state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), None)
+    state.clear_cast_session()
+    assert state.util.RunState(state.CAST_SESSION).read() is None
+
+
+def test_expire_cast_session_by_ttl(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), None)
+    state.expire_cast_session()  # fresh → kept
+    rs = state.util.RunState(state.CAST_SESSION)
+    assert rs.read() is not None
+    stale = rs.read()
+    assert stale is not None
+    stale["ts"] = stale["ts"] - state.CAST_SESSION_TTL - 60
+    rs.write(stale)
+    state.expire_cast_session()
+    assert rs.read() is None
+
+
+def test_save_entry_keeps_watched_series_for_advance(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    e = state.make_entry(
+        "tt1:1:4", "Show", "series", 2950.0, 3000.0, series_id="tt1", season=1, episode=4
+    )
+    state.save_entry(CFG, e)  # watched → kept for next-episode resume, not popped
+    assert "tt1:1:4" in state.load_history(CFG)
+    assert state.recent(CFG) == []  # …but hidden from continue-watching
+    assert state.watched_series(CFG)[0]["episode"] == 4
+    # a watched MOVIE is still retired
+    state.save_entry(CFG, state.make_entry("tt9", "Film", "movie", 2950.0, 3000.0))
+    assert "tt9" not in state.load_history(CFG)
+
+
+def test_note_started_retires_watched_sibling(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_entry(
+        CFG,
+        state.make_entry(
+            "tt1:1:4", "Show", "series", 2950.0, 3000.0, series_id="tt1", season=1, episode=4
+        ),
+    )
+    nxt = state.make_entry(
+        "tt1:1:5", "Show", "series", 0.0, 0.0, series_id="tt1", season=1, episode=5
+    )
+    state.note_started(CFG, nxt)  # the advance happened: the finished sibling retires
+    assert list(state.load_history(CFG)) == ["tt1:1:5"]
