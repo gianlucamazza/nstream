@@ -20,7 +20,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, discovery, languages, log, ui, util
+from . import bridge, cast_delivery, discovery, languages, log, ui, util
 from .config import Config
 from .picker import fzf
 
@@ -43,7 +43,9 @@ class CastMeta:
 
 # Callback the headless `--follow` JSONL path passes in to receive normalized playback events
 # (started/playing/paused/ended/failed) as they happen; None for the interactive path.
-EventCb = Callable[[dict], None]
+# Canonical definition lives with the shared driver (ADR 0011); re-exported here because
+# every cast signature historically names `caster.EventCb`.
+EventCb = cast_delivery.EventCb
 
 
 class CastUnavailable(Exception):
@@ -77,7 +79,8 @@ def _confirm_device(name: str, ip: str) -> bool:
 # costs ~240 polls over a 2h film and resume granularity of ≤15s is plenty.
 _CAST_POLL = 15.0
 # Fraction of the runtime past which a stop counts as "finished" (→ binge advance).
-_CAST_DONE = 0.97
+# Single source with the bridge driver (ADR 0011); the catt poll loop shares it.
+_CAST_DONE = cast_delivery.CAST_DONE
 # Give up if the cast never starts playing within this many polls (~60s): the device
 # may be unreachable or the receiver refused the media — don't poll forever.
 _CAST_GIVEUP = 4
@@ -359,33 +362,25 @@ def _cast_via_bridge(
         "content_type": meta.content_type,
         "current_time": float(start or 0.0),
     }
-    started = False
-    pos = dur = 0.0
-    finished = False
-    events = bridge.cast_load(device, url, follow=follow, **kwargs)
-    try:
-        for ev in events:
-            kind = ev.get("kind")
-            if kind == "failed" and not started:
-                _log.info("castbridge non partito (%s) → fallback catt", ev.get("error"))
-                return None
-            if kind == "started" and not started:
-                started = True
-                tail = "  (Ctrl-C per smettere di seguire)" if follow else ""
-                print(f"{ui.g().tv} {title} → {device}{tail}", file=sys.stderr)
-            if on_event:
-                on_event(ev)
-            if kind in ("playing", "paused", "ended"):
-                pos = float(ev.get("position") or pos)
-                dur = float(ev.get("duration") or dur)
-            if kind == "ended":
-                finished = bool(dur) and pos >= dur * _CAST_DONE
-    except KeyboardInterrupt:
-        bridge.stop(device)
-    finally:
-        events.close()
-    advance = bool(next_label) and finished
-    return (pos, dur, advance)
+
+    def announce() -> None:
+        tail = "  (Ctrl-C per smettere di seguire)" if follow else ""
+        print(f"{ui.g().tv} {title} → {device}{tail}", file=sys.stderr)
+
+    # Shared driver (ADR 0011). No on_interrupt hook: interactive semantics — Ctrl-C
+    # stops following (the driver already stopped the receiver) and keeps the result.
+    out = cast_delivery.drive_bridge(
+        device,
+        url,
+        follow=follow,
+        load_kwargs=kwargs,
+        on_event=on_event,
+        on_started=announce,
+    )
+    if out is None:
+        return None
+    advance = bool(next_label) and out.finished
+    return (out.pos, out.dur, advance)
 
 
 def _emit(on_event: EventCb | None, kind: str, **fields) -> None:

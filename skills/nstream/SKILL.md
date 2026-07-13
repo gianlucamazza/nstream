@@ -40,6 +40,7 @@ Always pass `--json`. Quote the title.
 | resume last watched                  | `nstream --json -c "X"` (or no title for the most recent)                                                                   |
 | next episode after finishing one     | `nstream --json --cast -c "X"` (auto-advances when the last episode is finished; `error: series_completed` past the finale) |
 | list a series' episodes              | `nstream --json --probe "X"` without `--episode` (add `--season N` to narrow)                                               |
+| why was this stream picked? | `nstream --json --explain "X"` (ranking + filters as data; add `--cast` for the TV profile; read-only) |
 | something popular / new / top-rated  | `nstream --json --cast --browse popolari\|nuovi\|top`                                                                       |
 | stop what's casting                  | `nstream --json --stop`                                                                                                     |
 | what's casting now                   | `nstream --json --status`                                                                                                   |

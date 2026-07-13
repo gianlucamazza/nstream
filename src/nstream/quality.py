@@ -191,7 +191,29 @@ def _parse_seeders(text: str) -> int:
     return int(m.group(1)) if (m := re.search(r"👤\s*(\d+)", text)) else 0
 
 
+# parse_stream is pure in (name, title, infoHash, fileIdx) and regex-heavy (~5 ms per
+# stream); rank_streams runs up to 4×/play over the full result set, so unmemoized
+# re-parsing cost ~0.8 s of CPU on a 50-stream title — seconds on a popular one
+# (measured live 2026-07-13; closes audit 2026-06-09 finding #32). Process-lifetime
+# cache, bounded by the streams seen in one run; StreamInfo is frozen, safe to share.
+_PARSE_CACHE: dict[tuple, StreamInfo] = {}
+
+
 def parse_stream(stream: Stream) -> StreamInfo:
+    key = (
+        stream.get("name") or "",
+        stream.get("title") or "",
+        stream.get("infoHash") or "",
+        stream.get("fileIdx"),
+    )
+    info = _PARSE_CACHE.get(key)
+    if info is None:
+        info = _parse_stream_uncached(stream)
+        _PARSE_CACHE[key] = info
+    return info
+
+
+def _parse_stream_uncached(stream: Stream) -> StreamInfo:
     text = _text(stream)
     return StreamInfo(
         resolution=_parse_resolution(text),

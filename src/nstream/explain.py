@@ -114,6 +114,66 @@ def explain_streams(cfg: Config, results: list[Stream], *, cast: bool) -> str:
     return "\n".join(lines)
 
 
+def _row_data(
+    r: quality.RankedStream, audio_langs: tuple[str, ...], *, cast: bool, reason: str | None = ""
+) -> dict:
+    """One ranked stream as parsed metadata + score components (never the url/token)."""
+    info = r.info
+    comp = quality.score_components(info, audio_langs, cast=cast)
+    row = {
+        "name": ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:120],
+        "resolution": info.resolution,
+        "codec": info.codec,
+        "source": info.source,
+        "audio": info.audio,
+        "languages": sorted(info.languages),
+        "cached": info.cached,
+        "size_gb": round(info.size_gb, 2),
+        # `size` is stored negated for sort order — expose the real GB (as the table does)
+        "score": {k: (round(-float(v), 2) if k == "size" else v) for k, v in comp.items()},
+    }
+    if reason:
+        row["excluded"] = reason
+    return row
+
+
+def explain_data(cfg: Config, results: list[Stream], *, cast: bool) -> dict:
+    """Machine-readable counterpart of `explain_streams`, for `--json --explain`: the same
+    ranking reconstruction as a dict — caps, filters, counts, playable rows best-first
+    with their score components, excluded rows with the reason. Parsed metadata only."""
+    playable, excluded, caps, spec = _rank(cfg, results, cast=cast)
+    return {
+        "profile": "cast" if cast else "local",
+        "caps": {
+            "codecs": sorted(caps.codecs),
+            "max_resolution": caps.max_resolution,
+            "vaapi": caps.vaapi,
+        },
+        "filters": {
+            "max_resolution": spec.max_resolution,
+            "lang_filter": spec.lang_filter,
+            "audio_langs": list(spec.audio_langs),
+            "exclude_camrip": spec.exclude_camrip,
+            "min_seeders": spec.min_seeders,
+            "dedup": spec.dedup,
+            "cast_audio": spec.cast_audio,
+            "allow_software": spec.allow_software,
+            "allow_dv5": spec.allow_dv5,
+        },
+        "counts": {
+            "total": len(results),
+            "playable": len(playable),
+            "excluded": len(excluded),
+            "duplicates": (
+                max(0, len(results) - len(playable) - len(excluded)) if spec.dedup else 0
+            ),
+        },
+        "pick": _row_data(playable[0], spec.audio_langs, cast=cast) if playable else None,
+        "playable": [_row_data(r, spec.audio_langs, cast=cast) for r in playable],
+        "excluded": [_row_data(r, spec.audio_langs, cast=cast, reason=r.reason) for r in excluded],
+    }
+
+
 def explain_audio(cfg: Config, pick: quality.RankedStream | None) -> str:
     """Explain which audio track the auto-picked file would play locally: the --alang
     order nstream injects, plus the real ffprobe tracks (best-effort) with the one mpv
