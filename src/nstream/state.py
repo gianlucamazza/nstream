@@ -7,8 +7,13 @@ file yields an empty history so playback is never blocked by state errors.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import time
+from collections.abc import Iterator
+from typing import cast
 
 from . import util
 from .config import Config, HistoryEntry, Video, state_path
@@ -81,23 +86,92 @@ def resume_position(cfg: Config, video_id: str) -> float | None:
     return start
 
 
+@contextlib.contextmanager
+def _history_lock() -> Iterator[None]:
+    """Serialise the save_entry read-modify-write across processes (a headless `--follow`
+    can end while an interactive session saves another title; without the lock the last
+    atomic_write silently drops the other writer's entry). Best-effort like all state I/O:
+    if the lock file can't be opened, proceed unlocked rather than block playback."""
+    try:
+        fd = os.open(state_path().with_name(".history.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def save_entry(cfg: Config, entry: HistoryEntry) -> None:
     if not cfg.history_enabled:
         return
-    history = load_history(cfg)
     vid = entry.get("video_id")
     if not vid:
         return
-    if _watched(entry):
-        history.pop(vid, None)
-    else:
-        history[vid] = entry
+    with contextlib.suppress(OSError):  # atomic_write recreates it (and surfaces the error)
+        state_path().parent.mkdir(parents=True, exist_ok=True)
+    with _history_lock():
+        history = load_history(cfg)
+        if _watched(entry):
+            history.pop(vid, None)
+        else:
+            history[vid] = entry
 
-    util.atomic_write(
-        state_path(),
-        lambda f: json.dump(history, f, ensure_ascii=False),
-        prefix=".history-",
-    )
+        util.atomic_write(
+            state_path(),
+            lambda f: json.dump(history, f, ensure_ascii=False),
+            prefix=".history-",
+        )
+
+
+def note_started(cfg: Config, entry: HistoryEntry) -> None:
+    """Record that playback of `entry` started when the end position can't be known
+    (headless fire-and-return cast: no poll loop runs). Keeps a previously known
+    duration so the watched/near-end logic stays meaningful; the real position lands
+    later via `update_from_receiver` (`--stop`/`--status`)."""
+    prev = load_history(cfg).get(entry.get("video_id", ""))
+    if prev and not entry.get("duration"):
+        entry["duration"] = prev.get("duration", 0.0)
+    save_entry(cfg, entry)
+
+
+# RunState slot for the receiver-side session of a fire-and-return cast: which entry is
+# on the TV, so a later `--stop`/`--status` can attribute the receiver's position to it.
+CAST_SESSION = "watch"
+
+
+def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
+    """Persist the fire-and-return cast session (entry + device) across nstream runs.
+    Interactive and `--follow` casts don't need this — their poll loop saves directly."""
+    if not cfg.history_enabled:
+        return
+    util.RunState(CAST_SESSION).write({**entry, "device": device or ""})
+
+
+def update_from_receiver(
+    cfg: Config, device: str | None, position: float, duration: float, *, clear: bool = False
+) -> bool:
+    """Merge a receiver-reported position into the session entry saved by `remember_cast`,
+    if one exists for `device`. Returns True when an entry was persisted. `clear` drops
+    the session file afterwards (the `--stop` one-shot); a zero/idle position still clears
+    but persists nothing."""
+    run_state = util.RunState(CAST_SESSION)
+    session = run_state.read()
+    if not session:
+        return False
+    if device and session.get("device") and session["device"] != device:
+        return False
+    if clear:
+        run_state.clear()
+    if not (position > 0 and duration > 0):
+        return False
+    merged = {k: v for k, v in session.items() if k != "device"}
+    merged.update(position=position, duration=duration, ts=time.time())
+    save_entry(cfg, cast(HistoryEntry, merged))
+    return True
 
 
 def recent(cfg: Config, limit: int = 30, typ: str | None = None) -> list[HistoryEntry]:

@@ -92,7 +92,7 @@ def test_remux_success_uses_cast_file(monkeypatch):
                 path=path, follow=k.get("follow"), start=k.get("start"),
                 on_event=k.get("on_event"),
             )
-            or (0.0, 0.0, False)
+            or (0.0, 0.0, False, False)
         ),
     )  # fmt: skip
     monkeypatch.setattr(
@@ -116,7 +116,7 @@ def test_remux_failure_degrades_to_direct(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         cast_flow.caster, "cast",
-        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
     )  # fmt: skip
     out = _run(_opts(), stream)
     assert "remux non riuscito" in capsys.readouterr().err
@@ -136,7 +136,7 @@ def test_absent_safety_subs_once_with_notice(monkeypatch, capsys):
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
     monkeypatch.setattr(
         cast_flow.caster, "cast",
-        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
     )  # fmt: skip
     out = _run(_opts(), stream)
     err = capsys.readouterr().err
@@ -152,7 +152,7 @@ def test_safety_sub_lang_passthrough(monkeypatch):
     the outcome untouched when the cast plan isn't `absent`."""
     stream = dict(_STREAM)
     seen = _wire(monkeypatch, _plan("direct", stream))
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     out = _run(_opts(), stream, safety_sub_lang="ita")
     assert seen["subs"] == ["ita"]
     assert out.safety_sub_lang == "ita"
@@ -197,7 +197,7 @@ def test_mirror_downgraded_when_decodable(monkeypatch, capsys):
         cast_flow.mirror, "cast_via_mirror", _boom("mirror must not run for decodable audio")
     )
     monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False)
+        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False, False)
     )
     out = _run(_opts(mirror=True), stream)
     assert cast_flow.MIRROR_NOT_NEEDED in capsys.readouterr().err
@@ -215,7 +215,7 @@ def test_lang_switch_wired_only_when_allowed(monkeypatch):
     monkeypatch.setattr(
         cast_flow.caster, "cast",
         lambda *a, **k: (
-            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False)
+            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False, False)
         ),
     )  # fmt: skip
     _run(_opts(), stream, allow_lang_switch=True)
@@ -238,7 +238,8 @@ def test_next_label_and_meta_threaded(monkeypatch):
     monkeypatch.setattr(
         cast_flow.caster, "cast",
         lambda *a, **k: (
-            seen.update(next_label=k.get("next_label"), meta=k.get("meta")) or (1.0, 2.0, True)
+            seen.update(next_label=k.get("next_label"), meta=k.get("meta"))
+            or (1.0, 2.0, True, False)
         ),
     )  # fmt: skip
     out = _run(_opts(), stream, next_label="S01E02", meta=meta)
@@ -255,6 +256,6 @@ def test_detach_spawned_gated_on_follow(monkeypatch, follow, expected):
     fire-and-return (follow=False) — interactive follow keeps ownership."""
     stream = dict(_STREAM)
     seen = _wire(monkeypatch, _plan("direct", stream))
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     _run(_opts(), stream, follow=follow)
     assert seen["detached"] == expected

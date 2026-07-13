@@ -10,6 +10,7 @@ launcher — is captured for diagnosis.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -61,6 +62,19 @@ class RedactFormatter(logging.Formatter):
         return redact(super().format(record))
 
 
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler that keeps the log 0600 — on the initial open, after every
+    rotation, and tightening a pre-existing world-readable file. The log is secret-free
+    by design, but the redaction is a regex blocklist: defense in depth at zero cost,
+    and consistent with config.json/history.json (both 0600)."""
+
+    def _open(self):
+        fd = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with contextlib.suppress(OSError):
+            os.fchmod(fd, 0o600)  # O_CREAT mode only applies to new files
+        return os.fdopen(fd, self.mode, encoding=self.encoding)
+
+
 def log_path() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return Path(base) / "nstream" / "nstream.log"
@@ -83,8 +97,8 @@ def setup_logging(debug: bool = False) -> logging.Logger:
     path = log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.handlers.RotatingFileHandler(
-            path, maxBytes=512 * 1024, backupCount=3, encoding="utf-8"
+        fh = _PrivateRotatingFileHandler(
+            str(path), maxBytes=512 * 1024, backupCount=3, encoding="utf-8"
         )
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(RedactFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))

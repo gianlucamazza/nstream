@@ -51,6 +51,7 @@ class CastOutcome:
     audio_verified: bool  # True when decided from real ffprobe tracks
     safety_sub_lang: str | None  # effective safety-subtitle language, or None
     sub_paths: tuple[str, ...]
+    subs_delivered: bool  # False when the delivery couldn't attach them (castbridge LOAD)
 
 
 def run_cast(
@@ -111,6 +112,7 @@ def run_cast(
             cfg, title, chosen["url"],
             device=device, start=start, sub_paths=sub_paths, follow=follow,
         )  # fmt: skip
+        subs_delivered = bool(sub_paths)  # mpv renders them into the mirrored frame
         action = "mirror"
     else:
         if opts.mirror and plan.mode != "remux":
@@ -126,7 +128,7 @@ def run_cast(
             else None
         )
         if remux_path:
-            pos, dur, advance = remux.cast_file(
+            pos, dur, advance, subs_delivered = remux.cast_file(
                 cfg, title, remux_path,
                 device=device, start=start, sub_paths=sub_paths, follow=follow,
                 meta=meta, on_event=on_event,
@@ -150,13 +152,21 @@ def run_cast(
                 if len(cast_langs) > 1:
                     langs = cast_langs
                     resolver = stream_select.cast_resolver(cfg, results)
-            pos, dur, advance = caster.cast(
+            pos, dur, advance, subs_delivered = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, next_label=next_label,
                 langs=langs, resolve_lang=resolver, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
         action = "cast"
+    if sub_paths and not subs_delivered:
+        # Honesty over silence: the safety net the user was promised is not on screen
+        # (the castbridge LOAD has no subtitle field — docs/adr/0007).
+        print(
+            f"nstream: {ui.g().warn} sottotitoli non supportati dal sender castbridge — "
+            "non caricati sul TV",
+            file=sys.stderr,
+        )
     if not follow:
         # Fire-and-return handoff: a pure-torrent stream is served by the TorrServer we may
         # have spawned — keep it alive past exit so the TV keeps playing (atexit would kill
@@ -167,4 +177,5 @@ def run_cast(
         reencoded=reencoded, notice=notice,
         audio_lang=plan.real_lang, audio_verified=plan.verified,
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
+        subs_delivered=subs_delivered,
     )  # fmt: skip

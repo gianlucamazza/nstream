@@ -141,6 +141,9 @@ def _gc_stale() -> None:
         for f in _cache_dir().glob("cast-*.mp4"):
             if str(f) != keep:
                 f.unlink(missing_ok=True)
+        for f in _cache_dir().glob("cast-*.mp4.srt"):  # subtitle sidecars of detached casts
+            if not keep or str(f) != f"{keep}.srt":
+                f.unlink(missing_ok=True)
         for f in _cache_dir().glob("catt-*.log"):  # startup-diagnosis stderr leftovers
             f.unlink(missing_ok=True)
 
@@ -336,7 +339,14 @@ def remux_to_file(
         "-movflags", "+faststart", path,
     ]  # fmt: skip
     print(f"{ui.g().tv} preparo l'audio per il cast (può richiedere un po')…", file=sys.stderr)
-    rc, stderr = _run_ffmpeg(cmd, duration)
+    try:
+        rc, stderr = _run_ffmpeg(cmd, duration)
+    except KeyboardInterrupt:
+        # An aborted prepare must not leak the partial multi-GB temp: the next-run GC may
+        # never come for a user who just cancelled a huge fetch. ffmpeg itself dies with
+        # the foreground group's SIGINT.
+        _rm(path)
+        raise
     if rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
         _log.warning("remux fallito (rc=%s): %s", rc, (stderr or "")[:300])
         _rm(path)
@@ -358,15 +368,23 @@ def cast_file(
     follow: bool = True,
     meta: caster.CastMeta | None = None,
     on_event: caster.EventCb | None = None,
-) -> tuple[float, float, bool]:
+) -> tuple[float, float, bool, bool]:
     """Cast the complete local `file_path` (a Tier-2 remux) to the DMR — the only delivery it
-    accepts is a complete, Range-served file. Returns (position, duration, advance).
+    accepts is a complete, Range-served file. Returns (position, duration, advance,
+    subs_delivered) — same contract as `caster.cast`: the castbridge LOAD has no subtitle
+    field, so requested subs ride only the catt fallback.
 
     Prefers the **native path** (ADR 0007): nstream's own Range HTTP server (`serve.py`) serves
     the file and **castbridge** LOADs its URL with metadata (so the TV card + HUD widget light
     up). Falls back to **catt** serving+casting (no metadata) when castbridge is unavailable or
     can't start. `follow=False` (headless) leaves the server detached and records its PID for
     `--stop`/GC; `follow=True` serves until playback ends, then removes the temp file."""
+    prev = _read_state()
+    if prev and _pid_alive(prev.get("pid")):
+        # The state slot is single: a new Tier-2 cast replaces the previous one. Reap the
+        # old detached server first, or it would be orphaned by the overwrite below and
+        # keep listening (and holding its multi-GB temp) until reboot.
+        _teardown(prev.get("pid"), prev.get("file"))
     if device:
         # The receiver fetches the file from us over the LAN, so the host firewall must let it
         # in. Best-effort + idempotent; covers both the castbridge-serve and catt-serve paths.
@@ -377,8 +395,17 @@ def cast_file(
             meta=meta or caster.CastMeta(), follow=follow, on_event=on_event,
         )  # fmt: skip
         if result is not None:
-            return result
+            return (*result, False)
         # castbridge couldn't start → fall back to catt serving+casting below.
+    if sub_paths and not follow:
+        # The srt lives in the caller's per-play temp dir, which is deleted as soon as a
+        # headless fire-and-return returns — under a detached catt that may still have to
+        # serve it. Keep a copy beside the remux (`<file_path>.srt`), on the same
+        # teardown/GC lifecycle as the mp4.
+        sub_copy = f"{file_path}.srt"
+        with contextlib.suppress(OSError):
+            shutil.copyfile(sub_paths[0], sub_copy)
+            sub_paths = (sub_copy,)
     base = ["catt", *(["-d", device] if device else [])]
     launch = [*base, "cast", file_path]
     if start and start > 1:
@@ -400,8 +427,9 @@ def cast_file(
     except (OSError, FileNotFoundError):
         print("nstream: catt non trovato", file=sys.stderr)
         _rm(file_path)
+        _rm(f"{file_path}.srt")
         _rm(err_path)
-        return (0.0, 0.0, False)
+        return (0.0, 0.0, False, False)
     finally:
         os.close(err_fd)
     _write_state(proc.pid, file_path, device)
@@ -416,13 +444,13 @@ def cast_file(
             print(serve.firewall_hint(serve.lan_ip(device)), file=sys.stderr)
         _teardown(proc.pid, file_path)
         _rm(err_path)
-        return (0.0, 0.0, False)
+        return (0.0, 0.0, False, False)
     _rm(err_path)  # startup confirmed: the capture served its (diagnosis-only) purpose
 
     if not follow:
         # Leave the detached catt serving; --stop / next-run GC tears it down.
         print(f"{ui.g().tv} {title} → {dest}", file=sys.stderr)
-        return (0.0, 0.0, False)
+        return (0.0, 0.0, False, bool(sub_paths))
 
     print(f"{ui.g().tv} {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
     try:
@@ -432,7 +460,7 @@ def cast_file(
             subprocess.run([*base, "stop"], capture_output=True, text=True)
     finally:
         _teardown(proc.pid, file_path)
-    return (0.0, 0.0, False)
+    return (0.0, 0.0, False, bool(sub_paths))
 
 
 def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) -> dict:
@@ -640,6 +668,8 @@ def _await_start(device: str | None) -> bool:
 def _teardown(pid: int | None, file_path: str | None) -> None:
     _kill(pid)
     _rm(file_path)
+    if file_path:
+        _rm(f"{file_path}.srt")  # subtitle sidecar of the detached catt path, if any
     _clear_state()
 
 

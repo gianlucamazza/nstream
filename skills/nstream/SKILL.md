@@ -85,16 +85,20 @@ Always pass `--json`. Quote the title.
 
 ### Cast lifecycle (nstream is now self-sufficient)
 - `nstream --json --status` → `player_state`, `title`, `position`, `duration`, `volume`, `muted`
-  of the receiver (use for "what's playing / is it still on?").
-- `nstream --json --stop` → stop the cast.
+  of the receiver (use for "what's playing / is it still on?"). Also refreshes the resume
+  point of a fire-and-return cast in the watch history (cast session).
+- `nstream --json --stop` → stop the cast AND persist the receiver's position to the watch
+  history, so a later `-c "titolo"` resumes where the user stopped.
 - `nstream --json --cast --volume N "X"` → set the receiver volume (0–100) when starting a cast;
   combine with the `volume`/`muted`/`notice` fields the cast result already reports.
 - (For mirroring the desktop or casting an arbitrary file/URL, still use the `skill-cast` skill.)
 
 Notes:
 - **Cast is fire-and-return by default** (`--no-follow` implied): the command returns as soon as
-  the receiver has the media. Add `--follow` only if the user wants resume/auto-advance tracking
-  (it will hold the terminal for the whole runtime).
+  the receiver has the media. The cast is still recorded in the watch history (a "started"
+  entry + cast session): prefer `--json --stop` to end it so the position is persisted, and
+  `-c "titolo"` will resume/propose correctly. Add `--follow` only if the user wants live
+  resume/auto-advance tracking (it will hold the terminal for the whole runtime).
 - **`--follow` streams playback events as JSONL** (one JSON object per line) instead of a single
   final object: `{"action":"cast","event":"started|playing|paused|ended|failed", ...}` with
   `position`/`duration` on the playing/ended lines. Read lines until `event:"ended"` (or

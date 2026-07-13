@@ -293,13 +293,17 @@ def cast(
     follow: bool = True,
     meta: CastMeta | None = None,
     on_event: EventCb | None = None,
-) -> tuple[float, float, bool]:
+) -> tuple[float, float, bool, bool]:
     """Cast `url` to a Chromecast and track playback so resume and series auto-advance work like
-    the mpv path. Returns (position, duration, advance). Prefers the **castbridge** native sender
-    (metadata-rich LOAD + a real event stream) when its binary is available; falls back to **catt**
-    (no metadata) otherwise, when castbridge can't start, or for the interactive in-cast audio
-    switch ('a'), which remains a catt-path capability (see docs/adr/0007). `on_event` receives
-    normalized events for the headless `--follow` JSONL path."""
+    the mpv path. Returns (position, duration, advance, subs_delivered). Prefers the **castbridge**
+    native sender (metadata-rich LOAD + a real event stream) when its binary is available; falls
+    back to **catt** (no metadata) otherwise, when castbridge can't start, or for the interactive
+    in-cast audio switch ('a'), which remains a catt-path capability (see docs/adr/0007).
+    `on_event` receives normalized events for the headless `--follow` JSONL path.
+
+    `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast —
+    the castbridge LOAD has no subtitle field, so on that path requested subs are NOT shown
+    and callers must not report them as active (only the catt path carries `-s`)."""
     can_switch = bool(langs) and resolve_lang is not None and follow and sys.stdin.isatty()
     if device and bridge.bridge_available() and not can_switch:
         result = _cast_via_bridge(
@@ -313,8 +317,8 @@ def cast(
             on_event=on_event,
         )
         if result is not None:
-            return result  # else castbridge couldn't start → fall back to catt below
-    return _cast_via_catt(
+            return (*result, False)  # else castbridge couldn't start → fall back to catt below
+    catt_result = _cast_via_catt(
         cfg,
         title,
         url,
@@ -327,6 +331,7 @@ def cast(
         follow=follow,
         on_event=on_event,
     )
+    return (*catt_result, bool(sub_paths))
 
 
 def _cast_via_bridge(
@@ -420,7 +425,10 @@ def _cast_via_catt(
     if sub_paths:  # catt takes a single subtitle file
         launch += ["-s", sub_paths[0]]
     dest = device or "Chromecast"
-    _log.debug("catt launch: %s", " ".join(launch))  # token redacted by the log filter
+    # Never log the URL itself: the redaction regexes cover the known token carriers, but a
+    # signed native-CDN link (TorBox/Premiumize requestdl) is a capability in its own right
+    # and its query params don't necessarily match them.
+    _log.debug("catt launch: %s", " ".join(a if a != url else "<url>" for a in launch))
     # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
     print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     try:

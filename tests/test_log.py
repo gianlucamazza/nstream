@@ -78,3 +78,18 @@ def test_setup_logging_redacts_exception_traceback(tmp_path, monkeypatch):
 def test_log_path_honours_xdg(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     assert log.log_path() == tmp_path / "nstream" / "nstream.log"
+
+
+def test_private_handler_keeps_log_0600(tmp_path):
+    import stat
+
+    path = tmp_path / "nstream.log"
+    path.write_text("old")
+    path.chmod(0o644)  # pre-existing world-readable file gets tightened
+    h = log._PrivateRotatingFileHandler(str(path), maxBytes=512, backupCount=1, encoding="utf-8")
+    try:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        h.doRollover()  # the re-created base file is 0600 too
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    finally:
+        h.close()

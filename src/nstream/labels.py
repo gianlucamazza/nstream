@@ -31,8 +31,9 @@ def meta_label(m: Meta) -> str:
 def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
     caps = ui.active_caps()
     g, pal = ui.glyphs(caps), ui.palette(caps)
-    name = (s.get("name") or "").replace("\n", " ")
-    title = (s.get("title") or "").replace("\n", " · ")
+    # Release names are untrusted: strip control/ESC chars before they reach the terminal.
+    name = ui.sanitize(s.get("name") or "").replace("\n", " ")
+    title = ui.sanitize(s.get("title") or "").replace("\n", " · ")
     base = f"{name}  |  {title}"[:200]
     if info is None:
         return base

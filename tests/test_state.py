@@ -147,3 +147,83 @@ def test_save_entry_no_partial_tmp_left(tmp_path, monkeypatch):
     assert leftovers == []
     # file is valid JSON
     json.loads((tmp_path / "nstream" / "history.json").read_text())
+
+
+# --- fire-and-return resume: note_started / cast session --------------------
+
+
+def test_note_started_preserves_known_duration(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 40.0, 100.0))
+    state.note_started(CFG, state.make_entry("tt1", "A", "movie", 40.0, 0.0))
+    e = state.load_history(CFG)["tt1"]
+    assert (e["position"], e["duration"]) == (40.0, 100.0)  # duration inherited
+
+
+def test_note_started_new_title_keeps_zero_duration(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.note_started(CFG, state.make_entry("tt2", "B", "movie", 0.0, 0.0))
+    e = state.load_history(CFG)["tt2"]
+    assert (e["position"], e["duration"]) == (0.0, 0.0)  # visible to -c, never "watched"
+
+
+def test_remember_cast_update_from_receiver_merges(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    entry = state.make_entry(
+        "tt1:1:1", "Show", "series", 0.0, 0.0, series_id="tt1", season=1, episode=1
+    )
+    state.remember_cast(CFG, entry, "192.168.1.9")
+    assert state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0) is True
+    e = state.load_history(CFG)["tt1:1:1"]
+    assert (e["position"], e["duration"], e["season"]) == (500.0, 3000.0, 1)
+    assert "device" not in e  # session-only field never lands in history
+
+
+def test_update_from_receiver_device_mismatch_no_write(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), "192.168.1.9")
+    assert state.update_from_receiver(CFG, "10.0.0.1", 500.0, 3000.0) is False
+    assert state.load_history(CFG) == {}
+
+
+def test_update_from_receiver_clear_is_one_shot(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), "192.168.1.9")
+    assert state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0, clear=True) is True
+    # session cleared → a later update has nothing to attribute the position to
+    assert state.update_from_receiver(CFG, "192.168.1.9", 600.0, 3000.0) is False
+
+
+def test_update_from_receiver_idle_zero_clears_but_keeps_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), "192.168.1.9")
+    assert state.update_from_receiver(CFG, "192.168.1.9", 0.0, 0.0, clear=True) is False
+    assert state.update_from_receiver(CFG, "192.168.1.9", 1.0, 2.0) is False  # cleared anyway
+
+
+def test_update_from_receiver_watched_retires_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10.0, 3000.0))
+    state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 10.0, 3000.0), None)
+    # stopped in the credits → save_entry's watched logic retires the entry
+    assert state.update_from_receiver(CFG, None, 2990.0, 3000.0, clear=True) is True
+    assert state.load_history(CFG) == {}
+
+
+def test_history_lock_degrades_when_unopenable(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    real_open = state.os.open
+
+    def deny(path, *a, **k):
+        if str(path).endswith(".history.lock"):
+            raise OSError("no lock for you")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(state.os, "open", deny)
+    state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10.0, 100.0))
+    assert state.load_history(CFG)["tt1"]["position"] == 10.0  # unlocked but not blocked

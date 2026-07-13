@@ -1,5 +1,5 @@
 from nstream import labels, ui
-from nstream.config import HistoryEntry, Meta, Video
+from nstream.config import HistoryEntry, Meta, Stream, Video
 from nstream.tracks import Track, Tracks
 
 
@@ -71,3 +71,11 @@ def test_sub_summary_external_wins():
 
 def test_sub_summary_none():
     assert labels.sub_summary("no", (), Tracks(audio=[], subs=[])) == "nessuno"
+
+
+def test_stream_label_strips_ansi_from_release_names():
+    s: Stream = {"name": "Grp\x1b[2Jname", "title": "Movie\x1b]0;spoof\x07.2024"}
+    label = labels.stream_label(s)
+    # ESC/BEL stripped → the leftover printable chars can't be interpreted by the terminal
+    assert "\x1b" not in label and "\x07" not in label
+    assert "Grp" in label and "Movie" in label

@@ -186,3 +186,21 @@ def test_run_cmd_passes_input():
     proc = util.run_cmd(["cat"], input="piped")
     assert proc is not None
     assert proc.stdout == "piped"
+
+
+def test_runstate_write_refuses_symlink(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    target = tmp_path / "target.json"
+    target.write_text('{"a": 1}')
+    rs = util.RunState("sym")
+    rs.path.symlink_to(target)
+    rs.write({"b": 2})  # O_NOFOLLOW → OSError → suppressed, nothing written
+    assert target.read_text() == '{"a": 1}'
+
+
+def test_runstate_write_0600(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    rs = util.RunState("perm")
+    rs.write({"a": 1})
+    assert rs.read() == {"a": 1}
+    assert stat.S_IMODE(rs.path.stat().st_mode) == 0o600

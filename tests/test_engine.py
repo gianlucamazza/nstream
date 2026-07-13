@@ -253,3 +253,16 @@ def test_shutdown_without_detach_terminates():
     engine._spawned = proc
     engine._shutdown()
     assert "terminate" in proc.calls and engine._spawned is None
+
+
+def test_wait_buffer_ctrl_c_propagates(monkeypatch):
+    """Ctrl-C while buffering must abort the whole flow, not degrade to
+    EngineUnavailable (which the multi-candidate loops read as "try the next
+    torrent" and keep buffering)."""
+
+    def interrupted(base, h):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(engine, "_torrent_stat", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        engine._wait_buffer("http://127.0.0.1:1", "hash")
