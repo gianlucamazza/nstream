@@ -791,3 +791,72 @@ def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
     assert p.mode == "direct" and p.verified is False and p.real_lang == "ita"
     p = _plan([Track(1, "und", "ac3")])
     assert p.mode == "remux" and p.verified is False  # codec still decides the tier
+
+
+def test_reselect_prefers_tagged_unverified_over_wrong_language(monkeypatch):
+    """The Dexter: Resurrection bug (2026-07-14): the top pick is a verified WRONG-language
+    stream (4K eng/rus) and every ita-tagged release is non-cached → unprobeable (empty
+    tracks → unverified direct). Reselect must return the name-tagged-ita release on benefit
+    of the doubt, NOT give up and let the caller cast the confirmed-Russian pick. This makes
+    the default cast consistent with the forced --audio-lang path (pick_audio_stream_verified),
+    which already accepts an unverified name tag."""
+    wrong: Stream = {"url": "rus-4k"}
+    ita_tagged: Stream = {"url": "ita-webrip"}
+
+    def tracks_of(cfg, s):
+        # the wrong pick probes fine (rus first); the ita release is unprobeable
+        return [Track(1, "rus", "eac3"), Track(2, "eng", "eac3")] if s is wrong else []
+
+    monkeypatch.setattr(stream_select, "_cast_audio_tracks", tracks_of)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results: [
+            _R(wrong, frozenset({"eng", "rus"})),
+            _R(ita_tagged, frozenset({"eng", "ita"})),  # name explicitly claims ita
+        ],
+    )  # fmt: skip
+    plan = stream_select.vet_cast_audio(_ccfg(), [wrong, ita_tagged], wrong, "ita")
+    assert plan.mode == "direct" and plan.stream is ita_tagged
+    assert plan.real_lang == "ita" and plan.verified is False  # honest: tagged, not confirmed
+
+
+def test_reselect_multi_unprobeable_not_trusted_as_target(monkeypatch):
+    """An unprobeable release tagged only `multi` (not the target language) is NOT a
+    benefit-of-the-doubt match — `multi` doesn't promise ita specifically. With no better
+    option, reselect returns None and the caller keeps the (absent) original plan."""
+    wrong: Stream = {"url": "rus-4k"}
+    multi: Stream = {"url": "multi-rel"}
+    monkeypatch.setattr(
+        stream_select, "_cast_audio_tracks",
+        lambda cfg, s: [Track(1, "rus", "eac3")] if s is wrong else [],
+    )  # fmt: skip
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results: [_R(wrong, frozenset({"rus"})), _R(multi, frozenset({"multi"}))],
+    )  # fmt: skip
+    assert stream_select._reselect_cast_for_lang(_ccfg(), [], wrong, "ita") is None
+
+
+def test_reselect_verified_direct_beats_tagged_guess(monkeypatch):
+    """A verified ita release must win over an earlier unprobeable ita-tagged guess even if
+    the guess is ranked higher — confidence beats a name tag."""
+    wrong: Stream = {"url": "rus"}
+    guess: Stream = {"url": "ita-guess"}  # higher-ranked, unprobeable
+    real: Stream = {"url": "ita-real"}  # lower-ranked, verified ita
+
+    def tracks_of(cfg, s):
+        if s is wrong:
+            return [Track(1, "rus", "aac")]
+        return [] if s is guess else [Track(1, "ita", "aac")]
+
+    monkeypatch.setattr(stream_select, "_cast_audio_tracks", tracks_of)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results: [
+            _R(wrong, frozenset({"rus"})),
+            _R(guess, frozenset({"ita"})),
+            _R(real, frozenset({"ita"})),
+        ],
+    )  # fmt: skip
+    plan = stream_select._reselect_cast_for_lang(_ccfg(), [], wrong, "ita")
+    assert plan is not None and plan.stream is real and plan.verified is True
