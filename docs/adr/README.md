@@ -27,6 +27,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0013](0013-custom-cast-receiver.md)                 | Custom Cast (CAF) receiver with runtime codec capability probing                   | Proposed |
 | [0014](0014-verified-cache-preranking.md)            | Verify cached availability before committing to a pick                             | Accepted |
 | [0015](0015-mirror-over-4k-remux.md)                 | Prefer the realtime mirror over a 4K remux for Dolby-only releases                 | Accepted |
-| [0016](0016-receiver-track-observability.md)         | Surface the receiver's real track + error state                                    | Proposed |
+| [0016](0016-receiver-track-observability.md)         | Surface the receiver's real track + error state                                    | Accepted |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

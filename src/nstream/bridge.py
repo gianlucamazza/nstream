@@ -238,11 +238,15 @@ def _media_load_args(
     subtitle_url: str = "",
     subtitle_lang: str = "",
     subtitle_name: str = "",
+    app_id: str = "",
 ) -> dict:
     """Build the `media-load` args, omitting empty optional fields so the daemon picks the
     right metadata block (TvShow if seriesTitle, else Movie if poster/subtitle, else title).
     `subtitle_url` (a WebVTT URL the receiver fetches) adds a side-loaded, auto-activated caption
-    track — distinct from `subtitle`, which is Movie-metadata text (a tagline), not a track."""
+    track — distinct from `subtitle`, which is Movie-metadata text (a tagline), not a track.
+    `app_id` (empty → Default Media Receiver) launches a custom Cast receiver instead — the
+    dormant enabling hook for ADR 0013 (a registered receiver with Dolby passthrough); no nstream
+    path sets it yet."""
     args: dict = {"ip": ip, "url": url}
     if content_type:
         args["contentType"] = content_type
@@ -266,6 +270,8 @@ def _media_load_args(
             args["subtitleLang"] = subtitle_lang
         if subtitle_name:
             args["subtitleName"] = subtitle_name
+    if app_id:
+        args["appId"] = app_id
     return args
 
 
@@ -273,12 +279,17 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
     """Cast `url` to the receiver at `ip` via castbridge with the given metadata, yielding
     normalized playback events:
 
-        {"kind": "started", "title": str}
-        {"kind": "playing", "position": float, "duration": float}
-        {"kind": "paused",  "position": float}
+        {"kind": "started", "title": str, "tracks": list[int]}
+        {"kind": "playing", "position": float, "duration": float, "tracks": list[int]}
+        {"kind": "paused",  "position": float, "tracks": list[int]}
         {"kind": "ended",   "position": float, "duration": float}
         {"kind": "failed",  "error": str, "message": str}
         {"kind": "disconnected", "position": float, "duration": float}  # daemon EOF mid-cast
+
+    `tracks` is the receiver's confirmed active track ids (`activeTrackIds`) — for a
+    side-loaded caption track it confirms the WebVTT was activated (ADR 0016); empty when the
+    receiver doesn't report it. A `failed` with `error: "receiver_error"` is the receiver
+    rejecting the media (codec/caption/invalid) mid- or pre-playback.
 
     `disconnected` (daemon socket EOF after `started`, without an explicit end) means the
     daemon died/restarted — playback on the receiver may well continue; it is not `ended`.
@@ -353,7 +364,20 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
                     return
                 continue
 
+            # The receiver reported a failure (bad codec, unreachable media, a caption it
+            # couldn't fetch — ADR 0016). Before `started` it's a load failure the caller
+            # falls back on; after, the session died. Either way, surface it, don't hang.
+            err = block.get("error")
+            if err:
+                yield {
+                    "kind": "failed",
+                    "error": "receiver_error",
+                    "message": str(err),
+                }
+                return
+
             state, p, du, t = _progress(block)
+            tracks = _active_tracks(block)
             if p:
                 pos = p
             if du:
@@ -363,16 +387,22 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
 
             if not started and state in ("PLAYING", "PAUSED", "BUFFERING"):
                 started = True
-                yield {"kind": "started", "title": title}
+                yield {"kind": "started", "title": title, "tracks": tracks}
                 if not follow:
                     return
             elif started and state and state != last_state:
                 if state == "PAUSED":
-                    yield {"kind": "paused", "position": round(pos, 1)}
+                    yield {"kind": "paused", "position": round(pos, 1), "tracks": tracks}
                 elif state == "PLAYING":
-                    yield {"kind": "playing", "position": round(pos, 1), "duration": round(dur, 1)}
+                    yield {
+                        "kind": "playing", "position": round(pos, 1),
+                        "duration": round(dur, 1), "tracks": tracks,
+                    }  # fmt: skip
             elif started and follow and state == "PLAYING":
-                yield {"kind": "playing", "position": round(pos, 1), "duration": round(dur, 1)}
+                yield {
+                    "kind": "playing", "position": round(pos, 1),
+                    "duration": round(dur, 1), "tracks": tracks,
+                }  # fmt: skip
             last_state = state or last_state
 
         # Socket closed (EOF) before an explicit end. A daemon crash/restart mid-cast is
@@ -405,6 +435,17 @@ def _media_block(msg: dict) -> dict | None:
         return None
     media = data.get("media")
     return media if isinstance(media, dict) else None
+
+
+def _active_tracks(info: dict) -> list[int]:
+    """Track ids the receiver reports active (`activeTrackIds`), ints only — the receiver's
+    confirmation of which tracks (incl. a side-loaded caption track) it actually activated
+    (ADR 0016). Empty when the receiver doesn't echo it: treated as 'unknown', never a
+    downgrade of what was sent."""
+    raw = info.get("activeTrackIds")
+    if not isinstance(raw, list):
+        return []
+    return [t for t in raw if isinstance(t, int)]
 
 
 def _progress(info: dict) -> tuple[str, float, float, str]:
@@ -466,3 +507,14 @@ def status(ip: str | None = None) -> dict | None:
     if reply and reply.get("ok"):
         return reply.get("data")
     return None
+
+
+def peek_status(ip: str | None = None) -> dict | None:
+    """Like `status`, but NEVER spawns the daemon: returns None when nothing is already
+    listening. For read-only status merges (a `--status` poll) where launching a daemon just
+    to answer — when no cast is in progress — would be pointless."""
+    sock = _connect()
+    if sock is None:
+        return None
+    sock.close()
+    return status(ip)

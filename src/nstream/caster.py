@@ -601,14 +601,33 @@ def device_volume(device: str | None) -> tuple[float | None, bool]:
     return (vol, bool(info.get("volume_muted")))
 
 
+def _bridge_track_info(device: str | None) -> tuple[list[int], str | None]:
+    """The receiver's confirmed active track ids + any error, read from the castbridge
+    session (ADR 0016) — the receiver's own view, which catt's status can't see. ([], None)
+    when the bridge isn't running (no live cast) or reports nothing; never spawns the daemon
+    just to answer, and never raises."""
+    if not bridge.bridge_available():
+        return [], None
+    data = bridge.peek_status(device)
+    media = data.get("media") if isinstance(data, dict) else None
+    if not isinstance(media, dict):
+        return [], None
+    ids = media.get("activeTrackIds")
+    tracks = [t for t in ids if isinstance(t, int)] if isinstance(ids, list) else []
+    err = media.get("error")
+    return tracks, (str(err) if err else None)
+
+
 def status(device: str | None) -> dict:
     """Best-effort normalized receiver status for the headless `--status` action:
-    player_state, title, position, duration, volume, muted. Empty player_state when the
+    player_state, title, position, duration, volume, muted, plus the receiver's confirmed
+    active_tracks + receiver_error (from castbridge, ADR 0016). Empty player_state when the
     receiver is idle/unreachable. Never raises."""
     info = _raw_info(device)
     pos, dur, state = _cast_progress(info)
     title = (info.get("media_metadata") or {}).get("title") or info.get("title") or None
     vol, muted = device_volume(device) if not info else _vol_muted(info)
+    active_tracks, receiver_error = _bridge_track_info(device)
     return {
         "player_state": state or "IDLE",
         "title": title,
@@ -616,6 +635,8 @@ def status(device: str | None) -> dict:
         "duration": round(dur, 1) if dur else 0.0,
         "volume": vol,
         "muted": muted,
+        "active_tracks": active_tracks,
+        "receiver_error": receiver_error,
     }
 
 

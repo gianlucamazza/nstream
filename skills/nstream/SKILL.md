@@ -40,7 +40,7 @@ Always pass `--json`. Quote the title.
 | resume last watched                  | `nstream --json -c "X"` (or no title for the most recent)                                                                   |
 | next episode after finishing one     | `nstream --json --cast -c "X"` (auto-advances when the last episode is finished; `error: series_completed` past the finale) |
 | list a series' episodes              | `nstream --json --probe "X"` without `--episode` (add `--season N` to narrow)                                               |
-| why was this stream picked? | `nstream --json --explain "X"` (ranking + filters as data; add `--cast` for the TV profile; read-only) |
+| why was this stream picked?          | `nstream --json --explain "X"` (ranking + filters as data; add `--cast` for the TV profile; read-only)                      |
 | something popular / new / top-rated  | `nstream --json --cast --browse popolari\|nuovi\|top`                                                                       |
 | stop what's casting                  | `nstream --json --stop`                                                                                                     |
 | what's casting now                   | `nstream --json --status`                                                                                                   |
@@ -94,8 +94,10 @@ Always pass `--json`. Quote the title.
 ### Cast lifecycle (nstream is now self-sufficient)
 
 - `nstream --json --status` → `player_state`, `title`, `position`, `duration`, `volume`, `muted`
-  of the receiver (use for "what's playing / is it still on?"). Also refreshes the resume
-  point of a fire-and-return cast in the watch history (cast session).
+  of the receiver (use for "what's playing / is it still on?"), plus `active_tracks` (the
+  receiver's confirmed active track ids — a caption track shows here once it's really activated)
+  and `receiver_error` (a codec/caption rejection reported by the receiver, else null). Also
+  refreshes the resume point of a fire-and-return cast in the watch history (cast session).
 - `nstream --json --stop` → stop the cast AND persist the receiver's position to the watch
   history, so a later `-c "titolo"` resumes where the user stopped.
 - `nstream --json --cast --volume N "X"` → set the receiver volume (0–100) when starting a cast;

@@ -107,7 +107,9 @@ Modules in `src/nstream/`:
 - `bridge.py` — IPC client for the **castbridge** daemon (AF_UNIX newline-JSON, stdlib `socket` only):
   metadata-rich LOAD + normalized event stream (started/playing/paused/ended/failed/disconnected).
   The session lives in the daemon, so a fire-and-return load survives our exit (ADR 0007/0008).
-  Leaf below `cli` (imports only `log` + stdlib).
+  started/playing/paused events also carry the receiver's confirmed `tracks` (activeTrackIds), and a
+  receiver `error` (bad codec/caption/invalid LOAD) becomes a `failed` event — ADR 0016 observability.
+  `peek_status` reads the session without spawning the daemon. Leaf below `cli` (imports only `log` + stdlib).
 - `serve.py` — Tier-2 cast delivery: minimal **Range-capable HTTP server** (206/`Content-Range`)
   serving the complete remux file to the DMR — in-process for the `follow` path, detached
   (`python -m nstream.serve`) for headless fire-and-return. Also serves an optional side-loaded

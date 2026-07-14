@@ -583,6 +583,41 @@ def test_status_idle_on_failure(monkeypatch):
     assert st["player_state"] == "IDLE"
 
 
+# --- receiver track/error observability in --status (ADR 0016) --------------
+
+
+def test_status_receiver_track_fields_default(monkeypatch):
+    """With the bridge unavailable (conftest default) --status still carries the fields, empty:
+    active_tracks=[] and receiver_error=None (no downgrade, predictable shape)."""
+
+    def boom(cmd, **k):
+        raise OSError("no catt")
+
+    monkeypatch.setattr(caster.subprocess, "run", boom)
+    st = caster.status(None)
+    assert st["active_tracks"] == [] and st["receiver_error"] is None
+
+
+def test_bridge_track_info_reads_session(monkeypatch):
+    """When the bridge is up, _bridge_track_info extracts the receiver's confirmed
+    activeTrackIds + error from its session snapshot (ADR 0016)."""
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(
+        caster.bridge, "peek_status",
+        lambda device: {"session": "media", "media": {"activeTrackIds": [1], "error": "ERROR"}},
+    )  # fmt: skip
+    tracks, err = caster._bridge_track_info("1.2.3.4")
+    assert tracks == [1] and err == "ERROR"
+
+
+def test_bridge_track_info_empty_when_unavailable(monkeypatch):
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(
+        caster.bridge, "peek_status", lambda device: pytest.fail("must not query a dead bridge")
+    )
+    assert caster._bridge_track_info("1.2.3.4") == ([], None)
+
+
 # --- cast() dispatch: castbridge vs catt -----------------------------------
 
 

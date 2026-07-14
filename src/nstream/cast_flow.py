@@ -33,6 +33,11 @@ MIRROR_NOT_NEEDED = (
     "nstream: audio decodificabile dal TV → cast diretto nativo (mirror non necessario)"
 )
 
+# Resolution (px height) at/above which a release is 4K/UHD: a remux of one is a tens-of-GB
+# fetch regardless of the parsed size, so it trips the mirror-over-remux rule even when the
+# size is unlabelled. Matches the cast resolution ceiling (`quality.cast_caps`).
+_UHD_MIN_RESOLUTION = 2160
+
 
 def _remux_is_pathological(info: quality.StreamInfo, threshold_gb: int) -> bool:
     """Whether a Tier-2 remux of this release would be a pathological multi-GB fetch — the
@@ -44,7 +49,7 @@ def _remux_is_pathological(info: quality.StreamInfo, threshold_gb: int) -> bool:
         return False
     if info.size_gb:
         return info.size_gb >= threshold_gb
-    return info.resolution >= 2160
+    return info.resolution >= _UHD_MIN_RESOLUTION
 
 
 @dataclass(frozen=True)
