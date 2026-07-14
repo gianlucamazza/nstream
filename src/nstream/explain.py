@@ -14,23 +14,26 @@ from .config import Config, Stream
 
 
 def _rank(
-    cfg: Config, results: list[Stream], *, cast: bool
+    cfg: Config, results: list[Stream], *, cast: bool, title: str = ""
 ) -> tuple[
     list[quality.RankedStream], list[quality.RankedStream], quality.Caps, quality.FilterSpec
 ]:
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast)
+    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
     playable, excluded = quality.rank_streams(results, caps, spec)
     return playable, excluded, caps, spec
 
 
-def auto_pick(cfg: Config, results: list[Stream], *, cast: bool) -> quality.RankedStream | None:
+def auto_pick(
+    cfg: Config, results: list[Stream], *, cast: bool, title: str = ""
+) -> quality.RankedStream | None:
     """The stream nstream would auto-play for this profile, or None if nothing qualifies."""
-    playable, _, _, _ = _rank(cfg, results, cast=cast)
+    playable, _, _, _ = _rank(cfg, results, cast=cast, title=title)
     return playable[0] if playable else None
 
 
 _COMP_LABEL = {
+    "title_match": "title",
     "cached": "cached",
     "resolution": "res",
     "cast_audio": "caud",
@@ -76,18 +79,19 @@ def _row(
     mark: str,
     *,
     cast: bool = False,
+    title: str = "",
 ) -> str:
-    comp = quality.score_components(r.info, audio_langs, cast=cast)
+    comp = quality.score_components(r.info, audio_langs, cast=cast, title=title)
     # Release names are untrusted: strip control/ESC chars before they reach the terminal.
     name = ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:60]
     return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {name}"
 
 
-def explain_streams(cfg: Config, results: list[Stream], *, cast: bool) -> str:
+def explain_streams(cfg: Config, results: list[Stream], *, cast: bool, title: str = "") -> str:
     """Render the full ranking decision for one profile (local GPU or Chromecast)."""
     if not results:
         return "nessuno stream restituito da Torrentio."
-    playable, excluded, caps, spec = _rank(cfg, results, cast=cast)
+    playable, excluded, caps, spec = _rank(cfg, results, cast=cast, title=title)
     profile = "CAST (Chromecast)" if cast else "LOCALE (mpv/GPU)"
     lines = [
         f"=== profilo {profile} ===",
@@ -104,22 +108,27 @@ def explain_streams(cfg: Config, results: list[Stream], *, cast: bool) -> str:
     ]
     for i, r in enumerate(playable):
         mark = f"{ui.g().cached}PICK" if i == 0 else ""
-        lines.append(_row(i + 1, r, spec.audio_langs, mark, cast=cast))
+        lines.append(_row(i + 1, r, spec.audio_langs, mark, cast=cast, title=spec.title))
     if excluded:
         lines.append("")
         lines.append("ESCLUSI (motivo):")
         for i, r in enumerate(excluded):
-            lines.append(_row(i + 1, r, spec.audio_langs, ui.g().warn, cast=cast))
+            lines.append(_row(i + 1, r, spec.audio_langs, ui.g().warn, cast=cast, title=spec.title))
             lines[-1] = lines[-1].replace("[", f"[escluso: {r.reason}] [", 1)
     return "\n".join(lines)
 
 
 def _row_data(
-    r: quality.RankedStream, audio_langs: tuple[str, ...], *, cast: bool, reason: str | None = ""
+    r: quality.RankedStream,
+    audio_langs: tuple[str, ...],
+    *,
+    cast: bool,
+    reason: str | None = "",
+    title: str = "",
 ) -> dict:
     """One ranked stream as parsed metadata + score components (never the url/token)."""
     info = r.info
-    comp = quality.score_components(info, audio_langs, cast=cast)
+    comp = quality.score_components(info, audio_langs, cast=cast, title=title)
     row = {
         "name": ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:120],
         "resolution": info.resolution,
@@ -137,11 +146,11 @@ def _row_data(
     return row
 
 
-def explain_data(cfg: Config, results: list[Stream], *, cast: bool) -> dict:
+def explain_data(cfg: Config, results: list[Stream], *, cast: bool, title: str = "") -> dict:
     """Machine-readable counterpart of `explain_streams`, for `--json --explain`: the same
     ranking reconstruction as a dict — caps, filters, counts, playable rows best-first
     with their score components, excluded rows with the reason. Parsed metadata only."""
-    playable, excluded, caps, spec = _rank(cfg, results, cast=cast)
+    playable, excluded, caps, spec = _rank(cfg, results, cast=cast, title=title)
     return {
         "profile": "cast" if cast else "local",
         "caps": {
@@ -168,9 +177,16 @@ def explain_data(cfg: Config, results: list[Stream], *, cast: bool) -> dict:
                 max(0, len(results) - len(playable) - len(excluded)) if spec.dedup else 0
             ),
         },
-        "pick": _row_data(playable[0], spec.audio_langs, cast=cast) if playable else None,
-        "playable": [_row_data(r, spec.audio_langs, cast=cast) for r in playable],
-        "excluded": [_row_data(r, spec.audio_langs, cast=cast, reason=r.reason) for r in excluded],
+        "pick": (
+            _row_data(playable[0], spec.audio_langs, cast=cast, title=spec.title)
+            if playable
+            else None
+        ),
+        "playable": [_row_data(r, spec.audio_langs, cast=cast, title=spec.title) for r in playable],
+        "excluded": [
+            _row_data(r, spec.audio_langs, cast=cast, reason=r.reason, title=spec.title)
+            for r in excluded
+        ],
     }
 
 

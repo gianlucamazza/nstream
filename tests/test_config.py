@@ -228,6 +228,7 @@ def test_cast_mirror_defaults(tmp_path, monkeypatch):
     assert cfg.cast_mode == "dmr"
     assert cfg.mirror_bitrate == 0
     assert cfg.mirror_playout_ms == 0
+    assert cfg.cast_mirror_over_remux_gb == 10  # ADR 0015 default threshold
 
 
 def test_cast_mirror_overrides(tmp_path, monkeypatch):
@@ -262,6 +263,9 @@ def test_cast_mode_invalid_falls_back(tmp_path, monkeypatch):
         ("mirror_playout_ms", -1, 0),  # clamped up
         ("mirror_playout_ms", 99999, 5000),  # clamped down to ceiling
         ("mirror_playout_ms", "bad", 0),  # invalid → default
+        ("cast_mirror_over_remux_gb", -1, 0),  # clamped up (0 = disabled)
+        ("cast_mirror_over_remux_gb", 9999, 1000),  # clamped down to ceiling
+        ("cast_mirror_over_remux_gb", "bad", 10),  # invalid → default
     ],
 )
 def test_mirror_int_coercion(tmp_path, monkeypatch, key, value, expected):

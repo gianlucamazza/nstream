@@ -585,6 +585,41 @@ def test_rank_excludes_dcprip_cinema_leak():
     assert any("camrip (dcp)" in (r.reason or "") for r in excluded)
 
 
+def test_title_match_demotes_mismapped_torrent():
+    # Real regression (I.S.S.): Torrentio returned an unrelated cached "Charlie Brown" pack
+    # (untagged → resolution 0). Cached dominates the score, so it auto-won over every real
+    # release. With the searched title known, `title_match` sinks the mismatch below the real
+    # (uncached) release — without excluding it (still listed/pickable).
+    junk: Stream = {
+        "name": "[RD+] Torrentio\n",
+        "title": "Charlie Brown and Snoopy (Anthology collection in MP4 format) [Landdo18]"
+        "\n👤 4 💾 0.22 GB ⚙️ x",
+    }
+    real: Stream = {
+        "name": "Torrentio\n720p",
+        "title": "I.S.S..2023.720p.WEBRip [YTS.MX]\n👤 10 💾 0.86 GB ⚙️ x",
+    }
+    # Without a title the cached junk still wins (documents the pre-fix behaviour).
+    playable, _ = quality.rank_streams([junk, real], _CAPS_HW, FilterSpec())
+    assert playable[0].stream is junk
+    # With the title, the real acronym-titled release ranks first; junk stays playable.
+    playable, _ = quality.rank_streams([junk, real], _CAPS_HW, FilterSpec(title="I.S.S."))
+    assert playable[0].stream is real
+    assert junk in [r.stream for r in playable]
+
+
+def test_title_matches_helper():
+    # Acronym title: compact-substring path (no usable word tokens).
+    assert quality._title_matches("I.S.S..2023.720p.WEBRip [YTS.MX]", "I.S.S.")
+    assert not quality._title_matches("Charlie Brown and Snoopy Anthology", "I.S.S.")
+    # Multi-word title: token-overlap path, tolerant of reordering/dropped words.
+    assert quality._title_matches("Dark.Knight.2008.1080p.BluRay", "The Dark Knight")
+    assert not quality._title_matches("Frozen.2013.1080p.WEB", "The Dark Knight")
+    # No-op when the title is empty or too short to match reliably.
+    assert quality._title_matches("anything at all", "")
+    assert quality._title_matches("anything at all", "Up")
+
+
 def test_score_components_in_sync_with_score():
     info = quality.parse_stream(S_1080_ITA)
     comp = quality.score_components(info, ("ita",))

@@ -268,7 +268,7 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
                 "imdb_id": imdb_id,
                 "season": season,
                 "episode": episode,
-                **explain.explain_data(cfg, results, cast=opts.cast),
+                **explain.explain_data(cfg, results, cast=opts.cast, title=title),
                 "error": None,
             }
         )
@@ -373,7 +373,7 @@ def _auto_play(
         vetted = stream_select.VettedStream(stream=chosen, auto=True, safety_sub_lang=None)
     else:
         vetted = stream_select.prepare_stream(
-            cfg, results, opts, auto=True, reselect_on_wrong_audio=False
+            cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title
         )
     if vetted is None:
         _emit_json(
@@ -513,8 +513,9 @@ def _auto_play(
             "audio_lang": cast_audio_lang,
             "audio_verified": cast_audio_verified,
             "available_audio": list(available_audio),
-            # Only claim subtitles the delivery actually attached: the castbridge LOAD has
-            # no subtitle field, so subs riding a bridge cast would be a false positive.
+            # Only claim subtitles the delivery actually attached (`subs_delivered`): both the
+            # castbridge (side-loaded WebVTT track) and catt (`-s`) paths carry them now, but a
+            # mirror cast or a failed conversion may not — don't report those as active.
             "subtitles": cast_sub_lang if (sub_paths and subs_delivered) else None,
             "notice": notice,
             "error": None,

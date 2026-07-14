@@ -82,6 +82,80 @@ def test_head_has_no_body(tmp_path):
         server.shutdown()
 
 
+# --- side-loaded WebVTT caption track + CORS --------------------------------
+
+
+def _serve_with_subs(tmp_path):
+    f = tmp_path / "movie.mp4"
+    f.write_bytes(b"video-bytes")
+    vtt = tmp_path / "eng.vtt"
+    vtt.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n")
+    server, port, _thread = serve.serve_file(str(f), "127.0.0.1", sub_path=str(vtt))
+    return server, port
+
+
+def test_sub_track_served_as_vtt_with_cors(tmp_path):
+    server, port = _serve_with_subs(tmp_path)
+    try:
+        url = serve.served_sub_url("127.0.0.1", port, server.token)
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            assert resp.status == 200
+            assert resp.headers["Content-Type"].startswith("text/vtt")
+            assert resp.headers["Access-Control-Allow-Origin"] == "*"  # Cast requires CORS
+            assert resp.read().startswith(b"WEBVTT")
+    finally:
+        server.shutdown()
+
+
+def test_media_response_also_carries_cors(tmp_path):
+    server, port = _serve_with_subs(tmp_path)
+    try:
+        with urllib.request.urlopen(_url(server, port), timeout=5) as resp:
+            assert resp.headers["Access-Control-Allow-Origin"] == "*"
+    finally:
+        server.shutdown()
+
+
+def test_options_preflight_returns_cors(tmp_path):
+    server, port = _serve_with_subs(tmp_path)
+    try:
+        req = urllib.request.Request(_url(server, port), method="OPTIONS")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            assert resp.status == 204
+            assert resp.headers["Access-Control-Allow-Origin"] == "*"
+    finally:
+        server.shutdown()
+
+
+def test_sub_path_404_when_no_sub_served(tmp_path):
+    # A media-only server must 404 the sub path (no sub_path configured).
+    server, port, _data = _serve(tmp_path)
+    try:
+        url = serve.served_sub_url("127.0.0.1", port, server.token)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(url, timeout=5)
+        assert exc.value.code == 404
+    finally:
+        server.shutdown()
+
+
+def test_sub_only_server_404s_media_path(tmp_path):
+    # Tier-1 direct cast: a sub-only server (no media file) serves the VTT but 404s the media.
+    vtt = tmp_path / "eng.vtt"
+    vtt.write_text("WEBVTT\n\n")
+    server, port, _thread = serve.serve_file(None, "127.0.0.1", sub_path=str(vtt))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(_url(server, port), timeout=5)
+        assert exc.value.code == 404
+        with urllib.request.urlopen(
+            serve.served_sub_url("127.0.0.1", port, server.token), timeout=5
+        ) as resp:
+            assert resp.status == 200
+    finally:
+        server.shutdown()
+
+
 # --- secret token path (capability URL) -------------------------------------
 
 

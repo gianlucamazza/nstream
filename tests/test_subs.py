@@ -129,3 +129,29 @@ def test_available_subtitle_langs_network_error(monkeypatch):
 
     monkeypatch.setattr(subs.api, "subtitles", boom)
     assert subs.available_subtitle_langs(CFG, "movie", "tt1") == []
+
+
+# --- SRT → WebVTT conversion (for side-loaded Cast caption tracks) -----------
+
+
+def test_to_vtt_converts_srt(tmp_path):
+    srt = tmp_path / "eng-x.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,500\nHello\n\n", encoding="utf-8")
+    vtt = subs.to_vtt(str(srt))
+    assert vtt is not None and vtt.endswith(".vtt")
+    body = Path(vtt).read_text(encoding="utf-8")
+    assert body.startswith("WEBVTT")
+    assert "00:00:01.000 --> 00:00:02.500" in body  # comma → dot on the cue-timing line
+    assert "Hello" in body
+
+
+def test_to_vtt_passes_through_existing_webvtt(tmp_path):
+    src = tmp_path / "eng-x.srt"
+    src.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhi\n", encoding="utf-8")
+    vtt = subs.to_vtt(str(src))
+    assert vtt is not None
+    assert Path(vtt).read_text(encoding="utf-8").count("WEBVTT") == 1  # not double-prefixed
+
+
+def test_to_vtt_missing_file_returns_none():
+    assert subs.to_vtt("/nonexistent/does-not-exist.srt") is None

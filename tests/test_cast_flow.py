@@ -27,9 +27,9 @@ def _opts(**kw):
     return PlayOpts(**base)
 
 
-def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
+def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True, needs_remux=False):
     return cast_flow.stream_select.CastAudioPlan(
-        mode, stream, audio_index, real_lang, verified=verified
+        mode, stream, audio_index, real_lang, verified=verified, needs_remux=needs_remux
     )
 
 
@@ -147,6 +147,33 @@ def test_absent_safety_subs_once_with_notice(monkeypatch, capsys):
     assert out.audio_lang == "eng" and out.audio_verified is True
 
 
+def test_absent_dolby_still_remuxes_with_safety_subs(monkeypatch, capsys):
+    """Root-cause regression: target language absent AND the fallback dub's default track is
+    Dolby (`needs_remux`). The remux must still run (else silent), while the safety subs and
+    the 'non disponibile' notice of the absent path are preserved — the two axes coexist."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng", needs_remux=True))
+    monkeypatch.setattr(
+        cast_flow.remux, "remux_for_cast",
+        lambda url, cfg, *, audio_index, size_gb=0.0: (
+            seen.update(remux_url=url, idx=audio_index) or "/tmp/out.mp4"
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.remux,
+        "cast_file",
+        lambda cfg, title, path, **k: seen.update(path=path) or (0.0, 0.0, False, False),
+    )
+    monkeypatch.setattr(
+        cast_flow.caster, "cast", _boom("direct cast must not run for an absent Dolby fallback")
+    )
+    out = _run(_opts(), stream)
+    err = capsys.readouterr().err
+    assert seen["path"] == "/tmp/out.mp4" and seen["remux_url"] == stream["url"]
+    assert seen["subs"] == [CFG.primary] and "non disponibile" in err  # absent path preserved
+    assert out.reencoded is True and out.safety_sub_lang == CFG.primary
+
+
 def test_safety_sub_lang_passthrough(monkeypatch):
     """A caller-provided safety language (from prepare_stream's vet) reaches auto_subs and
     the outcome untouched when the cast plan isn't `absent`."""
@@ -156,6 +183,43 @@ def test_safety_sub_lang_passthrough(monkeypatch):
     out = _run(_opts(), stream, safety_sub_lang="ita")
     assert seen["subs"] == ["ita"]
     assert out.safety_sub_lang == "ita"
+
+
+def test_explicit_sub_lang_overrides_absent_safety(monkeypatch, capsys):
+    """`--sub-lang` set + target audio absent: the explicit subtitle language wins over the
+    primary-language safety default (auto_subs gets no safety lang), and it's threaded to the
+    cast as the caption-track language. The audio-absent warning still prints."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux on this path"))
+    captured: dict = {}
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: captured.update(sub_lang=k.get("sub_lang")) or (0.0, 0.0, False, True),
+    )  # fmt: skip
+    out = _run(_opts(sub_mode="auto", sub_lang="eng"), stream)
+    err = capsys.readouterr().err
+    assert seen["subs"] == [None]  # NO safety override — explicit --sub-lang wins
+    assert captured["sub_lang"] == "eng"  # explicit language threaded to the cast track
+    assert "non disponibile" in err and "attivati" not in err
+    assert out.safety_sub_lang is None and out.subs_delivered is True
+
+
+def test_bridge_subtitles_reported_delivered(monkeypatch):
+    """The bridge cast now carries subtitles: when the delivery reports subs_delivered=True,
+    the outcome reflects it (no 'not loaded' honesty notice) and threads the safety language."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("direct cast, no remux"))
+    captured: dict = {}
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: captured.update(sub_lang=k.get("sub_lang")) or (0.0, 0.0, False, True),
+    )  # fmt: skip
+    out = _run(_opts(), stream)
+    assert seen["subs"] == [CFG.primary]  # safety subs fetched (no explicit --sub-lang)
+    assert captured["sub_lang"] == CFG.primary  # safety language labels the track
+    assert out.subs_delivered is True and out.safety_sub_lang == CFG.primary
 
 
 # --- mirror gate --------------------------------------------------------------
@@ -202,6 +266,94 @@ def test_mirror_downgraded_when_decodable(monkeypatch, capsys):
     out = _run(_opts(mirror=True), stream)
     assert cast_flow.MIRROR_NOT_NEEDED in capsys.readouterr().err
     assert seen.get("cast") is True and out.action == "cast"
+
+
+# --- auto mirror over a pathological 4K remux (ADR 0015) ----------------------
+
+# A 4K Dolby-only release: undecodable audio (needs_remux) + a huge fetch.
+_STREAM_4K = {
+    "name": "[RD+] Torrentio\n2160p",
+    "title": "Dune.2024.2160p.UHD.BluRay.REMUX.TrueHD\n👤 12 💾 55 GB",
+    "url": "http://u/dune-4k.mkv",
+}
+
+
+def _wire_mirror(monkeypatch, seen):
+    """Route the mirror path to a spy and boom the remux + direct cast (must be preempted)."""
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.mirror, "cast_via_mirror",
+        lambda cfg, title, url, **k: seen.update(mirror=url) or (0.0, 0.0, False),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("direct cast must not run on the mirror"))
+
+
+def test_auto_mirror_on_pathological_4k_remux(monkeypatch, capsys):
+    """No --mirror, but a 4K Dolby-only remux (55 GB ≥ threshold) with the mirror available →
+    auto-prefer the mirror: it preempts the remux and the outcome carries the degrade notice."""
+    stream = dict(_STREAM_4K)
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    _wire_mirror(monkeypatch, seen)
+    out = _run(_opts(mirror=False), stream)  # NOT forced — the size threshold drives it
+    assert seen["mirror"] == stream["url"]
+    assert out.action == "mirror" and out.reencoded is False
+    assert out.notice and "mirror 1080p" in out.notice
+    assert "mirror 1080p" in capsys.readouterr().err
+
+
+def test_no_auto_mirror_for_small_1080p_remux(monkeypatch):
+    """A modest 1080p Dolby remux (8 GB < threshold) → the remux still wins (native video),
+    the mirror is not auto-chosen even though it's available."""
+    stream = dict(_STREAM)  # 1080p, 8 GB
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.mirror, "cast_via_mirror", _boom("small remux must not auto-mirror")
+    )
+    monkeypatch.setattr(
+        cast_flow.remux, "remux_for_cast", lambda url, cfg, **k: "/tmp/out.mp4"
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_file",
+        lambda *a, **k: seen.update(remuxed=True) or (0.0, 0.0, False, False),
+    )  # fmt: skip
+    out = _run(_opts(mirror=False), stream)
+    assert seen.get("remuxed") is True
+    assert out.action == "cast" and out.reencoded is True and out.notice is None
+
+
+def test_auto_mirror_disabled_by_zero_threshold(monkeypatch):
+    """cast_mirror_over_remux_gb=0 disables the auto-switch: even a 55 GB 4K remux takes the
+    remux path (the config opt-out), the mirror is never auto-chosen."""
+    cfg = Config(torrentio_base="tb", cast_mirror_over_remux_gb=0)
+    stream = dict(_STREAM_4K)
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.mirror, "cast_via_mirror", _boom("zero threshold must not auto-mirror")
+    )
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda url, cfg, **k: "/tmp/out.mp4")
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_file",
+        lambda *a, **k: seen.update(remuxed=True) or (0.0, 0.0, False, False),
+    )  # fmt: skip
+    out = cast_flow.run_cast(
+        cfg, [stream], stream, device="192.168.1.5", title="Dune", typ="movie",
+        video_id="tt1", work_dir="/tmp", opts=_opts(mirror=False), start=None,
+    )  # fmt: skip
+    assert seen.get("remuxed") is True and out.action == "cast"
+
+
+def test_remux_pathological_helper():
+    """Size ≥ threshold, or 4K with unknown size, is pathological; small or unknown-1080p not."""
+    from nstream.quality import StreamInfo
+
+    assert cast_flow._remux_is_pathological(StreamInfo(size_gb=55.0), 10) is True
+    assert cast_flow._remux_is_pathological(StreamInfo(size_gb=8.0), 10) is False
+    assert cast_flow._remux_is_pathological(StreamInfo(resolution=2160), 10) is True  # size unknown
+    assert cast_flow._remux_is_pathological(StreamInfo(resolution=1080), 10) is False
+    assert cast_flow._remux_is_pathological(StreamInfo(size_gb=55.0), 0) is False  # disabled
 
 
 # --- in-cast audio switch wiring ----------------------------------------------

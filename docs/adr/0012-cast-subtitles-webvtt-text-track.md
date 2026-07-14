@@ -1,7 +1,7 @@
 # 0012. Cast subtitles as a WebVTT text track on the castbridge path
 
-- **Status:** Proposed
-- **Date:** 2026-07-13
+- **Status:** Accepted
+- **Date:** 2026-07-13 (accepted/shipped 2026-07-14)
 - **Deciders:** project maintainer
 
 ## Context
@@ -58,9 +58,29 @@ Alternatives considered:
 - Testing: contract tests on the LOAD payload and the VTT conversion; a field validation
   on the real TV before flipping `subs_delivered` (kb: validate-in-the-field).
 
+## As built (2026-07-14)
+
+Shipped with two refinements over the proposal, both simpler:
+
+- **Activation in the LOAD, not a follow-up `EDIT_TRACKS_INFO`.** The daemon sets
+  `media.tracks` (one `TEXT`/`SUBTITLES` track, `text/vtt`) **and** the LOAD's
+  `activeTrackIds`, so captions show from the first frame without a second round-trip
+  (`cast/native/castbridge/media_receiver_client.cc:SendLoad`).
+- **Flat IPC fields, not a `text_tracks` list.** `media-load` gained `subtitleUrl`/
+  `subtitleLang`/`subtitleName` (one track — all a movie/episode needs), validated like
+  `poster` (`daemon.cc`). `bridge._media_load_args` mirrors them.
+- **CORS is mandatory.** The receiver fetches the track cross-site, so `serve.py` sends
+  `Access-Control-Allow-Origin: *` on every response (the capability token is the gate).
+- **Tier-1 VTT server lifecycle** is a single-slot detached server in `serve.py`
+  (`register_sub_server`/`reap_sub_server`), reaped by the next cast / `--stop`; the
+  detached-spawn helper (`serve.spawn_detached`) is now shared with the Tier-2 path.
+- Field-validated on the real TV (I.S.S., eng track, 1072 cues) before flipping
+  `subs_delivered` — the JSON reported `subtitles: eng` (kb: validate-in-the-field).
+
 ## References
 
-- Google Cast media protocol: `media.tracks` (TEXT, WebVTT), `EDIT_TRACKS_INFO`.
-- `src/nstream/bridge.py` (`_media_load_args`), `src/nstream/serve.py`,
-  `src/nstream/cast_flow.py` (honesty notice), ADR 0005/0007/0011.
-- Cold-review M3 fix (2026-07-13): `subs_delivered` plumbing this ADR builds on.
+- Google Cast media protocol: `media.tracks` (TEXT, WebVTT), `activeTrackIds`.
+- `src/nstream/bridge.py` (`_media_load_args`), `src/nstream/serve.py`, `src/nstream/subs.py`
+  (`to_vtt`), `src/nstream/cast_flow.py`, `cast/native/castbridge/media_receiver_client.cc`.
+- ADR 0005/0007/0011; superseded-in-part by **0013** (a custom receiver would render captions
+  natively, making the sideloaded-VTT server optional).

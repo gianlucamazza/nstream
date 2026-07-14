@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
@@ -47,7 +48,7 @@ def no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
 
 
 def _pick_stream(
-    cfg: Config, results: list[Stream], *, auto: bool, cast: bool = False
+    cfg: Config, results: list[Stream], *, auto: bool, cast: bool = False, title: str = ""
 ) -> Stream | None:
     """Rank and curate streams, then auto-pick the best or show an fzf menu (top N
     playable + a 'show all' entry that reveals the rest and the excluded ones ⚠).
@@ -59,7 +60,7 @@ def _pick_stream(
         return results[0] if auto else fzf(ranked, "stream> ")
 
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast)
+    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
     playable, excluded = quality.rank_streams(results, caps, spec)
     if excluded:
         reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
@@ -197,13 +198,20 @@ class CastAudioPlan:
       - `remux`:  the target language is present but not the first decodable track → remux
                   keeping only `audio_index` (a single-track AAC/copy file the DMR plays right).
       - `absent`: no candidate carries the target language → caller falls back (other dub + subs).
-    `real_lang` is the language that will actually play (for honest `audio_lang` reporting)."""
+    `real_lang` is the language that will actually play (for honest `audio_lang` reporting).
+
+    `needs_remux` is orthogonal to `mode`: it flags that the track we'll actually cast
+    (`audio_index`) has a codec the DMR can't decode (AC-3/E-AC-3/DTS/…), so it must be
+    remuxed to AAC regardless of the language decision. `mode == "remux"` already implies it;
+    the field carries the same requirement into the `absent` fallback, where we still cast a
+    (wrong-language) dub and it would otherwise go out silent as a direct cast."""
 
     mode: str
     stream: Stream
     audio_index: int = 0  # audio-relative index of the chosen track → ffmpeg `-map 0:a:<i>`
     real_lang: str | None = None
     verified: bool = False  # True when decided from real ffprobe tracks (not a name guess)
+    needs_remux: bool = False  # cast track's codec is undecodable → Tier-2 remux even if `absent`
 
 
 def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
@@ -237,7 +245,12 @@ def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) 
     k = next((i for i, c in enumerate(codes) if c == target_lang), None)
     if k is not None:
         return CastAudioPlan("remux", stream, k, target_lang, verified=True)
-    return CastAudioPlan("absent", stream, 0, codes[0], verified=True)
+    # Target language genuinely absent: the caller casts this dub anyway (+ safety subs). Its
+    # default track still has to be DECODABLE — a Dolby/DTS first track would go out silent on
+    # a direct cast — so flag a remux of track 0, orthogonally to the language being absent.
+    return CastAudioPlan(
+        "absent", stream, 0, codes[0], verified=True, needs_remux=not remux._decodable(c0)
+    )
 
 
 def _reselect_cast_for_lang(
@@ -408,30 +421,32 @@ def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
 
 
 def pick_and_resolve(
-    cfg: Config, results: list[Stream], *, auto: bool, cast: bool
+    cfg: Config, results: list[Stream], *, auto: bool, cast: bool, title: str = ""
 ) -> Stream | None:
     """Pick a stream and make it playable. Returns None on ESC or an unresolvable pick."""
-    chosen = _pick_stream(cfg, results, auto=auto, cast=cast)
+    chosen = _pick_stream(cfg, results, auto=auto, cast=cast, title=title)
     if not chosen:
         return None
     return _resolve_stream(cfg, chosen)
 
 
-def _auto_candidates(cfg: Config, results: list[Stream], *, cast: bool) -> list[Stream]:
+def _auto_candidates(
+    cfg: Config, results: list[Stream], *, cast: bool, title: str = ""
+) -> list[Stream]:
     """Playable streams in auto-pick order (best first) — the same ranking `_pick_stream`
     uses for `auto`, exposed as a list so the language guard can try the next-best when the
     top pick lacks the primary audio language."""
     if not cfg.hw_filter:
         return list(results)
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast)
+    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
     playable, _ = quality.rank_streams(results, caps, spec)
     return [r.stream for r in playable]
 
 
 def _reselect_for_primary(
     cfg: Config, results: list[Stream], current: Stream, opts: PlayOpts, primary: str, *,
-    limit: int = 4,
+    limit: int = 4, title: str = "",
 ) -> Stream | None:  # fmt: skip
     """Find another candidate whose audio actually contains `primary`, spending the probe
     budget on releases whose NAME claims it: every candidate tagged `primary` (best-first,
@@ -442,7 +457,7 @@ def _reselect_for_primary(
     (resolved, url-ready), or None when no tagged candidate qualifies within `limit`."""
     tagged: list[Stream] = []
     maybe: list[Stream] = []
-    for s in _auto_candidates(cfg, results, cast=opts.cast):
+    for s in _auto_candidates(cfg, results, cast=opts.cast, title=title):
         if s is current or s.get("url") == current.get("url"):
             continue
         langs = quality.parse_stream(s).languages
@@ -472,15 +487,82 @@ def _reselect_for_primary(
     return None
 
 
-def _ensure_playable(cfg: Config, results: list[Stream], chosen: Stream, opts: PlayOpts) -> Stream:
+# Process-lifetime memo of the reachability probe (like the parse/ffprobe memos): a resolved
+# url's availability doesn't change within a run, so probe each at most once — shared by the
+# pre-commit cached verification and `_ensure_playable`'s last-resort net, so a url the
+# verifier already found live isn't re-probed when the pick is confirmed.
+_PROBE_MEMO: dict[str, bool] = {}
+_VERIFY_CACHED_CAP = 5  # top-N cached candidates to probe before committing the auto-pick
+
+
+def _probe_url(url: str) -> bool:
+    """Memoized `api.url_playable` for a resolved stream url (see `_PROBE_MEMO`)."""
+    verdict = _PROBE_MEMO.get(url)
+    if verdict is None:
+        verdict = api.url_playable(url)
+        _PROBE_MEMO[url] = verdict
+    return verdict
+
+
+def _demote_cached(stream: Stream) -> None:
+    """Strip the debrid cached marker (`[RD+]`, `[TB+]`…) from a stream's name so
+    `quality.parse_stream` no longer ranks it as instantly available — its ready url probed
+    dead. The inverse of `_mark_native_cached`: the demotion then flows through the whole
+    ranking/explain pipeline with no downstream special-casing (parse_stream re-keys on the
+    new name). Provider-agnostic via the shared `quality._CACHED_RE`."""
+    name = stream.get("name") or ""
+    stripped = quality._CACHED_RE.sub("", name).strip()
+    if stripped != name:
+        stream["name"] = stripped
+
+
+def _verify_cached_availability(
+    cfg: Config, results: list[Stream], *, cast: bool, title: str
+) -> None:
+    """Pre-commit availability guard (ADR 0014, auto-pick only): the Torrentio `[RD+]` cached
+    marker is a crowdsourced guess that can be stale/evicted, yet `cached` is the top-precedence
+    rank term — so a dead cached release wins the auto-pick and only `_ensure_playable` catches
+    it, after cascading through resolves and possibly landing in an expensive Tier-2 remux.
+
+    Instead, probe the real reachability of the top-N ranked *cached* candidates concurrently
+    and demote any dead one to uncached-equivalent (strip its marker) so the very next rank pass
+    re-orders around what actually responds — a live 1080p AAC release then outranks a dead 4K
+    cached one. Bounded (≤`_VERIFY_CACHED_CAP`) and memoized (each url probed once, reused by
+    `_ensure_playable`). Only cached candidates are probed; uncached ones are already gated by
+    their seeder count. No-op for the local backend (engine-served urls are buffer-gated, not
+    cached-marked). Mutates `results` in place."""
+    if cfg.playback_backend == "local":
+        return
+    targets = [
+        s
+        for s in _auto_candidates(cfg, results, cast=cast, title=title)
+        if s.get("url") and quality.parse_stream(s).cached
+    ][:_VERIFY_CACHED_CAP]
+    if not targets:
+        return
+    with ThreadPoolExecutor(max_workers=min(len(targets), _VERIFY_CACHED_CAP)) as ex:
+        verdicts = list(ex.map(lambda s: _probe_url(s["url"]), targets))
+    for s, live in zip(targets, verdicts, strict=True):
+        if not live:
+            _demote_cached(s)
+
+
+def _ensure_playable(
+    cfg: Config, results: list[Stream], chosen: Stream, opts: PlayOpts, *, title: str = ""
+) -> Stream:
     """Debrid/auto only: the "cached" marker is a crowdsourced guess, so a ready url may be a
     dead/expired link. If the chosen url isn't reachable, fall back — to local P2P when the
     stream also carries an infoHash (hybrid 'auto'), else to the next-best reachable candidate.
-    Local backend urls are engine-served (`_wait_buffer` already gates them), so skip the check."""
+    Local backend urls are engine-served (`_wait_buffer` already gates them), so skip the check.
+
+    Last-resort net after `_verify_cached_availability` (which already re-ranked around dead
+    cached links up front): this still runs so a url that dies between probe and play, or the
+    non-auto paths, are covered. Shares the `_probe_url` memo, so a candidate already probed
+    live by the verifier isn't hit twice."""
     if cfg.playback_backend == "local":
         return chosen
     url = chosen.get("url")
-    if not url or api.url_playable(url):
+    if not url or _probe_url(url):
         return chosen
     print("nstream: la sorgente «cached» non risponde, ripiego…", file=sys.stderr)
     if chosen.get("infoHash"):  # hybrid stream → local P2P fallback
@@ -488,14 +570,14 @@ def _ensure_playable(cfg: Config, results: list[Stream], chosen: Stream, opts: P
             chosen["url"] = engine.resolve(cfg, chosen)
             return chosen
     tried = 0
-    for s in _auto_candidates(cfg, results, cast=opts.cast):
+    for s in _auto_candidates(cfg, results, cast=opts.cast, title=title):
         if tried >= 3:
             break
         if s is chosen or s.get("url") == url:
             continue
         tried += 1
         ready = _resolve_stream(cfg, s)
-        if ready and (not ready.get("url") or api.url_playable(ready["url"])):
+        if ready and (not ready.get("url") or _probe_url(ready["url"])):
             return ready
     return chosen  # nothing better reachable — let the player try anyway
 
@@ -575,7 +657,7 @@ class VettedStream:
 
 def prepare_stream(
     cfg: Config, results: list[Stream], opts: PlayOpts, *,
-    auto: bool, reselect_on_wrong_audio: bool,
+    auto: bool, reselect_on_wrong_audio: bool, title: str = "",
 ) -> VettedStream | None:  # fmt: skip
     """Pick one stream from `results`, resolve it, and vet it for playback. Returns the
     vetted result, or None when the user backed out (ESC) of a (re)selection.
@@ -587,7 +669,13 @@ def prepare_stream(
     # Native backend: tag cached releases up front so the cached score term ranks them first
     # for both the auto-pick and the cast menu (mutates `results` once, in place).
     _mark_native_cached(cfg, results)
-    chosen = pick_and_resolve(cfg, results, auto=auto, cast=opts.cast)
+    # Verify the top cached candidates actually respond before committing (ADR 0014): a dead
+    # `[RD+]` marker is demoted so the auto-pick re-ranks around what's live, keeping the pick
+    # off a stale link (and out of an accidental Tier-2 remux). Auto only — a manual pick is
+    # the user's explicit choice.
+    if auto:
+        _verify_cached_availability(cfg, results, cast=opts.cast, title=title)
+    chosen = pick_and_resolve(cfg, results, auto=auto, cast=opts.cast, title=title)
     if not chosen:
         return None
 
@@ -595,7 +683,7 @@ def prepare_stream(
     # is reachable and fall back (local P2P for a hybrid stream, else the next candidate) before
     # committing to it. Only in auto mode (manual picks are the user's explicit choice).
     if auto:
-        chosen = _ensure_playable(cfg, results, chosen, opts)
+        chosen = _ensure_playable(cfg, results, chosen, opts, title=title)
 
     # Auto-play language guard (local mpv only): the auto-pick can be a file whose audio
     # isn't in the primary language — an untagged/mistagged foreign leak, or a "Dual"
@@ -608,7 +696,7 @@ def prepare_stream(
         if avail is not None and primary and primary not in avail:
             # Best pick lacks the primary language: try the next-best candidates for one
             # that has it (probing each), per the user's "try next, then fallback+subs".
-            alt = _reselect_for_primary(cfg, results, chosen, opts, primary)
+            alt = _reselect_for_primary(cfg, results, chosen, opts, primary, title=title)
             if alt is not None:
                 chosen = alt
             elif set(cfg.audio_langs) & avail:
@@ -632,7 +720,7 @@ def prepare_stream(
                 )
                 if reselect_on_wrong_audio:
                     auto = False  # let choose_tracks give track control on the manual pick
-                    chosen = pick_and_resolve(cfg, results, auto=False, cast=opts.cast)
+                    chosen = pick_and_resolve(cfg, results, auto=False, cast=opts.cast, title=title)
                     if not chosen:
                         return None
 

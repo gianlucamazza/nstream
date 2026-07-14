@@ -88,7 +88,7 @@ def _wire_movie(monkeypatch, *, name="Dune", stream=None):
     monkeypatch.setattr(headless.api, "streams", lambda cfg, t, v: [stream])
     monkeypatch.setattr(
         headless.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     # Keep audio-language discovery hermetic (no real rank_streams/vainfo in unit tests).
     monkeypatch.setattr(
@@ -138,7 +138,7 @@ def test_run_auto_exact_match_over_first(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         headless.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
@@ -158,7 +158,7 @@ def test_run_auto_year_disambiguates(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         headless.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
@@ -189,7 +189,7 @@ def test_run_auto_series_season_episode(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         headless.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
     seen = {}
@@ -433,7 +433,7 @@ def test_run_auto_browse(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         headless.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(
         headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("eng",)
@@ -526,7 +526,7 @@ def _wire_fargo(monkeypatch):
     )
     monkeypatch.setattr(
         headless.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
@@ -729,8 +729,11 @@ def test_run_auto_resume_threads_history_entry(monkeypatch):
     assert seen["selection"] == "resume" and seen["title"] == "Severance · S01E02"
 
 
-def test_run_auto_resume_no_result(monkeypatch, capsys):
+def test_run_auto_resume_no_result(monkeypatch, tmp_path, capsys):
     """--json -c: empty history and a no-match query are both no_result (rc 1)."""
+    # Isolate the on-disk history: the resume path reads it directly (not only via the stubbed
+    # `state.recent`), so without this it would find the real user history and try to play it.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr(headless, "_auto_play", _boom("nothing should play"))
     monkeypatch.setattr(headless.state, "recent", lambda cfg, limit=30, typ=None: [])
     rc = headless.run_auto(CFG, _hns(cont=True), _hopts())
@@ -852,7 +855,7 @@ def test_subtitles_not_reported_when_delivery_drops_them(monkeypatch, capsys):
     cap = capsys.readouterr()
     out = json.loads(cap.out)
     assert rc == 0 and out["subtitles"] is None
-    assert "sottotitoli non supportati" in cap.err  # honesty notice on stderr
+    assert "non caricati sul TV" in cap.err  # honesty notice on stderr
 
 
 def test_auto_play_session_stores_resolved_ip(monkeypatch, tmp_path, capsys):
