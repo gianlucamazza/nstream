@@ -56,6 +56,21 @@ def test_media_load_args_series():
     assert args["episode"] == 5
 
 
+def test_media_load_args_subtitle_track():
+    args = bridge._media_load_args(
+        "ip", "url", subtitle_url="http://h/subs.vtt", subtitle_lang="eng", subtitle_name="English"
+    )
+    assert args["subtitleUrl"] == "http://h/subs.vtt"
+    assert args["subtitleLang"] == "eng"
+    assert args["subtitleName"] == "English"
+
+
+def test_media_load_args_subtitle_lang_dropped_without_url():
+    # A language with no track URL is meaningless → the whole track block is omitted.
+    args = bridge._media_load_args("ip", "url", subtitle_lang="eng")
+    assert "subtitleUrl" not in args and "subtitleLang" not in args
+
+
 def test_media_load_args_current_time_gate():
     # A near-zero resume point isn't worth sending (matches the >1 gate elsewhere).
     assert "currentTime" not in bridge._media_load_args("ip", "url", current_time=0.5)

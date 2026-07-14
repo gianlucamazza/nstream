@@ -20,7 +20,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, cast_delivery, discovery, languages, log, ui, util
+from . import bridge, cast_delivery, discovery, languages, log, serve, subs, ui, util
 from .config import Config
 from .picker import fzf
 
@@ -290,6 +290,7 @@ def cast(
     device: str | None,
     start: float | None = None,
     sub_paths: tuple[str, ...] = (),
+    sub_lang: str | None = None,
     next_label: str | None = None,
     langs: tuple[str, ...] = (),
     resolve_lang: Callable[[str], str | None] | None = None,
@@ -304,9 +305,9 @@ def cast(
     in-cast audio switch ('a'), which remains a catt-path capability (see docs/adr/0007).
     `on_event` receives normalized events for the headless `--follow` JSONL path.
 
-    `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast —
-    the castbridge LOAD has no subtitle field, so on that path requested subs are NOT shown
-    and callers must not report them as active (only the catt path carries `-s`)."""
+    `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast. Both
+    senders now carry subtitles: the castbridge path serves the SRT as a side-loaded WebVTT track
+    (`sub_lang` labels it), the catt path uses `-s`."""
     can_switch = bool(langs) and resolve_lang is not None and follow and sys.stdin.isatty()
     if device and bridge.bridge_available() and not can_switch:
         result = _cast_via_bridge(
@@ -318,9 +319,11 @@ def cast(
             next_label=next_label,
             follow=follow,
             on_event=on_event,
+            sub_paths=sub_paths,
+            sub_lang=sub_lang,
         )
         if result is not None:
-            return (*result, False)  # else castbridge couldn't start → fall back to catt below
+            return result  # else castbridge couldn't start → fall back to catt below
     catt_result = _cast_via_catt(
         cfg,
         title,
@@ -347,11 +350,19 @@ def _cast_via_bridge(
     next_label: str | None,
     follow: bool,
     on_event: EventCb | None,
-) -> tuple[float, float, bool] | None:
+    sub_paths: tuple[str, ...] = (),
+    sub_lang: str | None = None,
+) -> tuple[float, float, bool, bool] | None:
     """Cast via castbridge with metadata, forwarding normalized events to `on_event`. Returns
-    (position, duration, advance), or **None** when the cast never started (transport/daemon
-    failure) so the caller falls back to catt. A media error the receiver reports (bad url/device)
-    ends as a `failed` event without a fallback (catt wouldn't fare better)."""
+    (position, duration, advance, subs_delivered), or **None** when the cast never started
+    (transport/daemon failure) so the caller falls back to catt. A media error the receiver
+    reports (bad url/device) ends as a `failed` event without a fallback (catt wouldn't fare
+    better).
+
+    A direct cast plays the remote `url`, so a requested subtitle rides a small local server of
+    its own (the SRT converted to WebVTT), side-loaded as an active caption track. `follow` keeps
+    that server in-process; a fire-and-return detaches it (single-slot, reaped by the next cast /
+    `--stop`)."""
     kwargs = {
         "title": title,
         "poster": meta.poster,
@@ -362,6 +373,8 @@ def _cast_via_bridge(
         "content_type": meta.content_type,
         "current_time": float(start or 0.0),
     }
+    vtt = subs.to_vtt(sub_paths[0]) if sub_paths else None
+    sub_shutdown, sub_delivered = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
 
     def announce() -> None:
         tail = "  (Ctrl-C per smettere di seguire)" if follow else ""
@@ -369,18 +382,51 @@ def _cast_via_bridge(
 
     # Shared driver (ADR 0011). No on_interrupt hook: interactive semantics — Ctrl-C
     # stops following (the driver already stopped the receiver) and keeps the result.
-    out = cast_delivery.drive_bridge(
-        device,
-        url,
-        follow=follow,
-        load_kwargs=kwargs,
-        on_event=on_event,
-        on_started=announce,
-    )
+    try:
+        out = cast_delivery.drive_bridge(
+            device,
+            url,
+            follow=follow,
+            load_kwargs=kwargs,
+            on_event=on_event,
+            on_started=announce,
+        )
+    finally:
+        if sub_shutdown is not None:  # in-process (follow) server: tear down with the cast
+            sub_shutdown()
     if out is None:
         return None
     advance = bool(next_label) and out.finished
-    return (out.pos, out.dur, advance)
+    return (out.pos, out.dur, advance, sub_delivered)
+
+
+def _serve_subtitle(
+    vtt: str | None, device: str, sub_lang: str | None, follow: bool, kwargs: dict
+) -> tuple[Callable[[], None] | None, bool]:
+    """Serve `vtt` (if any) for a Tier-1 direct cast and add its URL to `kwargs`. Returns
+    `(shutdown_callable_or_None, subs_delivered)`. `follow` → an in-process server whose
+    `shutdown` the caller must call; fire-and-return → a detached single-slot server (no
+    shutdown callable — reaped by the next cast / `--stop`)."""
+    if not vtt:
+        return None, False
+    bind_ip = serve.lan_ip(device)
+    serve.ensure_firewall(bind_ip)
+    serve.reap_sub_server()  # only one cast plays at a time → drop any leftover VTT server
+    if follow:
+        server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt)
+        kwargs["subtitle_url"] = serve.served_sub_url(bind_ip, port, server.token)
+        if sub_lang:
+            kwargs["subtitle_lang"] = sub_lang
+        return server.shutdown, True
+    spawned = serve.spawn_detached(bind_ip, sub_path=vtt)
+    if spawned is None:
+        return None, False
+    pid, port, token = spawned
+    serve.register_sub_server(pid)
+    kwargs["subtitle_url"] = serve.served_sub_url(bind_ip, port, token)
+    if sub_lang:
+        kwargs["subtitle_lang"] = sub_lang
+    return None, True
 
 
 def _emit(on_event: EventCb | None, kind: str, **fields) -> None:

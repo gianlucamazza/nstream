@@ -604,8 +604,8 @@ def test_play_video_interactive_calls_track_menu(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
-            {"url": "http://u", "name": "S"}, auto, None
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+            cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
     monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (2, 1, ()))
@@ -631,8 +631,8 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
-            {"url": "http://u", "name": "S"}, auto, None
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+            cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
     monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
@@ -664,8 +664,8 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
-            {"url": "http://u", "name": "S"}, auto, None
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+            cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
 
@@ -698,8 +698,8 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: cli.stream_select.VettedStream(
-            {"url": "http://u", "name": "S"}, auto, None
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+            cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
     monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
@@ -986,7 +986,7 @@ def test_play_history_on_save_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(
         cli.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
     monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 100.0, ""))
@@ -1012,7 +1012,7 @@ def test_play_history_resume_start_threaded(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(
         cli.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio: _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
     seen = {}

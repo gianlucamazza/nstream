@@ -17,6 +17,15 @@ def _gopts(*, cast: bool = False) -> PlayOpts:
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_probe_memo():
+    """The reachability probe memo is process-lifetime — clear it between tests so a url's
+    verdict from one test can't leak into another that stubs `url_playable` differently."""
+    stream_select._PROBE_MEMO.clear()
+    yield
+    stream_select._PROBE_MEMO.clear()
+
+
 # --- release date message --------------------------------------------------
 
 
@@ -240,7 +249,7 @@ def test_audio_langs_of_fallback_tag_unverifiable_uses_name(monkeypatch):
 def _reselect_env(monkeypatch, candidates, *, real_langs, resolve_fail=()):
     """Wire _reselect_for_primary's collaborators: candidates list, identity resolve
     (None for urls in `resolve_fail`), and a name→langs map for stream_audio_langs."""
-    monkeypatch.setattr(stream_select, "_auto_candidates", lambda cfg, res, cast: candidates)
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: candidates)
     monkeypatch.setattr(
         stream_select,
         "_resolve_stream",
@@ -481,6 +490,64 @@ def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
     assert out is good  # skipped the dead cached link for the next reachable candidate
 
 
+# --- pre-commit cached verification (_verify_cached_availability, ADR 0014) ---
+
+
+def test_probe_url_memoizes(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(stream_select.api, "url_playable", lambda u, **k: calls.append(u) or True)
+    assert stream_select._probe_url("http://x") is True
+    assert stream_select._probe_url("http://x") is True
+    assert calls == ["http://x"]  # probed once, second call served from the memo
+
+
+def test_verify_cached_demotes_dead_keeps_live(monkeypatch):
+    dead: Stream = {"url": "https://rd/dead", "name": "[RD+] Torrentio\n4k"}
+    live: Stream = {"url": "https://rd/live", "name": "[RD+] Torrentio\n1080p"}
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [dead, live])
+    monkeypatch.setattr(
+        stream_select.api, "url_playable", lambda u, **k: u == "https://rd/live"
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    stream_select._verify_cached_availability(cfg, [dead, live], cast=False, title="")
+    assert "[RD+]" not in dead["name"]  # dead cached link demoted to uncached-equivalent
+    assert "[RD+]" in live["name"]  # live one keeps its marker
+    assert not stream_select.quality.parse_stream(dead).cached  # flows through the rank pipeline
+
+
+def test_verify_cached_bounded_to_cap(monkeypatch):
+    streams: list[Stream] = [{"url": f"https://rd/{i}", "name": "[RD+] x\n1080p"} for i in range(8)]
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: streams)
+    probed: list[str] = []
+    monkeypatch.setattr(
+        stream_select.api, "url_playable", lambda u, **k: probed.append(u) or True
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    stream_select._verify_cached_availability(cfg, streams, cast=False, title="")
+    assert len(probed) == stream_select._VERIFY_CACHED_CAP  # only the top-N are probed
+
+
+def test_verify_cached_skips_uncached(monkeypatch):
+    uncached: Stream = {"url": "https://rd/u", "name": "Torrentio\n1080p"}  # no [XX+] marker
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [uncached])
+    monkeypatch.setattr(
+        stream_select.api, "url_playable",
+        lambda u, **k: pytest.fail("an uncached candidate must not be probed"),
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    stream_select._verify_cached_availability(cfg, [uncached], cast=False, title="")
+
+
+def test_verify_cached_noop_local_backend(monkeypatch):
+    cached: Stream = {"url": "https://rd/u", "name": "[RD+] x\n1080p"}
+    monkeypatch.setattr(
+        stream_select.api, "url_playable",
+        lambda u, **k: pytest.fail("no probe on the local backend"),
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", playback_backend="local")
+    stream_select._verify_cached_availability(cfg, [cached], cast=False, title="")
+
+
 # --- P2P privacy guard -----------------------------------------------------
 
 
@@ -517,7 +584,7 @@ def test_prepare_stream_reselects_on_wrong_audio(monkeypatch, capsys):
     chosen2: Stream = {"url": "u2", "name": "y\n1080p"}
     picks = iter([foreign, chosen2])
     monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: next(picks))
-    monkeypatch.setattr(stream_select, "_ensure_playable", lambda cfg, r, c, o: c)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
     monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"spa"})  # no ita/eng
     monkeypatch.setattr(stream_select, "_reselect_for_primary", lambda *a, **k: None)  # no better
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
@@ -534,7 +601,7 @@ def test_prepare_stream_binge_warns_and_proceeds(monkeypatch, capsys):
     monkeypatch.setattr(
         stream_select, "_pick_stream", lambda *a, **k: (calls.append(1), foreign)[1]
     )
-    monkeypatch.setattr(stream_select, "_ensure_playable", lambda cfg, r, c, o: c)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
     monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"spa"})
     monkeypatch.setattr(stream_select, "_reselect_for_primary", lambda *a, **k: None)
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
@@ -550,7 +617,7 @@ def test_prepare_stream_reselects_for_primary(monkeypatch):
     top: Stream = {"url": "u1", "name": "x\n1080p"}
     better: Stream = {"url": "u2", "name": "y\n1080p"}
     monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: top)
-    monkeypatch.setattr(stream_select, "_ensure_playable", lambda cfg, r, c, o: c)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
     monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"eng"})  # top has no ita
     monkeypatch.setattr(stream_select, "_reselect_for_primary", lambda *a, **k: better)
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
@@ -565,7 +632,7 @@ def test_prepare_stream_safety_subtitles(monkeypatch, capsys):
     # play it but turn on primary-language safety subtitles.
     chosen: Stream = {"url": "u1", "name": "x\n1080p"}
     monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: chosen)
-    monkeypatch.setattr(stream_select, "_ensure_playable", lambda cfg, r, c, o: c)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
     monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"eng"})  # fallback only
     monkeypatch.setattr(stream_select, "_reselect_for_primary", lambda *a, **k: None)
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
@@ -707,6 +774,16 @@ def test_cast_plan_remux_selects_nondefault_aac_track():
 def test_cast_plan_absent_when_no_target_track():
     p = _plan([Track(1, "eng", "aac"), Track(2, "fra", "aac")])
     assert p.mode == "absent" and p.real_lang == "eng"
+    assert p.needs_remux is False  # decodable AAC fallback → direct cast is fine
+
+
+def test_cast_plan_absent_dolby_track_still_needs_remux():
+    # Root cause of silent audio: target (ita) absent, fallback dub's first track is E-AC3.
+    # An `absent` plan must still flag a remux — a direct cast of Dolby goes out silent on the
+    # Default Media Receiver. (Regression for I.S.S.: untagged-language Blu-Ray, eng E-AC3.)
+    p = _plan([Track(1, "eng", "eac3", 6), Track(2, "fra", "ac3", 6)])
+    assert p.mode == "absent" and p.real_lang == "eng"
+    assert p.needs_remux is True
 
 
 def test_cast_plan_unprobeable_is_direct_unverified():

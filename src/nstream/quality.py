@@ -371,10 +371,18 @@ class FilterSpec:
     # it. Size is the real download-cost proxy (the resolution cap can't see an unlabelled 4K
     # remux). 0 = no size demotion. Mirrors `Config.cast_remux_max_size_gb`.
     cast_remux_max_size: int = 0
+    # Searched title, for the `title_match` demotion guard against a Torrentio mis-mapping
+    # (an unrelated cached torrent out-ranking real releases). Empty = no-op ranking.
+    title: str = ""
 
     @classmethod
     def from_config(
-        cls, cfg: Config, *, cast_audio: bool = False, lang_filter: bool | None = None
+        cls,
+        cfg: Config,
+        *,
+        cast_audio: bool = False,
+        lang_filter: bool | None = None,
+        title: str = "",
     ) -> FilterSpec:
         """Derive a spec from the user config. `cast_audio`/`lang_filter` override per call
         (the cast path ranks against the receiver and ignores the language filter)."""
@@ -391,6 +399,7 @@ class FilterSpec:
             cast_remux=cast_audio and cfg.cast_remux,
             cast_remux_max_resolution=cfg.cast_remux_max_resolution if cast_audio else 0,
             cast_remux_max_size=cfg.cast_remux_max_size_gb if cast_audio else 0,
+            title=title,
         )
 
 
@@ -481,6 +490,34 @@ def _source_rank(source: str) -> int:
     return _SOURCE_RANK.get(source, _SOURCE_UNKNOWN_RANK)
 
 
+def _norm_title(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _title_matches(release_name: str, title: str) -> bool:
+    """Whether `release_name` plausibly belongs to the searched `title`. Guards against an
+    unrelated torrent Torrentio maps under the wrong IMDb id (e.g. a "Charlie Brown" pack
+    returned for "I.S.S.") that, being cached + untagged (resolution 0), would otherwise
+    out-rank every real release. Used as a top-precedence **demotion** term, never an
+    exclusion, so a false negative only sinks a legit release (still listed/pickable) rather
+    than hiding it. No-op (True) when `title` is empty or too short to match reliably.
+
+    Match if the compact (alphanumeric-only) title is a substring of the compact release
+    name — this handles acronym titles like "I.S.S." (compact "iss") that have no usable
+    word tokens — or, for multi-word titles, if at least half the title's ≥3-char word
+    tokens appear in the release name (release names reorder/drop words freely)."""
+    nt = _norm_title(title)
+    nr = _norm_title(release_name)
+    if len(nt) < 3 or not nr:
+        return True
+    if nt in nr:
+        return True
+    tokens = [t for t in re.split(r"[^a-z0-9]+", title.lower()) if len(t) >= 3]
+    if not tokens:
+        return False
+    return sum(t in nr for t in tokens) / len(tokens) >= 0.5
+
+
 def score_components(
     info: StreamInfo,
     audio_langs: tuple[str, ...] = (),
@@ -488,10 +525,15 @@ def score_components(
     cast: bool = False,
     cast_remux_cap: int = 0,
     cast_remux_size: int = 0,
+    title: str = "",
 ) -> dict[str, float | int | bool]:
     """The labelled score terms in precedence order (highest first). `_score` is just the
     tuple of these values; `explain` renders the dict — keeping both here keeps the
     auto-pick and its explanation in sync.
+
+    `title` (when set): a top-precedence `title_match` guard demoting a release whose name
+    is unrelated to the searched title (a Torrentio mis-mapping) below every real one; a
+    no-op (uniformly True) when `title` is empty, so default ranking is unchanged.
 
     Local (default): cached first (instant); then resolution; preferred audio language;
     better source (remux/bluray > web > …); HEVC over H264; "well-seeded enough"; finally
@@ -525,6 +567,7 @@ def score_components(
             not needs_remux or cast_remux_size == 0 or info.size_gb <= cast_remux_size
         )
         return {
+            "title_match": _title_matches(info.release_name, title),
             "cached": info.cached,
             "remux_within_size": within_remux_size,
             "cast_audio": _cast_audio_rank(info),
@@ -537,6 +580,7 @@ def score_components(
             "size": -info.size_gb,
         }
     return {
+        "title_match": _title_matches(info.release_name, title),
         "cached": info.cached,
         "resolution": info.resolution,
         "lang": _lang_rank(info, audio_langs),
@@ -554,6 +598,7 @@ def _score(
     cast: bool = False,
     cast_remux_cap: int = 0,
     cast_remux_size: int = 0,
+    title: str = "",
 ) -> tuple:
     return tuple(
         score_components(
@@ -562,6 +607,7 @@ def _score(
             cast=cast,
             cast_remux_cap=cast_remux_cap,
             cast_remux_size=cast_remux_size,
+            title=title,
         ).values()
     )
 
@@ -623,6 +669,7 @@ def rank_streams(
             cast=spec.cast_audio,
             cast_remux_cap=spec.cast_remux_max_resolution,
             cast_remux_size=spec.cast_remux_max_size,
+            title=spec.title,
         ),
         reverse=True,
     )

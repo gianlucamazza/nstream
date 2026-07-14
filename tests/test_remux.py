@@ -366,7 +366,7 @@ def test_cast_file_prefers_bridge_result_over_catt(monkeypatch, tmp_path):
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: fw.append(ip))
     monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
     monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
-    monkeypatch.setattr(remux, "_cast_file_via_bridge", lambda *a, **k: (5.0, 99.0, False))
+    monkeypatch.setattr(remux, "_cast_file_via_bridge", lambda *a, **k: (5.0, 99.0, False, False))
     monkeypatch.setattr(
         remux.subprocess, "Popen", lambda *a, **k: pytest.fail("catt fallback launched")
     )
@@ -483,7 +483,7 @@ def _bridge_scaffold(monkeypatch, cast_load):
     monkeypatch.setattr(remux.bridge, "stop", lambda dev=None: stopped.append(dev) or True)
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
-    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b: (srv, 46000, None))
+    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 46000, None))
     monkeypatch.setattr(
         remux.subprocess, "Popen",
         lambda *a, **k: pytest.fail("catt fallback launched"),
@@ -558,7 +558,11 @@ def test_cast_file_headless_bridge_writes_serve_state(monkeypatch, tmp_path):
         yield {"kind": "started", "title": "T"}
 
     _srv, _stopped = _bridge_scaffold(monkeypatch, started)
-    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "spawn_detached",
+        lambda bind_ip, file_path=None, sub_path=None: (777, 46001, "tok"),
+    )
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert out == (0.0, 0.0, False, False)
     assert remux._read_state() == {
@@ -578,7 +582,11 @@ def test_cast_file_headless_bridge_failed_falls_back_to_catt(monkeypatch, tmp_pa
         yield {"kind": "failed", "error": "load_failed", "message": "nope"}
 
     monkeypatch.setattr(remux.bridge, "cast_load", failed)
-    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "spawn_detached",
+        lambda bind_ip, file_path=None, sub_path=None: (777, 46001, "tok"),
+    )
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert out == (0.0, 0.0, False, False)
     assert 777 in rec["killed"]  # bridge-path server reaped before the fallback
@@ -601,7 +609,11 @@ def test_cast_file_headless_ctrl_c_propagates_no_catt_fallback(monkeypatch, tmp_
     _srv, stopped = _bridge_scaffold(monkeypatch, aborted)
     killed: list[int] = []
     monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
-    monkeypatch.setattr(remux, "_spawn_server", lambda p, b: (777, 46001, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "spawn_detached",
+        lambda bind_ip, file_path=None, sub_path=None: (777, 46001, "tok"),
+    )
     with pytest.raises(KeyboardInterrupt):
         remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert stopped == ["10.0.0.5"]  # receiver session stopped
@@ -621,24 +633,24 @@ class _ServeProc:
 
 def test_spawn_server_returns_pid_port_and_token(monkeypatch):
     monkeypatch.setattr(
-        remux.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\nTOKEN=abc\n")
+        remux.serve.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\nTOKEN=abc\n")
     )
-    assert remux._spawn_server("/f.mp4", "192.168.1.10") == (777, 46001, "abc")
+    assert remux.serve.spawn_detached("192.168.1.10", file_path="/f.mp4") == (777, 46001, "abc")
 
 
 def test_spawn_server_kills_on_missing_token(monkeypatch):
     killed: list[int] = []
-    monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
-    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\n"))
-    assert remux._spawn_server("/f.mp4", "192.168.1.10") is None
+    monkeypatch.setattr(remux.serve, "kill_detached", lambda pid: killed.append(pid))
+    monkeypatch.setattr(remux.serve.subprocess, "Popen", lambda *a, **k: _ServeProc("PORT=46001\n"))
+    assert remux.serve.spawn_detached("192.168.1.10", file_path="/f.mp4") is None
     assert killed == [777]  # no orphan server when the token never arrives
 
 
 def test_spawn_server_kills_on_bad_announcement(monkeypatch):
     killed: list[int] = []
-    monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
-    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: _ServeProc("boom\n"))
-    assert remux._spawn_server("/f.mp4", "192.168.1.10") is None
+    monkeypatch.setattr(remux.serve, "kill_detached", lambda pid: killed.append(pid))
+    monkeypatch.setattr(remux.serve.subprocess, "Popen", lambda *a, **k: _ServeProc("boom\n"))
+    assert remux.serve.spawn_detached("192.168.1.10", file_path="/f.mp4") is None
     assert killed == [777]  # no orphan server on a botched handshake
 
 

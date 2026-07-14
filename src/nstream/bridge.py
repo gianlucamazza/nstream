@@ -235,9 +235,14 @@ def _media_load_args(
     episode: int = 0,
     content_type: str = "",
     current_time: float = 0.0,
+    subtitle_url: str = "",
+    subtitle_lang: str = "",
+    subtitle_name: str = "",
 ) -> dict:
     """Build the `media-load` args, omitting empty optional fields so the daemon picks the
-    right metadata block (TvShow if seriesTitle, else Movie if poster/subtitle, else title)."""
+    right metadata block (TvShow if seriesTitle, else Movie if poster/subtitle, else title).
+    `subtitle_url` (a WebVTT URL the receiver fetches) adds a side-loaded, auto-activated caption
+    track — distinct from `subtitle`, which is Movie-metadata text (a tagline), not a track."""
     args: dict = {"ip": ip, "url": url}
     if content_type:
         args["contentType"] = content_type
@@ -255,6 +260,12 @@ def _media_load_args(
         args["season"] = int(season)
     if episode > 0:
         args["episode"] = int(episode)
+    if subtitle_url:
+        args["subtitleUrl"] = subtitle_url
+        if subtitle_lang:
+            args["subtitleLang"] = subtitle_lang
+        if subtitle_name:
+            args["subtitleName"] = subtitle_name
     return args
 
 
@@ -272,7 +283,8 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
     `disconnected` (daemon socket EOF after `started`, without an explicit end) means the
     daemon died/restarted — playback on the receiver may well continue; it is not `ended`.
 
-    `meta` accepts title/poster/subtitle/series_title/season/episode/content_type/current_time.
+    `meta` accepts title/poster/subtitle/series_title/season/episode/content_type/current_time
+    plus subtitle_url/subtitle_lang/subtitle_name (a side-loaded WebVTT caption track).
     With `follow=False` it loads, confirms the handoff, emits `started`, and returns (the daemon
     keeps the session alive). With `follow=True` it streams events until the session ends.
     Never raises: any transport failure becomes a `failed` event so the caller can fall back."""

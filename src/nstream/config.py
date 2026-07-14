@@ -164,6 +164,14 @@ class Config:
     # budget into constant drops near 110 ms RTT).
     mirror_bitrate: int = 0
     mirror_playout_ms: int = 0
+    # When a Tier-2 remux would have to fetch a file at least this many GB — a 4K Dolby-only
+    # release with no AAC alternative — auto-prefer the realtime mirror instead (ADR 0015):
+    # it starts in seconds with no download, at the cost of 1080p SDR + ~120 ms latency.
+    # Below the threshold the remux wins (native video/HDR, no latency once prepared). A
+    # size-unknown 4K/8K release counts as above-threshold (the resolution can't hide the
+    # fetch cost). 0 = never auto-switch (always remux). Only applies when the mirror backend
+    # is available; `cast_mode: "mirror"`/`--mirror` still force the mirror regardless.
+    cast_mirror_over_remux_gb: int = 10
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -271,6 +279,7 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "cast_remux_max_size_gb": (0, 1000),
     "mirror_bitrate": (0, 100_000_000),
     "mirror_playout_ms": (0, 5000),
+    "cast_mirror_over_remux_gb": (0, 1000),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
@@ -341,6 +350,9 @@ def load() -> Config:
         cast_mode=_enum_str(raw, "cast_mode", Config.cast_mode),
         mirror_bitrate=_bounded_int(raw, "mirror_bitrate", Config.mirror_bitrate),
         mirror_playout_ms=_bounded_int(raw, "mirror_playout_ms", Config.mirror_playout_ms),
+        cast_mirror_over_remux_gb=_bounded_int(
+            raw, "cast_mirror_over_remux_gb", Config.cast_mirror_over_remux_gb
+        ),
         autoplay=bool(raw.get("autoplay", Config.autoplay)),
         autoplay_lead=_bounded_int(raw, "autoplay_lead", Config.autoplay_lead),
         mpv_quiet=bool(raw.get("mpv_quiet", Config.mpv_quiet)),

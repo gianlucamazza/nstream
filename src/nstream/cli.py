@@ -189,7 +189,12 @@ def _play_video(
         print(f"nstream: {notice}", file=sys.stderr)
         return (notice, False)
     vetted = stream_select.prepare_stream(
-        cfg, results, opts, auto=auto, reselect_on_wrong_audio=reselect_on_wrong_audio
+        cfg,
+        results,
+        opts,
+        auto=auto,
+        reselect_on_wrong_audio=reselect_on_wrong_audio,
+        title=title,
     )
     if vetted is None:
         return (None, False)  # no playable stream, or backed out of a (re)selection
@@ -476,11 +481,11 @@ def run_explain(cfg: Config, query: str) -> int:
         title = display_title(title, v)
     results = api.streams(cfg, typ, video_id)
     print(f"\n# nstream --explain · {title}\n")
-    print(explain.explain_streams(cfg, results, cast=False))
+    print(explain.explain_streams(cfg, results, cast=False, title=title))
     print()
-    print(explain.explain_streams(cfg, results, cast=True))
+    print(explain.explain_streams(cfg, results, cast=True, title=title))
     print()
-    print(explain.explain_audio(cfg, explain.auto_pick(cfg, results, cast=False)))
+    print(explain.explain_audio(cfg, explain.auto_pick(cfg, results, cast=False, title=title)))
     return 0
 
 

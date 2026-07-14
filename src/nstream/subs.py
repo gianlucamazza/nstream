@@ -82,6 +82,33 @@ def pick_subtitles(
     return (path,) if path else ()
 
 
+def to_vtt(srt_path: str) -> str | None:
+    """Convert an SRT file to WebVTT, required for a side-loaded Cast caption track. Writes a
+    sibling `<name>.vtt` and returns its path (or None on failure). Minimal and safe: prepend the
+    `WEBVTT` header and turn the `,` millisecond separator into `.` on cue-timing lines only
+    (`-->`), leaving cue identifiers and text untouched. Idempotent-ish: a file already starting
+    with `WEBVTT` is copied through unchanged."""
+    try:
+        with open(srt_path, "rb") as f:
+            text = f.read().decode("utf-8-sig", errors="replace")
+    except OSError:
+        return None
+    if text.lstrip().startswith("WEBVTT"):
+        out = text
+    else:
+        lines = ["WEBVTT", ""]
+        lines += [ln.replace(",", ".") if "-->" in ln else ln for ln in text.splitlines()]
+        out = "\n".join(lines) + "\n"
+    base = srt_path[:-4] if srt_path.lower().endswith(".srt") else srt_path
+    vtt_path = f"{base}.vtt"
+    try:
+        with open(vtt_path, "w", encoding="utf-8") as f:
+            f.write(out)
+    except OSError:
+        return None
+    return vtt_path
+
+
 def auto_subs(
     cfg: Config, typ: str, video_id: str, work_dir: str, opts: PlayOpts,
     *, safety_sub_lang: str | None = None,

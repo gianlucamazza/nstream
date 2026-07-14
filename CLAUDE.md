@@ -54,8 +54,13 @@ Modules in `src/nstream/`:
   as a callable (`PlayVideo` Protocol), so it never imports `cli`; imports
   `api`/`state`/`labels`/`picker`/`config`/`ui` (+ `caster.CastMeta`).
 - `stream_select.py` — stream selection + resolution + auto-play vetting guards. `prepare_stream()`
-  is the single entry the orchestrator calls (pick+resolve → cached-miss fallback → primary-language
-  audio guard), returning a `VettedStream`. Also `cast_languages`/`cast_resolver` for the in-cast
+  is the single entry the orchestrator calls (pre-commit cached verification → pick+resolve →
+  cached-miss fallback → primary-language audio guard), returning a `VettedStream`. The pre-commit
+  step (ADR 0014, `_verify_cached_availability`, auto + non-local only) probes the top-N `[XX+]`
+  cached candidates concurrently and demotes any dead one (strips its marker via `quality._CACHED_RE`,
+  the inverse of `_mark_native_cached`) so the auto-pick re-ranks around what actually responds —
+  keeping it off a stale link and out of an accidental Tier-2 remux. Probes are memoized
+  (`_probe_url`) and shared with the last-resort `_ensure_playable`. Also `cast_languages`/`cast_resolver` for the in-cast
   switch. Imports `api`/`debrid`/`engine`/`quality`/`remux`/`tracks`/`languages`/`picker`/
   `labels`/`config`/`log`/`ui`; never `cli`.
 - `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the
@@ -105,7 +110,11 @@ Modules in `src/nstream/`:
   Leaf below `cli` (imports only `log` + stdlib).
 - `serve.py` — Tier-2 cast delivery: minimal **Range-capable HTTP server** (206/`Content-Range`)
   serving the complete remux file to the DMR — in-process for the `follow` path, detached
-  (`python -m nstream.serve`) for headless fire-and-return. Also `ensure_firewall()` (ufw rule for
+  (`python -m nstream.serve`) for headless fire-and-return. Also serves an optional side-loaded
+  **WebVTT caption track** (second token path, CORS headers the receiver requires) so castbridge
+  can LOAD subtitles; `spawn_detached`/`kill_detached` (shared detached-server helper) and a
+  single-slot `register_sub_server`/`reap_sub_server` for the Tier-1 direct-cast VTT server. Also
+  `ensure_firewall()` (ufw rule for
   the receiver's inbound fetch). Leaf: stdlib + `log`.
 - `remux.py` — Tier-2 cast for titles whose audio the Chromecast can't decode (AC-3/E-AC-3/DTS/
   TrueHD → silent). Detects them (ffprobe), remuxes to a complete temp MP4 (video `-c copy`, audio
@@ -183,7 +192,12 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
   when its binary is present (`CASTBRIDGE_BIN` or the openscreen-build path) and **fall back to catt**
   (no metadata) otherwise, when it can't start, or for the interactive 'a' audio switch (catt-only).
   Tier-2 remux is served by nstream's own stdlib **Range server** (`serve.py`), not catt, on the
-  castbridge path. `--follow` emits one JSON line per event (started/playing/paused/ended/failed/
+  castbridge path. **Subtitles ride both senders**: the SRT is converted to WebVTT and side-loaded
+  as an active caption track — served next to the media on the Tier-2 path, or by a small
+  single-slot standalone server (`serve.register_sub_server`) on the Tier-1 direct path; catt still
+  uses `-s`. `caster.cast`/`remux.cast_file` take `sub_lang` (labels the track); the daemon
+  `media-load` gained `subtitleUrl`/`subtitleLang`/`subtitleName`. `--follow` emits one JSON line
+  per event (started/playing/paused/ended/failed/
   `disconnected` — daemon socket EOF mid-cast: the receiver may still be playing, it is **not**
   `ended`, so Tier-2 keeps its Range server alive and leaves the temp file to `--stop`/GC).
 - **Tier-2 firewall:** the receiver fetches the remux file _inbound_ from the host, so `serve.py`
@@ -235,7 +249,12 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
     a free-disk pre-check always runs (~size×1.1 when the release size is parsed, a `_MIN_FREE_GB`
     floor when it's unknown).
   - Last resort for what even the DMR can't play: the in-tree realtime H.264 1080p mirror
-    (`mirror.py`, `--mirror` / `cast_mode: "mirror"` — ADR 0006).
+    (`mirror.py`, `--mirror` / `cast_mode: "mirror"` — ADR 0006). Beyond the forced flag, the
+    mirror is **auto-preferred over a pathological remux** (ADR 0015): when a remux would fetch a
+    4K Dolby-only release ≥ `cast_mirror_over_remux_gb` GB (default 10; a size-unknown 4K counts),
+    `cast_flow` mirrors instead — instant start, no 30-60 GB download, at the cost of 1080p SDR
+    (surfaced in the outcome `notice`). Below the threshold the remux still wins (native video/HDR).
+    `0` disables the auto-switch.
   - Dolby/DTS are no longer _excluded_ from cast (they were "silent") — only ranked below native AAC.
 
 ### mpv ↔ nstream signalling
