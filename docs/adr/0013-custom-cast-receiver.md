@@ -72,6 +72,28 @@ v3), not a workaround layered on the default app.
   contract test for the app-id + capability channel, and field validation on a Dolby-capable
   and a non-Dolby display before flipping the default app id (kb: validate-in-the-field).
 
+## Status note — enabling plumbing shipped, decision still gated (2026-07-14)
+
+The ADR stays **Proposed**: the decision (custom receiver as the Dolby path) can't be _realized_
+or field-validated without two things only an operator can provide — a **registered Google Cast
+application id** (paid, account-bound) and **HTTPS hosting** of the receiver. What was safely,
+testably completable _without_ those was shipped **dormant** (kb: run-disabled-not-removed), so
+the remaining work is exactly the operator steps, not code:
+
+- **castbridge** (`cast` repo): `media-load` accepts an optional, validated `appId`
+  (`daemon.cc::IsOptionalAppId`), forwarded to `MediaReceiverClient::app_id()` — empty →
+  `kDefaultMediaReceiverAppId` (`CC1AD845`, back-compat). Built clean, native tests pass.
+- **nstream**: `bridge._media_load_args(app_id=...)` forwards it; **no nstream path sets it yet**
+  (default receiver unchanged). Tested (`test_media_load_args_app_id`).
+- **receiver artifact + runbook**: `cast/native/receiver/index.html` (a minimal CAF v3 receiver
+  that probes the device with `canDisplayType()` on READY and broadcasts a `capabilities` message
+  on `urn:x-cast:example.castbridge`) + `cast/native/receiver/README.md` (the operator
+  steps). **Not field-validated** (no registered id).
+- **Deliberately NOT built:** the nstream capability-gating half (remux consulting the receiver
+  capability) — it depends on a live receiver reporting back, which can't be validated without the
+  registration/hosting, so building it now would be untested, unvalidatable code (anti-theater).
+  The capability channel exists; the consuming policy waits for a real receiver.
+
 ## References
 
 - Google Cast: [Supported Media](https://developers.google.com/cast/docs/media),

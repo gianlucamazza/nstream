@@ -49,6 +49,13 @@ def test_media_load_args_includes_metadata():
     assert "seriesTitle" not in args and "season" not in args  # zero/empty dropped
 
 
+def test_media_load_args_app_id():
+    """appId is forwarded only when set (dormant ADR 0013 hook); absent → no key (default
+    receiver, back-compat)."""
+    assert "appId" not in bridge._media_load_args("ip", "url")
+    assert bridge._media_load_args("ip", "url", app_id="ABCD1234")["appId"] == "ABCD1234"
+
+
 def test_media_load_args_series():
     args = bridge._media_load_args("ip", "url", series_title="Show", season=2, episode=5)
     assert args["seriesTitle"] == "Show"
@@ -478,3 +485,55 @@ def test_cast_load_paused_then_resumed_transitions(monkeypatch):
     paused = events[1]
     assert paused["position"] == 12.0
     assert events[2]["position"] == 12.0 and events[2]["duration"] == 100.0
+
+
+# --- receiver track/error observability (ADR 0016) --------------------------
+
+
+def test_active_tracks_helper():
+    assert bridge._active_tracks({"activeTrackIds": [1, 2]}) == [1, 2]
+    assert bridge._active_tracks({"activeTrackIds": []}) == []
+    assert bridge._active_tracks({}) == []  # absent → unknown, never a downgrade
+    assert bridge._active_tracks({"activeTrackIds": "x"}) == []  # malformed
+    assert bridge._active_tracks({"activeTrackIds": [1, "x", 2]}) == [1, 2]  # ints only
+
+
+def test_cast_load_events_carry_active_tracks(monkeypatch):
+    """The receiver's confirmed activeTrackIds ride the started/playing events (ADR 0016) —
+    a caption track (id 1) confirmed active is the receiver's own acknowledgement."""
+    frames = [
+        {"id": 1, "action": "media-load", "ok": True, "data": {"loaded": True}},
+        {
+            "type": "media-status",
+            "data": {
+                "state": "PLAYING",
+                "title": "Dune",
+                "position": 1.0,
+                "duration": 100.0,
+                "activeTrackIds": [1],
+            },
+        },
+        {"type": "media-status", "data": None},
+    ]
+    server = _fake_daemon(monkeypatch, frames)
+    try:
+        events = list(bridge.cast_load("ip", "http://x", follow=True, title="Dune"))
+    finally:
+        server.close()
+    started = events[0]
+    assert started["kind"] == "started" and started["tracks"] == [1]
+
+
+def test_cast_load_receiver_error_before_start_fails(monkeypatch):
+    """A receiver error status (LOAD_FAILED/idleReason ERROR) before `started` → a `failed`
+    event so the caller falls back, instead of hanging until the load timeout."""
+    frames = [
+        {"id": 1, "action": "media-load", "ok": True, "data": {"loaded": True}},
+        {"type": "media-status", "data": {"error": "LOAD_FAILED", "state": ""}},
+    ]
+    server = _fake_daemon(monkeypatch, frames)
+    try:
+        events = list(bridge.cast_load("ip", "http://x", follow=True))
+    finally:
+        server.close()
+    assert events == [{"kind": "failed", "error": "receiver_error", "message": "LOAD_FAILED"}]

@@ -1,6 +1,6 @@
 # 0016. Surface the receiver's real track + error state
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-14
 - **Deciders:** project maintainer
 
@@ -56,10 +56,41 @@ Alternatives considered:
 - **Testing:** a castbridge contract test on the extended status payload; nstream unit tests on
   the confirmed-vs-sent `subs_delivered` logic and the `--status` shape.
 
+## As built (2026-07-14)
+
+Shipped the **observability primitive** end-to-end; kept the consuming policy conservative
+per the Consequences ("advisory — never downgrade a working cast").
+
+- **castbridge** (`cast` repo): `MediaStatus` gained `active_track_ids` + `error`.
+  `HandleMediaStatus` parses `activeTrackIds` and sets `error` only on `idleReason == "ERROR"`
+  (FINISHED/CANCELLED/INTERRUPTED are normal ends). A new `HandleMediaError` routes
+  `LOAD_FAILED`/`INVALID_REQUEST`/`ERROR` media-namespace messages → an error status **and**
+  resolves the one-shot ready as failure (so a pre-status load failure doesn't hang to timeout).
+  `daemon.cc::MediaData` forwards `activeTrackIds` + `error`, and now serializes an _inactive_
+  status when it carries an error (else the failure would be dropped as an idle session). Built
+  clean; native unit tests pass (11 + 6); daemon restarted onto the new binary.
+- **nstream**: `bridge._active_tracks` + `cast_load` thread the confirmed `tracks` onto the
+  `started`/`playing`/`paused` events (→ `--follow` JSONL) and turn a receiver `error` block
+  into a `failed` event (`error: "receiver_error"`) — before `started` the caller falls back to
+  catt, after it ends the follow. `bridge.peek_status` reads the session **without** spawning
+  the daemon. `caster.status` overlays `active_tracks` + `receiver_error` from the bridge session
+  so `--status` reports the receiver's real active tracks; `caster._bridge_track_info` is the
+  best-effort extractor (`([], None)` when the bridge is down).
+- **Deliberately deferred (advisory-only):** `subs_delivered` still reflects send-time attach,
+  NOT receiver confirmation. Flipping it on `activeTrackIds` would only be observable on
+  `--follow` (fire-and-return returns at `started`, before the receiver echoes tracks), and the
+  ADR forbids downgrading a working cast on a possibly-flaky status — so the confirmed tracks are
+  surfaced for diagnosis (`--status`/`--follow`) without gating the result. The primitive is in
+  place should a future follow-path policy want to consume it.
+- Tests: `bridge` (`_active_tracks`, events carry tracks, receiver-error→failed), `caster`
+  (`--status` fields, `_bridge_track_info` reads/empties).
+
 ## References
 
 - Google Cast media protocol: `MEDIA_STATUS.activeTrackIds`, `LOAD_FAILED`/error events.
-- `cast/native/castbridge/media_receiver_client.cc` (`HandleMediaStatus`),
-  `src/nstream/bridge.py`, `src/nstream/cast_delivery.py`, `src/nstream/headless.py`.
+- `cast/native/castbridge/media_receiver_client.{h,cc}` (`HandleMediaStatus`,
+  `HandleMediaError`), `cast/native/castbridge/daemon.cc` (`MediaData`), `src/nstream/bridge.py`
+  (`_active_tracks`, `peek_status`, `cast_load`), `src/nstream/caster.py` (`status`,
+  `_bridge_track_info`), `src/nstream/cast_delivery.py`, `src/nstream/headless.py` (`_run_status`).
 - ADR 0007/0011 (event stream), 0012 (subtitles — the gap that motivated this), 0013 (audio
   track selection benefits too).
