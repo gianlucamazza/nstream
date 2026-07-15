@@ -39,9 +39,10 @@ Modules in `src/nstream/`:
 
 - `cli.py` — orchestrator: argparse, TUI flow (home + typed Film/Serie sections with Generi…,
   paginated catalog browse), resume, `--explain`/`__preview` commands, `--movies`/`--series`
-  type filters. Delegates stream selection to `stream_select`, subtitles/track menu to `subs`,
-  the series flow to `series`, the whole `--json` mode to `headless`, label formatting to
-  `labels`; sits at the bottom of the import graph.
+  type filters, `--quality` (exact resolution filter for TUI and `--json`). Delegates stream
+  selection to `stream_select`, subtitles/track menu to `subs`, the series flow to `series`,
+  the whole `--json` mode to `headless`, label formatting to `labels`; sits at the bottom of
+  the import graph.
 - `headless.py` — the `--json` subsystem: `run()` is the single seam `cli._dispatch` calls when
   `--json` is set — non-interactive title/episode resolution (`_select_meta`), play/cast
   (`_auto_play`, via `cast_flow.run_cast` + the volume guard), `--probe`/`--stop`/`--status`/`-c`,
@@ -55,13 +56,16 @@ Modules in `src/nstream/`:
   `entry_video`). The player entry point is injected as a callable (`PlayVideo` Protocol), so it
   never imports `cli`; imports `api`/`state`/`labels`/`picker`/`config`/`ui` (+ `caster.CastMeta`).
 - `stream_select.py` — stream selection + resolution + auto-play vetting guards. `prepare_stream()`
-  is the single entry the orchestrator calls (pre-commit cached verification → pick+resolve →
-  cached-miss fallback → primary-language audio guard), returning a `VettedStream`. The pre-commit
-  step (ADR 0014, `_verify_cached_availability`, auto + non-local only) probes the top-N `[XX+]`
-  cached candidates concurrently and demotes any dead one (strips its marker via `quality._CACHED_RE`,
-  the inverse of `_mark_native_cached`) so the auto-pick re-ranks around what actually responds —
-  keeping it off a stale link and out of an accidental Tier-2 remux. Probes are memoized
-  (`_probe_url`) and shared with the last-resort `_ensure_playable`. Also `cast_languages`/`cast_resolver` for the in-cast
+  is the single entry the orchestrator calls (quality resolve → pre-commit cached verification →
+  pick+resolve → cached-miss fallback → primary-language audio guard), returning a `VettedStream`
+  (incl. sticky `quality`). Quality: `PlayOpts.quality` / `--quality` (exact-res hard filter via
+  `FilterSpec.exact_resolution`); TUI offers an in-flow picker when undecided; headless fails with
+  `quality_unavailable` + `available_resolutions`. The pre-commit step (ADR 0014,
+  `_verify_cached_availability`, auto + non-local only) probes the top-N `[XX+]` cached candidates
+  concurrently and demotes any dead one (strips its marker via `quality._CACHED_RE`, the inverse of
+  `_mark_native_cached`) so the auto-pick re-ranks around what actually responds — keeping it off a
+  stale link and out of an accidental Tier-2 remux. Probes are memoized (`_probe_url`) and shared
+  with the last-resort `_ensure_playable`. Also `cast_languages`/`cast_resolver` for the in-cast
   switch. Imports `api`/`debrid`/`engine`/`quality`/`remux`/`tracks`/`languages`/`picker`/
   `labels`/`config`/`log`/`ui`; never `cli`.
 - `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the

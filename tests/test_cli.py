@@ -68,7 +68,7 @@ def test_dispatch_warms_discovery_on_interactive_paths(monkeypatch):
     monkeypatch.setattr(cli.discovery, "start_background", lambda: started.append(1))
     monkeypatch.setattr(cli, "_clear", lambda: None)
     monkeypatch.setattr(cli, "run_home", lambda cfg, opts: 0)
-    monkeypatch.setattr(cli, "run_explain", lambda cfg, query: 0)
+    monkeypatch.setattr(cli, "run_explain", lambda cfg, query, opts=None: 0)
     monkeypatch.setattr(cli.headless, "run", lambda cfg, args, opts: 0)
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
@@ -160,7 +160,7 @@ def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, advance = cli._play_video(
+    notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "Movie", opts, auto=True, next_label=None, on_save=None
     )
     assert (notice, advance) == (None, False)
@@ -184,7 +184,7 @@ def test_play_video_cast_fallback_selects_local_profile(monkeypatch):
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, advance = cli._play_video(
+    notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
     )
     assert seen["cast"] is False  # selection downgraded to the local profile
@@ -215,7 +215,7 @@ def test_play_video_cast_fetch_overlaps_device_scan(monkeypatch):
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, advance = cli._play_video(
+    notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
     )
     assert order == ["fetch-start", "device-resolved"]
@@ -248,7 +248,7 @@ def test_play_video_no_streams_returns_notice(monkeypatch):
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, advance = cli._play_video(
+    notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "Dune 3", opts, auto=True, next_label=None, on_save=None
     )
     assert advance is False
@@ -277,7 +277,7 @@ def test_play_meta_series_dispatches_to_series(monkeypatch):
 
 def test_play_meta_movie_skips_series(monkeypatch):
     monkeypatch.setattr(cli.series, "play", lambda *a, **k: pytest.fail("series.play called"))
-    monkeypatch.setattr(cli, "_play_video", lambda *a, **k: ("notice", False))
+    monkeypatch.setattr(cli, "_play_video", lambda *a, **k: ("notice", False, 0))
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
@@ -302,7 +302,7 @@ def test_play_history_movie_plays_directly(monkeypatch):
 
     def fake(cfg, typ, video_id, title, opts, **kw):
         seen.update(typ=typ, video_id=video_id, title=title)
-        return (None, False)
+        return (None, False, 0)
 
     monkeypatch.setattr(cli, "_play_video", fake)
     monkeypatch.setattr(cli.series, "resume", lambda *a, **k: pytest.fail("series.resume called"))
@@ -320,7 +320,7 @@ def test_series_player_binds_cfg_and_type(monkeypatch):
 
     def fake(cfg, typ, video_id, title, opts, **kw):
         seen.update(cfg=cfg, typ=typ, video_id=video_id, kw=kw)
-        return ("n", True)
+        return ("n", True, 0)
 
     monkeypatch.setattr(cli, "_play_video", fake)
     opts = cli.PlayOpts(
@@ -330,7 +330,7 @@ def test_series_player_binds_cfg_and_type(monkeypatch):
     out = play_video(
         "tt9:1:1", "Show 1x01", opts, auto=False, next_label="nxt", on_save=lambda p, d: None
     )
-    assert out == ("n", True)
+    assert out == ("n", True, 0)
     assert seen["cfg"] is CFG and seen["typ"] == "series" and seen["video_id"] == "tt9:1:1"
     assert seen["kw"]["next_label"] == "nxt" and seen["kw"]["auto"] is False
 
@@ -675,7 +675,7 @@ def test_play_video_auto_skips_track_menu(monkeypatch):
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, _ = cli._play_video(
+    notice, _, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
     )
     assert notice is None
@@ -733,7 +733,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, _ = cli._play_video(
+    notice, _, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
     )
     assert notice is None
@@ -768,7 +768,7 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     opts = cli.PlayOpts(
         auto=False, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, advance = cli._play_video(
+    notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
     )
     assert seen.get("local") is True and advance is False
@@ -800,7 +800,7 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
     opts = cli.PlayOpts(
         auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    notice, advance = cli._play_video(
+    notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
     )
     assert seen == {"start": 55.0, "device": "TV"} and advance is False

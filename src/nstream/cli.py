@@ -30,6 +30,9 @@ from . import (
     stream_select,
     ui,
 )
+from . import (
+    quality as quality_mod,
+)
 from .api import CAT_MAP, CATALOG_PAGE, GENRES
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
@@ -85,11 +88,12 @@ def _play_video(
     on_save: Callable[[float, float], None] | None,
     reselect_on_wrong_audio: bool = True,
     cast_meta: caster.CastMeta | None = None,
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, bool, int]:
     """Resolve streams for one video, play it, persist progress. Returns
-    (notice, advance): `notice` is a user-facing message to surface (no streams /
-    not released yet) or None on success or a cancelled stream menu; `advance` is
-    True when the next-episode overlay asked to continue.
+    (notice, advance, quality): `notice` is a user-facing message to surface (no
+    streams / not released yet) or None on success or a cancelled stream menu;
+    `advance` is True when the next-episode overlay asked to continue; `quality`
+    is the resolved quality choice (0 = Auto, N = exact res) for series binge sticky.
 
     `auto` overrides `opts.auto` for this single video: the binge loop forces it
     True from the second episode on, so use `auto` (not `opts.auto`) here."""
@@ -132,7 +136,7 @@ def _play_video(
     if not results:
         notice = stream_select.no_streams_message(cfg, typ, video_id, title)
         ui.status(notice, kind="fail")
-        return (notice, False)
+        return (notice, False, opts.quality if opts.quality is not None else 0)
     vetted = stream_select.prepare_stream(
         cfg,
         results,
@@ -142,8 +146,10 @@ def _play_video(
         title=title,
     )
     if vetted is None:
-        return (None, False)  # no playable stream, or backed out of a (re)selection
+        # No playable stream, or backed out of a (re)selection / quality picker.
+        return (None, False, opts.quality if opts.quality is not None else 0)
     chosen, auto, safety_sub_lang = vetted.stream, vetted.auto, vetted.safety_sub_lang
+    quality_choice = vetted.quality
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
@@ -164,14 +170,15 @@ def _play_video(
                 start=start, next_label=next_label, auto=auto, safety_sub_lang=safety_sub_lang,
             )  # fmt: skip
             if res is None:
-                return (None, False)  # backed out of the track menu → return to the list
+                # Backed out of the track menu → return to the list; keep quality sticky.
+                return (None, False, quality_choice)
             pos, dur, advance = res
     _clear()  # drop mpv's exit frame/logs before returning to the menu
     # Only persist a resume we can reason about: a real duration is needed for the
     # watched/near-end logic, otherwise the entry would stick forever.
     if opts.history and on_save and pos > 0 and dur > 0:
         on_save(pos, dur)
-    return (None, advance)
+    return (None, advance, quality_choice)
 
 
 def _resolve_cast_device(cfg: Config, opts: PlayOpts) -> str | None:
@@ -282,7 +289,7 @@ def _series_player(cfg: Config) -> series.PlayVideo:
         on_save: Callable[[float, float], None],
         reselect_on_wrong_audio: bool = True,
         cast_meta: caster.CastMeta | None = None,
-    ) -> tuple[str | None, bool]:
+    ) -> tuple[str | None, bool, int]:
         return _play_video(
             cfg, "series", video_id, title, opts,
             auto=auto, next_label=next_label, on_save=on_save,
@@ -308,7 +315,7 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
     def on_save(pos: float, dur: float) -> None:
         state.save_entry(cfg, state.make_entry(movie_id, name, typ, pos, dur))
 
-    notice, _ = _play_video(
+    notice, _, _ = _play_video(
         cfg, typ, movie_id, display_title(name, None), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
         cast_meta=caster.CastMeta(poster=meta.get("poster") or ""),
@@ -329,7 +336,7 @@ def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None
     def on_save(pos: float, dur: float) -> None:
         state.save_entry(cfg, state.make_entry(video_id, name, typ, pos, dur))
 
-    notice, _ = _play_video(
+    notice, _, _ = _play_video(
         cfg, typ, video_id, display_title(name, None), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
     )  # fmt: skip
@@ -463,10 +470,11 @@ def run_genre(cfg: Config, opts: PlayOpts, typ: str) -> int:
     return run_browse(cfg, "top", opts, typ, genre=genre)
 
 
-def run_explain(cfg: Config, query: str) -> int:
+def run_explain(cfg: Config, query: str, opts: PlayOpts | None = None) -> int:
     """`--explain`: search → pick a title (and episode, for series) → print WHY the
     auto-pick won (ranking table for local + cast profiles, plus the audio decision).
-    Read-only: never plays or casts."""
+    Read-only: never plays or casts. Honours `--quality` when set on `opts`."""
+    exact = stream_select.exact_resolution(opts.quality if opts else None)
     metas = api.search(cfg, query)
     if not metas:
         print("nstream: nessun risultato", file=sys.stderr)
@@ -489,11 +497,16 @@ def run_explain(cfg: Config, query: str) -> int:
         title = display_title(title, v)
     results = api.streams(cfg, typ, video_id)
     print(f"\n# nstream --explain · {title}\n")
-    print(explain.explain_streams(cfg, results, cast=False, title=title))
+    print(explain.explain_streams(cfg, results, cast=False, title=title, exact_resolution=exact))
     print()
-    print(explain.explain_streams(cfg, results, cast=True, title=title))
+    print(explain.explain_streams(cfg, results, cast=True, title=title, exact_resolution=exact))
     print()
-    print(explain.explain_audio(cfg, explain.auto_pick(cfg, results, cast=False, title=title)))
+    print(
+        explain.explain_audio(
+            cfg,
+            explain.auto_pick(cfg, results, cast=False, title=title, exact_resolution=exact),
+        )
+    )
     return 0
 
 
@@ -633,7 +646,7 @@ def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         if not query:
             print("nstream: --explain richiede un titolo da cercare", file=sys.stderr)
             return 2
-        return run_explain(cfg, query)
+        return run_explain(cfg, query, opts)
     if query:
         return run_search(cfg, query, opts, typ)
     return run_home(cfg, opts)  # the home has the typed sections; flags don't apply
@@ -768,6 +781,14 @@ def main() -> int:
         "--audio-lang", metavar="CODE", help="forza la lingua audio/dub (es. eng, ita) (--json)"
     )
     parser.add_argument(
+        "--quality",
+        metavar="RES",
+        help=(
+            "filtra per risoluzione esatta: auto, 720, 1080, 4k/2160 "
+            "(TUI e --json; senza flag la TUI chiede, --json non filtra)"
+        ),
+    )
+    parser.add_argument(
         "--probe",
         action="store_true",
         help="--json: elenca audio/sottotitoli disponibili per il titolo, non riproduce",
@@ -832,6 +853,16 @@ def main() -> int:
     sub_mode, sub_lang = _sub_options(args)
     # Mirror is a cast backend: it implies cast routing (device resolution), unless local.
     mirror_mode = (args.mirror or cfg.cast_mode == "mirror") and not args.local
+    quality: int | None = None
+    if getattr(args, "quality", None):
+        parsed = quality_mod.parse_quality(args.quality)
+        if parsed is None:
+            msg = f"qualità non valida: «{args.quality}» (usa auto, 720, 1080, 4k…)"
+            if args.json:
+                _json_error("usage", msg)
+            print(f"nstream: {msg}", file=sys.stderr)
+            return 2
+        quality = parsed
     opts = PlayOpts(
         # --json is headless: always auto-pick (no fzf stream menu).
         auto=cfg.auto_play or args.play or args.json,
@@ -842,6 +873,7 @@ def main() -> int:
         autoplay=cfg.autoplay and not args.no_autoplay,
         audio_lang=args.audio_lang or None,
         mirror=mirror_mode,
+        quality=quality,
     )
     try:
         return _dispatch(cfg, args, opts)

@@ -374,6 +374,9 @@ class FilterSpec:
     # Searched title, for the `title_match` demotion guard against a Torrentio mis-mapping
     # (an unrelated cached torrent out-ranking real releases). Empty = no-op ranking.
     title: str = ""
+    # Hard-filter to this exact resolution (e.g. 1080). 0 = no exact filter. Distinct from
+    # `max_resolution` (hardware safety ceiling): this is a per-session quality choice.
+    exact_resolution: int = 0
 
     @classmethod
     def from_config(
@@ -383,9 +386,11 @@ class FilterSpec:
         cast_audio: bool = False,
         lang_filter: bool | None = None,
         title: str = "",
+        exact_resolution: int = 0,
     ) -> FilterSpec:
-        """Derive a spec from the user config. `cast_audio`/`lang_filter` override per call
-        (the cast path ranks against the receiver and ignores the language filter)."""
+        """Derive a spec from the user config. `cast_audio`/`lang_filter`/`exact_resolution`
+        override per call (the cast path ranks against the receiver and ignores the language
+        filter; quality choice is per-invocation via PlayOpts)."""
         return cls(
             max_resolution=cfg.max_resolution,
             allow_software=cfg.allow_software,
@@ -400,19 +405,23 @@ class FilterSpec:
             cast_remux_max_resolution=cfg.cast_remux_max_resolution if cast_audio else 0,
             cast_remux_max_size=cfg.cast_remux_max_size_gb if cast_audio else 0,
             title=title,
+            exact_resolution=exact_resolution,
         )
 
 
 def unsupported_reason(info: StreamInfo, caps: Caps, spec: FilterSpec) -> str | None:
     """Why this stream is excluded from the main list, or None if it belongs there.
-    Order: hardware (codec/resolution/DV5) → Cast audio → camrip → language → near-dead.
-    The opt-in filters on `spec` default to no-ops, leaving the HW-only behaviour."""
+    Order: hardware (codec/resolution/DV5) → exact quality → Cast audio → camrip → language
+    → near-dead. The opt-in filters on `spec` default to no-ops, leaving the HW-only behaviour."""
     if spec.max_resolution and info.resolution > spec.max_resolution:
         return "8K" if info.resolution >= 4320 else f"{info.resolution}p"
     if not _codec_supported(info.codec, caps):
         return f"{info.codec.upper()} no-HW"
     if info.dv_profile == 5:
         return "Dolby Vision P5"
+    # Per-session quality choice: keep only streams at the exact resolution (unknown = drop).
+    if spec.exact_resolution and info.resolution != spec.exact_resolution:
+        return f"{info.resolution}p" if info.resolution else "res ?"
     # Cast: the Default Media Receiver can't decode TrueHD/DTS/DTS-HD → silent audio.
     # A REMUX carries the lossless track even when the title omits the codec, so it's
     # demoted too; other unknown audio gets the benefit of the doubt (WEB-DLs rarely tag).
@@ -674,3 +683,60 @@ def rank_streams(
         reverse=True,
     )
     return playable, excluded
+
+
+def resolutions_of(playable: list[RankedStream]) -> list[int]:
+    """Unique positive resolutions among ranked playable streams, highest first."""
+    return sorted({r.info.resolution for r in playable if r.info.resolution > 0}, reverse=True)
+
+
+# CLI / label aliases for --quality and the in-flow picker.
+_QUALITY_ALIASES: dict[str, int] = {
+    "auto": 0,
+    "4k": 2160,
+    "uhd": 2160,
+    "2160": 2160,
+    "2160p": 2160,
+    "1440": 1440,
+    "1440p": 1440,
+    "2k": 1440,
+    "1080": 1080,
+    "1080p": 1080,
+    "fhd": 1080,
+    "720": 720,
+    "720p": 720,
+    "hd": 720,
+    "480": 480,
+    "480p": 480,
+    "sd": 480,
+}
+
+
+def parse_quality(raw: str) -> int | None:
+    """Parse a CLI/TUI quality token into resolution pixels (0 = auto), or None if invalid."""
+    key = (raw or "").strip().lower()
+    if not key:
+        return None
+    if key in _QUALITY_ALIASES:
+        return _QUALITY_ALIASES[key]
+    # Bare integer (optionally with trailing 'p'): 1080, 1080p, 2160.
+    if key.endswith("p") and key[:-1].isdigit():
+        key = key[:-1]
+    if key.isdigit():
+        return int(key)
+    return None
+
+
+def quality_label(res: int) -> str:
+    """Human label for a quality choice: Auto, 2160p (4K), 1080p, …"""
+    if res <= 0:
+        return "Auto (migliore disponibile)"
+    if res >= 4320:
+        return f"{res}p (8K)"
+    if res >= 2160:
+        return f"{res}p (4K)"
+    if res == 1080:
+        return "1080p (Full HD)"
+    if res == 720:
+        return "720p (HD)"
+    return f"{res}p"

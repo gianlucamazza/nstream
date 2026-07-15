@@ -259,6 +259,7 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
                 }
             )
             return 1
+        exact = stream_select.exact_resolution(opts.quality)
         _emit_json(
             {
                 "ok": True,
@@ -268,14 +269,16 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
                 "imdb_id": imdb_id,
                 "season": season,
                 "episode": episode,
-                **explain.explain_data(cfg, results, cast=opts.cast, title=title),
+                **explain.explain_data(
+                    cfg, results, cast=opts.cast, title=title, exact_resolution=exact
+                ),
                 "error": None,
             }
         )
         return 0
 
     if args.probe:
-        # Discovery only: list available audio/subtitle languages, never play.
+        # Discovery only: list available audio/subtitle languages + resolutions, never play.
         results = api.streams(cfg, typ, video_id)
         _emit_json(
             {
@@ -290,6 +293,9 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
                     stream_select.audio_languages(cfg, results, cast=opts.cast)
                 ),
                 "available_subtitles": available_subtitle_langs(cfg, typ, video_id),
+                "available_resolutions": stream_select.available_resolutions(
+                    cfg, results, cast=opts.cast
+                ),
                 "error": None,
             }
         )
@@ -341,6 +347,20 @@ def _auto_play(
         )
         return 1
     available_audio = stream_select.audio_languages(cfg, results, cast=opts.cast)
+    available_resolutions = stream_select.available_resolutions(cfg, results, cast=opts.cast)
+    exact = stream_select.exact_resolution(opts.quality)
+
+    # Hard quality filter: fail fast with the available tiers (like audio_lang_unavailable).
+    if exact and exact not in available_resolutions:
+        _emit_json(
+            {
+                "ok": False,
+                "error": "quality_unavailable",
+                "message": f"nessuno stream {exact}p per «{title}»",
+                "available_resolutions": available_resolutions,
+            }
+        )
+        return 1
 
     audio_verified: bool | None = None
     if opts.audio_lang:
@@ -358,7 +378,7 @@ def _auto_play(
         # Track-accurate: ffprobe-confirm the real tracks carry the dub (the name tag can
         # lie). None back = every name-match's real tracks lack the language.
         chosen, audio_verified = stream_select.pick_audio_stream_verified(
-            cfg, results, opts.audio_lang, cast=opts.cast
+            cfg, results, opts.audio_lang, cast=opts.cast, exact_resolution=exact
         )
         if chosen is None:
             _emit_json(
@@ -370,12 +390,25 @@ def _auto_play(
                 }
             )
             return 1
-        vetted = stream_select.VettedStream(stream=chosen, auto=True, safety_sub_lang=None)
+        vetted = stream_select.VettedStream(
+            stream=chosen, auto=True, safety_sub_lang=None, quality=opts.quality or 0
+        )
     else:
         vetted = stream_select.prepare_stream(
             cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title
         )
     if vetted is None:
+        # Quality filter may have emptied the set even if the pre-check passed (e.g. HW).
+        if exact:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "quality_unavailable",
+                    "message": f"nessuno stream {exact}p riproducibile per «{title}»",
+                    "available_resolutions": available_resolutions,
+                }
+            )
+            return 1
         _emit_json(
             {
                 "ok": False,
@@ -506,6 +539,9 @@ def _auto_play(
             "episode": episode,
             "selection": selection,
             "stream": stream_block,
+            # Echo the requested quality (0/null = Auto / no filter); stream.resolution is actual.
+            "quality": vetted.quality if vetted.quality else None,
+            "available_resolutions": available_resolutions,
             "reencoded": reencoded,
             "device": device_name,
             "volume": volume,

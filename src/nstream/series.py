@@ -8,6 +8,7 @@ module touches no playback machinery directly (ADR 0009)."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol
 
 from . import api, state, ui
@@ -23,7 +24,8 @@ _SEASON_THRESHOLD = 40
 
 class PlayVideo(Protocol):
     """The injected player entry point: `cli._play_video` with cfg and typ="series"
-    pre-bound. Returns (notice, advance) — see `_play_video` for the semantics."""
+    pre-bound. Returns (notice, advance, quality) — see `_play_video` for the semantics.
+    `quality` (0 = Auto, N = exact res) is sticky across binge episodes."""
 
     def __call__(
         self,
@@ -36,7 +38,7 @@ class PlayVideo(Protocol):
         on_save: Callable[[float, float], None],
         reselect_on_wrong_audio: bool = True,
         cast_meta: CastMeta | None = None,
-    ) -> tuple[str | None, bool]: ...
+    ) -> tuple[str | None, bool, int]: ...
 
 
 def entry_video(entry: HistoryEntry) -> Video | None:
@@ -75,7 +77,7 @@ def binge(
                 cfg, state.make_entry(vid, name, "series", pos, dur, series_id=series_id, video=v)
             )
 
-        notice, advance = play_video(
+        notice, advance, quality = play_video(
             video_id, display_title(name, video), opts,
             auto=auto, next_label=next_label, on_save=on_save,
             reselect_on_wrong_audio=not unattended,  # binge advances warn-and-proceed, don't block
@@ -84,6 +86,8 @@ def binge(
                 season=video.get("season", 0) or 0, episode=video.get("episode", 0) or 0,
             ),
         )  # fmt: skip
+        # Sticky quality for subsequent episodes (skip the in-flow picker / keep filter).
+        opts = replace(opts, quality=quality)
         if notice:
             return notice
         if not advance or nxt is None:
@@ -185,7 +189,7 @@ def resume(
             ),  # fmt: skip
         )
 
-    notice, _ = play_video(
+    notice, _, _ = play_video(
         video_id, display_title(name, entry_video(entry)), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
     )  # fmt: skip

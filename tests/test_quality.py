@@ -107,6 +107,52 @@ def test_reason_camrip():
     assert quality.unsupported_reason(info, CAPS, spec) == "camrip (cam)"
 
 
+def test_reason_exact_resolution():
+    """Per-session quality filter: keep only the exact resolution; unknown drops out."""
+    i1080 = quality.parse_stream(S_1080)
+    i4k = quality.parse_stream(S_WEBDL_4K)
+    unk = quality.parse_stream({"name": "Torrentio\n?", "title": "F.WEB-DL\n👤 9"})
+    spec = FilterSpec(max_resolution=2160, exact_resolution=1080)
+    assert quality.unsupported_reason(i1080, CAPS, spec) is None
+    assert quality.unsupported_reason(i4k, CAPS, spec) == "2160p"
+    assert quality.unsupported_reason(unk, CAPS, spec) == "res ?"
+
+
+def test_rank_exact_resolution_only_1080():
+    """exact_resolution hard-filters before score; only matching res stays playable."""
+    playable, excluded = _rank([S_WEBDL_4K, S_1080, S_8K], max_resolution=4320)
+    # Without exact filter, 4K/8K may rank; with exact 1080 only the 1080 stream remains.
+    spec = FilterSpec(max_resolution=4320, exact_resolution=1080)
+    playable, excluded = quality.rank_streams([S_WEBDL_4K, S_1080, S_8K], CAPS, spec)
+    assert len(playable) == 1
+    assert playable[0].info.resolution == 1080
+    assert {r.info.resolution for r in excluded} >= {2160, 4320}
+
+
+def test_parse_quality_aliases():
+    assert quality.parse_quality("auto") == 0
+    assert quality.parse_quality("4k") == 2160
+    assert quality.parse_quality("1080p") == 1080
+    assert quality.parse_quality("fhd") == 1080
+    assert quality.parse_quality("720") == 720
+    assert quality.parse_quality("hd") == 720
+    assert quality.parse_quality("480p") == 480
+    assert quality.parse_quality("nope") is None
+    assert quality.parse_quality("") is None
+
+
+def test_resolutions_of():
+    from nstream.quality import RankedStream, StreamInfo
+
+    rows = [
+        RankedStream({}, StreamInfo(resolution=2160)),
+        RankedStream({}, StreamInfo(resolution=1080)),
+        RankedStream({}, StreamInfo(resolution=1080)),
+        RankedStream({}, StreamInfo(resolution=0)),
+    ]
+    assert quality.resolutions_of(rows) == [2160, 1080]
+
+
 def test_reason_language():
     info = quality.parse_stream(
         {"name": "Torrentio\n1080p", "title": "F.2025.FRENCH.1080p.WEB-DL\n👤 9 💾 2 GB"}
