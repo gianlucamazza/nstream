@@ -31,16 +31,18 @@ Always pass `--json`. Quote the title.
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
 | "metti X sul TV" / "casta X"         | `nstream --json --cast "X"`                                                                                                 |
 | "guarda X" / "riproduci X in locale" | `nstream --json --local "X"`                                                                                                |
+| cast via realtime mirror (1080p SDR) | `nstream --json --mirror "X"` (instant start, no remux download; not desktop mirror — use `skill-cast` for that)             |
 | disambiguate by year                 | `nstream --json --cast --year 1999 "X"`                                                                                     |
+| only movies / only series            | add `--movies` or `--series` (search/browse/continue; avoids same-named title of the other type)                           |
 | a specific series episode            | `nstream --json --cast --season 1 --episode 3 "X"`                                                                          |
 | target a specific TV                 | `nstream --json --cast --device "Salotto" "X"`                                                                              |
 | with subtitles                       | add `--subs` (preferred lang) or `--sub-lang ita`                                                                           |
 | force the audio/dub language         | add `--audio-lang eng` (e.g. original audio + `--sub-lang ita`)                                                             |
 | force stream quality / resolution    | add `--quality 1080` (or `720`, `4k`/`2160`, `auto`) — hard filter; fails if that res is absent                            |
-| list available audio/subs (no play)  | `nstream --json --probe "X"`                                                                                                |
+| list audio/subs/resolutions (no play)| `nstream --json --probe "X"`                                                                                                |
 | resume last watched                  | `nstream --json -c "X"` (or no title for the most recent)                                                                   |
 | next episode after finishing one     | `nstream --json --cast -c "X"` (auto-advances when the last episode is finished; `error: series_completed` past the finale) |
-| list a series' episodes              | `nstream --json --probe "X"` without `--episode` (add `--season N` to narrow)                                               |
+| list a series' episodes              | `nstream --json --probe "X"` without `--episode` → `action: "episodes"` (add `--season N` to narrow)                        |
 | why was this stream picked?          | `nstream --json --explain "X"` (ranking + filters as data; add `--cast` for the TV profile; read-only)                      |
 | something popular / new / top-rated  | `nstream --json --cast --browse popolari\|nuovi\|top`                                                                       |
 | stop what's casting                  | `nstream --json --stop`                                                                                                     |
@@ -58,16 +60,22 @@ Always pass `--json`. Quote the title.
   stream carries that language the command fails with `error: audio_lang_unavailable` and an
   `available_audio` list — **do not** silently play another language; show the available options
   and ask the user.
-- **Discover first**: when the user is unsure ("what languages does X have?"), run `--probe` — it
-  returns `available_audio`, `available_subtitles`, and `available_resolutions` without playing,
-  so you can present the choices, then play with the chosen `--audio-lang`/`--sub-lang`/`--quality`.
+- **Discover first**: when the user is unsure ("what languages / qualities does X have?"), run
+  `--probe` — without playing it returns:
+  - title with streams: `action: "probe"` + `available_audio`, `available_subtitles`,
+    `available_resolutions`
+  - series without `--episode`: `action: "episodes"` + `episodes[{season,episode,title}]`
+    (optionally narrow with `--season N`)
+  Present the choices, then play with `--audio-lang` / `--sub-lang` / `--quality` as needed.
 - Every play result includes `audio_lang` (the dub played) and `available_audio` (what else was
   on offer), so you can confirm precisely what was started.
 - **Quality**: `--quality 1080` (aliases: `4k`/`2160`, `fhd`/`1080`, `hd`/`720`, `auto`) hard-
   filters to that resolution before ranking. If none match: `error: quality_unavailable` with
   `available_resolutions` — show the list and ask (or drop the flag). Success echoes `quality`
-  (requested) and `stream.resolution` (actual). Without `--quality`, headless does not filter
-  (best playable wins as before).
+  (requested; null/omitted when Auto) and `stream.resolution` (actual), plus
+  `available_resolutions`. Without `--quality`, headless does not filter (best playable wins).
+  Combined with `--audio-lang`: quality is applied first; if the res exists but no stream at
+  that res carries the dub, you get `audio_lang_unavailable` (not `quality_unavailable`).
 - **Track-accurate**: when `--audio-lang` is set, nstream ffprobe-confirms the chosen stream's
   REAL audio tracks carry that language before sending it (the release name can mistag). The
   result's `audio_verified` is `true` when confirmed by the actual tracks, `false`/`null` when
@@ -118,9 +126,13 @@ Notes:
   `-c "titolo"` will resume/propose correctly. Add `--follow` only if the user wants live
   resume/auto-advance tracking (it will hold the terminal for the whole runtime).
 - **`--follow` streams playback events as JSONL** (one JSON object per line) instead of a single
-  final object: `{"action":"cast","event":"started|playing|paused|ended|failed", ...}` with
-  `position`/`duration` on the playing/ended lines. Read lines until `event:"ended"` (or
-  `event:"failed"`). Without `--follow` you get the usual single summary object.
+  final object:
+  `{"action":"cast","event":"started|playing|paused|ended|failed|disconnected", ...}` with
+  `position`/`duration` on the playing/ended/disconnected lines. Read until `event:"ended"` or
+  `event:"failed"`. **`disconnected` is not `ended`**: the castbridge daemon socket died mid-cast;
+  the receiver may still be playing (Tier-2 keeps its Range server alive for `--stop`/GC). Treat
+  it as an uncertain mid-session loss of telemetry, not a clean finish. Without `--follow` you
+  get the usual single summary object.
 - **Now-playing metadata on the TV + HUD**: when the native `castbridge` backend is built, the
   cast sends the title, poster, and season/episode so the TV's now-playing card and the desktop
   HUD widget show them — no extra flags. Without castbridge it transparently falls back to the
@@ -133,31 +145,39 @@ Notes:
 
 ## Parsing the result
 
-stdout is always a single JSON object. Read `ok`:
+stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
 
-- `ok: true` → confirm to the user with `title`, `action` (cast/play), `device`, and a short
-  stream summary from `stream` (e.g. "1080p HEVC, audio ita, cached"). `selection` tells you
-  whether the title was an `exact` name match or a `first`-result guess — if `first`, mention
-  which title was chosen so the user can correct it.
+- `ok: true` → confirm to the user with `title`, `action` (`cast` / `play` / `probe` /
+  `episodes` / `explain` / lifecycle), `device` when casting, and a short stream summary from
+  `stream` when present (e.g. "1080p HEVC, audio ita, cached"). Also surface when relevant:
+  - `quality` — requested filter (null = Auto / none)
+  - `available_resolutions` — tiers on offer for this title
+  - `audio_lang` / `available_audio` / `audio_verified`
+  - `reencoded` — Tier-2 remux used
+  - `selection` — `exact` name match vs `first`-result guess (if `first`, say which title)
 - `ok: false` → handle by `error` code (below).
 
 ### Error codes
 
-- `no_result` — nothing matched the title. Offer to retry with a different spelling or add a year.
+- `no_result` — nothing matched the title (or empty history for `-c`). Offer to retry with a
+  different spelling or add a year / `--movies`/`--series`.
 - `no_streams` — title found but no sources (often "not released yet"); surface `message`.
-- `no_playable_stream` — sources exist but none pass the hardware/cast filters; suggest `--local`
-  or a lower-quality preference.
-- `audio_lang_unavailable` — the requested `--audio-lang` isn't in any stream; show the
-  `available_audio` list and ask which dub to use (or drop `--audio-lang`).
+- `no_playable_stream` — sources exist but none pass the hardware/cast filters; try `--local`,
+  or a lower tier with `--quality 1080` / `720`.
+- `audio_lang_unavailable` — the requested `--audio-lang` isn't in any (remaining) stream; show
+  the `available_audio` list and ask which dub to use (or drop `--audio-lang`).
 - `quality_unavailable` — the requested `--quality` isn't among playable streams; show
   `available_resolutions` and ask (or drop `--quality` / try another tier).
 - `episode_not_found` — show the `available` seasons/episodes and ask which to play.
+- `series_completed` — `-c` / next-episode past the finale; tell the user the show is finished.
 - `device_not_found` — no Chromecast resolved, or several TVs and none specified. Run `catt scan`
   to list devices; if more than one, ask the user which (AskUserQuestion) and re-run with
   `--device "<name>"`.
-- `usage` — a bad flag combo (e.g. `--sub-menu` with `--json`); fix the command.
-- Missing debrid token / config error → nstream exits non-zero and prints to **stderr**; surface
-  that line and point the user at `nstream --settings`.
+- `network` — addon/API network failure; surface `message` and retry later.
+- `usage` — a bad flag combo (e.g. `--sub-menu` with `--json`, invalid `--quality`); fix the
+  command.
+- Missing debrid token / config error → nstream exits non-zero and prints to **stderr** (or JSON
+  `error: config` on some paths); surface that line and point the user at `nstream --settings`.
 
 ## HDR on the external monitor (local playback only)
 
