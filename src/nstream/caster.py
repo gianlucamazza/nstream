@@ -377,8 +377,9 @@ def _cast_via_bridge(
     sub_shutdown, sub_delivered = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
 
     def announce() -> None:
-        tail = "  (Ctrl-C per smettere di seguire)" if follow else ""
-        print(f"{ui.g().tv} {title} → {device}{tail}", file=sys.stderr)
+        # Title already printed as the play banner in the interactive path; keep it for
+        # Alt-C / paths that jump straight to cast without that banner.
+        ui.cast_live(device, follow=follow)
 
     # Shared driver (ADR 0011). No on_interrupt hook: interactive semantics — Ctrl-C
     # stops following (the driver already stopped the receiver) and keeps the result.
@@ -471,7 +472,7 @@ def _cast_via_catt(
     # and its query params don't necessarily match them.
     _log.debug("catt launch: %s", " ".join(a if a != url else "<url>" for a in launch))
     # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
-    print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
+    ui.status(f"consegno a {dest}…", kind="tv")
     try:
         proc = subprocess.run(
             launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT
@@ -493,15 +494,17 @@ def _cast_via_catt(
         _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
         return (0.0, 0.0, False)
 
+    can_switch = bool(langs) and resolve_lang is not None
+    if can_switch and follow:
+        ui.cast_live(dest, follow=True)
+        ui.status_detail("a: cambia lingua audio")
+    else:
+        ui.cast_live(dest, follow=follow)
     if not follow:
         # Fire-and-return: the receiver has the media; don't poll for the whole runtime.
-        print(f"{ui.g().tv} {title} → {dest}", file=sys.stderr)
         _emit(on_event, "started", title=title)
         return (0.0, 0.0, False)
 
-    can_switch = bool(langs) and resolve_lang is not None
-    hint = "a: lingua audio · Ctrl-C: stop" if can_switch else "Ctrl-C per smettere di seguire"
-    print(f"{ui.g().tv} {title} → {dest}  ({hint})", file=sys.stderr)
     holder = {"position": 0.0, "duration": 0.0}
     started = False
     finished = False

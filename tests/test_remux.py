@@ -153,7 +153,7 @@ def test_audio_bitrate_scales_with_channels(channels, expected):
 
 
 def _fake_ffmpeg_ok(seen):
-    def run(cmd, duration):
+    def run(cmd, duration, **_kw):
         seen["cmd"] = cmd
         seen["duration"] = duration
         with open(cmd[-1], "wb") as f:  # ffmpeg writes a non-empty output at the path (last arg)
@@ -195,7 +195,7 @@ def test_remux_to_file_copies_decodable_track(monkeypatch, tmp_path):
 def test_remux_to_file_failure_cleans_up(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
-    monkeypatch.setattr(remux, "_run_ffmpeg", lambda cmd, duration: (1, "boom"))
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda cmd, duration, **k: (1, "boom"))
     assert remux.remux_to_file("http://x", _cfg()) is None
     assert list(tmp_path.glob("cast-*.mp4")) == []  # no leftover temp file
 
@@ -209,7 +209,7 @@ def test_remux_to_file_aborts_on_insufficient_disk(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_free_gb", lambda _p: 5.0)
     ran = []
-    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a: ran.append(1) or (0, ""))
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a, **k: ran.append(1) or (0, ""))
     assert remux.remux_to_file("http://x", _cfg(), size_gb=40.0) is None
     assert ran == []  # ffmpeg never launched
 
@@ -219,7 +219,7 @@ def test_remux_to_file_size_cap_confirm_declined(monkeypatch):
     monkeypatch.setattr(remux, "_free_gb", lambda _p: 500.0)
     monkeypatch.setattr(remux, "_confirm", lambda _m: False)
     ran = []
-    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a: ran.append(1) or (0, ""))
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a, **k: ran.append(1) or (0, ""))
     assert remux.remux_to_file("http://x", _cfg(cast_remux_max_size_gb=10), size_gb=30.0) is None
     assert ran == []
 
@@ -241,7 +241,7 @@ def test_remux_to_file_unknown_size_refused_on_low_disk(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_free_gb", lambda _p: remux._MIN_FREE_GB - 1)
     ran = []
-    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a: ran.append(1) or (0, ""))
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a, **k: ran.append(1) or (0, ""))
     assert remux.remux_to_file("http://x", _cfg()) is None
     assert ran == []  # ffmpeg never launched
 
@@ -779,7 +779,7 @@ def test_remux_to_file_ctrl_c_removes_partial(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_free_gb", lambda p: 1000.0)
 
-    def interrupted(cmd, duration):
+    def interrupted(cmd, duration, **_kw):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(remux, "_run_ffmpeg", interrupted)
