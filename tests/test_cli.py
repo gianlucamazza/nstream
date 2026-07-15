@@ -365,7 +365,7 @@ def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
     assert cli._pick_meta(items, CFG, opts) == 0
     # First render shows the Tab/Alt-C hint; after the pick the notice is threaded through.
     assert seen["headers"] == [
-        "Tab: avvia al volo  ·  Alt-C: casta sul TV",
+        "Tab: avvia al volo  ·  Alt-C: casta sul TV  ·  Ctrl-/: anteprima",
         "non ancora disponibile",
     ]
 
@@ -394,7 +394,7 @@ def test_run_home_dispatches_actions(monkeypatch):
     ]
     fake_fzf, _ = _fzf_script(actions)
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
-    monkeypatch.setattr(cli, "input", lambda *a: "matrix", raising=False)
+    monkeypatch.setattr(cli, "ask_query", lambda *a, **k: "matrix")
     called: dict[str, object] = {}
     sections: list[str] = []
     monkeypatch.setattr(
@@ -430,9 +430,11 @@ def test_run_home_shows_typed_sections_not_mixed_browse(monkeypatch):
     assert seen["prompt"] == "nstream> "
     assert (cli._SECTION, "movie") in seen["values"]
     assert (cli._SECTION, "series") in seen["values"]
-    assert not any(v[0] == cli._BROWSE for v in seen["values"])  # catalogs live in the sections
+    actions = [v for v in seen["values"] if isinstance(v, tuple)]
+    assert not any(v[0] == cli._BROWSE for v in actions)  # catalogs live in the sections
     labels = " ".join(seen["labels"])
     assert "Film" in labels and "Serie TV" in labels and "Popolari" not in labels
+    assert any("sistema" in lab for lab in seen["labels"])  # visual group separator
 
 
 def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
@@ -456,7 +458,7 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
         return next(it)
 
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
-    monkeypatch.setattr(cli, "input", lambda *a: "fargo", raising=False)
+    monkeypatch.setattr(cli, "ask_query", lambda *a, **k: "fargo")
     called = {}
     monkeypatch.setattr(
         cli, "run_browse", lambda c, cat, o, typ=None: called.__setitem__("browse", (cat, typ))
@@ -472,7 +474,6 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
     assert prompts == ["serie> "] * 3
     assert called["browse"] == (cli.CAT_MAP["popolari"], "series")
     assert called["search"] == ("fargo", "series")
-
 
 def test_run_browse_typed_uses_catalog(monkeypatch):
     """With a type, run_browse goes through api.catalog (single-type); without, api.browse."""

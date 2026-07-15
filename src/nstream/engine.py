@@ -294,19 +294,18 @@ def _wait_buffer(base: str, file_hash: str) -> None:
             peers = st.get("active_peers", st.get("connected_seeders", 0))
             mb = preloaded / (1024 * 1024)
             pct = f" ({100 * preloaded / preload:3.0f}%)" if preload else ""
-            msg = f"\r{ui.g().globe} buffering P2P… peer {peers}  {mb:6.1f} MB{pct}"
-            print(msg, end="", file=sys.stderr)
+            ui.progress(f"{ui.g().globe} buffering P2P… peer {peers}  {mb:6.1f} MB{pct}")
             # Ready once the read-ahead window is full, or some data is buffered with peers.
             if (preload and preloaded >= preload) or (preloaded > 2 * 1024 * 1024 and peers):
                 filled = True
                 break
             time.sleep(0.5)
-        print("", file=sys.stderr)  # newline after the \r progress line
+        ui.progress_done()
     except KeyboardInterrupt:
         # Ctrl-C while buffering aborts the whole flow. Converting it to EngineUnavailable
         # would make the multi-candidate loops read it as "candidate failed → try the next"
         # and start buffering ANOTHER torrent — the user asked to stop, not to try harder.
-        print("", file=sys.stderr)
+        ui.progress_done()
         raise
     if filled:
         return

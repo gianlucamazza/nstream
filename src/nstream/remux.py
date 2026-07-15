@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import bridge, cast_delivery, caster, log, serve, subs, ui, util
+from . import bridge, cast_delivery, caster, log, picker, serve, subs, ui, util
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -211,15 +211,10 @@ def _free_gb(path: Path) -> float:
 
 
 def _confirm(msg: str) -> bool:
-    """Ask y/n on an interactive tty; headless (no tty) → proceed without blocking (the
-    release was the only castable option, and a JSON/auto caller must not hang on input)."""
-    if not (sys.stdin.isatty() and sys.stderr.isatty()):
-        return True
-    try:
-        ans = input(f"{msg} — procedo? [s/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    return ans in ("s", "si", "sì", "y", "yes")
+    """Ask yes/no via the shared fzf confirm (stays in the TUI chrome). Headless (no
+    tty) → proceed without blocking: the release was the only castable option, and a
+    JSON/auto caller must not hang on input."""
+    return picker.confirm(f"{msg} — procedo?", default_yes=False, non_tty_default=True)
 
 
 def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
@@ -250,11 +245,10 @@ def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
                     new = min(99, int(cur / duration * 100))
                     if new != pct:
                         pct = new
-                        msg = f"\r{ui.g().tv} preparo l'audio per il cast… {pct}%"
-                        print(msg, end="", file=sys.stderr, flush=True)
+                        ui.progress(f"{ui.g().tv} preparo l'audio per il cast… {pct}%")
         proc.wait()
         if pct >= 0:
-            print(f"\r{ui.g().tv} audio pronto, avvio il cast.        ", file=sys.stderr)
+            ui.progress_done(f"{ui.g().tv} audio pronto, avvio il cast.")
         err.seek(0)
         stderr = err.read().decode("utf-8", errors="replace")
     return proc.returncode, stderr
