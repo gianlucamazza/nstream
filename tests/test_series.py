@@ -194,6 +194,40 @@ def test_play_applies_key_to_opts(monkeypatch):
     assert calls[0]["auto"] is False  # the flipped opts drove the first episode
 
 
+def test_play_season_first_for_multi_season(monkeypatch):
+    """≥2 seasons → season menu first; ESC on episodes returns to seasons; ESC on seasons leaves."""
+    eps = [
+        Video(id="tt:1:1", season=1, episode=1, name="A"),
+        Video(id="tt:2:1", season=2, episode=1, name="B"),
+    ]
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: eps)
+    season_picks = iter([1, None])  # pick S01, then ESC seasons
+    monkeypatch.setattr(series, "fzf", lambda items, prompt, **k: next(season_picks))
+    ep_picks = iter([None])  # ESC episodes → back to seasons
+    monkeypatch.setattr(series, "fzf_key", lambda items, prompt, **k: next(ep_picks, None))
+    play, calls = _fake_play(advance_until=0)
+    assert series.play(CFG, META, _opts(), **_picker_kwargs(play)) is None
+    assert calls == []
+
+
+def test_play_flat_when_single_season_short(monkeypatch):
+    """One short season stays a flat episode list (no season menu)."""
+    eps = _episodes(3)  # all S01
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: eps)
+    season_called = []
+    monkeypatch.setattr(
+        series,
+        "fzf",
+        lambda *a, **k: (
+            season_called.append(1) or (_ for _ in ()).throw(AssertionError("no season menu"))
+        ),
+    )
+    _fzf_script(monkeypatch, [None])
+    play, _ = _fake_play(advance_until=0)
+    assert series.play(CFG, META, _opts(), **_picker_kwargs(play)) is None
+    assert season_called == []
+
+
 # --- history resume (series.resume) -----------------------------------------
 
 

@@ -179,6 +179,34 @@ def _extras(genre: str | None, skip: int) -> str:
 # --browse keyword → Cinemeta catalog id (the CLI's --browse choices).
 CAT_MAP = {"popolari": "top", "nuovi": "year", "top": "imdbRating"}
 
+# Cinemeta genre path segments (`/genre=Action`). Stable English tokens — the addon
+# does not localise them. Used by the typed-section Generi… menu (ADR 0009 follow-up).
+GENRES: tuple[str, ...] = (
+    "Action",
+    "Adventure",
+    "Animation",
+    "Biography",
+    "Comedy",
+    "Crime",
+    "Documentary",
+    "Drama",
+    "Family",
+    "Fantasy",
+    "History",
+    "Horror",
+    "Music",
+    "Mystery",
+    "Romance",
+    "Sci-Fi",
+    "Sport",
+    "Thriller",
+    "War",
+    "Western",
+)
+
+# Cinemeta serves ~100 metas per catalog page; a full page means "maybe more".
+CATALOG_PAGE = 100
+
 
 def catalog(
     cfg: Config, typ: str, cat: str = "top", *, genre: str | None = None, skip: int = 0

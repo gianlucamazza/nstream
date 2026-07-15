@@ -1,5 +1,8 @@
-"""Subtitle acquisition: fetch OpenSubtitles tracks, rank by preferred language,
-download (gunzip) into the per-play temp dir. No playback flow lives here."""
+"""Subtitle acquisition + the pre-play audio/subtitle track menu.
+
+Fetch OpenSubtitles tracks, rank by preferred language, download (gunzip) into the
+per-play temp dir. Also owns `choose_tracks` (the fzf menu over ffprobe tracks +
+OpenSubtitles) so the orchestrator stays free of leaf-menu code."""
 
 from __future__ import annotations
 
@@ -9,10 +12,62 @@ import os
 import sys
 import tempfile
 import urllib.request
+from typing import cast as typecast
 
-from . import api
+from . import api, tracks, ui
 from .config import Config, PlayOpts, Subtitle
+from .labels import audio_summary, sub_summary, track_label
 from .picker import fzf
+
+
+def choose_tracks(
+    cfg: Config, url: str, typ: str, video_id: str, work_dir: str
+) -> tuple[int | None, str | int | None, tuple[str, ...]] | None:
+    """Pre-play menu to pick the audio/subtitle track from those actually in the file
+    (probed with ffprobe). Returns (audio_id, sub_id, sub_paths), or None if the user
+    backs out (ESC). With ffprobe unavailable, skips silently to mpv's defaults."""
+    tr = tracks.probe_tracks(url)
+    if tr.empty():
+        print("nstream: tracce non sondabili (ffprobe assente?), uso i default", file=sys.stderr)
+        return (None, None, ())
+
+    aid: int | None = None
+    sid: int | str | None = None
+    sub_paths: tuple[str, ...] = ()
+    # Sentinels: fzf returns None for ESC, so "automatic" can't be a None *value*.
+    _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
+    while True:
+        items: list[tuple[str, object]] = [
+            (f"{ui.g().play}  Avvia", _PLAY),
+            (f"{ui.g().audio} Audio: {audio_summary(aid, tr)}", _AUDIO),
+            (f"{ui.g().subs} Sottotitoli: {sub_summary(sid, sub_paths, tr)}", _SUBS),
+        ]
+        chosen = fzf(items, "riproduzione> ")
+        if chosen is None:
+            return None
+        if chosen is _PLAY:
+            return (aid, sid, sub_paths)
+        if chosen is _AUDIO:
+            opts: list[tuple[str, object]] = [("automatico (lingua preferita)", _AUTO)]
+            opts += [(track_label(a), a.id) for a in tr.audio]
+            pick = fzf(opts, "audio> ")
+            if pick is _AUTO:
+                aid = None
+            elif pick is not None:
+                aid = typecast(int, pick)
+        else:  # _SUBS
+            sopts: list[tuple[str, object]] = [("nessuno", "no")]
+            sopts += [(track_label(s), s.id) for s in tr.subs]
+            sopts.append(("OpenSubtitles… (esterni)", _OPENSUBS))
+            pick = fzf(sopts, "sottotitoli> ")
+            if pick is None:
+                continue
+            if pick is _OPENSUBS:
+                got = pick_subtitles(cfg, typ, video_id, work_dir, mode="menu")
+                if got:
+                    sub_paths, sid = got, None
+            else:
+                sid, sub_paths = typecast("str | int", pick), ()
 
 
 def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:

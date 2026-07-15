@@ -15,7 +15,11 @@ from . import api, state, ui
 from .caster import CastMeta
 from .config import Config, HistoryEntry, Meta, PlayOpts, Video
 from .labels import display_title, episode_label
-from .picker import fzf_key
+from .picker import fzf, fzf_key
+
+# Above this many episodes (or when ≥2 seasons exist) the picker is season-first
+# so long series stay scannable. Below: flat list as before.
+_SEASON_THRESHOLD = 40
 
 
 class PlayVideo(Protocol):
@@ -102,29 +106,54 @@ def play(
     apply_key: Callable[[PlayOpts, str], PlayOpts],
 ) -> str | None:
     """Episode picker for a series title: pick an episode (fzf), binge from it, and
-    return to the picker when playback ends or backs out. `pick_hint`/`apply_key` are
-    cli's leaf-list helpers, injected like the player. Returns a notice, or None."""
+    return to the picker when playback ends or backs out. Multi-season / long series
+    get a season menu first. `pick_hint`/`apply_key` are cli's leaf-list helpers,
+    injected like the player. Returns a notice, or None."""
     name = meta.get("name", "nstream")
     eps = api.episodes(cfg, meta["id"])
     if not eps:
         return f"nessun episodio per «{name}»"
-    items = [(episode_label(v), v) for v in eps]
     sid = meta["id"]
+    seasons = sorted({int(v.get("season") or 0) for v in eps if (v.get("season") or 0) > 0})
+    season_first = len(seasons) >= 2 or len(eps) > _SEASON_THRESHOLD
 
     def ep_preview(v: Video) -> str:
         return f"episode {sid} {v.get('season', 0)} {v.get('episode', 0)}"
 
-    # Loop the episode picker so finishing/backing out returns here, not to the list.
-    header: str | None = None
+    def pick_and_binge(subset: list[Video]) -> bool:
+        """Episode list loop. Returns True when the user ESCs (caller may reopen a
+        season menu); never returns a binge notice — those stay as the list header."""
+        items = [(episode_label(v), v) for v in subset]
+        notice: str | None = None
+        while True:
+            chosen = fzf_key(
+                items, "episodio> ", header=notice or pick_hint(opts), preview=ep_preview
+            )
+            if not chosen:
+                return True
+            key, start_video = chosen
+            notice = binge(
+                cfg, meta["id"], name, eps, start_video, apply_key(opts, key),
+                play_video=play_video, poster=meta.get("poster") or "",
+            )  # fmt: skip
+
+    if not season_first:
+        pick_and_binge(eps)
+        return None
+
+    # Season-first: pick a season (or "all"), then the episode list for that subset.
+    g = ui.glyphs(ui.active_caps())
+    _ALL = object()
+    season_items: list[tuple[str, object]] = [(f"{g.series}  Stagione {s:02d}", s) for s in seasons]
+    season_items.append((f"{g.series}  Tutte le stagioni", _ALL))
     while True:
-        chosen = fzf_key(items, "episodio> ", header=header or pick_hint(opts), preview=ep_preview)
-        if not chosen:
+        pick = fzf(season_items, "stagione> ", header=pick_hint(opts))
+        if pick is None:
             return None
-        key, start_video = chosen
-        header = binge(
-            cfg, meta["id"], name, eps, start_video, apply_key(opts, key),
-            play_video=play_video, poster=meta.get("poster") or "",
-        )  # fmt: skip
+        subset = eps if pick is _ALL else [v for v in eps if int(v.get("season") or 0) == pick]
+        if not subset:
+            continue
+        pick_and_binge(subset)  # ESC → reopen season menu
 
 
 def resume(
