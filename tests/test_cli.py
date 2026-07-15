@@ -42,7 +42,7 @@ def test_run_explain_movie(monkeypatch, capsys):
     monkeypatch.setattr(cli.api, "streams", lambda cfg, typ, vid: [
         {"name": "[RD+] Torrentio\n4k", "title": "Dune.2024.2160p.BluRay.HEVC.ITA-GRP\n👤 9 💾 20 GB", "url": "u"},
     ])  # fmt: skip
-    monkeypatch.setattr(cli.explain.tracks, "probe_tracks", lambda url: cli.tracks.Tracks())
+    monkeypatch.setattr(cli.explain.tracks, "probe_tracks", lambda url: Tracks())
     rc = cli.run_explain(Config(torrentio_base="tb"), "dune")
     out = capsys.readouterr().out
     assert rc == 0
@@ -475,22 +475,95 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
     assert called["browse"] == (cli.CAT_MAP["popolari"], "series")
     assert called["search"] == ("fargo", "series")
 
+
 def test_run_browse_typed_uses_catalog(monkeypatch):
     """With a type, run_browse goes through api.catalog (single-type); without, api.browse."""
     seen = {}
-    monkeypatch.setattr(
-        cli.api, "catalog", lambda c, typ, cat: seen.setdefault("catalog", (typ, cat)) and []
-    )
-    monkeypatch.setattr(cli.api, "browse", lambda c, cat: seen.setdefault("browse", cat) and [])
-    monkeypatch.setattr(cli, "_pick_meta", lambda items, c, o: 0)
+
+    def catalog(c, typ, cat, *, genre=None, skip=0):
+        seen["catalog"] = (typ, cat, genre, skip)
+        return []
+
+    def browse(c, cat, *, genre=None, skip=0):
+        seen["browse"] = (cat, genre, skip)
+        return []
+
+    monkeypatch.setattr(cli.api, "catalog", catalog)
+    monkeypatch.setattr(cli.api, "browse", browse)
     opts = cli.PlayOpts(
         auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
-    cli.run_browse(CFG, "top", opts, typ="series")
-    assert seen == {"catalog": ("series", "top")}  # api.browse untouched
+    assert cli.run_browse(CFG, "top", opts, typ="series") == 1  # empty catalog
+    assert seen == {"catalog": ("series", "top", None, 0)}  # api.browse untouched
     seen.clear()
-    cli.run_browse(CFG, "top", opts)
-    assert seen == {"browse": "top"}  # default stays mixed
+    assert cli.run_browse(CFG, "top", opts) == 1
+    assert seen == {"browse": ("top", None, 0)}  # default stays mixed
+
+
+def test_run_browse_genre_and_pagination(monkeypatch):
+    """Genre is forwarded; a full page exposes «altri…» and advances skip."""
+    from nstream.api import CATALOG_PAGE
+
+    pages: list[tuple] = []
+
+    def catalog(c, typ, cat, *, genre=None, skip=0):
+        pages.append((typ, cat, genre, skip))
+        if skip == 0:
+            return [{"id": f"tt{i}", "type": typ, "name": f"T{i}"} for i in range(CATALOG_PAGE)]
+        return [{"id": "ttX", "type": typ, "name": "Next"}]
+
+    monkeypatch.setattr(cli.api, "catalog", catalog)
+    # Page 0: pick «altri…»; page 1: ESC
+    more_sent = None
+    calls = []
+
+    def fake_fzf(items, prompt, *, header=None, preview=None):
+        calls.append(([(lab, type(v).__name__) for lab, v in items], header))
+        nonlocal more_sent
+        if more_sent is None:
+            more_sent = items[-1][1]  # the «altri…» sentinel
+            assert "altri" in items[-1][0]
+            return ("", more_sent)
+        return None
+
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_browse(CFG, "top", opts, typ="movie", genre="Action") == 0
+    assert pages == [("movie", "top", "Action", 0), ("movie", "top", "Action", CATALOG_PAGE)]
+    assert "Action" in (calls[0][1] or "")
+
+
+def test_run_genre_picks_then_browses(monkeypatch):
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: "Comedy")
+    seen = {}
+
+    def browse(c, cat, o, typ=None, *, genre=None):
+        seen["call"] = (cat, typ, genre)
+        return 0
+
+    monkeypatch.setattr(cli, "run_browse", browse)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_genre(CFG, opts, "series") == 0
+    assert seen["call"] == ("top", "series", "Comedy")
+
+
+def test_run_section_offers_genres(monkeypatch):
+    seen = {}
+
+    def fake(items, prompt, *, header=None, preview=None):
+        seen["actions"] = [v for _, v in items if isinstance(v, tuple)]
+        return None
+
+    monkeypatch.setattr(cli, "fzf_key", fake)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_section(CFG, "movie", opts) == 0
+    assert (cli._GENRE, "") in seen["actions"]
 
 
 def test_run_search_forwards_type(monkeypatch):
@@ -534,12 +607,16 @@ def _seq_fzf(monkeypatch, returns):
 
 
 def test_choose_tracks_empty_when_no_probe(monkeypatch):
-    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: Tracks())
+    from nstream import subs
+
+    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: Tracks())
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, None, ())
 
 
 def test_choose_tracks_pick_audio_then_play(monkeypatch):
-    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: _TR)
+    from nstream import subs
+
+    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
     # main: pick Audio → submenu: pick track id 2 → main: pick ▶ Avvia
     captured = {}
 
@@ -552,18 +629,23 @@ def test_choose_tracks_pick_audio_then_play(monkeypatch):
             return items[2][1]  # track id 2 (after "automatico")
         return items[0][1]  # ▶ Avvia
 
-    monkeypatch.setattr(cli, "fzf", fzf)
+    monkeypatch.setattr(subs, "fzf", fzf)
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (2, None, ())
 
 
 def test_choose_tracks_esc_returns_none(monkeypatch):
-    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: _TR)
-    _seq_fzf(monkeypatch, [None])  # ESC on the main screen
+    from nstream import subs
+
+    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
+    it = iter([None])
+    monkeypatch.setattr(subs, "fzf", lambda *a, **k: next(it))
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") is None
 
 
 def test_choose_tracks_subs_none(monkeypatch):
-    monkeypatch.setattr(cli.tracks, "probe_tracks", lambda *a, **k: _TR)
+    from nstream import subs
+
+    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
 
     def fzf(items, prompt, *, header=None):
         if prompt == "riproduzione> " and not hasattr(fzf, "seen"):
@@ -573,7 +655,7 @@ def test_choose_tracks_subs_none(monkeypatch):
             return items[0][1]  # "nessuno" → "no"
         return items[0][1]  # ▶ Avvia
 
-    monkeypatch.setattr(cli, "fzf", fzf)
+    monkeypatch.setattr(subs, "fzf", fzf)
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, "no", ())
 
 

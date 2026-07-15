@@ -7,6 +7,7 @@ need not thread glyphs/palette through every label call."""
 from __future__ import annotations
 
 import re
+import shutil
 from datetime import UTC, datetime
 
 from . import quality, tracks, ui
@@ -31,10 +32,13 @@ def meta_label(m: Meta) -> str:
 def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
     caps = ui.active_caps()
     g, pal = ui.glyphs(caps), ui.palette(caps)
+    # Cap to the terminal width on narrow panes; floor 60 keeps the tag prefix readable.
+    cols = shutil.get_terminal_size((80, 24)).columns
+    cap = min(200, max(60, cols - 2))
     # Release names are untrusted: strip control/ESC chars before they reach the terminal.
     name = ui.sanitize(s.get("name") or "").replace("\n", " ")
     title = ui.sanitize(s.get("title") or "").replace("\n", " · ")
-    base = f"{name}  |  {title}"[:200]
+    base = f"{name}  |  {title}"[:cap]
     if info is None:
         return base
     tags = []
@@ -56,9 +60,10 @@ def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
         tags.append(f"{info.size_gb:.1f}G")
     prefix = (g.cached if info.cached else " ") + " " + " ".join(tags)
     # Truncate the plain string first, then colour only the fixed-width prefix region so
-    # the alignment is exact and no ANSI escape is ever cut by the 200-char cap.
-    plain = f"{prefix:36s} {base}"[:200]
-    return ui.ansi(plain[:36], pal.good if info.cached else pal.dim) + plain[36:]
+    # the alignment is exact and no ANSI escape is ever cut by the width cap.
+    pref_w = min(36, cap)
+    plain = f"{prefix:{pref_w}s} {base}"[:cap]
+    return ui.ansi(plain[:pref_w], pal.good if info.cached else pal.dim) + plain[pref_w:]
 
 
 def episode_label(v: Video) -> str:

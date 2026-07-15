@@ -28,10 +28,9 @@ from . import (
     settings,
     state,
     stream_select,
-    tracks,
     ui,
 )
-from .api import CAT_MAP
+from .api import CAT_MAP, CATALOG_PAGE, GENRES
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
 from .config import (
@@ -45,17 +44,14 @@ from .config import (
     load,
 )
 from .labels import (
-    audio_summary,
     display_title,
     episode_label,
     history_label,
     meta_label,
-    sub_summary,
-    track_label,
 )
 from .picker import ask_query, fzf, fzf_key
 from .player import play
-from .subs import auto_subs, pick_subtitles
+from .subs import auto_subs, choose_tracks  # re-export: tests + _play_on_mpv
 
 _log = log.get_logger("cli")
 
@@ -72,59 +68,6 @@ def _init_theme(cfg: Config) -> None:
     # Pin the active caps once; label builders (labels.py) and the menus below read them
     # on demand via ui.active_caps(). Sensible defaults keep direct calls (tests) working.
     ui.set_active_caps(ui.detect_caps(cfg))
-
-
-# --- pre-play audio/subtitle track menu ----------------------------------
-
-
-def choose_tracks(
-    cfg: Config, url: str, typ: str, video_id: str, work_dir: str
-) -> tuple[int | None, str | int | None, tuple[str, ...]] | None:
-    """Pre-play menu to pick the audio/subtitle track from those actually in the file
-    (probed with ffprobe). Returns (audio_id, sub_id, sub_paths), or None if the user
-    backs out (ESC). With ffprobe unavailable, skips silently to mpv's defaults."""
-    tr = tracks.probe_tracks(url)
-    if tr.empty():
-        print("nstream: tracce non sondabili (ffprobe assente?), uso i default", file=sys.stderr)
-        return (None, None, ())
-
-    aid: int | None = None
-    sid: int | str | None = None
-    sub_paths: tuple[str, ...] = ()
-    # Sentinels: fzf returns None for ESC, so "automatic" can't be a None *value*.
-    _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
-    while True:
-        items: list[tuple[str, object]] = [
-            (f"{ui.g().play}  Avvia", _PLAY),
-            (f"{ui.g().audio} Audio: {audio_summary(aid, tr)}", _AUDIO),
-            (f"{ui.g().subs} Sottotitoli: {sub_summary(sid, sub_paths, tr)}", _SUBS),
-        ]
-        chosen = fzf(items, "riproduzione> ")
-        if chosen is None:
-            return None
-        if chosen is _PLAY:
-            return (aid, sid, sub_paths)
-        if chosen is _AUDIO:
-            opts: list[tuple[str, object]] = [("automatico (lingua preferita)", _AUTO)]
-            opts += [(track_label(a), a.id) for a in tr.audio]
-            pick = fzf(opts, "audio> ")
-            if pick is _AUTO:
-                aid = None
-            elif pick is not None:
-                aid = typecast(int, pick)
-        else:  # _SUBS
-            sopts: list[tuple[str, object]] = [("nessuno", "no")]
-            sopts += [(track_label(s), s.id) for s in tr.subs]
-            sopts.append(("OpenSubtitles… (esterni)", _OPENSUBS))
-            pick = fzf(sopts, "sottotitoli> ")
-            if pick is None:
-                continue
-            if pick is _OPENSUBS:
-                got = pick_subtitles(cfg, typ, video_id, work_dir, mode="menu")
-                if got:
-                    sub_paths, sid = got, None
-            else:
-                sid, sub_paths = typecast("str | int", pick), ()
 
 
 # --- flow ----------------------------------------------------------------
@@ -447,13 +390,74 @@ def run_search(cfg: Config, query: str, opts: PlayOpts, typ: str | None = None) 
     return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
 
 
-def run_browse(cfg: Config, cat: str, opts: PlayOpts, typ: str | None = None) -> int:
-    # Typed → single-type catalog; None → movies + series, fetched concurrently.
-    metas = api.catalog(cfg, typ, cat) if typ else api.browse(cfg, cat)
-    if not metas:
-        print("nstream: catalogo vuoto", file=sys.stderr)
-        return 1
-    return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
+def run_browse(
+    cfg: Config,
+    cat: str,
+    opts: PlayOpts,
+    typ: str | None = None,
+    *,
+    genre: str | None = None,
+) -> int:
+    """Browse a Cinemeta catalog (typed or mixed), with optional genre filter and
+    in-place pagination via a trailing «altri…» row when a full page is returned."""
+    skip = 0
+    header: str | None = None
+    g = ui.glyphs(ui.active_caps())
+    _MORE = object()  # sentinel: next page (not a Meta)
+    while True:
+        if typ:
+            metas = api.catalog(cfg, typ, cat, genre=genre, skip=skip)
+        else:
+            metas = api.browse(cfg, cat, genre=genre, skip=skip)
+        if not metas:
+            if skip == 0:
+                print("nstream: catalogo vuoto", file=sys.stderr)
+                return 1
+            # Past the last page after «altri…»: stay put isn't possible — leave.
+            return 0
+
+        items: list[tuple[str, Meta | object]] = [(meta_label(m), m) for m in metas]
+        if len(metas) >= CATALOG_PAGE:
+            items.append((f"{g.down}  altri…", _MORE))
+
+        page_header = header
+        if page_header is None and (genre or skip):
+            bits = []
+            if genre:
+                bits.append(genre)
+            if skip:
+                bits.append(f"pagina {skip // CATALOG_PAGE + 1}")
+            page_header = " · ".join(bits) if bits else None
+
+        while True:
+            chosen = fzf_key(
+                items,
+                "titolo> ",
+                header=page_header or _pick_hint(opts),
+                preview=lambda v: None if v is _MORE else _meta_preview(typecast("Meta", v)),
+            )
+            if not chosen:
+                return 0
+            key, value = chosen
+            if value is _MORE:
+                skip += CATALOG_PAGE
+                header = None
+                break  # outer loop fetches the next page
+            meta = typecast("Meta", value)
+            sel = replace(opts, cast=True, cast_choose=True) if key == "alt-c" else opts
+            if meta.get("type") != "series":
+                sel = _apply_key(opts, key)
+            header = play_meta(cfg, meta, sel)
+            page_header = header  # notice from playback on re-open of this page
+
+
+def run_genre(cfg: Config, opts: PlayOpts, typ: str) -> int:
+    """Pick a Cinemeta genre, then browse the typed `top` catalog filtered by it."""
+    items = [(name, name) for name in GENRES]
+    genre = fzf(items, "genere> ", header="catalogo Top filtrato per genere · ESC: indietro")
+    if genre is None:
+        return 0
+    return run_browse(cfg, "top", opts, typ, genre=genre)
 
 
 def run_explain(cfg: Config, query: str) -> int:
@@ -513,6 +517,7 @@ def run_continue(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
 # Home-menu action kinds (the value half of an fzf item; history entries are dicts).
 _SEARCH = "search"
 _BROWSE = "browse"
+_GENRE = "genre"
 _SECTION = "section"
 _SETTINGS = "settings"
 
@@ -567,11 +572,12 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
                 (ui.ansi("── sistema ──", pal.dim), _SEP),
                 (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
             ]
-        else:  # section: the three catalogs, served per-type by api.catalog
+        else:  # section: catalogs + genre browse, served per-type by api.catalog
             items += [
                 (f"{g.fire}  Popolari", (_BROWSE, "popolari")),
                 (f"{g.new}  Novità", (_BROWSE, "nuovi")),
                 (f"{g.star}  Top IMDb", (_BROWSE, "top")),
+                (f"{g.folder}  Generi…", (_GENRE, "")),
             ]
 
         # The Tab hint only applies to the continue-watching rows.
@@ -598,6 +604,8 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
             run_section(cfg, typecast(str, value), opts)
         elif kind == _BROWSE:
             run_browse(cfg, CAT_MAP[typecast(str, value)], opts, typ)
+        elif kind == _GENRE:
+            run_genre(cfg, opts, typecast(str, typ))
         elif kind == _SETTINGS:
             settings.run_settings(cfg)
             cfg = load()  # pick up any change for the next loop
