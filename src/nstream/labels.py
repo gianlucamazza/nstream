@@ -70,8 +70,10 @@ def episode_label(v: Video) -> str:
 
 def history_label(e: HistoryEntry) -> str:
     caps = ui.active_caps()
-    pal = ui.palette(caps)
-    title = ui.ansi(e.get("title", "?"), pal.secondary)
+    g, pal = ui.glyphs(caps), ui.palette(caps)
+    # Same type glyph as meta_label so home / continue-watching stay scannable.
+    icon = g.series if e.get("type") == "series" else g.movie
+    title = f"{icon}  {ui.ansi(e.get('title', '?'), pal.secondary)}"
     if e.get("type") == "series" and e.get("season"):
         title += "  " + ui.ansi(f"S{e.get('season', 0):02d}E{e.get('episode', 0):02d}", pal.dim)
     dur = e.get("duration") or 0.0

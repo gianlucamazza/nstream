@@ -45,6 +45,15 @@ def test_history_label_has_progress_bar():
     assert "█" in label  # progress bar rendered
 
 
+def test_history_label_has_type_glyph():
+    movie = labels.history_label(HistoryEntry(title="Dune", type="movie", duration=0.0))
+    series = labels.history_label(
+        HistoryEntry(title="Show", type="series", season=1, episode=2, duration=0.0)
+    )
+    assert ui.PORTABLE.movie in movie
+    assert ui.PORTABLE.series in series
+
+
 def test_history_label_no_bar_without_duration():
     label = labels.history_label(HistoryEntry(title="Dune", type="movie", duration=0.0))
     assert "%" not in label and "█" not in label

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -365,6 +366,58 @@ def progress_bar(position: float, duration: float, *, width: int, caps: Caps) ->
     frac = max(0.0, min(position / duration, 1.0))
     filled = round(frac * width)
     return g.bar_full * filled + g.bar_empty * (width - filled)
+
+
+# --- status / progress lines (stderr, TUI-facing) ---------------------------
+
+# kind → Glyphs field name. Unknown kinds fall back to play (generic activity).
+_STATUS_GLYPH = {
+    "info": "play",
+    "play": "play",
+    "warn": "warn",
+    "fail": "fail",
+    "search": "search",
+    "cast": "cast",
+    "tv": "tv",
+    "globe": "globe",
+    "audio": "audio",
+    "subs": "subs",
+}
+
+
+def status(msg: str, *, kind: str = "info") -> None:
+    """One-shot status line on stderr: glyph + message. Readable without colour
+    (glyph carries the kind; text is the state — never colour-only semantics)."""
+    g = glyphs(active_caps())
+    icon = getattr(g, _STATUS_GLYPH.get(kind, "play"), g.play)
+    print(f"{icon} {msg}", file=sys.stderr)
+
+
+def progress(msg: str) -> None:
+    """In-place progress line (`\\r`) on a tty stderr; plain newline when not a tty
+    so pipes/logs still see updates without control junk."""
+    if sys.stderr.isatty():
+        print(f"\r{msg}", end="", file=sys.stderr, flush=True)
+    else:
+        print(msg, file=sys.stderr)
+
+
+def progress_done(msg: str = "") -> None:
+    """Finish a `progress` line: overwrite with `msg` (or just newline) on a tty."""
+    if sys.stderr.isatty():
+        if msg:
+            # Pad to clear a longer previous \\r line on typical terminals.
+            print(f"\r{msg:<60s}", file=sys.stderr)
+        else:
+            print("", file=sys.stderr)
+    elif msg:
+        print(msg, file=sys.stderr)
+
+
+def key_hint(*parts: str) -> str:
+    """Join keybinding discoverability fragments with a middle-dot separator
+    (`Tab: …  ·  Alt-C: …`). Empty parts are dropped."""
+    return "  ·  ".join(p for p in parts if p)
 
 
 # --- small-terminal layout --------------------------------------------------

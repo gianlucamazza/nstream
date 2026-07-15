@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from . import bridge, cast_delivery, discovery, languages, log, serve, subs, ui, util
 from .config import Config
+from .picker import confirm as _confirm
 from .picker import fzf
 
 _log = log.get_logger("cast")
@@ -58,18 +59,17 @@ _cast_confirmed = False
 
 
 def _confirm_device(name: str, ip: str) -> bool:
-    """Confirm the auto-resolved cast target on an interactive tty ([S/n], Enter = yes), so a
-    `prefer_cast` route to the TV is announced instead of silent. Non-interactive callers and
-    an already-confirmed session always pass."""
+    """Confirm the auto-resolved cast target on an interactive tty (fzf Sì/No, default
+    yes), so a `prefer_cast` route to the TV is announced instead of silent.
+    Non-interactive callers and an already-confirmed session always pass."""
     global _cast_confirmed
     if _cast_confirmed or not (sys.stdin.isatty() and sys.stderr.isatty()):
         return True
-    try:
-        prompt = f"{ui.g().tv} Chromecast trovato: {name} ({ip}) — casto lì? [S/n] "
-        ans = input(prompt).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    ok = ans in ("", "s", "si", "sì", "y", "yes")
+    ok = _confirm(
+        f"{ui.g().tv} Chromecast trovato: {name} ({ip}) — casto lì?",
+        default_yes=True,
+        non_tty_default=True,
+    )
     _cast_confirmed = ok
     return ok
 

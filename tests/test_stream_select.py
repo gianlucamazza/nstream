@@ -349,9 +349,11 @@ def test_pick_stream_cap_and_show_all(monkeypatch):
     playable, excluded = _ranked(25), _ranked(2, reason="camrip (cam)")
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, excluded))
     calls = []
+    headers = []
 
     def fzf(items, prompt, *, header=None):
         calls.append(items)  # both menus share the "stream> " prompt now
+        headers.append(header)
         if len(calls) == 1:
             return items[-1][1]  # capped menu → the "↓ mostra tutti" sentinel
         return items[0][1]  # full menu → first stream
@@ -363,6 +365,10 @@ def test_pick_stream_cap_and_show_all(monkeypatch):
     assert "mostra tutti" in calls[0][-1][0]
     assert len(calls[1]) == 27
     assert out is playable[0].stream
+    # Ranking notice lives in the fzf header (not only on stderr).
+    assert headers[0] and "2 stream filtrati" in headers[0]
+    assert "camrip" in headers[0]
+
 
 
 def test_pick_stream_auto_picks_best(monkeypatch):

@@ -62,13 +62,19 @@ def _pick_stream(
     caps = quality.cast_caps() if cast else quality.detect_caps()
     spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
     playable, excluded = quality.rank_streams(results, caps, spec)
+    # Build a notice that survives into the fzf header (stderr scrolls away under fullscreen).
+    notice_parts: list[str] = []
     if excluded:
         reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
-        print(f"nstream: {len(excluded)} stream filtrati ({reasons})", file=sys.stderr)
+        notice_parts.append(f"{len(excluded)} stream filtrati ({reasons})")
     dupes = len(results) - len(playable) - len(excluded)
     if dupes > 0:
-        print(f"nstream: {dupes} doppioni rimossi", file=sys.stderr)
+        notice_parts.append(f"{dupes} doppioni rimossi")
+    notice = "  ·  ".join(notice_parts) if notice_parts else None
     if auto:
+        # No menu → surface the ranking summary on stderr so logs still see it.
+        if notice:
+            print(f"nstream: {notice}", file=sys.stderr)
         if playable:
             return playable[0].stream
         msg = (
@@ -85,7 +91,7 @@ def _pick_stream(
             (f"{ui.g().warn} {r.reason}  {stream_label(r.stream, r.info)}", r.stream)
             for r in excluded
         ]
-        return fzf(items, "stream> ")
+        return fzf(items, "stream> ", header=notice)
 
     cap = cfg.max_streams
     if not cap or len(playable) + len(excluded) <= cap:
@@ -95,7 +101,7 @@ def _pick_stream(
     hidden = len(playable) - len(shown) + len(excluded)
     items: list[tuple[str, object]] = [(stream_label(r.stream, r.info), r.stream) for r in shown]
     items.append((f"{ui.g().down} mostra tutti ({hidden} altri)", _ALL))
-    chosen = fzf(items, "stream> ")
+    chosen = fzf(items, "stream> ", header=notice)
     if chosen is _ALL:
         return _full()
     return typecast("Stream | None", chosen)

@@ -6,15 +6,11 @@ The Real-Debrid token is read with getpass and never printed back.
 
 from __future__ import annotations
 
-import contextlib
 import getpass
-import os
 import re
-import shlex
 import sys
-import tempfile
 
-from . import addons, config, debrid, discovery, engine, languages, picker, ui, util
+from . import addons, config, debrid, discovery, engine, languages, picker, ui
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -34,41 +30,11 @@ CHOICE_VALUES: dict[str, list[str]] = {
 def _fzf_select(
     rows: list[str], *, prompt: str, header: str = "", previews: list[str] | None = None
 ) -> int | None:
-    """Show `rows` in fzf; return the selected index (input order) or None."""
-    if not rows:
-        return None
-    lines = "".join(f"{i}\t{r}\n" for i, r in enumerate(rows))
-    # No --height → full alternate screen (clean enter/exit, no scrollback buildup).
-    caps = ui.active_caps()
-    args = [
-        "fzf", "--prompt", prompt, "--with-nth", "2..", "--delimiter", "\t",
-        "--no-sort", "--reverse", "--cycle",
-        "--ansi", "--border", "rounded", "--info", "inline",
-        "--pointer", ui.glyphs(caps).play, *ui.fzf_color_arg(caps),
-    ]  # fmt: skip
-    if header:
-        args += ["--header", header]
-    pv_path = None
-    try:
-        if previews:
-            fd, pv_path = tempfile.mkstemp(prefix="nstream-help-")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write("\n".join(p.replace("\n", " ") for p in previews))
-            args += [
-                "--preview", f'sed -n "$(({{n}}+1))p" {shlex.quote(pv_path)}',
-                "--preview-window", "down:3:wrap",
-            ]  # fmt: skip
-        proc = util.run_cmd(args, input=lines)
-        if proc is None:
-            print("nstream: fzf non trovato", file=sys.stderr)
-            return None
-    finally:
-        if pv_path:
-            with contextlib.suppress(OSError):
-                os.unlink(pv_path)
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    return int(proc.stdout.split("\t", 1)[0])
+    """Show `rows` in fzf; return the selected index (input order) or None.
+
+    Thin wrapper over `picker.fzf_index` so settings keeps a stable seam for tests
+    while all fzf chrome lives in the shared picker (single theme source)."""
+    return picker.fzf_index(rows, prompt=prompt, header=header, help_previews=previews)
 
 
 def _ask(prompt: str) -> str:

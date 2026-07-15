@@ -53,7 +53,7 @@ from .labels import (
     sub_summary,
     track_label,
 )
-from .picker import fzf, fzf_key
+from .picker import ask_query, fzf, fzf_key
 from .player import play
 from .subs import auto_subs, pick_subtitles
 
@@ -156,7 +156,7 @@ def _play_video(
     # "no-HW" even though the local GPU decodes it) on the laptop.
     # Resolving streams (Torrentio + RD) can take a moment; without a menu to mask
     # the wait, say what's happening so the TUI doesn't look frozen.
-    print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
+    ui.status(f"{title} — cerco la sorgente migliore…", kind="play")
     if opts.cast:
         # Overlap the stream fetch (profile-independent) with device resolution (near
         # instant via the verified cache / background scan; a short bounded wait at
@@ -205,7 +205,7 @@ def _play_video(
         start = state.resume_position(cfg, video_id) if opts.history else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "")
         if device is not None:
-            print(f"{ui.g().play} {title} — {name_line}", file=sys.stderr)
+            ui.status(f"{title} — {name_line}", kind="play")
             pos, dur, advance = _play_on_cast(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
@@ -213,7 +213,7 @@ def _play_video(
                 cast_meta=cast_meta,
             )  # fmt: skip
         else:
-            print(f"{ui.g().play} {title} — {name_line}", file=sys.stderr)
+            ui.status(f"{title} — {name_line}", kind="play")
             res = _play_on_mpv(
                 cfg, chosen, work_dir,
                 typ=typ, video_id=video_id, title=title, opts=opts,
@@ -391,9 +391,10 @@ def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None
 
 
 def _pick_hint(opts: PlayOpts) -> str:
-    """Discoverability line for the leaf lists: Tab flips the play mode, Alt-C casts."""
+    """Discoverability line for the leaf lists: Tab flips the play mode, Alt-C casts,
+    Ctrl-/ toggles the poster preview (wired in every preview-enabled menu)."""
     tab = "Tab: scegli sorgente/tracce" if opts.auto else "Tab: avvia al volo"
-    return f"{tab}  ·  Alt-C: casta sul TV"
+    return ui.key_hint(tab, "Alt-C: casta sul TV", "Ctrl-/: anteprima")
 
 
 def _apply_key(opts: PlayOpts, key: str) -> PlayOpts:
@@ -520,16 +521,15 @@ _SECTION_PROMPT = {"movie": "film> ", "series": "serie> "}
 
 
 def _home_preview(value: object) -> str | None:
-    """Action rows (tuples) have no preview; continue-watching entries (dicts) do."""
-    return None if isinstance(value, tuple) else _entry_preview(typecast("HistoryEntry", value))
+    """Continue-watching entries (dicts) get a poster pane; actions and group headers don't."""
+    if not isinstance(value, dict):
+        return None
+    return _entry_preview(typecast("HistoryEntry", value))
 
 
 def _ask_query() -> str | None:
-    """Prompt for a search query on stdin; None on EOF (leave the menu)."""
-    try:
-        return input("cerca> ").strip()
-    except EOFError:
-        return None
+    """Prompt for a search query inside fzf (keeps the TUI chrome). None on ESC/empty."""
+    return ask_query("cerca> ")
 
 
 def run_home(cfg: Config, opts: PlayOpts) -> int:
@@ -552,12 +552,19 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
     while True:
         recent = state.recent(cfg, typ=typ) if opts.history else []
         g = ui.glyphs(ui.active_caps())
+        pal = ui.palette(ui.active_caps())
         items: list[tuple[str, object]] = [(history_label(e), e) for e in recent]
+        # Dim section labels (value None) group the menu; the loop skips them if focused.
+        # fzf still requires every row selectable — a None value is ignored after pick.
+        _SEP = None  # sentinel: group headers, never an action
+        if recent:
+            items.append((ui.ansi("── azioni ──", pal.dim), _SEP))
         items.append((f"{g.search}  Cerca…", (_SEARCH, "")))
         if typ is None:  # home: the typed sections own the catalogs
             items += [
                 (f"{g.movie}  Film", (_SECTION, "movie")),
                 (f"{g.series}  Serie TV", (_SECTION, "series")),
+                (ui.ansi("── sistema ──", pal.dim), _SEP),
                 (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
             ]
         else:  # section: the three catalogs, served per-type by api.catalog
@@ -575,6 +582,8 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
         if chosen is None:
             return 0
         key, value = chosen
+        if value is _SEP:
+            continue  # group header — re-open the menu
         if not isinstance(value, tuple):  # a continue-watching entry
             notice = play_history(cfg, typecast("HistoryEntry", value), _apply_key(opts, key))
             continue
@@ -582,7 +591,7 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
         if kind == _SEARCH:
             query = _ask_query()
             if query is None:
-                return 0
+                continue  # ESC on search → stay in home (not exit the whole TUI)
             if query:
                 run_search(cfg, query, opts, typ)
         elif kind == _SECTION:

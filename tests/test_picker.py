@@ -154,3 +154,79 @@ def test_fzf_single_item_returned_directly(monkeypatch):
     cap = _stub_fzf(monkeypatch)
     assert picker.fzf([("only", 7)], "p> ") == 7
     assert "cmd" not in cap  # fzf never invoked
+
+
+# --- fzf_index (settings seam) ----------------------------------------------
+
+
+def test_fzf_index_returns_selected_index(monkeypatch):
+    cap = _stub_fzf(monkeypatch, stdout="2\trow\n")
+    assert picker.fzf_index(["a", "b", "c"], prompt="p> ") == 2
+    assert "--pointer" in cap["cmd"]
+    assert "--color" in cap["cmd"]
+
+
+def test_fzf_index_help_previews_add_preview_window(monkeypatch):
+    cap = _stub_fzf(monkeypatch, stdout="0\tx\n")
+    assert picker.fzf_index(["a"], prompt="p> ", help_previews=["help for a"]) == 0
+    cmd = cap["cmd"]
+    assert "--preview" in cmd
+    assert "--preview-window" in cmd
+    assert any("down:3:wrap" in c for c in cmd)
+
+
+def test_fzf_index_esc_returns_none(monkeypatch):
+    _stub_fzf(monkeypatch, returncode=1)
+    assert picker.fzf_index(["a"], prompt="p> ") is None
+
+
+def test_fzf_index_empty_rows(monkeypatch):
+    assert picker.fzf_index([], prompt="p> ") is None
+
+
+# --- confirm / ask_query ----------------------------------------------------
+
+
+def test_confirm_yes(monkeypatch):
+    monkeypatch.setattr(picker.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(picker.sys, "stderr", type("T", (), {"isatty": lambda self: True})())
+    # default_yes=False → order is No, Sì; pick index 1 (Sì)
+    _stub_fzf(monkeypatch, stdout="1\tSì\n")
+    assert picker.confirm("sicuro?", default_yes=False) is True
+
+
+def test_confirm_no(monkeypatch):
+    monkeypatch.setattr(picker.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(picker.sys, "stderr", type("T", (), {"isatty": lambda self: True})())
+    _stub_fzf(monkeypatch, stdout="0\tNo\n")
+    assert picker.confirm("sicuro?", default_yes=False) is False
+
+
+def test_confirm_esc_is_false(monkeypatch):
+    monkeypatch.setattr(picker.sys, "stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr(picker.sys, "stderr", type("T", (), {"isatty": lambda self: True})())
+    _stub_fzf(monkeypatch, returncode=1)
+    assert picker.confirm("sicuro?") is False
+
+
+def test_confirm_non_tty_uses_default(monkeypatch):
+    monkeypatch.setattr(picker.sys.stdin, "isatty", lambda: False)
+    assert picker.confirm("x", non_tty_default=True) is True
+    assert picker.confirm("x", non_tty_default=False) is False
+
+
+def test_ask_query_returns_trimmed(monkeypatch):
+    cap = _stub_fzf(monkeypatch, stdout="the matrix\n")
+    assert picker.ask_query() == "the matrix"
+    assert "--print-query" in cap["cmd"]
+    assert "--disabled" in cap["cmd"]
+
+
+def test_ask_query_esc_returns_none(monkeypatch):
+    _stub_fzf(monkeypatch, returncode=1)
+    assert picker.ask_query() is None
+
+
+def test_ask_query_empty_returns_none(monkeypatch):
+    _stub_fzf(monkeypatch, stdout="\n")
+    assert picker.ask_query() is None

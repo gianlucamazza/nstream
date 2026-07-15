@@ -245,3 +245,35 @@ def test_sanitize_strips_terminal_control_chars():
     assert "\x1b" not in clean and "\x07" not in clean and "\r" not in clean
     assert "Movie" in clean and "name" in clean
     assert ui.sanitize("keep\nlines\tand tabs") == "keep\nlines\tand tabs"
+
+
+# --- status / progress / key_hint -------------------------------------------
+
+
+def test_status_prints_glyph_and_message(capsys, monkeypatch):
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=False))
+    ui.status("cerco…", kind="play")
+    err = capsys.readouterr().err
+    assert "cerco…" in err
+    assert ui.PORTABLE.play in err
+
+
+def test_status_warn_kind_uses_warn_glyph(capsys, monkeypatch):
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=False))
+    ui.status("attenzione", kind="warn")
+    assert ui.PORTABLE.warn in capsys.readouterr().err
+
+
+def test_progress_non_tty_is_plain_line(capsys, monkeypatch):
+    monkeypatch.setattr(ui.sys.stderr, "isatty", lambda: False)
+    ui.progress("50%")
+    ui.progress_done("done")
+    err = capsys.readouterr().err
+    assert "50%" in err and "done" in err
+    assert "\r" not in err
+
+
+def test_key_hint_joins_parts():
+    assert ui.key_hint("Tab: x", "Alt-C: y") == "Tab: x  ·  Alt-C: y"
+    assert ui.key_hint("only", "") == "only"
+    assert ui.key_hint() == ""

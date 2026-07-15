@@ -117,25 +117,30 @@ def test_confirm_device_default_yes_and_session_latch(monkeypatch):
     monkeypatch.setattr(caster.sys, "stdin", _Tty())
     monkeypatch.setattr(caster.sys, "stderr", _Tty())
     prompts = []
-    monkeypatch.setattr("builtins.input", lambda msg: prompts.append(msg) or "")
-    assert caster._confirm_device("TV1", "10.0.0.9") is True  # Enter = yes
+
+    def _yes(msg, **k):
+        prompts.append(msg)
+        return True
+
+    monkeypatch.setattr(caster, "_confirm", _yes)
+    assert caster._confirm_device("TV1", "10.0.0.9") is True  # Sì
     assert "TV1" in prompts[0] and "10.0.0.9" in prompts[0]
     # Latched: the next play (binge advance) must not re-ask.
-    monkeypatch.setattr("builtins.input", lambda msg: pytest.fail("must not re-ask"))
+    monkeypatch.setattr(caster, "_confirm", lambda *a, **k: pytest.fail("must not re-ask"))
     assert caster._confirm_device("TV1", "10.0.0.9") is True
 
 
 def test_confirm_device_refusal_not_latched(monkeypatch):
     monkeypatch.setattr(caster.sys, "stdin", _Tty())
     monkeypatch.setattr(caster.sys, "stderr", _Tty())
-    monkeypatch.setattr("builtins.input", lambda msg: "n")
+    monkeypatch.setattr(caster, "_confirm", lambda *a, **k: False)
     assert caster._confirm_device("TV1", "10.0.0.9") is False
     assert caster._cast_confirmed is False  # a refusal is per-play, asked again next time
 
 
 def test_confirm_device_non_tty_passes(monkeypatch):
-    # Headless/piped callers must never block on input.
-    monkeypatch.setattr("builtins.input", lambda msg: pytest.fail("must not prompt"))
+    # Headless/piped callers must never block on confirm (no fzf).
+    monkeypatch.setattr(caster, "_confirm", lambda *a, **k: pytest.fail("must not prompt"))
     assert caster._confirm_device("TV1", "10.0.0.9") is True
 
 

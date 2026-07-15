@@ -5,13 +5,19 @@ both cli and caster can use it without an import cycle. `_run_fzf` is the core; 
 returns just the value, `fzf_key` also reports which key (Enter/Tab/Alt-C) made the
 selection. Every menu carries the shared colour theme; title/episode/continue menus can
 also opt into a poster+metadata preview pane via the `preview` callback.
+
+Settings and onboarding use `fzf_index` (row labels → selected index) so there is a
+single source of fzf chrome — never a parallel `fzf` argv builder.
 """
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shlex
 import shutil
 import sys
+import tempfile
 from collections.abc import Callable
 
 from . import ui, util
@@ -51,6 +57,10 @@ def _preview_args(preview_args: list[str | None]) -> list[str]:
         "--bind", "ctrl-/:toggle-preview",
         "--bind", f"resize:transform:{exe} __layout",
     ]  # fmt: skip
+
+
+def _missing_fzf() -> None:
+    print("nstream: fzf non trovato", file=sys.stderr)
 
 
 def _run_fzf[T](
@@ -98,7 +108,7 @@ def _run_fzf[T](
         cmd += _preview_args(preview_args)
     proc = util.run_cmd(cmd, input=lines)
     if proc is None:
-        print("nstream: fzf non trovato", file=sys.stderr)
+        _missing_fzf()
         return None
     if proc.returncode != 0:  # ESC / Ctrl-C / no match
         return None
@@ -172,7 +182,7 @@ def fzf_multi[T](
         cmd += ["--header", header]
     proc = util.run_cmd(cmd, input=lines)
     if proc is None:
-        print("nstream: fzf non trovato", file=sys.stderr)
+        _missing_fzf()
         return None
     if proc.returncode != 0:  # ESC / Ctrl-C / no match
         return None
@@ -180,3 +190,91 @@ def fzf_multi[T](
         items[int(line.split("\t", 1)[0])][1] for line in proc.stdout.splitlines() if line.strip()
     ]
     return chosen or None
+
+
+def fzf_index(
+    rows: list[str],
+    *,
+    prompt: str,
+    header: str = "",
+    help_previews: list[str] | None = None,
+) -> int | None:
+    """Show plain `rows` in fzf; return the selected index (input order) or None.
+
+    Used by settings/onboarding where the value is the row position itself (enums,
+    choice lists). Optional `help_previews` (one line per row) opens a small bottom
+    pane with the focused row's help text — same contract the settings menu had."""
+    if not rows:
+        return None
+    lines = "".join(f"{i}\t{r}\n" for i, r in enumerate(rows))
+    cmd = [
+        "fzf", "--prompt", prompt, "--with-nth", "2..", "--delimiter", "\t",
+        "--no-sort", "--reverse", "--cycle", *_theme_args(),
+    ]  # fmt: skip
+    if header:
+        cmd += ["--header", header]
+    pv_path: str | None = None
+    try:
+        if help_previews:
+            fd, pv_path = tempfile.mkstemp(prefix="nstream-help-")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(p.replace("\n", " ") for p in help_previews))
+            cmd += [
+                "--preview", f'sed -n "$(({{n}}+1))p" {shlex.quote(pv_path)}',
+                "--preview-window", "down:3:wrap",
+            ]  # fmt: skip
+        proc = util.run_cmd(cmd, input=lines)
+        if proc is None:
+            _missing_fzf()
+            return None
+    finally:
+        if pv_path:
+            with contextlib.suppress(OSError):
+                os.unlink(pv_path)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    return int(proc.stdout.split("\t", 1)[0])
+
+
+def confirm(msg: str, *, default_yes: bool = False, non_tty_default: bool = True) -> bool:
+    """Yes/No picker that stays inside the fzf chrome. ESC / missing fzf → False on a
+    tty; non-interactive (no stdin/stderr tty) returns `non_tty_default` so headless
+    callers never hang (remux big-download → proceed; cast confirm uses True too)."""
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return non_tty_default
+    yes_label, no_label = "Sì", "No"
+    # Default-first so Enter without moving the cursor matches the stated default.
+    items = (
+        [(yes_label, True), (no_label, False)]
+        if default_yes
+        else [(no_label, False), (yes_label, True)]
+    )
+    header = f"{msg}  ·  INVIO: {'Sì' if default_yes else 'No'} · ESC: annulla"
+    chosen = fzf(items, "conferma> ", header=header)
+    return False if chosen is None else chosen
+
+
+def ask_query(prompt: str = "cerca> ") -> str | None:
+    """Type a free-text query inside fzf (keeps the alternate-screen chrome). Returns
+    the trimmed query, or None on ESC / empty / missing binary.
+
+    Uses a single placeholder row so fzf has something to render; the user types in
+    the query box and presses Enter. `--print-query` alone with an empty list exits
+    immediately on some fzf builds, so the placeholder is required."""
+    cmd = [
+        "fzf", "--prompt", prompt, "--print-query", "--no-sort", "--reverse",
+        "--info", "hidden", "--disabled",  # focus the query box; list is just a hint
+        *_theme_args(),
+        "--header", "digita e premi INVIO · ESC: indietro",
+    ]  # fmt: skip
+    # One hint row; with --disabled the user cannot select it, only submit the query.
+    lines = "digita il titolo…\n"
+    proc = util.run_cmd(cmd, input=lines)
+    if proc is None:
+        _missing_fzf()
+        return None
+    if proc.returncode != 0:  # ESC / Ctrl-C
+        return None
+    # --print-query: first line is the query (may be empty); second is the selection.
+    query = (proc.stdout.splitlines() or [""])[0].strip()
+    return query or None
