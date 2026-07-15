@@ -72,9 +72,9 @@ def _pick_stream(
         notice_parts.append(f"{dupes} doppioni rimossi")
     notice = "  ·  ".join(notice_parts) if notice_parts else None
     if auto:
-        # No menu → surface the ranking summary on stderr so logs still see it.
+        # No menu → ranking summary as a secondary status line (not a hard `nstream:` error).
         if notice:
-            print(f"nstream: {notice}", file=sys.stderr)
+            ui.status_detail(notice)
         if playable:
             return playable[0].stream
         msg = (
@@ -82,7 +82,7 @@ def _pick_stream(
             if cast
             else "nessuno stream supportato dall'hardware"
         )
-        print(f"nstream: {msg}", file=sys.stderr)
+        ui.status(msg, kind="fail")
         return None
 
     def _full() -> Stream | None:

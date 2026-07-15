@@ -273,6 +273,43 @@ def test_progress_non_tty_is_plain_line(capsys, monkeypatch):
     assert "\r" not in err
 
 
+def test_progress_tty_uses_erase_not_space_pad(capsys, monkeypatch):
+    monkeypatch.setattr(ui.sys.stderr, "isatty", lambda: True)
+    ui.progress("remux audio  42%")
+    ui.progress_done("ok")
+    err = capsys.readouterr().err
+    assert "\x1b[K" in err
+    assert "ok" in err
+    # No old-style space padding that left a visible trail of blanks.
+    assert "ok" + " " * 10 not in err
+
+
+def test_status_detail_indents_without_glyph(capsys, monkeypatch):
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=False))
+    ui.status_detail("15 stream filtrati")
+    err = capsys.readouterr().err
+    assert err.startswith("  · ")
+    assert "15 stream filtrati" in err
+    assert ui.PORTABLE.play not in err
+
+
+def test_cast_live_follow_hint(capsys, monkeypatch):
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=False))
+    ui.cast_live("10.0.0.1", follow=True)
+    err = capsys.readouterr().err
+    assert "in onda" in err and "10.0.0.1" in err
+    assert "Ctrl-C: esci dal follow" in err
+    assert ui.PORTABLE.tv in err
+
+
+def test_cast_live_with_title(capsys, monkeypatch):
+    monkeypatch.setattr(ui, "_active", ui.Caps(nerd_font=False))
+    ui.cast_live("10.0.0.1", follow=False, title="Film")
+    err = capsys.readouterr().err
+    assert "Film → 10.0.0.1" in err
+    assert "Ctrl-C" not in err
+
+
 def test_key_hint_joins_parts():
     assert ui.key_hint("Tab: x", "Alt-C: y") == "Tab: x  ·  Alt-C: y"
     assert ui.key_hint("only", "") == "only"

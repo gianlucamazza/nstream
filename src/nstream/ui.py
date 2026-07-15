@@ -393,25 +393,44 @@ def status(msg: str, *, kind: str = "info") -> None:
     print(f"{icon} {msg}", file=sys.stderr)
 
 
+def status_detail(msg: str) -> None:
+    """Secondary stderr line under a `status` banner (filter notices, hints).
+    No glyph prefix — indented middle-dot so it reads as a child of the phase above,
+    never as a hard `nstream:` error."""
+    print(f"  · {msg}", file=sys.stderr)
+
+
 def progress(msg: str) -> None:
     """In-place progress line (`\\r`) on a tty stderr; plain newline when not a tty
-    so pipes/logs still see updates without control junk."""
+    so pipes/logs still see updates without control junk. Erases to EOL so a shorter
+    update doesn't leave tails of a longer previous line."""
     if sys.stderr.isatty():
-        print(f"\r{msg}", end="", file=sys.stderr, flush=True)
+        print(f"\r{msg}\x1b[K", end="", file=sys.stderr, flush=True)
     else:
         print(msg, file=sys.stderr)
 
 
 def progress_done(msg: str = "") -> None:
-    """Finish a `progress` line: overwrite with `msg` (or just newline) on a tty."""
+    """Finish a `progress` line: overwrite with `msg` (or just advance) on a tty.
+    Uses CSI erase-to-EOL instead of space-padding so no trailing blanks remain."""
     if sys.stderr.isatty():
         if msg:
-            # Pad to clear a longer previous \\r line on typical terminals.
-            print(f"\r{msg:<60s}", file=sys.stderr)
+            print(f"\r{msg}\x1b[K", file=sys.stderr)
         else:
+            print("\r\x1b[K", end="", file=sys.stderr)
             print("", file=sys.stderr)
     elif msg:
         print(msg, file=sys.stderr)
+
+
+def cast_live(device: str, *, follow: bool = False, title: str = "") -> None:
+    """Single 'on air' line for an active cast. Omits the title when the play session
+    already printed it as the banner (pass `title` for Alt-C / standalone paths)."""
+    dest = f"{title} → {device}" if title else f"→ {device}"
+    if follow:
+        status(f"in onda {dest}  ·  Ctrl-C: esci dal follow", kind="tv")
+    else:
+        status(f"in onda {dest}", kind="tv")
 
 
 def key_hint(*parts: str) -> str:

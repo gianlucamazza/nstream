@@ -7,7 +7,6 @@ module touches no playback machinery directly (ADR 0009)."""
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from typing import Protocol
 
@@ -92,7 +91,7 @@ def binge(
         idx += 1
         auto = True
         unattended = True
-        print(f"{ui.g().play} Carico {display_title(name, eps[idx])}…", file=sys.stderr)
+        ui.status(f"prossimo: {display_title(name, eps[idx])}", kind="play")
     return None
 
 

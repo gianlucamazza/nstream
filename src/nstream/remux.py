@@ -217,15 +217,25 @@ def _confirm(msg: str) -> bool:
     return picker.confirm(f"{msg} — procedo?", default_yes=False, non_tty_default=True)
 
 
-def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
-    """Run the ffmpeg remux, rendering a percentage line from its `-progress` stream so the
-    (minutes-long) prepare isn't a silent wait. Returns `(returncode, stderr)`; rc is None if
-    ffmpeg couldn't be launched. Progress is best-effort — any parse hiccup just shows no bar.
+def _run_ffmpeg(
+    cmd: list[str], duration: float, *, size_label: str = ""
+) -> tuple[int | None, str]:
+    """Run the ffmpeg remux, rendering a single in-place progress line from its
+    `-progress` stream. Returns `(returncode, stderr)`; rc is None if ffmpeg couldn't
+    be launched. Progress is best-effort — any parse hiccup just keeps the last frame.
 
     stderr goes to an unnamed temp file (read back after `wait()`), not a pipe: the progress
     loop only drains stdout, so a chatty ffmpeg (>64KB of network/demux warnings on a long
     remote remux) would fill an undrained stderr pipe and deadlock the whole remux — same
     no-reader problem as the detached catt's stderr capture below."""
+    g = ui.g().tv
+    size_bit = f"  {size_label}" if size_label else ""
+
+    def _frame(pct: int | None) -> str:
+        if pct is None:
+            return f"{g} remux audio…{size_bit}"
+        return f"{g} remux audio  {pct:3d}%{size_bit}"
+
     with tempfile.TemporaryFile() as err:
         try:
             proc = subprocess.Popen(  # noqa: S603
@@ -234,10 +244,13 @@ def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
         except (OSError, subprocess.SubprocessError) as e:
             return None, str(e)
         pct = -1
-        show = duration > 0 and sys.stderr.isatty()
+        show = sys.stderr.isatty()
+        if show:
+            # Immediate feedback: duration-known paths jump to 0%, else a static "…".
+            ui.progress(_frame(0 if duration > 0 else None))
         if proc.stdout is not None:
             for line in proc.stdout:
-                if show and line.startswith("out_time_us="):
+                if show and duration > 0 and line.startswith("out_time_us="):
                     try:
                         cur = int(line.split("=", 1)[1]) / 1_000_000
                     except ValueError:
@@ -245,10 +258,11 @@ def _run_ffmpeg(cmd: list[str], duration: float) -> tuple[int | None, str]:
                     new = min(99, int(cur / duration * 100))
                     if new != pct:
                         pct = new
-                        ui.progress(f"{ui.g().tv} preparo l'audio per il cast… {pct}%")
+                        ui.progress(_frame(pct))
         proc.wait()
-        if pct >= 0:
-            ui.progress_done(f"{ui.g().tv} audio pronto, avvio il cast.")
+        if show:
+            # Clear the progress line; the cast "in onda" line is the next status.
+            ui.progress_done()
         err.seek(0)
         stderr = err.read().decode("utf-8", errors="replace")
     return proc.returncode, stderr
@@ -343,13 +357,14 @@ def remux_to_file(
         "-c:v", "copy", *acodec,
         "-movflags", "+faststart", path,
     ]  # fmt: skip
-    print(f"{ui.g().tv} preparo l'audio per il cast (può richiedere un po')…", file=sys.stderr)
+    size_label = f"~{size_gb:.1f}G" if size_gb > 0 else ""
     try:
-        rc, stderr = _run_ffmpeg(cmd, duration)
+        rc, stderr = _run_ffmpeg(cmd, duration, size_label=size_label)
     except KeyboardInterrupt:
         # An aborted prepare must not leak the partial multi-GB temp: the next-run GC may
         # never come for a user who just cancelled a huge fetch. ffmpeg itself dies with
         # the foreground group's SIGINT.
+        ui.progress_done()
         _rm(path)
         raise
     if rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -422,7 +437,6 @@ def cast_file(
     if sub_paths:
         launch += ["-s", sub_paths[0]]
     dest = device or "Chromecast"
-    print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     # Capture catt's stderr to a temp file (a detached pipe would have no reader): if the
     # cast never starts, its tail says why (device unreachable, refused media, …) — the
     # diagnosis that was lost to DEVNULL. Removed once startup is confirmed (or by GC).
@@ -456,12 +470,12 @@ def cast_file(
         return (0.0, 0.0, False, False)
     _rm(err_path)  # startup confirmed: the capture served its (diagnosis-only) purpose
 
+    # Title already shown as the play banner; live line is device-only.
+    ui.cast_live(dest, follow=follow)
     if not follow:
         # Leave the detached catt serving; --stop / next-run GC tears it down.
-        print(f"{ui.g().tv} {title} → {dest}", file=sys.stderr)
         return (0.0, 0.0, False, bool(sub_paths))
 
-    print(f"{ui.g().tv} {title} → {dest}  (Ctrl-C per smettere di seguire)", file=sys.stderr)
     pos = dur = 0.0
     try:
         # catt exits when playback ends; poll the receiver meanwhile so this branch
@@ -564,7 +578,7 @@ def _cast_file_via_bridge(
             _rm(f"{file_path}.vtt")  # the catt fallback re-derives its own sidecar
             return None
         _write_state(pid, file_path, device, mode="serve")
-        print(f"{ui.g().tv} {title} → {device}", file=sys.stderr)
+        ui.cast_live(device, follow=False)
         return (0.0, 0.0, False, bool(sub_url))
 
     # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
@@ -578,10 +592,7 @@ def _cast_file_via_bridge(
             kwargs["subtitle_lang"] = sub_lang
 
     def announce() -> None:
-        print(
-            f"{ui.g().tv} {title} → {device}  (Ctrl-C per smettere di seguire)",
-            file=sys.stderr,
-        )
+        ui.cast_live(device, follow=True)
 
     def disconnect(pos: float) -> None:
         # The daemon died mid-cast (socket EOF without an explicit end) — NOT a

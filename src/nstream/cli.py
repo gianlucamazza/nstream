@@ -97,9 +97,11 @@ def _play_video(
     # (Chromecast receiver caps vs the local GPU), so when no device is reachable we
     # must select for local mpv — not play a TV-filtered pick (e.g. AV1 dropped as
     # "no-HW" even though the local GPU decodes it) on the laptop.
-    # Resolving streams (Torrentio + RD) can take a moment; without a menu to mask
-    # the wait, say what's happening so the TUI doesn't look frozen.
-    ui.status(f"{title} — cerco la sorgente migliore…", kind="play")
+    # Resolving streams (Torrentio + debrid) can take a moment; without a menu to mask
+    # the wait, say what's happening so the TUI doesn't look frozen. Title once as
+    # context; later phases are short verbs (no re-banner of the full title).
+    ui.status(title, kind="play")
+    ui.status("cerco sorgente…", kind="search")
     if opts.cast:
         # Overlap the stream fetch (profile-independent) with device resolution (near
         # instant via the verified cache / background scan; a short bounded wait at
@@ -129,7 +131,7 @@ def _play_video(
         opts = replace(opts, cast=False)  # degrade: select and play with the local profile
     if not results:
         notice = stream_select.no_streams_message(cfg, typ, video_id, title)
-        print(f"nstream: {notice}", file=sys.stderr)
+        ui.status(notice, kind="fail")
         return (notice, False)
     vetted = stream_select.prepare_stream(
         cfg,
@@ -146,9 +148,9 @@ def _play_video(
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = state.resume_position(cfg, video_id) if opts.history else None
-        name_line = next(iter((chosen.get("name") or "").splitlines()), "")
+        name_line = next(iter((chosen.get("name") or "").splitlines()), "") or "sorgente"
+        ui.status(f"scelto {name_line}", kind="play")
         if device is not None:
-            ui.status(f"{title} — {name_line}", kind="play")
             pos, dur, advance = _play_on_cast(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
@@ -156,7 +158,6 @@ def _play_video(
                 cast_meta=cast_meta,
             )  # fmt: skip
         else:
-            ui.status(f"{title} — {name_line}", kind="play")
             res = _play_on_mpv(
                 cfg, chosen, work_dir,
                 typ=typ, video_id=video_id, title=title, opts=opts,
@@ -698,7 +699,10 @@ def main() -> int:
     parser.add_argument(
         "--cast",
         action="store_true",
-        help="manda lo stream a un Chromecast (castbridge se disponibile, altrimenti catt) invece di mpv",
+        help=(
+            "manda lo stream a un Chromecast "
+            "(castbridge se disponibile, altrimenti catt) invece di mpv"
+        ),
     )
     parser.add_argument(
         "--mirror",

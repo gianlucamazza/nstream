@@ -418,7 +418,9 @@ def test_stop_and_volume_timeout_degrade(monkeypatch):
 def test_cast_prints_preparing_before_launch(monkeypatch, capsys):
     _cast_run(monkeypatch, info_seq=[{"player_state": "IDLE"}])
     caster.cast(CFG, "Dune", "http://u", device="TV")
-    assert "preparo il cast" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "consegno" in err and "TV" in err
+    assert "in onda" in err
 
 
 def test_cast_warns_on_zero_volume(monkeypatch, capsys):
