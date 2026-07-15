@@ -1,6 +1,6 @@
 [project]
 name = "nstream"
-description = "Native Stremio-like client: Cinemeta + Torrentio (Real-Debrid) + mpv."
+description = "Native terminal-first Stremio-like client: Cinemeta + Torrentio/debrid or P2P + mpv."
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"

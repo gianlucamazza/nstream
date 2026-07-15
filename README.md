@@ -109,9 +109,10 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   hardware and audio/subtitles default to your preferred languages. Press **Tab** in the list to
   pick the source and tracks by hand for that title. Set `false` to make manual the default (then
   Tab plays instantly). `--play` forces auto regardless of this setting.
-- `prefer_cast`: send playback to a Chromecast via `catt` instead of mpv by default (`false`). The
-  `--cast` flag forces casting for one run; `--local` forces mpv even when this is on. Casting keeps
-  full parity — resume, continue-watching and series auto-advance work by polling `catt info`. The
+- `prefer_cast`: send playback to a Chromecast (preferred sender: **castbridge** when available,
+  else `catt`) instead of mpv by default (`false`). The `--cast` flag forces casting for one run;
+  `--local` forces mpv even when this is on. Casting keeps full parity — resume, continue-watching
+  and series auto-advance work via castbridge events (or by polling `catt info` on the fallback). The
   embedded-track menu is mpv-only, so in cast mode subtitles are sent as an external file (when you
   pass `--subs`/`--sub-lang`) and the rest is left to the receiver. Stream selection is **Cast-aware**:
   it ranks against the Chromecast's decode profile (H.264/HEVC/VP9 up to 4K; AV1 and 8K dropped to
@@ -305,18 +306,22 @@ nstream --json --audio-lang eng ...       # force the dub language for a headles
 
 From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
 (continue-watching · 🔍 search · 🎬 Film · 📺 Serie TV · ⚙ settings). The Film/Serie sections are
-type-scoped: their own continue-watching, search and catalogs (popular/new/top IMDb); the
-top-level search and continue-watching stay mixed. All UI lives in the TUI; the launcher only
-opens it. ESC steps back one level; after a title plays (or has no sources) you return to the
-list rather than the app quitting.
+type-scoped: their own continue-watching, search, catalogs (popular/new/top IMDb), and **Generi…**
+(Cinemeta genre filter on Top). Catalog pages that return a full batch show **↓ altri…** to load
+the next page. Multi-season / long series open a **season menu** before episodes. Search is typed
+inside fzf (same chrome as the rest of the TUI). Leaf lists hint **Tab** / **Alt-C** / **Ctrl-/**
+(preview). The top-level search and continue-watching stay mixed. All UI lives in the TUI; the
+launcher only opens it. ESC steps back one level; after a title plays (or has no sources) you
+return to the list rather than the app quitting.
 
 By default a title plays straight away. Press **Tab** in any title/episode/continue list to enter
-manual mode for that pick: the curated **stream menu** followed by a **pre-play screen**
-(`▶ Avvia · 🔊 Audio · 💬 Sottotitoli`) to choose the exact embedded audio/subtitle track (probed
-with `ffprobe`, mapped to mpv `--aid`/`--sid`) or external OpenSubtitles. `▶ Avvia` is the default
-(one Enter starts with the auto language preference); without `ffprobe` it falls back silently to
-mpv's defaults. Flip the default with the **Riproduzione automatica** setting (`auto_play`); auto-
-advancing binge episodes always play automatically.
+manual mode for that pick: the curated **stream menu** (filter notices stay in the fzf header)
+followed by a **pre-play screen** (`▶ Avvia · 🔊 Audio · 💬 Sottotitoli`) to choose the exact
+embedded audio/subtitle track (probed with `ffprobe`, mapped to mpv `--aid`/`--sid`) or external
+OpenSubtitles. `▶ Avvia` is the default (one Enter starts with the auto language preference);
+without `ffprobe` it falls back silently to mpv's defaults. Flip the default with the
+**Riproduzione automatica** setting (`auto_play`); auto-advancing binge episodes always play
+automatically.
 
 ## Settings
 
@@ -334,11 +339,11 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 
 | Path                           | Role                                                                                                                                           |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections, resume                                                                     |
+| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections (Generi…, paginated browse), resume                                          |
 | `src/nstream/headless.py`      | headless `--json` subsystem: non-interactive play/cast/probe/stop/status, one JSON object on stdout (no fzf, no TTY)                           |
-| `src/nstream/series.py`        | series-only flow: episode picker, binge auto-advance, per-episode resume (injected player)                                                     |
+| `src/nstream/series.py`        | series-only flow: season-first/episode picker, binge auto-advance, per-episode resume (injected player)                                        |
 | `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards                                     |
-| `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles)                                                                                                   |
+| `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles) + pre-play `choose_tracks` menu                                                                   |
 | `src/nstream/labels.py`        | display-label formatting for the fzf/mpv UI                                                                                                    |
 | `src/nstream/api.py`           | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
 | `src/nstream/addons.py`        | Stremio addon-protocol client (manifests, dispatch, cache)                                                                                     |
@@ -357,9 +362,9 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/mirror.py`        | realtime cast backend: mpv on a headless output mirrored via the openscreen sender                                                             |
 | `src/nstream/tracks.py`        | ffprobe audio/subtitle track probing (memoized per url)                                                                                        |
 | `src/nstream/languages.py`     | single source of truth for language tokens/flags/display names                                                                                 |
-| `src/nstream/picker.py`        | shared fzf pickers (TUI flow + cast menus)                                                                                                     |
+| `src/nstream/picker.py`        | shared fzf pickers: fzf/fzf_key/multi/index, confirm, ask_query                                                                                |
 | `src/nstream/preview.py`       | poster thumbnail + metadata card for the fzf preview pane (`__preview`)                                                                        |
-| `src/nstream/ui.py`            | TUI design system: capability detection, palette, fzf theme, layout                                                                            |
+| `src/nstream/ui.py`            | TUI design system: caps, palette, glyphs, status/progress, layout, NO_COLOR                                                                    |
 | `src/nstream/explain.py`       | `--explain` diagnostic renderer (why a stream/audio was auto-picked)                                                                           |
 | `src/nstream/settings.py`      | native fzf settings menu (config + addons)                                                                                                     |
 | `src/nstream/config.py`        | config load/save (XDG, atomic 0600) + payload types                                                                                            |
