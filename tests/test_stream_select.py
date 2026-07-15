@@ -11,9 +11,16 @@ from nstream import stream_select
 from nstream.config import Config, PlayOpts, Stream
 
 
-def _gopts(*, cast: bool = False) -> PlayOpts:
+def _gopts(*, cast: bool = False, quality: int | None = 0) -> PlayOpts:
+    # quality=0 (Auto) by default so unit tests don't open the in-flow quality picker.
     return PlayOpts(
-        auto=True, cast=cast, sub_mode=None, sub_lang=None, history=False, autoplay=False
+        auto=True,
+        cast=cast,
+        sub_mode=None,
+        sub_lang=None,
+        history=False,
+        autoplay=False,
+        quality=quality,
     )
 
 
@@ -370,7 +377,6 @@ def test_pick_stream_cap_and_show_all(monkeypatch):
     assert "camrip" in headers[0]
 
 
-
 def test_pick_stream_auto_picks_best(monkeypatch):
     cfg = Config(torrentio_base="tb")
     monkeypatch.setattr(
@@ -647,6 +653,113 @@ def test_prepare_stream_safety_subtitles(monkeypatch, capsys):
     )
     assert v is not None and v.stream is chosen and v.safety_sub_lang == "ita"
     assert "sottotitoli ita attivati" in capsys.readouterr().err
+
+
+def test_prepare_stream_quality_picker_interactive(monkeypatch):
+    """When quality is undecided and interactive, the in-flow picker sets exact_resolution."""
+    s4k: Stream = {
+        "url": "u4k",
+        "name": "[RD+] Torrentio\n4k",
+        "title": "F.2025.2160p.WEB-DL.HEVC\n👤 9 💾 20 GB",
+    }
+    s1080: Stream = {
+        "url": "u1080",
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "F.2025.1080p.WEB-DL.HEVC\n👤 9 💾 8 GB",
+    }
+    seen: dict = {}
+
+    def _pick(cfg, results, *, auto, cast=False, title="", exact_resolution=0):
+        seen["exact"] = exact_resolution
+        # Prefer 1080 when filtered; otherwise first.
+        if exact_resolution == 1080:
+            return s1080
+        return s4k
+
+    monkeypatch.setattr(stream_select, "pick_quality", lambda *a, **k: 1080)
+    monkeypatch.setattr(stream_select, "_pick_stream", _pick)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
+    monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"ita"})
+    cfg = Config(torrentio_base="tb", audio_langs=["ita"])
+    v = stream_select.prepare_stream(
+        cfg, [s4k, s1080], _gopts(quality=None), auto=True, reselect_on_wrong_audio=True
+    )
+    assert v is not None and v.quality == 1080 and v.stream is s1080
+    assert seen["exact"] == 1080
+
+
+def test_prepare_stream_quality_cli_skips_picker(monkeypatch):
+    """CLI --quality 720: no picker, exact filter applied."""
+    s720: Stream = {
+        "url": "u720",
+        "name": "Torrentio\n720p",
+        "title": "F.2025.720p.WEB-DL\n👤 9 💾 3 GB",
+    }
+    seen: dict = {}
+
+    def _pick(cfg, results, *, auto, cast=False, title="", exact_resolution=0):
+        seen["exact"] = exact_resolution
+        return s720
+
+    monkeypatch.setattr(
+        stream_select,
+        "pick_quality",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("picker must not run")),
+    )
+    monkeypatch.setattr(stream_select, "_pick_stream", _pick)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
+    monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"ita"})
+    cfg = Config(torrentio_base="tb", audio_langs=["ita"])
+    v = stream_select.prepare_stream(
+        cfg, [s720], _gopts(quality=720), auto=True, reselect_on_wrong_audio=True
+    )
+    assert v is not None and v.quality == 720 and seen["exact"] == 720
+
+
+def test_prepare_stream_headless_no_picker(monkeypatch):
+    """Headless (reselect=False, quality=None): Auto, no picker."""
+    s: Stream = {"url": "u", "name": "x\n1080p", "title": "F.1080p\n👤 9"}
+    monkeypatch.setattr(
+        stream_select,
+        "pick_quality",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no picker headless")),
+    )
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: s)
+    monkeypatch.setattr(stream_select, "_ensure_playable", lambda *a, **k: a[2])
+    monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"ita"})
+    cfg = Config(torrentio_base="tb", audio_langs=["ita"])
+    v = stream_select.prepare_stream(
+        cfg, [s], _gopts(quality=None), auto=True, reselect_on_wrong_audio=False
+    )
+    assert v is not None and v.quality == 0
+
+
+def test_exact_resolution_mapping():
+    assert stream_select.exact_resolution(None) == 0
+    assert stream_select.exact_resolution(0) == 0
+    assert stream_select.exact_resolution(1080) == 1080
+
+
+def test_resolve_quality_cli_wins_over_picker(monkeypatch):
+    monkeypatch.setattr(
+        stream_select,
+        "pick_quality",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("picker")),
+    )
+    cfg = Config(torrentio_base="tb")
+    assert (
+        stream_select.resolve_quality(cfg, [], _gopts(quality=720), cast=False, offer_picker=True)
+        == 720
+    )
+
+
+def test_resolve_quality_esc_returns_none(monkeypatch):
+    monkeypatch.setattr(stream_select, "pick_quality", lambda *a, **k: None)
+    cfg = Config(torrentio_base="tb")
+    assert (
+        stream_select.resolve_quality(cfg, [], _gopts(quality=None), cast=False, offer_picker=True)
+        is None
+    )
 
 
 # --- audio language discovery / forced dub ---------------------------------

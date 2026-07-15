@@ -308,8 +308,9 @@ def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     seen = {}
 
-    def pick(cfg, results, lang, *, cast, probe_cap=4):
+    def pick(cfg, results, lang, *, cast, probe_cap=4, exact_resolution=0):
         seen["lang"] = lang
+        seen["exact"] = exact_resolution
         return results[0], True  # (stream, verified) — track-accurate confirmed
 
     monkeypatch.setattr(headless.stream_select, "pick_audio_stream_verified", pick)
@@ -363,11 +364,15 @@ def test_run_auto_probe_lists_audio_and_subs(monkeypatch, capsys):
     monkeypatch.setattr(
         headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
+    monkeypatch.setattr(
+        headless.stream_select, "available_resolutions", lambda cfg, results, *, cast: [1080, 720]
+    )
     rc = headless.run_auto(CFG, _hns(query=["dune"], probe=True), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["action"] == "probe"
     assert out["available_audio"] == ["ita", "eng"]
     assert out["available_subtitles"] == ["eng", "fre", "ita"]
+    assert out["available_resolutions"] == [1080, 720]
 
 
 def test_run_auto_cast_reports_volume(monkeypatch, capsys):
@@ -466,7 +471,7 @@ def test_run_auto_audio_lang_not_in_real_tracks(monkeypatch, capsys):
     # name tags claim ita, but ffprobe verification finds no candidate → reject (no wrong dub).
     monkeypatch.setattr(
         headless.stream_select, "pick_audio_stream_verified",
-        lambda cfg, results, lang, *, cast, probe_cap=4: (None, False),
+        lambda cfg, results, lang, *, cast, probe_cap=4, exact_resolution=0: (None, False),
     )  # fmt: skip
     monkeypatch.setattr(
         headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
@@ -1115,3 +1120,48 @@ def test_json_explain_is_read_only_and_structured(monkeypatch, capsys):
     assert out["pick"] is None or "secret-token" not in json.dumps(out)  # never the url
     row = (out["playable"] + out["excluded"])[0]
     assert row["resolution"] == 1080 and "score" in row
+
+
+# --- quality filter (headless) -----------------------------------------------
+
+
+def test_run_auto_quality_unavailable(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(
+        headless.stream_select, "available_resolutions", lambda cfg, results, *, cast: [2160, 720]
+    )
+    monkeypatch.setattr(
+        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+    )
+    opts = headless.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None,
+        history=False, autoplay=False, quality=1080,
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), opts)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "quality_unavailable"
+    assert out["available_resolutions"] == [2160, 720]
+
+
+def test_run_auto_quality_echoes_on_success(monkeypatch, capsys):
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(
+        headless.stream_select, "available_resolutions", lambda cfg, results, *, cast: [1080]
+    )
+
+    def prep(cfg, results, opts, *, auto, reselect_on_wrong_audio, title=""):
+        return headless.stream_select.VettedStream(
+            stream=results[0], auto=True, safety_sub_lang=None, quality=opts.quality or 0
+        )
+
+    monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
+    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    opts = headless.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None,
+        history=False, autoplay=False, quality=1080,
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), opts)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["quality"] == 1080
+    assert out["available_resolutions"] == [1080]
+    assert out["stream"]["resolution"] == 1080

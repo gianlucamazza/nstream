@@ -217,9 +217,7 @@ def _confirm(msg: str) -> bool:
     return picker.confirm(f"{msg} — procedo?", default_yes=False, non_tty_default=True)
 
 
-def _run_ffmpeg(
-    cmd: list[str], duration: float, *, size_label: str = ""
-) -> tuple[int | None, str]:
+def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tuple[int | None, str]:
     """Run the ffmpeg remux, rendering a single in-place progress line from its
     `-progress` stream. Returns `(returncode, stderr)`; rc is None if ffmpeg couldn't
     be launched. Progress is best-effort — any parse hiccup just keeps the last frame.

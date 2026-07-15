@@ -52,7 +52,8 @@ def _fake_play(advance_until):
         )
         idx = len(calls)  # 1-based
         # Mimic real play(): advancing requires the overlay, which requires a next_label.
-        return (None, next_label is not None and idx < advance_until)
+        # Third return is quality (0 = Auto) for binge sticky.
+        return (None, next_label is not None and idx < advance_until, 0)
 
     return fake, calls
 
@@ -100,10 +101,24 @@ def test_binge_stops_and_propagates_notice():
     eps = _episodes(3)
 
     def play(*a, **k):
-        return ("nessuno stream disponibile per «E1»", False)
+        return ("nessuno stream disponibile per «E1»", False, 0)
 
     notice = series.binge(CFG, "tt", "Show", eps, eps[0], _opts(), play_video=play)
     assert notice == "nessuno stream disponibile per «E1»"
+
+
+def test_binge_sticky_quality():
+    """Quality chosen on ep1 is threaded into opts for subsequent episodes (no re-pick)."""
+    eps = _episodes(3)
+    seen_quality: list[int | None] = []
+
+    def play(video_id, title, opts, *, auto, next_label, on_save, **kw):
+        seen_quality.append(opts.quality)
+        # First episode "picks" 1080p; later ones should see quality=1080 on opts.
+        return (None, next_label is not None and video_id != "tt:2", 1080)
+
+    assert series.binge(CFG, "tt", "Show", eps, eps[0], _opts(), play_video=play) is None
+    assert seen_quality == [None, 1080]  # ep1 undecided; ep2 sticky 1080
 
 
 def test_binge_unknown_start_is_noop():
@@ -174,7 +189,7 @@ def test_play_picks_episode_then_loops_threading_header(monkeypatch):
     seen = _fzf_script(monkeypatch, [("", eps[1]), None])
 
     def play(video_id, title, opts, **kw):
-        return ("solo episodio 2", False)  # a notice → becomes the next header
+        return ("solo episodio 2", False, 0)  # a notice → becomes the next header
 
     assert series.play(CFG, META, _opts(), **_picker_kwargs(play)) is None
     assert seen.headers == ["HINT", "solo episodio 2"]
@@ -269,7 +284,7 @@ def test_resume_propagates_notice(monkeypatch):
     monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: [])
 
     def play(video_id, title, opts, **kw):
-        return ("non ancora disponibile", False)
+        return ("non ancora disponibile", False, 0)
 
     entry = HistoryEntry(video_id="tt:1", type="series", title="Show", series_id="tt")
     assert series.resume(CFG, entry, _opts(), play_video=play) == "non ancora disponibile"

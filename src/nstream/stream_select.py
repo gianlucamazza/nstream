@@ -1,10 +1,11 @@
 """Stream selection, resolution, and the auto-play vetting guards.
 
 Owns everything between "we have a list of streams" and "we have one playable,
-language-vetted stream ready to hand to the player/caster": ranking + fzf curation,
-debrid/P2P resolution, the cached-miss fallback, and the primary-language audio guard
-(re-pick / safety-subtitles). `prepare_stream` is the single entry point the orchestrator
-calls; the rest are module-internal helpers (also exercised directly by the tests)."""
+language-vetted stream ready to hand to the player/caster": quality choice (CLI /
+in-flow picker), ranking + fzf curation, debrid/P2P resolution, the cached-miss
+fallback, and the primary-language audio guard (re-pick / safety-subtitles).
+`prepare_stream` is the single entry point the orchestrator calls; the rest are
+module-internal helpers (also exercised directly by the tests)."""
 
 from __future__ import annotations
 
@@ -47,23 +48,85 @@ def no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
     return f"nessuno stream disponibile per «{title}»"
 
 
+def exact_resolution(quality_choice: int | None) -> int:
+    """Map a PlayOpts.quality value to FilterSpec.exact_resolution (0 = no filter)."""
+    return quality_choice if quality_choice and quality_choice > 0 else 0
+
+
+def available_resolutions(cfg: Config, results: list[Stream], *, cast: bool = False) -> list[int]:
+    """Resolutions present among playable streams (HW/cast filters, no quality filter)."""
+    return quality.resolutions_of(_playable_set(cfg, results, cast=cast))
+
+
+def pick_quality(
+    cfg: Config, results: list[Stream], *, cast: bool = False, title: str = ""
+) -> int | None:
+    """In-flow quality picker: Auto + resolutions present for this title. Returns 0 (Auto),
+    N (exact res), or None on ESC. Only offers tiers that exist among playable streams."""
+    res_list = available_resolutions(cfg, results, cast=cast)
+    items: list[tuple[str, int]] = [(quality.quality_label(0), 0)]
+    items += [(quality.quality_label(r), r) for r in res_list]
+    header = f"qualità · {title}" if title else "qualità"
+    return fzf(items, "qualità> ", header=header)
+
+
+def resolve_quality(
+    cfg: Config,
+    results: list[Stream],
+    opts: PlayOpts,
+    *,
+    cast: bool,
+    title: str = "",
+    offer_picker: bool,
+) -> int | None:
+    """Decide the session quality: CLI/opts win; else interactive picker; else Auto (0).
+    Returns None only when the user ESC'd the picker."""
+    if opts.quality is not None:
+        return opts.quality
+    if not offer_picker:
+        return 0  # headless / binge-unattended without a sticky choice → no filter
+    return pick_quality(cfg, results, cast=cast, title=title)
+
+
 def _pick_stream(
-    cfg: Config, results: list[Stream], *, auto: bool, cast: bool = False, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    *,
+    auto: bool,
+    cast: bool = False,
+    title: str = "",
+    exact_resolution: int = 0,
 ) -> Stream | None:
     """Rank and curate streams, then auto-pick the best or show an fzf menu (top N
     playable + a 'show all' entry that reveals the rest and the excluded ones ⚠).
 
     When `cast`, rank against the Chromecast receiver's profile (not the laptop GPU)
-    and demote streams whose audio it can't decode (TrueHD/DTS/DTS-HD → silent)."""
+    and demote streams whose audio it can't decode (TrueHD/DTS/DTS-HD → silent).
+    `exact_resolution` (>0) hard-filters to that resolution before ranking."""
     if not cfg.hw_filter:
-        ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in results]
-        return results[0] if auto else fzf(ranked, "stream> ")
+        pool = results
+        if exact_resolution:
+            pool = [s for s in results if quality.parse_stream(s).resolution == exact_resolution]
+        if not pool:
+            ui.status(
+                f"nessuno stream {exact_resolution}p"
+                if exact_resolution
+                else "nessuno stream disponibile",
+                kind="fail",
+            )
+            return None
+        ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in pool]
+        return pool[0] if auto else fzf(ranked, "stream> ")
 
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
+    spec = quality.FilterSpec.from_config(
+        cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution
+    )
     playable, excluded = quality.rank_streams(results, caps, spec)
     # Build a notice that survives into the fzf header (stderr scrolls away under fullscreen).
     notice_parts: list[str] = []
+    if exact_resolution:
+        notice_parts.append(f"qualità {exact_resolution}p")
     if excluded:
         reasons = ", ".join(sorted({r.reason for r in excluded if r.reason}))
         notice_parts.append(f"{len(excluded)} stream filtrati ({reasons})")
@@ -77,6 +140,9 @@ def _pick_stream(
             ui.status_detail(notice)
         if playable:
             return playable[0].stream
+        if exact_resolution:
+            ui.status(f"nessuno stream {exact_resolution}p disponibile", kind="fail")
+            return None
         msg = (
             "nessuno stream compatibile col Chromecast (prova Tab o --local)"
             if cast
@@ -107,11 +173,20 @@ def _pick_stream(
     return typecast("Stream | None", chosen)
 
 
-def _playable_set(cfg: Config, results: list[Stream], *, cast: bool) -> list[quality.RankedStream]:
+def _playable_set(
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    exact_resolution: int = 0,
+) -> list[quality.RankedStream]:
     """Streams playable on the target profile (Chromecast or local GPU), ranked best-first,
-    ignoring the language filter so every available dub is visible (for listing/switching)."""
+    ignoring the language filter so every available dub is visible (for listing/switching).
+    Optional `exact_resolution` applies the per-session quality hard-filter."""
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, lang_filter=False)
+    spec = quality.FilterSpec.from_config(
+        cfg, cast_audio=cast, lang_filter=False, exact_resolution=exact_resolution
+    )
     playable, _ = quality.rank_streams(results, caps, spec)
     return playable
 
@@ -136,17 +211,28 @@ def audio_languages(cfg: Config, results: list[Stream], *, cast: bool) -> tuple[
 
 
 def pick_audio_stream(
-    cfg: Config, results: list[Stream], lang: str, *, cast: bool
+    cfg: Config,
+    results: list[Stream],
+    lang: str,
+    *,
+    cast: bool,
+    exact_resolution: int = 0,
 ) -> Stream | None:
     """The best playable stream whose audio includes `lang` (url resolved), or None."""
-    for r in _playable_set(cfg, results, cast=cast):
+    for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution):
         if lang in r.info.languages and _playable_url(cfg, r.stream):
             return r.stream
     return None
 
 
 def pick_audio_stream_verified(
-    cfg: Config, results: list[Stream], lang: str, *, cast: bool, probe_cap: int = 4
+    cfg: Config,
+    results: list[Stream],
+    lang: str,
+    *,
+    cast: bool,
+    probe_cap: int = 4,
+    exact_resolution: int = 0,
 ) -> tuple[Stream | None, bool]:
     """Track-accurate variant: among the playable streams whose NAME tags `lang`, ffprobe up
     to `probe_cap` candidates and return the first whose REAL audio tracks carry `lang`
@@ -155,7 +241,7 @@ def pick_audio_stream_verified(
     name-match's real tracks are known AND lack `lang` — i.e. the name lied for all of them."""
     name_pick: Stream | None = None
     probed = 0
-    for r in _playable_set(cfg, results, cast=cast):
+    for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution):
         if lang not in r.info.languages:
             continue
         if probed >= probe_cap:
@@ -427,32 +513,49 @@ def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
 
 
 def pick_and_resolve(
-    cfg: Config, results: list[Stream], *, auto: bool, cast: bool, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    *,
+    auto: bool,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
 ) -> Stream | None:
     """Pick a stream and make it playable. Returns None on ESC or an unresolvable pick."""
-    chosen = _pick_stream(cfg, results, auto=auto, cast=cast, title=title)
+    chosen = _pick_stream(
+        cfg, results, auto=auto, cast=cast, title=title, exact_resolution=exact_resolution
+    )
     if not chosen:
         return None
     return _resolve_stream(cfg, chosen)
 
 
 def _auto_candidates(
-    cfg: Config, results: list[Stream], *, cast: bool, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
 ) -> list[Stream]:
     """Playable streams in auto-pick order (best first) — the same ranking `_pick_stream`
     uses for `auto`, exposed as a list so the language guard can try the next-best when the
     top pick lacks the primary audio language."""
     if not cfg.hw_filter:
+        if exact_resolution:
+            return [s for s in results if quality.parse_stream(s).resolution == exact_resolution]
         return list(results)
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
+    spec = quality.FilterSpec.from_config(
+        cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution
+    )
     playable, _ = quality.rank_streams(results, caps, spec)
     return [r.stream for r in playable]
 
 
 def _reselect_for_primary(
     cfg: Config, results: list[Stream], current: Stream, opts: PlayOpts, primary: str, *,
-    limit: int = 4, title: str = "",
+    limit: int = 4, title: str = "", exact_resolution: int = 0,
 ) -> Stream | None:  # fmt: skip
     """Find another candidate whose audio actually contains `primary`, spending the probe
     budget on releases whose NAME claims it: every candidate tagged `primary` (best-first,
@@ -463,7 +566,9 @@ def _reselect_for_primary(
     (resolved, url-ready), or None when no tagged candidate qualifies within `limit`."""
     tagged: list[Stream] = []
     maybe: list[Stream] = []
-    for s in _auto_candidates(cfg, results, cast=opts.cast, title=title):
+    for s in _auto_candidates(
+        cfg, results, cast=opts.cast, title=title, exact_resolution=exact_resolution
+    ):
         if s is current or s.get("url") == current.get("url"):
             continue
         langs = quality.parse_stream(s).languages
@@ -523,7 +628,12 @@ def _demote_cached(stream: Stream) -> None:
 
 
 def _verify_cached_availability(
-    cfg: Config, results: list[Stream], *, cast: bool, title: str
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str,
+    exact_resolution: int = 0,
 ) -> None:
     """Pre-commit availability guard (ADR 0014, auto-pick only): the Torrentio `[RD+]` cached
     marker is a crowdsourced guess that can be stale/evicted, yet `cached` is the top-precedence
@@ -541,7 +651,9 @@ def _verify_cached_availability(
         return
     targets = [
         s
-        for s in _auto_candidates(cfg, results, cast=cast, title=title)
+        for s in _auto_candidates(
+            cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
+        )
         if s.get("url") and quality.parse_stream(s).cached
     ][:_VERIFY_CACHED_CAP]
     if not targets:
@@ -554,7 +666,13 @@ def _verify_cached_availability(
 
 
 def _ensure_playable(
-    cfg: Config, results: list[Stream], chosen: Stream, opts: PlayOpts, *, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    opts: PlayOpts,
+    *,
+    title: str = "",
+    exact_resolution: int = 0,
 ) -> Stream:
     """Debrid/auto only: the "cached" marker is a crowdsourced guess, so a ready url may be a
     dead/expired link. If the chosen url isn't reachable, fall back — to local P2P when the
@@ -576,7 +694,9 @@ def _ensure_playable(
             chosen["url"] = engine.resolve(cfg, chosen)
             return chosen
     tried = 0
-    for s in _auto_candidates(cfg, results, cast=opts.cast, title=title):
+    for s in _auto_candidates(
+        cfg, results, cast=opts.cast, title=title, exact_resolution=exact_resolution
+    ):
         if tried >= 3:
             break
         if s is chosen or s.get("url") == url:
@@ -651,14 +771,16 @@ def _mark_native_cached(cfg: Config, results: list[Stream]) -> None:
 
 @dataclass(frozen=True)
 class VettedStream:
-    """The outcome of `prepare_stream`: a playable, language-vetted stream plus the two
+    """The outcome of `prepare_stream`: a playable, language-vetted stream plus the
     decisions the guard may flip — `auto` (cleared when a wrong-audio warning dropped the
-    user back to a manual pick) and `safety_sub_lang` (set when only a fallback dub exists,
-    so the player turns on primary-language subtitles as a net)."""
+    user back to a manual pick), `safety_sub_lang` (set when only a fallback dub exists,
+    so the player turns on primary-language subtitles as a net), and `quality` (0 = Auto /
+    no filter, N = exact resolution) so a series binge can sticky the choice."""
 
     stream: Stream
     auto: bool
     safety_sub_lang: str | None
+    quality: int = 0  # 0 = Auto; N = exact resolution filter
 
 
 def prepare_stream(
@@ -669,19 +791,38 @@ def prepare_stream(
     vetted result, or None when the user backed out (ESC) of a (re)selection.
 
     `auto` overrides `opts.auto` for this single video (the binge loop forces it True from
-    the second episode on). Steps: pick+resolve → cached-miss fallback (auto only) → primary-
-    language audio guard (local mpv only). Cast keeps its own language UX, so the guard is
-    skipped there."""
+    the second episode on). Steps: quality resolve → pick+resolve → cached-miss fallback
+    (auto only) → primary-language audio guard (local mpv only). Cast keeps its own language
+    UX, so the guard is skipped there.
+
+    Quality: when `opts.quality` is set (CLI / binge sticky) it hard-filters; when None and
+    interactive (`reselect_on_wrong_audio`), an in-flow fzf picker offers Auto + available
+    resolutions; headless / unattended defaults to Auto (no filter)."""
     # Native backend: tag cached releases up front so the cached score term ranks them first
     # for both the auto-pick and the cast menu (mutates `results` once, in place).
     _mark_native_cached(cfg, results)
+
+    # Quality choice first (before ranking/pick) so the hard-filter is in place everywhere.
+    # `reselect_on_wrong_audio` doubles as the interactive signal: True for a user-attended
+    # first play, False for headless and binge-unattended advances.
+    quality_choice = resolve_quality(
+        cfg, results, opts, cast=opts.cast, title=title, offer_picker=reselect_on_wrong_audio
+    )
+    if quality_choice is None:
+        return None  # ESC from the quality picker
+    exact = exact_resolution(quality_choice)
+
     # Verify the top cached candidates actually respond before committing (ADR 0014): a dead
     # `[RD+]` marker is demoted so the auto-pick re-ranks around what's live, keeping the pick
     # off a stale link (and out of an accidental Tier-2 remux). Auto only — a manual pick is
     # the user's explicit choice.
     if auto:
-        _verify_cached_availability(cfg, results, cast=opts.cast, title=title)
-    chosen = pick_and_resolve(cfg, results, auto=auto, cast=opts.cast, title=title)
+        _verify_cached_availability(
+            cfg, results, cast=opts.cast, title=title, exact_resolution=exact
+        )
+    chosen = pick_and_resolve(
+        cfg, results, auto=auto, cast=opts.cast, title=title, exact_resolution=exact
+    )
     if not chosen:
         return None
 
@@ -689,7 +830,7 @@ def prepare_stream(
     # is reachable and fall back (local P2P for a hybrid stream, else the next candidate) before
     # committing to it. Only in auto mode (manual picks are the user's explicit choice).
     if auto:
-        chosen = _ensure_playable(cfg, results, chosen, opts, title=title)
+        chosen = _ensure_playable(cfg, results, chosen, opts, title=title, exact_resolution=exact)
 
     # Auto-play language guard (local mpv only): the auto-pick can be a file whose audio
     # isn't in the primary language — an untagged/mistagged foreign leak, or a "Dual"
@@ -702,7 +843,9 @@ def prepare_stream(
         if avail is not None and primary and primary not in avail:
             # Best pick lacks the primary language: try the next-best candidates for one
             # that has it (probing each), per the user's "try next, then fallback+subs".
-            alt = _reselect_for_primary(cfg, results, chosen, opts, primary, title=title)
+            alt = _reselect_for_primary(
+                cfg, results, chosen, opts, primary, title=title, exact_resolution=exact
+            )
             if alt is not None:
                 chosen = alt
             elif set(cfg.audio_langs) & avail:
@@ -726,8 +869,17 @@ def prepare_stream(
                 )
                 if reselect_on_wrong_audio:
                     auto = False  # let choose_tracks give track control on the manual pick
-                    chosen = pick_and_resolve(cfg, results, auto=False, cast=opts.cast, title=title)
+                    chosen = pick_and_resolve(
+                        cfg,
+                        results,
+                        auto=False,
+                        cast=opts.cast,
+                        title=title,
+                        exact_resolution=exact,
+                    )
                     if not chosen:
                         return None
 
-    return VettedStream(stream=chosen, auto=auto, safety_sub_lang=safety_sub_lang)
+    return VettedStream(
+        stream=chosen, auto=auto, safety_sub_lang=safety_sub_lang, quality=quality_choice
+    )

@@ -36,6 +36,7 @@ Always pass `--json`. Quote the title.
 | target a specific TV                 | `nstream --json --cast --device "Salotto" "X"`                                                                              |
 | with subtitles                       | add `--subs` (preferred lang) or `--sub-lang ita`                                                                           |
 | force the audio/dub language         | add `--audio-lang eng` (e.g. original audio + `--sub-lang ita`)                                                             |
+| force stream quality / resolution    | add `--quality 1080` (or `720`, `4k`/`2160`, `auto`) — hard filter; fails if that res is absent                            |
 | list available audio/subs (no play)  | `nstream --json --probe "X"`                                                                                                |
 | resume last watched                  | `nstream --json -c "X"` (or no title for the most recent)                                                                   |
 | next episode after finishing one     | `nstream --json --cast -c "X"` (auto-advances when the last episode is finished; `error: series_completed` past the finale) |
@@ -58,10 +59,15 @@ Always pass `--json`. Quote the title.
   `available_audio` list — **do not** silently play another language; show the available options
   and ask the user.
 - **Discover first**: when the user is unsure ("what languages does X have?"), run `--probe` — it
-  returns `available_audio` and `available_subtitles` without playing, so you can present the
-  choices, then play with the chosen `--audio-lang`/`--sub-lang`.
+  returns `available_audio`, `available_subtitles`, and `available_resolutions` without playing,
+  so you can present the choices, then play with the chosen `--audio-lang`/`--sub-lang`/`--quality`.
 - Every play result includes `audio_lang` (the dub played) and `available_audio` (what else was
   on offer), so you can confirm precisely what was started.
+- **Quality**: `--quality 1080` (aliases: `4k`/`2160`, `fhd`/`1080`, `hd`/`720`, `auto`) hard-
+  filters to that resolution before ranking. If none match: `error: quality_unavailable` with
+  `available_resolutions` — show the list and ask (or drop the flag). Success echoes `quality`
+  (requested) and `stream.resolution` (actual). Without `--quality`, headless does not filter
+  (best playable wins as before).
 - **Track-accurate**: when `--audio-lang` is set, nstream ffprobe-confirms the chosen stream's
   REAL audio tracks carry that language before sending it (the release name can mistag). The
   result's `audio_verified` is `true` when confirmed by the actual tracks, `false`/`null` when
@@ -143,6 +149,8 @@ stdout is always a single JSON object. Read `ok`:
   or a lower-quality preference.
 - `audio_lang_unavailable` — the requested `--audio-lang` isn't in any stream; show the
   `available_audio` list and ask which dub to use (or drop `--audio-lang`).
+- `quality_unavailable` — the requested `--quality` isn't among playable streams; show
+  `available_resolutions` and ask (or drop `--quality` / try another tier).
 - `episode_not_found` — show the `available` seasons/episodes and ask which to play.
 - `device_not_found` — no Chromecast resolved, or several TVs and none specified. Run `catt scan`
   to list devices; if more than one, ask the user which (AskUserQuestion) and re-run with

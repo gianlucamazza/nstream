@@ -89,16 +89,38 @@ keep only the primary-language track (ffmpeg `0:a:N`), reselects another dub, or
 primary-language safety subtitles. This is why a high-ranked but wrong-language pick still ends up
 in the right language.
 
-### 4. Cap & pick (`stream_select._pick_stream`)
+### 4. Quality choice (before pick)
+
+Per-session **exact resolution** filter (`PlayOpts.quality` / `--quality`):
+
+| Value | Meaning |
+|-------|---------|
+| `None` | Undecided: TUI shows an in-flow fzf picker (Auto + resolutions present); headless = no filter |
+| `0` | Auto (no exact filter; binge sticky so the picker is not re-shown) |
+| `720` / `1080` / `2160` / … | Hard-filter: only streams with `StreamInfo.resolution == N` |
+
+Applied in `unsupported_reason` **after** the hardware `max_resolution` cap and **before**
+cast-audio/camrip/lang. Unknown resolution (`0`) is excluded when the filter is active.
+Distinct from `max_resolution` (GPU safety ceiling): quality is a session preference, not a
+hardware limit. Ranking inside the filtered set is unchanged (`cached` still dominates).
+
+CLI: `nstream --quality 1080 "…"`, `nstream --json --quality 4k --cast "…"`. Aliases:
+`auto`, `4k`/`uhd`/`2160`, `fhd`/`1080`, `hd`/`720`, `sd`/`480`. Headless failure:
+`error: quality_unavailable` with `available_resolutions`. Series binge sticky-propagates
+the first episode's choice via `VettedStream.quality`.
+
+### 5. Cap & pick (`stream_select._pick_stream`)
 
 `auto` → `playable[0]`. Manual → fzf menu capped at `max_streams` with a "show all". With
-`hw_filter` off, ranking is skipped entirely (Torrentio order).
+`hw_filter` off, ranking is skipped entirely (Torrentio order), but an exact quality filter
+still subsets the list first.
 
 ## Config knobs
 
 `hw_filter` (master switch), `max_resolution`, `allow_software`, `allow_dv5`, `lang_filter`,
 `audio_langs` (preference order — drives the `lang` score term and `--alang`),
 `exclude_camrip`, `min_seeders`, `dedup`, `max_streams`. Editable via `nstream --settings`.
+Per-invocation quality is **not** a config default (v1): use `--quality` or the TUI picker.
 
 ## Languages: one registry, one allow-list
 

@@ -14,21 +14,35 @@ from .config import Config, Stream
 
 
 def _rank(
-    cfg: Config, results: list[Stream], *, cast: bool, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
 ) -> tuple[
     list[quality.RankedStream], list[quality.RankedStream], quality.Caps, quality.FilterSpec
 ]:
     caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(cfg, cast_audio=cast, title=title)
+    spec = quality.FilterSpec.from_config(
+        cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution
+    )
     playable, excluded = quality.rank_streams(results, caps, spec)
     return playable, excluded, caps, spec
 
 
 def auto_pick(
-    cfg: Config, results: list[Stream], *, cast: bool, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
 ) -> quality.RankedStream | None:
     """The stream nstream would auto-play for this profile, or None if nothing qualifies."""
-    playable, _, _, _ = _rank(cfg, results, cast=cast, title=title)
+    playable, _, _, _ = _rank(
+        cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
+    )
     return playable[0] if playable else None
 
 
@@ -87,17 +101,27 @@ def _row(
     return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {name}"
 
 
-def explain_streams(cfg: Config, results: list[Stream], *, cast: bool, title: str = "") -> str:
+def explain_streams(
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
+) -> str:
     """Render the full ranking decision for one profile (local GPU or Chromecast)."""
     if not results:
         return "nessuno stream restituito da Torrentio."
-    playable, excluded, caps, spec = _rank(cfg, results, cast=cast, title=title)
+    playable, excluded, caps, spec = _rank(
+        cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
+    )
     profile = "CAST (Chromecast)" if cast else "LOCALE (mpv/GPU)"
     lines = [
         f"=== profilo {profile} ===",
         f"Caps: codecs={','.join(sorted(caps.codecs))} max_res={caps.max_resolution} "
         f"vaapi={caps.vaapi}",
-        f"Filtri: max_res={spec.max_resolution} lang_filter={spec.lang_filter} "
+        f"Filtri: max_res={spec.max_resolution} exact_res={spec.exact_resolution or '—'} "
+        f"lang_filter={spec.lang_filter} "
         f"audio_langs={','.join(spec.audio_langs) or '—'} exclude_camrip={spec.exclude_camrip} "
         f"min_seeders={spec.min_seeders} dedup={spec.dedup} cast_audio={spec.cast_audio} "
         f"allow_sw={spec.allow_software} allow_dv5={spec.allow_dv5}",
@@ -146,11 +170,20 @@ def _row_data(
     return row
 
 
-def explain_data(cfg: Config, results: list[Stream], *, cast: bool, title: str = "") -> dict:
+def explain_data(
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
+) -> dict:
     """Machine-readable counterpart of `explain_streams`, for `--json --explain`: the same
     ranking reconstruction as a dict — caps, filters, counts, playable rows best-first
     with their score components, excluded rows with the reason. Parsed metadata only."""
-    playable, excluded, caps, spec = _rank(cfg, results, cast=cast, title=title)
+    playable, excluded, caps, spec = _rank(
+        cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
+    )
     return {
         "profile": "cast" if cast else "local",
         "caps": {
@@ -160,6 +193,7 @@ def explain_data(cfg: Config, results: list[Stream], *, cast: bool, title: str =
         },
         "filters": {
             "max_resolution": spec.max_resolution,
+            "exact_resolution": spec.exact_resolution or None,
             "lang_filter": spec.lang_filter,
             "audio_langs": list(spec.audio_langs),
             "exclude_camrip": spec.exclude_camrip,

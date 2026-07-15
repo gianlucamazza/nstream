@@ -97,6 +97,11 @@ class PlayOpts:
     cast_choose: bool = False  # force the device picker (explicit "cast this" action)
     audio_lang: str | None = None  # force this audio/dub language (headless --audio-lang)
     mirror: bool = False  # cast via the native mirror backend instead of the DMR (file) path
+    # Stream resolution filter for this invocation:
+    #   None = undecided (TUI offers an in-flow quality picker; headless = no filter)
+    #   0    = Auto (no exact-resolution filter; skip picker — binge sticky)
+    #   N    = hard-filter to streams with StreamInfo.resolution == N (e.g. 1080)
+    quality: int | None = None
 
 
 @dataclass(frozen=True)

@@ -302,6 +302,8 @@ nstream --json --cast --device TV "dune"  # headless: no fzf, one JSON object on
 nstream --json --cast --follow ...        # follow the cast to the end (resume tracked)
 nstream --json --stop       # stop a cast started by nstream; --status shows its state
 nstream --json --audio-lang eng ...       # force the dub language for a headless play/cast
+nstream --quality 1080 "matrix"           # hard-filter to 1080p (TUI + --json; aliases: 4k, 720, auto)
+nstream --json --quality 4k --cast "…"    # headless quality filter; fails with quality_unavailable
 ```
 
 From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
@@ -314,7 +316,9 @@ inside fzf (same chrome as the rest of the TUI). Leaf lists hint **Tab** / **Alt
 launcher only opens it. ESC steps back one level; after a title plays (or has no sources) you
 return to the list rather than the app quitting.
 
-By default a title plays straight away. Press **Tab** in any title/episode/continue list to enter
+By default a title plays straight away. Without `--quality`, the TUI offers an in-flow **quality
+picker** (Auto · resolutions present for that title) before the auto-pick or stream menu; series
+binge keeps the first choice sticky. Press **Tab** in any title/episode/continue list to enter
 manual mode for that pick: the curated **stream menu** (filter notices stay in the fzf header)
 followed by a **pre-play screen** (`▶ Avvia · 🔊 Audio · 💬 Sottotitoli`) to choose the exact
 embedded audio/subtitle track (probed with `ffprobe`, mapped to mpv `--aid`/`--sid`) or external
