@@ -37,10 +37,11 @@ Each `src/nstream/<mod>.py` has a matching `tests/test_<mod>.py`.
 
 Modules in `src/nstream/`:
 
-- `cli.py` — orchestrator: argparse, TUI flow (home + typed Film/Serie sections), resume,
-  `--explain`/`__preview` commands, `--movies`/`--series` type filters. Delegates stream selection
-  to `stream_select`, subtitles to `subs`, the series flow to `series`, the whole `--json` mode to
-  `headless`, label formatting to `labels`; sits at the bottom of the import graph.
+- `cli.py` — orchestrator: argparse, TUI flow (home + typed Film/Serie sections with Generi…,
+  paginated catalog browse), resume, `--explain`/`__preview` commands, `--movies`/`--series`
+  type filters. Delegates stream selection to `stream_select`, subtitles/track menu to `subs`,
+  the series flow to `series`, the whole `--json` mode to `headless`, label formatting to
+  `labels`; sits at the bottom of the import graph.
 - `headless.py` — the `--json` subsystem: `run()` is the single seam `cli._dispatch` calls when
   `--json` is set — non-interactive title/episode resolution (`_select_meta`), play/cast
   (`_auto_play`, via `cast_flow.run_cast` + the volume guard), `--probe`/`--stop`/`--status`/`-c`,
@@ -49,10 +50,10 @@ Modules in `src/nstream/`:
   `cli`). Same tier as `cast_flow`: imports `api`/`bridge`/`cast_flow`/`caster`/`mirror`/`player`/
   `quality`/`remux`/`series`/`state`/`stream_select`/`subs`/`labels`/`config`/`ui`; never `cli`,
   never `picker`/fzf.
-- `series.py` — the series-only flow (ADR 0009): episode picker, binge auto-advance loop,
-  per-episode resume (`play`/`binge`/`resume`/`entry_video`). The player entry point is injected
-  as a callable (`PlayVideo` Protocol), so it never imports `cli`; imports
-  `api`/`state`/`labels`/`picker`/`config`/`ui` (+ `caster.CastMeta`).
+- `series.py` — the series-only flow (ADR 0009): episode picker (season-first when multi-season
+  or >40 episodes), binge auto-advance loop, per-episode resume (`play`/`binge`/`resume`/
+  `entry_video`). The player entry point is injected as a callable (`PlayVideo` Protocol), so it
+  never imports `cli`; imports `api`/`state`/`labels`/`picker`/`config`/`ui` (+ `caster.CastMeta`).
 - `stream_select.py` — stream selection + resolution + auto-play vetting guards. `prepare_stream()`
   is the single entry the orchestrator calls (pre-commit cached verification → pick+resolve →
   cached-miss fallback → primary-language audio guard), returning a `VettedStream`. The pre-commit
@@ -72,7 +73,8 @@ Modules in `src/nstream/`:
   `stream_select`: imports `caster`/`engine`/`mirror`/`remux`/`quality`/`stream_select`/`subs`/
   `config`/`log`/`ui`; never `cli`.
 - `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download), `auto_subs`
-  (no-menu paths + safety-subtitle net). Leaf below `cli`; imports `api`/`picker`/`config`.
+  (no-menu paths + safety-subtitle net), and `choose_tracks` (pre-play audio/sub fzf menu).
+  Leaf below `cli`; imports `api`/`picker`/`tracks`/`labels`/`ui`/`config`.
 - `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
   `display_title`/`track_label`/`audio_summary`/`sub_summary`). Reads active caps on demand via
   `ui.active_caps()`. Top tier: imports only `ui`/`quality`/`tracks`/`config`.
@@ -140,11 +142,14 @@ Modules in `src/nstream/`:
   Used only by the `native` playback backend; RealDebrid is intentionally absent (no cache endpoint
   since 2024 — see `docs/adr/0002`). Leaf below `cli` (imports `config`/`engine`/`log` + stdlib);
   best-effort, raises `DebridUnavailable` → caller degrades to P2P. `get_resolver`/`DebridResolver`.
-- `picker.py` — shared fzf pickers (TUI flow + cast menus); imports only `util`+`ui`. `fzf`/`fzf_key`.
+- `picker.py` — shared fzf pickers (TUI flow + cast/settings menus); imports only `util`+`ui`.
+  `fzf`/`fzf_key`/`fzf_multi`/`fzf_index` (settings rows + help preview), `confirm` (Sì/No),
+  `ask_query` (free-text search inside fzf chrome).
 - `preview.py` — body of the hidden `nstream __preview` subcommand: poster thumbnail (via `chafa`)
   plus metadata card in the fzf preview pane. Best-effort, **never prints stream URLs**.
 - `ui.py` — TUI design system: capability detection, palette/glyph set/fzf theme, progress bars,
-  layout breakpoints. Near the top of the import graph; must never import `api`/`picker`/`cli`/`quality`/`caster`.
+  layout breakpoints, `status`/`progress`/`key_hint` stderr helpers, `NO_COLOR`. Near the top of
+  the import graph; must never import `api`/`picker`/`cli`/`quality`/`caster`.
 - `explain.py` — diagnostic renderer for `--explain`: reconstructs the auto-pick decision with the
   same primitives the player uses (`languages`/`player`/`quality`/`tracks`/`ui`). Read-only.
 - `languages.py` — **single source of truth** for languages (release tokens, flags, display names);
@@ -161,7 +166,8 @@ Modules in `src/nstream/`:
   retires its started siblings; every new cast clears the previous session
   (`clear_cast_session` in `cast_flow.run_cast` / Alt-C).
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
-- `settings.py` — fzf-based settings menu (debrid token, addons, hwdec, cast device…).
+- `settings.py` — fzf-based settings menu (debrid token, addons, hwdec, cast device…); uses
+  `picker.fzf_index` for chrome (no parallel fzf argv builder).
 - `log.py` — rotating file log + crash capture + secret redaction.
 - `util.py` — low-level helpers: atomic write, best-effort JSON load, subprocess launch. Top of the
   import graph, stdlib-only.

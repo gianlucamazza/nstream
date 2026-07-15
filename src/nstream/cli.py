@@ -239,7 +239,9 @@ def _play_on_mpv(
         if sel is None:
             return None
         audio_id, sub_id, sub_paths = sel
-    cast_ok = shutil.which("catt") is not None  # enable in-player Alt-C → TV
+    # Device discovery still needs catt (scan); castbridge is the preferred *delivery*
+    # backend once a device IP is known. Without catt, Alt-C has no way to resolve a target.
+    cast_ok = shutil.which("catt") is not None
     pos, dur, signal = play(
         cfg, title, chosen["url"],
         start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
@@ -682,7 +684,10 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         prog="nstream",
-        description="Native Stremio-like client (Cinemeta + Torrentio + Real-Debrid + mpv).",
+        description=(
+            "Native terminal-first Stremio-like client "
+            "(Cinemeta + Torrentio/debrid or local P2P + mpv; cast via castbridge or catt)."
+        ),
     )
     parser.add_argument("query", nargs="*", help="titolo da cercare (altrimenti chiede)")
     parser.add_argument(
@@ -691,7 +696,9 @@ def main() -> int:
         help="forza la riproduzione automatica (anche se disattivata)",
     )
     parser.add_argument(
-        "--cast", action="store_true", help="manda lo stream a un Chromecast (catt) invece di mpv"
+        "--cast",
+        action="store_true",
+        help="manda lo stream a un Chromecast (castbridge se disponibile, altrimenti catt) invece di mpv",
     )
     parser.add_argument(
         "--mirror",

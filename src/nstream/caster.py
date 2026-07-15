@@ -114,7 +114,7 @@ def resolve_device(
     name (or `cfg.cast_device`) must be on the LAN, else a single device is used, else it
     raises CastUnavailable so the caller can surface a clean error instead of blocking.
 
-    `confirm` asks once per session ([S/n] on a tty) before an **auto**-resolved device is
+    `confirm` asks once per session (fzf Sì/No on a tty) before an **auto**-resolved device is
     used — so a `prefer_cast` start announces where the video is going instead of silently
     casting. Explicit picks (`prefer`, the fzf picker) never re-ask; a refusal raises
     CastUnavailable so the caller falls back to local playback."""

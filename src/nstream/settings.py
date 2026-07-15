@@ -1,7 +1,7 @@
 """Native fzf settings menu: edit config.json and Stremio addons interactively.
 
 Self-contained (does not import cli) so it can be reused from anywhere without a cycle.
-The Real-Debrid token is read with getpass and never printed back.
+Debrid tokens are read with getpass and never printed back (any Torrentio-supported provider).
 """
 
 from __future__ import annotations
@@ -134,14 +134,16 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Riproduzione su Chromecast",
             "bool",
             "on" if cfg.prefer_cast else "off",
-            "Manda lo stream al Chromecast (catt). --cast/--local forzano per la sessione.",
+            "Manda lo stream al Chromecast (castbridge se disponibile, altrimenti catt). "
+            "--cast/--local forzano per la sessione.",
         ),
         (
             "cast_device",
             "Dispositivo cast",
             "castdev",
             cfg.cast_device or "auto (scoperta)",
-            "Chromecast preferito (scoperta via catt). 'auto' = per-LAN (catt scan).",
+            "Chromecast preferito (nome). Scoperta via catt scan in background + cache; "
+            "cast per IP. 'auto' = per-LAN.",
         ),
         (
             "autoplay",
