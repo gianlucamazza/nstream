@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 
 from . import log
+from .net import UA
 
 _log = log.get_logger("oshash")
 
@@ -42,7 +43,8 @@ def _ranged_read(url: str, start: int, end: int) -> tuple[bytes, int]:
     """GET `bytes=start-end` of `url` → (body, total_size). Total size comes from
     `Content-Range: bytes a-b/TOTAL` (0 when the server answered 200 without one —
     the body is then the whole file and the caller sizes it from Content-Length)."""
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+    # Same UA as every other nstream fetch: debrid CDNs reject the urllib default (403).
+    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}", "User-Agent": UA})
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
         body = resp.read(end - start + 1)
         total = 0
