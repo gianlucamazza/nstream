@@ -120,7 +120,7 @@ def test_subtitles_video_hash_query_tags_and_wins_dedup(monkeypatch):
     )
     hash_urls = [u for u in urls if "videoHash=" in u]
     assert len(hash_urls) == 1 and len(urls) == 2
-    assert "videoSize=1000" in hash_urls[0] and "filename=V+x.mkv" in hash_urls[0]
+    assert "videoSize=1000" in hash_urls[0] and "filename=V%20x.mkv" in hash_urls[0]
     by_url = {s["url"]: s for s in out}
     assert by_url["same.srt"].get("hash_match") is True  # tagged copy survived the dedup
     assert by_url["other.srt"].get("hash_match") is None

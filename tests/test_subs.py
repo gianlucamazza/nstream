@@ -255,3 +255,35 @@ def test_stream_filename_reads_behavior_hints():
     assert subs.stream_filename({"behaviorHints": {"filename": "X.mkv"}}) == "X.mkv"
     assert subs.stream_filename({"behaviorHints": {}}) is None
     assert subs.stream_filename({}) is None
+
+
+def test_decode_sub_preserves_latin1_accents(tmp_path):
+    """A CP1252/latin-1 Italian track must keep its accents — errors="replace" used to
+    mojibake every `è`/`à` on the TV (the addon's SubEncoding field is unreliable)."""
+    p = tmp_path / "s.srt"
+    p.write_bytes("1\n00:00:01,000 --> 00:00:02,000\nperché è già là\n".encode("latin-1"))
+    assert "perché è già là" in subs._decode_sub(str(p))
+    vtt = subs.to_vtt(str(p))
+    text = Path(vtt).read_text(encoding="utf-8")  # VTT spec REQUIRES UTF-8
+    assert "perché è già là" in text and text.startswith("WEBVTT")
+
+
+def test_retime_srt_transcodes_latin1_to_utf8(tmp_path):
+    p = tmp_path / "s.srt"
+    p.write_bytes("1\n00:00:01,000 --> 00:00:02,000\ncosì\n".encode("latin-1"))
+    assert subs.retime_srt(str(p), 1.0, 1.0) is True
+    text = p.read_text(encoding="utf-8")
+    assert "così" in text and "00:00:02,000 --> 00:00:03,000" in text
+
+
+def test_pick_skips_hash_on_loopback_url(monkeypatch, stub_download, tmp_path):
+    """A loopback url is the local P2P gateway: a tail Range read would force the
+    torrent's LAST piece at startup (piece-deadline anti-pattern) — no hash probe."""
+    monkeypatch.setattr(
+        subs.oshash, "hash_url", lambda url: pytest.fail("loopback must not be hashed")
+    )
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: [{"lang": "ita", "url": "u"}])
+    out = subs._pick(
+        CFG, "movie", "id", str(tmp_path), video_url="http://127.0.0.1:8090/stream?link=x"
+    )
+    assert out.match == "lang"
