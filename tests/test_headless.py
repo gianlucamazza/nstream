@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from nstream import cast_flow, headless, picker
+from nstream import cast_flow, headless, picker, subs
 from nstream.config import Config, HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
@@ -94,8 +94,8 @@ def _wire_movie(monkeypatch, *, name="Dune", stream=None):
     monkeypatch.setattr(
         headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
     )
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())  # local-play path
-    monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: ())  # cast path
+    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())  # local-play path
+    monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: subs.SubsPick())  # cast path
     monkeypatch.setattr(headless, "device_volume", lambda device: (0.4, False))
     return stream
 
@@ -140,7 +140,7 @@ def test_run_auto_exact_match_over_first(monkeypatch, capsys):
         headless.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
@@ -160,7 +160,7 @@ def test_run_auto_year_disambiguates(monkeypatch, capsys):
         headless.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["dune"], year="2021"), _hopts())
     assert json.loads(capsys.readouterr().out)["imdb_id"] == "new"
@@ -191,7 +191,7 @@ def test_run_auto_series_season_episode(monkeypatch, capsys):
         headless.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
     seen = {}
     monkeypatch.setattr(
         headless.api,
@@ -443,7 +443,7 @@ def test_run_auto_browse(monkeypatch, capsys):
     monkeypatch.setattr(
         headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("eng",)
     )
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
     rc = headless.run_auto(CFG, _hns(browse="popolari"), _hopts())
     out = json.loads(capsys.readouterr().out)
@@ -533,7 +533,7 @@ def _wire_fargo(monkeypatch):
         headless.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
 
 
@@ -655,8 +655,8 @@ def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs",
-        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None: (
-            calls.append(safety_sub_lang) or ("/tmp/sub.srt",)
+        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None, **kw: (
+            calls.append(safety_sub_lang) or subs.SubsPick(("/tmp/sub.srt",), "lang")
         ),
     )  # fmt: skip
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
@@ -845,7 +845,9 @@ def test_status_refreshes_session_entry(monkeypatch, tmp_path, capsys):
 def test_subtitles_not_reported_when_delivery_drops_them(monkeypatch, capsys):
     """M3: subs the castbridge LOAD can't carry must not be claimed in the JSON."""
     stream = _wire_movie(monkeypatch)
-    monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: ("/tmp/sub.srt",))
+    monkeypatch.setattr(
+        cast_flow.subs, "auto_subs", lambda *a, **k: subs.SubsPick(("/tmp/sub.srt",), "lang")
+    )
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
         headless.stream_select,

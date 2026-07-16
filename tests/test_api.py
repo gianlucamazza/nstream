@@ -100,6 +100,43 @@ def test_subtitles_aggregate(monkeypatch):
     assert {s["url"] for s in api.subtitles(CFG, "movie", "tt1")} == {"a.srt", "b.srt"}
 
 
+def test_subtitles_video_hash_query_tags_and_wins_dedup(monkeypatch):
+    """With a videoHash the addon is queried twice (hash extra + plain); hash results are
+    tagged `hash_match` and, being fetched first, survive the by-url dedup over the plain
+    duplicate of the same track (ADR 0018)."""
+    a = _addon("A", "http://a", "subtitles", idp=())
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])
+    urls: list[str] = []
+
+    def fake_get(url, **k):
+        urls.append(url)
+        if "videoHash=" in url:
+            return {"subtitles": [{"id": "s1", "url": "same.srt"}]}
+        return {"subtitles": [{"id": "s1", "url": "same.srt"}, {"id": "s2", "url": "other.srt"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    out = api.subtitles(
+        CFG, "movie", "tt1", video_hash="ab" * 8, video_size=1000, filename="V x.mkv"
+    )
+    hash_urls = [u for u in urls if "videoHash=" in u]
+    assert len(hash_urls) == 1 and len(urls) == 2
+    assert "videoSize=1000" in hash_urls[0] and "filename=V+x.mkv" in hash_urls[0]
+    by_url = {s["url"]: s for s in out}
+    assert by_url["same.srt"].get("hash_match") is True  # tagged copy survived the dedup
+    assert by_url["other.srt"].get("hash_match") is None
+
+
+def test_subtitles_without_hash_single_query(monkeypatch):
+    a = _addon("A", "http://a", "subtitles", idp=())
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])
+    urls: list[str] = []
+    monkeypatch.setattr(
+        api, "http_get_json", lambda url, **k: urls.append(url) or {"subtitles": []}
+    )
+    api.subtitles(CFG, "movie", "tt1")
+    assert len(urls) == 1 and "videoHash" not in urls[0]
+
+
 def test_catalog_extra_must_declare_catalog(monkeypatch):
     builtin = addons.Addon(
         base="http://cine", name="Cinemeta", builtin=True,

@@ -391,11 +391,44 @@ def _stream_key(s: Stream) -> object:
     return id(s)
 
 
-def subtitles(cfg: Config, typ: str, video_id: str) -> list[Subtitle]:
+def _hash_subtitles(url: str, name: str) -> list[Subtitle]:
+    """One addon's videoHash query, each result tagged `hash_match` (timed for the exact
+    file — ADR 0018). Addons answer a hash query with ONLY the hash matches (verified on
+    opensubtitles-v3: an unknown hash → empty list), never the id-wide set."""
+    subs = http_get_json(url, what=f"sottotitoli hash ({name})").get("subtitles", [])
+    for s in subs:
+        s["hash_match"] = True
+    return subs
+
+
+def subtitles(
+    cfg: Config,
+    typ: str,
+    video_id: str,
+    *,
+    video_hash: str | None = None,
+    video_size: int = 0,
+    filename: str | None = None,
+) -> list[Subtitle]:
+    """Subtitle tracks for a video, aggregated across addons. With `video_hash` (OSHash of
+    the resolved stream) each addon is ALSO queried with the `videoHash`/`videoSize`/
+    `filename` extras (Stremio protocol): those results are exact-file matches, tagged
+    `hash_match` and listed first (the dedup keeps the first occurrence)."""
+    extra = ""
+    if video_hash:
+        params: dict[str, str] = {"videoHash": video_hash}
+        if video_size:
+            params["videoSize"] = str(video_size)
+        if filename:
+            params["filename"] = filename
+        extra = urllib.parse.urlencode(params)
     tasks: list[Callable[[], list]] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "subtitles", typ, video_id):
             continue
+        if extra:
+            hash_url = f"{addon.base}/subtitles/{typ}/{video_id}/{extra}.json"
+            tasks.append(lambda url=hash_url, name=addon.name: _hash_subtitles(url, name))
         url = f"{addon.base}/subtitles/{typ}/{video_id}.json"
         tasks.append(
             lambda url=url, name=addon.name: http_get_json(url, what=f"sottotitoli ({name})").get(

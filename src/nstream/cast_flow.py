@@ -82,6 +82,7 @@ class CastOutcome:
     audio_verified: bool  # True when decided from real ffprobe tracks
     safety_sub_lang: str | None  # effective safety-subtitle language, or None
     sub_paths: tuple[str, ...]
+    sub_match: str | None  # "hash" (exact-file OSHash match) | "lang" (guess) | None
     subs_delivered: bool  # False when the delivery couldn't attach them (castbridge LOAD)
 
 
@@ -150,7 +151,12 @@ def run_cast(
                 file=sys.stderr,
             )
     # Exactly one auto_subs call, with the effective safety language (normalization 2).
-    sub_paths = subs.auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
+    # The resolved url/filename enable the exact-file hash match (ADR 0018).
+    subs_pick = subs.auto_subs(
+        cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
+        video_url=chosen.get("url"), filename=subs.stream_filename(chosen),
+    )  # fmt: skip
+    sub_paths = subs_pick.paths
     # Language of the fetched subtitle track (labels the side-loaded caption track on the TV).
     sub_lang = safety_sub_lang or opts.sub_lang
     _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
@@ -258,5 +264,5 @@ def run_cast(
         reencoded=reencoded, notice=notice,
         audio_lang=plan.real_lang, audio_verified=plan.verified,
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
-        subs_delivered=subs_delivered,
+        sub_match=subs_pick.match, subs_delivered=subs_delivered,
     )  # fmt: skip

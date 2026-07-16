@@ -37,6 +37,10 @@ Always pass `--json`. Quote the title.
 | a specific series episode            | `nstream --json --cast --season 1 --episode 3 "X"`                                                                          |
 | target a specific TV                 | `nstream --json --cast --device "Salotto" "X"`                                                                              |
 | with subtitles                       | add `--subs` (preferred lang) or `--sub-lang ita`                                                                           |
+| subs out of sync: constant shift     | add `--sub-offset -2.5` (seconds, ±; retimes the file → works for mpv AND cast)                                             |
+| subs out of sync: progressive drift  | add `--sub-fps 25:23.976` (fps the subs were authored for : fps of the video)                                               |
+| subs out of sync: constant shift     | add `--sub-offset -2.5` (seconds, ±; retimes the file → works for mpv AND cast)                                             |
+| subs out of sync: progressive drift  | add `--sub-fps 25:23.976` (fps the subs were authored for : fps of the video)                                               |
 | force the audio/dub language         | add `--audio-lang eng` (e.g. original audio + `--sub-lang ita`)                                                             |
 | force stream quality / resolution    | add `--quality 1080` (or `720`, `4k`/`2160`, `auto`) — hard filter; fails if that res is absent                            |
 | list audio/subs/resolutions (no play)| `nstream --json --probe "X"`                                                                                                |
@@ -55,7 +59,17 @@ Always pass `--json`. Quote the title.
 ### Audio & subtitles
 
 - **Subtitles**: `--sub-lang ita` forces Italian subs; `--subs` picks your preferred language.
-  The play result reports the active `subtitles` lang.
+  The play result reports the active `subtitles` lang. Selection is **hash-first** (ADR 0018):
+  nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
+  track timed for the EXACT file — the result's `subtitles_match` says how it was chosen:
+  `"hash"` = sync verified by construction, `"lang"` = best language guess (correct it with
+  `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
+  it cheap). Selection is **hash-first** (ADR 0018):
+  nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
+  track timed for the EXACT file — the result's `subtitles_match` says how it was chosen:
+  `"hash"` = sync verified by construction, `"lang"` = best language guess (correct it with
+  `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
+  it cheap).
 - **Audio/dub**: `--audio-lang CODE` forces a specific dub (e.g. `eng` for original audio). If no
   stream carries that language the command fails with `error: audio_lang_unavailable` and an
   `available_audio` list — **do not** silently play another language; show the available options
