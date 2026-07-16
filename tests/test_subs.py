@@ -354,3 +354,21 @@ def test_align_local_skips_hash_and_manual_and_disabled(monkeypatch, tmp_path):
     off = Config(torrentio_base="tb", sub_align=False)
     assert subs.align_local(off, lang_pick, "/m", str(tmp_path), _opts_plain()) is lang_pick
     assert calls["probe"] == []  # nessun probe in tutti e tre i casi
+
+
+def test_align_local_timeout_scales_with_file_size(monkeypatch, tmp_path):
+    """Measured live: the probe demuxes the whole container (10.5 GB ≈ 270 s), so a
+    fixed budget refuses big remuxes 30 s short of success. The effective timeout must
+    scale with size, with the config budget as the floor."""
+    srt_path = _srt_file(tmp_path)
+    _align_env(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(
+        subs.subalign, "probe_local",
+        lambda path, *, duration, timeout_s: seen.update(t=timeout_s)
+        or subs.subalign.Fingerprint(5000.0, ((0.0, 100.0),), ((1.0, 2.0),)),
+    )  # fmt: skip
+    monkeypatch.setattr(subs.os.path, "getsize", lambda p: 12_000_000_000)  # 12 GB
+    pick = subs.SubsPick((str(srt_path),), "lang")
+    subs.align_local(CFG, pick, "/m.mp4", str(tmp_path), _opts_plain())
+    assert seen["t"] >= 12_000_000_000 / 30e6  # ≥ 400 s for a 12 GB file
