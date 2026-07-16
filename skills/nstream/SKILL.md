@@ -32,6 +32,7 @@ Always pass `--json`. Quote the title.
 | "metti X sul TV" / "casta X"         | `nstream --json --cast "X"`                                                                                                 |
 | "guarda X" / "riproduci X in locale" | `nstream --json --local "X"`                                                                                                |
 | cast via realtime mirror (1080p SDR) | `nstream --json --mirror "X"` (instant start, no remux download; not desktop mirror — use `skill-cast` for that)             |
+| never mirror for this cast           | `nstream --json --cast --no-mirror "X"` (suppresses the auto mirror-over-remux switch too)                                  |
 | disambiguate by year                 | `nstream --json --cast --year 1999 "X"`                                                                                     |
 | only movies / only series            | add `--movies` or `--series` (search/browse/continue; avoids same-named title of the other type)                           |
 | a specific series episode            | `nstream --json --cast --season 1 --episode 3 "X"`                                                                          |
@@ -80,7 +81,9 @@ Always pass `--json`. Quote the title.
   Present the choices, then play with `--audio-lang` / `--sub-lang` / `--quality` as needed.
 - Every play result includes `audio_lang` (the dub played) and `available_audio` (what else was
   on offer), so you can confirm precisely what was started.
-- **Quality**: `--quality 1080` (aliases: `4k`/`2160`, `fhd`/`1080`, `hd`/`720`, `auto`) hard-
+- **Quality**: `--quality 1080` holds on EVERY selection path (ADR 0021), including the
+  audio-language reselects — a dub swap can no longer return a resolution you excluded.
+  `--quality 1080` (aliases: `4k`/`2160`, `fhd`/`1080`, `hd`/`720`, `auto`) hard-
   filters to that resolution before ranking. If none match: `error: quality_unavailable` with
   `available_resolutions` — show the list and ask (or drop the flag). Success echoes `quality`
   (requested; null/omitted when Auto) and `stream.resolution` (actual), plus
