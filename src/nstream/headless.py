@@ -432,7 +432,8 @@ def _auto_play(
     cast_audio_lang = opts.audio_lang or (cfg.primary or None)
     cast_audio_verified = audio_verified
     cast_sub_lang = vetted.safety_sub_lang or opts.sub_lang
-    sub_match: str | None = None  # "hash" | "lang" — how the subtitle track was chosen
+    sub_match: str | None = None  # "hash" | "audio" | "lang" — how the track was chosen
+    sub_offset: float | None = None  # applied correction (s) when sub_match == "audio"
     subs_delivered = True  # local mpv always renders requested subs; cast paths override
     # History bookkeeping: the plain show name (the decorated `title` would break the
     # `-c <titolo>` normalized-title match), and the end position when a path can know it.
@@ -500,6 +501,7 @@ def _auto_play(
             cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang
             sub_paths = outcome.sub_paths
             sub_match = outcome.sub_match
+            sub_offset = outcome.sub_offset
             subs_delivered = outcome.subs_delivered
             action, reencoded, notice = outcome.action, outcome.reencoded, outcome.notice
             if args.follow:
@@ -535,6 +537,7 @@ def _auto_play(
                 video_url=chosen.get("url"), filename=subs_filename(chosen),
             )  # fmt: skip
             sub_paths, sub_match = subs_pick.paths, subs_pick.match
+            sub_offset = subs_pick.offset_s
             # Local mpv blocks until the window closes (intended; the user is watching).
             hist_pos, hist_dur, _sig = play(
                 cfg, title, chosen["url"],
@@ -572,10 +575,11 @@ def _auto_play(
             # castbridge (side-loaded WebVTT track) and catt (`-s`) paths carry them now, but a
             # mirror cast or a failed conversion may not — don't report those as active.
             "subtitles": cast_sub_lang if (sub_paths and subs_delivered) else None,
-            # How the track was chosen: "hash" = protocol-verified OSHash match, "audio" =
-            # alass-corrected against the real audio (ADR 0019), "runtime" = last cue fits
-            # the media duration, "lang" = best language guess (ADR 0018).
+            # How the track was chosen (ADR 0020): "hash" = protocol-verified OSHash
+            # match, "audio" = aligned against the local media's real audio (offset in
+            # subtitles_offset), "lang" = best language guess (correct with --sub-offset).
             "subtitles_match": sub_match if (sub_paths and subs_delivered) else None,
+            "subtitles_offset": sub_offset if (sub_paths and subs_delivered) else None,
             "notice": notice,
             "error": None,
         }

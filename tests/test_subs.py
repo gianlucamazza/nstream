@@ -9,10 +9,10 @@ CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
 
 @pytest.fixture(autouse=True)
-def _no_host_alass(monkeypatch):
-    """The audio-anchored pass (ADR 0019) gates on the HOST's alass binary: force it
-    off so the suite is hermetic; wiring tests re-stub what they need."""
-    monkeypatch.setattr(subs.subsync, "available", lambda: False)
+def _no_host_engine(monkeypatch):
+    """The local-media alignment tier gates on the HOST's ffmpeg: force the engine off
+    so the suite is hermetic; wiring tests re-stub what they need."""
+    monkeypatch.setattr(subs.subalign, "available", lambda: False)
 
 
 def _opts(*, sub_mode: str | None = "auto", sub_lang: str | None = None) -> PlayOpts:
@@ -229,142 +229,128 @@ def test_pick_skips_hash_on_loopback_url(monkeypatch, stub_download, tmp_path):
     assert out.match == "lang"
 
 
-# --- runtime-fit fallback (ADR 0018 refinement) -------------------------------
+# --- evidence-tier selection + local-media alignment (ADR 0020) ---------------
 
 
-def _srt_ending_at(tmp_path, name, last_s):
-    mm, ss = divmod(int(last_s), 60)
-    hh, mm = divmod(mm, 60)
+def test_choose_lang_guess_carries_alternates(monkeypatch, stub_download, tmp_path):
+    """Tier 3 delivers the first candidate honestly as "lang" and keeps the rest of the
+    same-language pool as alternates for the local-alignment tier."""
+    tracks_list = [{"lang": "ita", "url": f"u{i}"} for i in range(8)]
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
+    out = subs._pick(CFG, "movie", "id", str(tmp_path))
+    assert out.match == "lang" and stub_download["sub"]["url"] == "u0"
+    assert [a["url"] for a in out.alternates] == ["u1", "u2", "u3", "u4", "u5"]  # cap 6
+
+
+def test_choose_hash_match_has_no_alternates(monkeypatch, stub_download, tmp_path):
+    tracks_list = [{"lang": "ita", "url": "u0", "hash_match": True}, {"lang": "ita", "url": "u1"}]
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
+    out = subs._pick(CFG, "movie", "id", str(tmp_path))
+    assert out.match == "hash" and out.alternates == ()
+
+
+def _opts_plain(**kw):
+    base = dict(auto=True, cast=True, sub_mode="auto", sub_lang=None, history=True, autoplay=True)
+    base.update(kw)
+    return PlayOpts(**base)
+
+
+def _srt_file(tmp_path, name="ita.srt"):
     p = tmp_path / name
-    p.write_text(
-        f"1\n00:00:01,000 --> 00:00:02,000\nciao\n\n"
-        f"2\n{hh:02d}:{mm:02d}:{ss:02d},000 --> {hh:02d}:{mm:02d}:{ss + 1:02d},000\nfine\n",
-        encoding="utf-8",
-    )
-    return str(p)
+    p.write_text("1\n00:00:20,000 --> 00:00:21,000\nciao\n", encoding="utf-8")
+    return p
 
 
-def _fit_env(monkeypatch, tmp_path, lasts: dict[str, float], duration: float):
-    """Candidates u1..uN whose downloaded SRTs end at the given times; media lasts
-    `duration` seconds."""
-    files = {u: _srt_ending_at(tmp_path, f"{u}.srt", t) for u, t in lasts.items()}
-    monkeypatch.setattr(subs, "_download_subtitle", lambda s, wd: files.get(s["url"]))
+def _align_env(monkeypatch, *, verdict_offset=-13.9, reason="aligned", duration=5276.4):
+    from nstream import subalign
+
+    monkeypatch.setattr(subs.subalign, "available", lambda: True)
     monkeypatch.setattr(
         subs.tracks, "probe_tracks",
-        lambda url: subs.tracks.Tracks(duration=duration, video_codec="h264"),
+        lambda path: subs.tracks.Tracks(duration=duration),
     )  # fmt: skip
-    monkeypatch.setattr(subs.oshash, "hash_url", lambda url: None)
-
-
-def test_auto_pick_fits_by_runtime(monkeypatch, tmp_path, capsys):
-    """Live regression (Coherence, 2026-07-16): two timing clusters, the addon's arbitrary
-    order picked the one 80 s short of the file → visible desync. With no protocol hash
-    match, the candidate whose last cue fits the REAL media duration must win."""
-    _fit_env(
-        monkeypatch, tmp_path,
-        {"u1": 5197.0, "u2": 5263.0, "u3": 5277.0}, duration=5276.4,
-    )  # fmt: skip
-    tracks_list = [{"lang": "ita", "url": u} for u in ("u1", "u2", "u3")]
-    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
-    out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
-    assert out.match == "runtime"
-    assert out.paths[0].endswith("u3.srt")  # 5277.0 vs 5276.4: the fitting cluster
-    assert "aderenza al runtime" in capsys.readouterr().err
-
-
-def test_auto_pick_runtime_gap_too_large_is_honest_lang(monkeypatch, tmp_path, capsys):
-    """Every candidate far from the media duration → still delivered (better than
-    nothing) but reported as a plain guess, with a warning."""
-    _fit_env(monkeypatch, tmp_path, {"u1": 4000.0, "u2": 4100.0}, duration=5276.4)
-    tracks_list = [{"lang": "ita", "url": "u1"}, {"lang": "ita", "url": "u2"}]
-    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
-    out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
-    assert out.match == "lang" and out.paths[0].endswith("u2.srt")
-    assert "non garantita" in capsys.readouterr().err
-
-
-def test_auto_pick_true_hash_match_skips_runtime_probe(monkeypatch, tmp_path):
-    """A protocol-verified hash match (m=='h' → hash_match) is synced by construction:
-    no candidate downloads beyond it, no duration probe."""
+    calls = {"probe": [], "align": []}
+    fp = subalign.Fingerprint(duration, ((0.0, 100.0),), ((1.0, 2.0),))
     monkeypatch.setattr(
-        subs.tracks, "probe_tracks", lambda url: pytest.fail("hash match → no probe")
-    )
-    monkeypatch.setattr(subs.oshash, "hash_url", lambda url: ("00" * 8, 200_000))
-    monkeypatch.setattr(subs, "_download_subtitle", lambda s, wd: str(tmp_path / "x.srt"))
-    tracks_list = [
-        {"lang": "ita", "url": "u1", "hash_match": True},
-        {"lang": "ita", "url": "u2"},
-    ]
-    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
-    out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
-    assert out.match == "hash"
-
-
-# --- audio-anchored correction wiring (ADR 0019) ------------------------------
-
-
-CFG_AS = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], sub_autosync=True)
-
-
-def _autosync_env(monkeypatch, tmp_path, *, offset=-13.9, match="runtime"):
-    p = tmp_path / "ita.srt"
-    p.write_text("1\n00:00:20,000 --> 00:00:21,000\nciao\n")
-    monkeypatch.setattr(subs, "_pick", lambda *a, **k: subs.SubsPick((str(p),), match))
-    monkeypatch.setattr(subs.subsync, "available", lambda: True)
-    calls: list[tuple] = []
+        subs.subalign, "probe_local",
+        lambda path, *, duration: calls["probe"].append(path) or fp,
+    )  # fmt: skip
+    diag = subalign.Alignment(verdict_offset or 0.0, 0.9, 0.2, 100.0, 50, 0.1, 0.2, 6, 8)
     monkeypatch.setattr(
-        subs.subsync, "measure_offset",
-        lambda srt, url, wd, window_s: calls.append((srt, url, window_s)) or offset,
+        subs.subalign, "align",
+        lambda spans, f: calls["align"].append(spans)
+        or subalign.Verdict(verdict_offset, 1.0, reason, diag),
     )  # fmt: skip
-    return calls, p
+    return calls
 
 
-def test_auto_subs_audio_corrects_non_hash_pick(monkeypatch, tmp_path, capsys):
-    calls, srt = _autosync_env(monkeypatch, tmp_path)
-    out = subs.auto_subs(
-        CFG_AS, "movie", "id", str(tmp_path), _opts(), video_url="http://cdn/v.mkv"
+def test_align_local_corrects_lang_pick(monkeypatch, tmp_path, capsys):
+    srt_path = _srt_file(tmp_path)
+    calls = _align_env(monkeypatch, verdict_offset=-13.9)
+    pick = subs.SubsPick((str(srt_path),), "lang")
+    out = subs.align_local(CFG, pick, "/media/remux.mp4", str(tmp_path), _opts_plain())
+    assert out.match == "audio" and out.offset_s == -13.9
+    assert calls["probe"] == ["/media/remux.mp4"] and len(calls["align"]) == 1
+    assert "00:00:06,100 --> 00:00:07,100" in srt_path.read_text()  # -13.9 applied
+    assert "allineati all'audio del file (offset -13.9s)" in capsys.readouterr().err
+
+
+def test_align_local_zero_offset_verifies_without_rewrite(monkeypatch, tmp_path):
+    srt_path = _srt_file(tmp_path)
+    before = srt_path.read_text()
+    _align_env(monkeypatch, verdict_offset=0.2)
+    out = subs.align_local(
+        CFG, subs.SubsPick((str(srt_path),), "lang"), "/m.mp4", str(tmp_path), _opts_plain()
     )
-    assert out.match == "audio" and len(calls) == 1
-    assert calls[0][1] == "http://cdn/v.mkv" and calls[0][2] == CFG_AS.sub_autosync_window_s
-    assert "allineati all'audio (offset -13.9s)" in capsys.readouterr().err
-    # the measured offset was applied by retime_srt to the INTACT original (20s → 6.1s)
-    assert "00:00:06,100 --> 00:00:07,100" in srt.read_text()
+    assert out.match == "audio" and srt_path.read_text() == before
 
 
-def test_auto_subs_audio_zero_offset_verifies_without_rewrite(monkeypatch, tmp_path, capsys):
-    calls, srt = _autosync_env(monkeypatch, tmp_path, offset=0.2)
-    before = srt.read_text()
-    out = subs.auto_subs(CFG_AS, "movie", "id", str(tmp_path), _opts(), video_url="http://u")
-    assert out.match == "audio" and srt.read_text() == before  # verified, not rewritten
+def test_align_local_refusal_keeps_honest_lang(monkeypatch, tmp_path):
+    srt_path = _srt_file(tmp_path)
+    _align_env(monkeypatch, verdict_offset=None, reason="cross_window_disagree")
+    pick = subs.SubsPick((str(srt_path),), "lang")
+    out = subs.align_local(CFG, pick, "/m.mp4", str(tmp_path), _opts_plain())
+    assert out is pick  # unchanged, honest "lang"
 
 
-def test_auto_subs_audio_skips_hash_match(monkeypatch, tmp_path):
-    calls, _ = _autosync_env(monkeypatch, tmp_path, match="hash")
-    out = subs.auto_subs(CFG_AS, "movie", "id", str(tmp_path), _opts(), video_url="http://u")
-    assert out.match == "hash" and calls == []  # synced by construction → no audio pass
+def test_align_local_falls_back_to_alternate(monkeypatch, tmp_path, stub_download):
+    """A refusing delivered track tries the alternates: a garbage SRT refuses, the next
+    family may align (the engine's verdict decides, not the addon's order)."""
+    from nstream import subalign
+
+    bad = _srt_file(tmp_path, "bad.srt")
+    _align_env(monkeypatch)  # base env; override align below
+
+    def fake_download(sub, wd):
+        p = tmp_path / f"{sub['url']}.srt"
+        p.write_text("1\n00:00:20,000 --> 00:00:21,000\nalt\n", encoding="utf-8")
+        return str(p)
+
+    monkeypatch.setattr(subs, "_download_subtitle", fake_download)
+    diag = subalign.Alignment(0.0, 0.9, 0.2, 100.0, 50, 0.1, 0.2, 6, 8)
+
+    def fake_align(spans, fp):
+        # first call (delivered) refuses; second (alternate) aligns at -7
+        if not hasattr(fake_align, "n"):
+            fake_align.n = 1
+            return subalign.Verdict(None, 1.0, "low_score", diag)
+        return subalign.Verdict(-7.0, 1.0, "aligned", diag)
+
+    monkeypatch.setattr(subs.subalign, "align", fake_align)
+    pick = subs.SubsPick((str(bad),), "lang", alternates=({"lang": "ita", "url": "alt1"},))
+    out = subs.align_local(CFG, pick, "/m.mp4", str(tmp_path), _opts_plain())
+    assert out.match == "audio" and out.offset_s == -7.0
+    assert out.paths[0].endswith("alt1.srt")
 
 
-def test_auto_subs_audio_skips_on_manual_retime(monkeypatch, tmp_path):
-    """--sub-offset/--sub-fps are a user override: the auto pass must step aside."""
-    calls, _ = _autosync_env(monkeypatch, tmp_path)
-    opts = PlayOpts(
-        auto=True, cast=False, sub_mode="auto", sub_lang=None, history=True, autoplay=True,
-        sub_offset=-14.0,
-    )  # fmt: skip
-    out = subs.auto_subs(CFG_AS, "movie", "id", str(tmp_path), opts, video_url="http://u")
-    assert calls == [] and out.match == "runtime"  # manual retime applied, match honest
-
-
-def test_auto_subs_audio_failure_keeps_honest_match(monkeypatch, tmp_path, capsys):
-    _autosync_env(monkeypatch, tmp_path, offset=None)
-    out = subs.auto_subs(CFG_AS, "movie", "id", str(tmp_path), _opts(), video_url="http://u")
-    assert out.match == "runtime"  # not upgraded: the correction did not run
-    assert "allineati all'audio" not in capsys.readouterr().err
-
-
-def test_auto_subs_audio_off_by_default(monkeypatch, tmp_path):
-    """sub_autosync defaults to OFF (field-falsified windowed measurement): even with
-    alass present, the default config must not run the audio pass."""
-    calls, _ = _autosync_env(monkeypatch, tmp_path)
-    out = subs.auto_subs(CFG, "movie", "id", str(tmp_path), _opts(), video_url="http://u")
-    assert calls == [] and out.match == "runtime"
+def test_align_local_skips_hash_and_manual_and_disabled(monkeypatch, tmp_path):
+    srt_path = _srt_file(tmp_path)
+    calls = _align_env(monkeypatch)
+    hash_pick = subs.SubsPick((str(srt_path),), "hash")
+    assert subs.align_local(CFG, hash_pick, "/m", str(tmp_path), _opts_plain()) is hash_pick
+    lang_pick = subs.SubsPick((str(srt_path),), "lang")
+    manual = _opts_plain(sub_offset=-14.0)
+    assert subs.align_local(CFG, lang_pick, "/m", str(tmp_path), manual) is lang_pick
+    off = Config(torrentio_base="tb", sub_align=False)
+    assert subs.align_local(off, lang_pick, "/m", str(tmp_path), _opts_plain()) is lang_pick
+    assert calls["probe"] == []  # nessun probe in tutti e tre i casi

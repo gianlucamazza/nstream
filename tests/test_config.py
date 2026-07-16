@@ -293,3 +293,23 @@ def test_primary_and_fallback_langs():
     # explicit primary_lang overrides the first-of-audio_langs derivation
     c2 = Config(audio_langs=["eng", "ita"], primary_lang="ita")
     assert c2.primary == "ita" and c2.fallback_langs == ["eng"]
+
+
+def test_sub_align_keys_round_trip_through_load(tmp_path, monkeypatch):
+    """ADR 0020 keys MUST be parsed by load() — the ADR-0019 keys existed on the
+    dataclass but the loader never read them, so the opt-in was unreachable from
+    config.json (found in the ADR-0020 exploration). Never again."""
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text('{"torrentio_base": "tb", "sub_align": false, "sub_align_budget_s": 5000}')
+    monkeypatch.setattr(config, "config_path", lambda: cfg_file)
+    cfg = config.load()
+    assert cfg.sub_align is False
+    assert cfg.sub_align_budget_s == 600  # clamped to INT_BOUNDS (60, 600)
+
+
+def test_sub_align_defaults(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text('{"torrentio_base": "tb", "sub_autosync": true}')  # stale key: inert
+    monkeypatch.setattr(config, "config_path", lambda: cfg_file)
+    cfg = config.load()
+    assert cfg.sub_align is True and cfg.sub_align_budget_s == 240
