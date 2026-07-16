@@ -2,8 +2,14 @@
   "torrentio_base": "sort=qualitysize|realdebrid=YOUR_REALDEBRID_API_TOKEN",
   "cinemeta": "https://v3-cinemeta.strem.io",
   "opensubtitles": "https://opensubtitles-v3.strem.io",
-  "subtitle_langs": ["ita", "eng"],
-  "audio_langs": ["ita", "eng"],
+  "subtitle_langs": [
+    "ita",
+    "eng"
+  ],
+  "audio_langs": [
+    "ita",
+    "eng"
+  ],
   "primary_lang": "",
   "addons": [],
   "history_enabled": true,
@@ -39,5 +45,7 @@
   "engine_cache_mb": 256,
   "engine_download_dir": "",
   "p2p_ack": false,
-  "p2p_require_vpn": false
+  "p2p_require_vpn": false,
+  "sub_align": true,
+  "sub_align_budget_s": 240
 }

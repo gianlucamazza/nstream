@@ -1,6 +1,6 @@
 # 0019. Audio-anchored subtitle sync (alass) when no hash match exists
 
-- **Status:** Accepted
+- **Status:** Superseded by 0020
 - **Date:** 2026-07-16
 - **Deciders:** project maintainer
 

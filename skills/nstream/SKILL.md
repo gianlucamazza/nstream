@@ -39,8 +39,6 @@ Always pass `--json`. Quote the title.
 | with subtitles                       | add `--subs` (preferred lang) or `--sub-lang ita`                                                                           |
 | subs out of sync: constant shift     | add `--sub-offset -2.5` (seconds, ±; retimes the file → works for mpv AND cast)                                             |
 | subs out of sync: progressive drift  | add `--sub-fps 25:23.976` (fps the subs were authored for : fps of the video)                                               |
-| subs out of sync: constant shift     | add `--sub-offset -2.5` (seconds, ±; retimes the file → works for mpv AND cast)                                             |
-| subs out of sync: progressive drift  | add `--sub-fps 25:23.976` (fps the subs were authored for : fps of the video)                                               |
 | force the audio/dub language         | add `--audio-lang eng` (e.g. original audio + `--sub-lang ita`)                                                             |
 | force stream quality / resolution    | add `--quality 1080` (or `720`, `4k`/`2160`, `auto`) — hard filter; fails if that res is absent                            |
 | list audio/subs/resolutions (no play)| `nstream --json --probe "X"`                                                                                                |
@@ -59,27 +57,16 @@ Always pass `--json`. Quote the title.
 ### Audio & subtitles
 
 - **Subtitles**: `--sub-lang ita` forces Italian subs; `--subs` picks your preferred language.
-  The play result reports the active `subtitles` lang. Selection is **hash-first** (ADR 0018):
-  nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
-  track timed for the EXACT file; with no hash match it picks the same-language candidate whose
-  last cue best fits the media's REAL duration. An audio-anchored correction (alass, ADR 0019)
-  exists but is EXPERIMENTAL and off by default (`sub_autosync`): windowed measurement proved
-  unreliable in the field — when on it only applies a three-window consensus offset. The
-  dependable manual lever remains `--sub-offset`.
-  `subtitles_match` says how it was chosen: `"hash"` = protocol-verified match, `"audio"` =
-  alass-corrected, `"runtime"` = duration-fitted, `"lang"` = guess (correct it with
-  `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
-  it cheap). Selection is **hash-first** (ADR 0018):
-  nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
-  track timed for the EXACT file; with no hash match it picks the same-language candidate whose
-  last cue best fits the media's REAL duration. An audio-anchored correction (alass, ADR 0019)
-  exists but is EXPERIMENTAL and off by default (`sub_autosync`): windowed measurement proved
-  unreliable in the field — when on it only applies a three-window consensus offset. The
-  dependable manual lever remains `--sub-offset`.
-  `subtitles_match` says how it was chosen: `"hash"` = protocol-verified match, `"audio"` =
-  alass-corrected, `"runtime"` = duration-fitted, `"lang"` = guess (correct it with
-  `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
-  it cheap).
+  The play result reports the active `subtitles` lang. Selection is **evidence-tiered**
+  (ADR 0020): a protocol hash match (OpenSubtitles moviehash of the exact file) wins outright;
+  otherwise, on casts that go through the Tier-2 remux, the delivered subtitle is **aligned
+  against the real audio of the remuxed file** (native engine, confidence-gated: it corrects or
+  verifies when the evidence is strong and refuses honestly when it isn't); otherwise it is an
+  honest language guess. `subtitles_match` reports which tier decided: `"hash"` =
+  protocol-verified, `"audio"` = aligned to the local media (the applied correction is in
+  `subtitles_offset`, seconds), `"lang"` = guess — correct a guess with
+  `--sub-offset`/`--sub-fps` (changing them for a running cast needs a re-cast; resume makes it
+  cheap). Manual flags always win: the engine steps aside.
 - **Audio/dub**: `--audio-lang CODE` forces a specific dub (e.g. `eng` for original audio). If no
   stream carries that language the command fails with `error: audio_lang_unavailable` and an
   `available_audio` list — **do not** silently play another language; show the available options
