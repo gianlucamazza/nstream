@@ -54,8 +54,8 @@ class _CountingProxy(socketserver.ThreadingMixIn, http.server.HTTPServer):
 class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     server: _CountingProxy
 
-    def log_message(self, *a) -> None:  # quiet
-        pass
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 — stdlib signature
+        pass  # quiet
 
     def do_GET(self) -> None:  # noqa: N802 — http.server contract
         req = urllib.request.Request(self.server.target)

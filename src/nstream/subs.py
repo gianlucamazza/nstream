@@ -276,6 +276,8 @@ def align_local(
         candidates.append(("", alt))
     for path, alt in candidates:
         if not path:
+            if alt is None:
+                continue
             path = _download_subtitle(alt, work_dir) or ""
             if not path:
                 continue
