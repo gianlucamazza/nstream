@@ -84,12 +84,13 @@ def sync_to_audio(
         return False, None
     out = os.path.join(work_dir, "subsync-out.srt")
     proc = util.run_cmd(["alass", "--no-split", ref, srt_path, out], timeout=_ALASS_TIMEOUT)
-    try:
-        out_ok = proc is not None and proc.returncode == 0 and os.path.getsize(out) > 0
-    except OSError:
-        out_ok = False
-    if not out_ok:
+    if proc is None or proc.returncode != 0:
         _log.info("subsync: alass fallito (rc=%s)", proc.returncode if proc else "n/a")
+        return False, None
+    try:
+        if os.path.getsize(out) <= 0:
+            return False, None
+    except OSError:
         return False, None
     offset = _parse_offset((proc.stdout or "") + (proc.stderr or ""))
     try:

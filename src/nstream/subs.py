@@ -272,8 +272,7 @@ def _auto_choose(
             scored: list[tuple[float, str]] = []
             for s in pool:
                 p = _download_subtitle(s, work_dir)
-                last = _last_cue_s(p) if p else None
-                if last:
+                if p and (last := _last_cue_s(p)):
                     scored.append((abs(last - duration), p))
             if scored:
                 gap, path = min(scored)
