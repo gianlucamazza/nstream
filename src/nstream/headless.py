@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import replace
 
 from . import (
     api,
@@ -420,6 +421,9 @@ def _auto_play(
         return 1
     chosen = vetted.stream
     stream_block = _stream_block(cfg, chosen)
+    # ADR 0021: resolve the per-invocation quality into opts — the cast decision tree
+    # threads it through every reselect path.
+    opts = replace(opts, quality=vetted.quality)
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     device_name: str | None = None

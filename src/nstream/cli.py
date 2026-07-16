@@ -151,6 +151,10 @@ def _play_video(
         return (None, False, opts.quality if opts.quality is not None else 0)
     chosen, auto, safety_sub_lang = vetted.stream, vetted.auto, vetted.safety_sub_lang
     quality_choice = vetted.quality
+    # ADR 0021: from here on opts.quality is ALWAYS the resolved int (0=Auto, N=exact) —
+    # the cast decision tree threads it through every reselect path (series.py already
+    # relies on the same replace() for the binge sticky).
+    opts = replace(opts, quality=quality_choice)
 
     runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
@@ -753,6 +757,11 @@ def main() -> int:
         help="cast via mirror nativo (mpv su output headless → sender): parte subito, 1080p SDR",
     )
     parser.add_argument(
+        "--no-mirror",
+        action="store_true",
+        help="sopprimi il mirror per questa invocazione (anche l'auto-switch ADR-0015)",
+    )
+    parser.add_argument(
         "--local",
         action="store_true",
         help="forza la riproduzione locale in mpv (anche se il default è cast)",
@@ -890,6 +899,12 @@ def main() -> int:
         return 0
 
     sub_mode, sub_lang = _sub_options(args)
+    if args.mirror and args.no_mirror:
+        msg = "--mirror e --no-mirror sono incompatibili"
+        if args.json:
+            _json_error("usage", msg)
+        print(f"nstream: {msg}", file=sys.stderr)
+        return 2
     sub_scale = 1.0
     if getattr(args, "sub_fps", None):
         sub_scale = _parse_sub_fps(args.sub_fps)
@@ -900,7 +915,13 @@ def main() -> int:
             print(f"nstream: {msg}", file=sys.stderr)
             return 2
     # Mirror is a cast backend: it implies cast routing (device resolution), unless local.
-    mirror_mode = (args.mirror or cfg.cast_mode == "mirror") and not args.local
+    # Tri-state (ADR 0021): True = forced (flag or cast_mode), False = --no-mirror,
+    # None = no per-invocation preference (the ADR-0015 auto-switch may apply).
+    mirror_opt: bool | None = None
+    if (args.mirror or cfg.cast_mode == "mirror") and not args.local:
+        mirror_opt = True
+    elif args.no_mirror:
+        mirror_opt = False
     quality: int | None = None
     if getattr(args, "quality", None):
         parsed = quality_mod.parse_quality(args.quality)
@@ -914,13 +935,13 @@ def main() -> int:
     opts = PlayOpts(
         # --json is headless: always auto-pick (no fzf stream menu).
         auto=cfg.auto_play or args.play or args.json,
-        cast=(cfg.prefer_cast or args.cast or mirror_mode) and not args.local,
+        cast=(cfg.prefer_cast or args.cast or mirror_opt is True) and not args.local,
         sub_mode=sub_mode,
         sub_lang=sub_lang,
         history=cfg.history_enabled and not args.no_history,
         autoplay=cfg.autoplay and not args.no_autoplay,
         audio_lang=args.audio_lang or None,
-        mirror=mirror_mode,
+        mirror=mirror_opt,
         quality=quality,
         sub_offset=args.sub_offset or 0.0,
         sub_scale=sub_scale,

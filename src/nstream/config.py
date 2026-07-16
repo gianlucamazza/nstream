@@ -99,11 +99,18 @@ class PlayOpts:
     autoplay: bool  # offer the next-episode overlay for series
     cast_choose: bool = False  # force the device picker (explicit "cast this" action)
     audio_lang: str | None = None  # force this audio/dub language (headless --audio-lang)
-    mirror: bool = False  # cast via the native mirror backend instead of the DMR (file) path
+    # Mirror backend, tri-state (ADR 0021): None = the config decides (cli folds
+    # cast_mode + the ADR-0015 auto-switch applies); True = forced (--mirror);
+    # False = suppressed for this invocation (--no-mirror: no auto-switch, and an
+    # undecodable-video cast raises instead of silently mirroring — manual wins).
+    mirror: bool | None = None
     # Stream resolution filter for this invocation:
     #   None = undecided (TUI offers an in-flow quality picker; headless = no filter)
     #   0    = Auto (no exact-resolution filter; skip picker — binge sticky)
     #   N    = hard-filter to streams with StreamInfo.resolution == N (e.g. 1080)
+    # INVARIANT (ADR 0021): downstream of `prepare_stream` the callers replace() this
+    # with the RESOLVED VettedStream.quality (always an int ≥ 0) — every reselect path
+    # in the cast decision tree relies on it; None exists only before resolution.
     quality: int | None = None
     # Manual subtitle retime (ADR 0018), applied to the downloaded SRT before use so it
     # holds identically for mpv and for the cast's WebVTT: t' = t * sub_scale + sub_offset.

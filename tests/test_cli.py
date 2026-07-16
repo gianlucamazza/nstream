@@ -892,9 +892,13 @@ def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
     plus the in-cast switch helpers and auto_subs. Returns the spy dict."""
     seen = {"subs": []}
     monkeypatch.setattr(cli.stream_select, "vet_cast_audio", lambda *a, **k: plan)
-    monkeypatch.setattr(cli.stream_select, "cast_languages", lambda cfg, results: langs)
     monkeypatch.setattr(
-        cli.stream_select, "cast_resolver", lambda cfg, results: lambda lang: "http://u2"
+        cli.stream_select, "cast_languages", lambda cfg, results, exact_resolution=0: langs
+    )
+    monkeypatch.setattr(
+        cli.stream_select,
+        "cast_resolver",
+        lambda cfg, results, exact_resolution=0: lambda lang: "http://u2",
     )
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs",
@@ -1026,7 +1030,9 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
     )  # fmt: skip
     _call_cast(_cast_opts(), stream)
     assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
-    monkeypatch.setattr(cli.stream_select, "cast_languages", lambda cfg, results: ("ita",))
+    monkeypatch.setattr(
+        cli.stream_select, "cast_languages", lambda cfg, results, exact_resolution=0: ("ita",)
+    )
     _call_cast(_cast_opts(), stream)
     assert seen["langs"] == () and seen["resolver"] is None
 
@@ -1137,7 +1143,7 @@ def test_main_bare_query_routed_to_dispatch(monkeypatch):
     assert seen["cfg"] is cfg
     assert seen["args"].query == ["the", "matrix"]
     opts = seen["opts"]
-    assert opts.auto is False and opts.cast is False and opts.mirror is False
+    assert opts.auto is False and opts.cast is False and opts.mirror is None
     assert opts.history is True and opts.autoplay is True  # cfg defaults pass through
 
 
@@ -1163,7 +1169,7 @@ def test_main_local_overrides_prefer_cast_and_mirror(monkeypatch):
     rc, seen = _run_main(monkeypatch, ["--local", "dune"], cfg)
     assert rc == 0
     opts = seen["opts"]
-    assert opts.cast is False and opts.mirror is False  # --local beats cfg cast prefs
+    assert opts.cast is False and opts.mirror is None  # --local beats cfg cast prefs
 
 
 def test_main_mirror_implies_cast_routing(monkeypatch):

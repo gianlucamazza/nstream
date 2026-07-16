@@ -1167,3 +1167,34 @@ def test_run_auto_quality_echoes_on_success(monkeypatch, capsys):
     assert rc == 0 and out["quality"] == 1080
     assert out["available_resolutions"] == [1080]
     assert out["stream"]["resolution"] == 1080
+
+
+def test_cast_boundary_forwards_resolved_quality_to_run_cast(monkeypatch, capsys):
+    """ADR 0021 boundary: run_cast must receive opts with the RESOLVED VettedStream
+    quality (the reselect paths depend on it), even though the caller's opts.quality
+    was None on entry."""
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(
+        headless.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+            headless.stream_select.VettedStream(
+                stream=results[0], auto=True, safety_sub_lang=None, quality=1080
+            )
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    seen = {}
+
+    def fake_run_cast(cfg, results, chosen, **kw):
+        seen["quality"] = kw["opts"].quality
+        return cast_flow.CastOutcome(
+            pos=0.0, dur=0.0, advance=False, action="cast", stream=chosen,
+            reencoded=False, notice=None, audio_lang="ita", audio_verified=True,
+            safety_sub_lang=None, sub_paths=(), sub_match=None, sub_offset=None,
+            subs_delivered=False,
+        )  # fmt: skip
+
+    monkeypatch.setattr(headless.cast_flow, "run_cast", fake_run_cast)
+    monkeypatch.setattr(headless.caster, "device_volume", lambda d: (0.5, False))
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
+    assert rc == 0 and seen["quality"] == 1080
