@@ -17,7 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import cast as typecast
 
-from . import api, oshash, tracks, ui
+from . import api, oshash, subsync, tracks, ui
 from .config import Config, PlayOpts, Stream, Subtitle
 from .labels import audio_summary, sub_summary, track_label
 from .picker import fzf
@@ -366,6 +366,25 @@ def auto_subs(
             cfg, typ, video_id, work_dir,
             mode=opts.sub_mode, lang=opts.sub_lang, video_url=video_url, filename=filename,
         )  # fmt: skip
+    # ADR 0019: without a protocol hash match, let the media's own audio arbitrate the
+    # sync (the runtime-fit was falsified live: end-cue adherence picked a track 14 s
+    # late). An explicit manual retime is a user override → the auto pass steps aside.
+    manual_retime = bool(opts.sub_offset) or opts.sub_scale != 1.0
+    if (
+        pick.paths
+        and pick.match != "hash"
+        and not manual_retime
+        and cfg.sub_autosync
+        and video_url
+        and subsync.available()
+    ):
+        ran, offset = subsync.sync_to_audio(
+            pick.paths[0], video_url, work_dir, window_s=cfg.sub_autosync_window_s
+        )
+        if ran:
+            pick = SubsPick(pick.paths, "audio")
+            detail = f" (offset {offset:+.1f}s)" if offset is not None else ""
+            print(f"nstream: sottotitoli allineati all'audio{detail}", file=sys.stderr)
     if pick.paths and (opts.sub_offset or opts.sub_scale != 1.0):
         for p in pick.paths:
             retime_srt(p, opts.sub_offset, opts.sub_scale)

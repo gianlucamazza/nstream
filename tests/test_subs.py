@@ -8,6 +8,13 @@ from nstream.config import Config, PlayOpts
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
 
+@pytest.fixture(autouse=True)
+def _no_host_alass(monkeypatch):
+    """The audio-anchored pass (ADR 0019) gates on the HOST's alass binary: force it
+    off so the suite is hermetic; wiring tests re-stub what they need."""
+    monkeypatch.setattr(subs.subsync, "available", lambda: False)
+
+
 def _opts(*, sub_mode: str | None = "auto", sub_lang: str | None = None) -> PlayOpts:
     return PlayOpts(
         auto=True, cast=False, sub_mode=sub_mode, sub_lang=sub_lang, history=True, autoplay=True
@@ -358,3 +365,51 @@ def test_auto_pick_true_hash_match_skips_runtime_probe(monkeypatch, tmp_path):
     monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
     out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
     assert out.match == "hash"
+
+
+# --- audio-anchored correction wiring (ADR 0019) ------------------------------
+
+
+def _autosync_env(monkeypatch, tmp_path, *, ran=True, offset=-13.9, match="runtime"):
+    p = tmp_path / "ita.srt"
+    p.write_text("1\n00:00:20,000 --> 00:00:21,000\nciao\n")
+    monkeypatch.setattr(subs, "_pick", lambda *a, **k: subs.SubsPick((str(p),), match))
+    monkeypatch.setattr(subs.subsync, "available", lambda: True)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        subs.subsync, "sync_to_audio",
+        lambda srt, url, wd, window_s: calls.append((srt, url, window_s)) or (ran, offset),
+    )  # fmt: skip
+    return calls
+
+
+def test_auto_subs_audio_corrects_non_hash_pick(monkeypatch, tmp_path, capsys):
+    calls = _autosync_env(monkeypatch, tmp_path)
+    out = subs.auto_subs(CFG, "movie", "id", str(tmp_path), _opts(), video_url="http://cdn/v.mkv")
+    assert out.match == "audio" and len(calls) == 1
+    assert calls[0][1] == "http://cdn/v.mkv" and calls[0][2] == CFG.sub_autosync_window_s
+    assert "allineati all'audio (offset -13.9s)" in capsys.readouterr().err
+
+
+def test_auto_subs_audio_skips_hash_match(monkeypatch, tmp_path):
+    calls = _autosync_env(monkeypatch, tmp_path, match="hash")
+    out = subs.auto_subs(CFG, "movie", "id", str(tmp_path), _opts(), video_url="http://u")
+    assert out.match == "hash" and calls == []  # synced by construction → no audio pass
+
+
+def test_auto_subs_audio_skips_on_manual_retime(monkeypatch, tmp_path):
+    """--sub-offset/--sub-fps are a user override: the auto pass must step aside."""
+    calls = _autosync_env(monkeypatch, tmp_path)
+    opts = PlayOpts(
+        auto=True, cast=False, sub_mode="auto", sub_lang=None, history=True, autoplay=True,
+        sub_offset=-14.0,
+    )  # fmt: skip
+    out = subs.auto_subs(CFG, "movie", "id", str(tmp_path), opts, video_url="http://u")
+    assert calls == [] and out.match == "runtime"  # manual retime applied, match honest
+
+
+def test_auto_subs_audio_failure_keeps_honest_match(monkeypatch, tmp_path, capsys):
+    _autosync_env(monkeypatch, tmp_path, ran=False, offset=None)
+    out = subs.auto_subs(CFG, "movie", "id", str(tmp_path), _opts(), video_url="http://u")
+    assert out.match == "runtime"  # not upgraded: the correction did not run
+    assert "allineati all'audio" not in capsys.readouterr().err

@@ -185,6 +185,11 @@ class Config:
     # fetch cost). 0 = never auto-switch (always remux). Only applies when the mirror backend
     # is available; `cast_mode: "mirror"`/`--mirror` still force the mirror regardless.
     cast_mirror_over_remux_gb: int = 10
+    # ADR 0019: audio-anchored subtitle correction (alass optdepend). When the pick is
+    # not a protocol hash match, a bounded audio segment of the stream arbitrates the
+    # constant offset. Zero cost when alass is absent or a real hash match exists.
+    sub_autosync: bool = True
+    sub_autosync_window_s: int = 900
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -293,6 +298,7 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "mirror_bitrate": (0, 100_000_000),
     "mirror_playout_ms": (0, 5000),
     "cast_mirror_over_remux_gb": (0, 1000),
+    "sub_autosync_window_s": (60, 3600),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
