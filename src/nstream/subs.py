@@ -16,22 +16,28 @@ import urllib.request
 from dataclasses import dataclass
 from typing import cast as typecast
 
-from . import api, oshash, srt, subsync, tracks, ui
+from . import api, log, oshash, srt, subalign, tracks, ui
 from .config import Config, PlayOpts, Stream, Subtitle
 from .labels import audio_summary, sub_summary, track_label
 from .picker import fzf
+
+_log = log.get_logger("subs")
 
 
 @dataclass(frozen=True)
 class SubsPick:
     """Outcome of the no-menu subtitle acquisition: the downloaded file(s) plus HOW the
     track was chosen — `"hash"` (protocol-verified OSHash match), `"audio"` (offset
-    measured on the media's real audio, ADR 0019), `"runtime"` (last cue fits the media
-    duration) or `"lang"` (best language guess, sync not guaranteed). Reported in the
-    headless JSON (`subtitles_match`) so a guess is never presented as a match."""
+    measured against the media's real audio, ADR 0020) or `"lang"` (best language
+    guess, sync not guaranteed). Reported in the headless JSON (`subtitles_match` +
+    `subtitles_offset`) so a guess is never presented as a match. `alternates` carries
+    the undelivered same-language candidates: the local-media alignment tier can fall
+    back to them when the delivered track refuses to align."""
 
     paths: tuple[str, ...] = ()
-    match: str | None = None  # "hash" | "lang" when paths is non-empty
+    match: str | None = None  # "hash" | "audio" | "lang" when paths is non-empty
+    offset_s: float | None = None  # measured+applied correction when match == "audio"
+    alternates: tuple[Subtitle, ...] = ()
 
 
 def stream_filename(stream: Stream) -> str | None:
@@ -193,8 +199,9 @@ def _pick(
         if not path:
             return SubsPick()
         return SubsPick((path,), "hash" if chosen.get("hash_match") else "lang")
-    # auto: hash-match (protocol-verified) → runtime fit → best language guess.
-    pick = _auto_choose(subs, pref, video_url, work_dir)
+    # auto: hash-match (protocol-verified) → honest language guess; the audio tier
+    # (ADR 0020) runs later, against the local media file, in align_local().
+    pick = _choose(subs, pref, work_dir)
     if pick is None:
         print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
         return SubsPick()
@@ -206,81 +213,90 @@ def _is_loopback(url: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
-# Text-format concerns moved to the `srt` leaf module (shared with the alignment
-# engine and the delivery tier). Thin aliases keep the existing call sites and the
-# public test surface stable; `_decode_sub` dies with the runtime-fit in ADR 0020.
-_decode_sub = srt.decode
-_SRT_TS = srt._TS
+# Same-language candidates kept for the local-alignment fallback (downloads are KB).
+_POOL_CAP = 6
 
 
-# Runtime-fit knobs (ADR 0018 refinement): candidates checked per language, and the
-# last-cue-vs-duration gap past which the fit is not trusted (reported as a plain guess).
-_FIT_CAP = 6
-_FIT_WARN_S = 120.0
+def _choose(subs: list[Subtitle], pref: dict[str, int], work_dir: str) -> SubsPick | None:
+    """Evidence-tier selection over the (lang, hash)-sorted candidates (ADR 0020).
 
-
-def _last_cue_s(path: str) -> float | None:
-    """Last cue timestamp (seconds) of an SRT, or None when unparsable."""
-    text = _decode_sub(path)
-    if not text:
-        return None
-    times = [
-        int(h) * 3600 + int(m) * 60 + int(sec) + int(ms.ljust(3, "0")) / 1000
-        for ln in text.splitlines()
-        if "-->" in ln
-        for h, m, sec, ms in _SRT_TS.findall(ln)
-    ]
-    return max(times) if times else None
-
-
-def _auto_choose(
-    subs: list[Subtitle], pref: dict[str, int], video_url: str | None, work_dir: str
-) -> SubsPick | None:
-    """Auto-mode selection over the (lang, hash)-sorted candidates. A REAL hash match
-    (protocol `m == "h"`) is synced by construction and wins. Otherwise, with several
-    same-language candidates and a known media duration, pick by RUNTIME FIT: the track
-    whose last cue lands closest to the file's real duration — measurable sync evidence
-    (live case: two timing clusters 80 s apart; the addon's arbitrary order picked the
-    wrong one). Downloads are a few KB gzipped each, capped at `_FIT_CAP`. None when no
-    candidate is in a preferred language."""
+    Tier 1 — protocol hash match (`m == "h"`): synced by construction, wins outright.
+    Tier 3 — honest language guess: first candidate by rank, `match="lang"`; the
+    undelivered pool rides along as `alternates` for tier 2, the LOCAL-media audio
+    alignment, which runs later (cast_flow) because the full media file only exists
+    after a Tier-2 remux. The runtime-fit heuristic that used to sit between them was
+    field-falsified (end-cue adherence picked a track 14 s late) and is gone.
+    None when no candidate is in a preferred language."""
     best_lang = subs[0].get("lang", "")
     if best_lang not in pref:
         return None
-    pool = [s for s in subs if s.get("lang", "") == best_lang][:_FIT_CAP]
+    pool = [s for s in subs if s.get("lang", "") == best_lang][:_POOL_CAP]
     if pool[0].get("hash_match"):  # sorted hash-first within the language
         path = _download_subtitle(pool[0], work_dir)
         if not path:
             return SubsPick()
         print("nstream: sottotitoli sincronizzati al file (hash-match)", file=sys.stderr)
         return SubsPick((path,), "hash")
-    if len(pool) > 1 and video_url:
-        duration = tracks.probe_tracks(video_url).duration  # memoized: probed at vetting
-        if duration > 600:
-            scored: list[tuple[float, str]] = []
-            for s in pool:
-                p = _download_subtitle(s, work_dir)
-                if p and (last := _last_cue_s(p)):
-                    scored.append((abs(last - duration), p))
-            if scored:
-                gap, path = min(scored)
-                if gap > _FIT_WARN_S:
-                    print(
-                        f"nstream: nessun sottotitolo combacia col runtime "
-                        f"(scarto minimo {gap:.0f}s) — sync non garantita",
-                        file=sys.stderr,
-                    )
-                    return SubsPick((path,), "lang")
-                print(
-                    f"nstream: sottotitoli scelti per aderenza al runtime (scarto {gap:.0f}s)",
-                    file=sys.stderr,
-                )
-                return SubsPick((path,), "runtime")
     path = _download_subtitle(pool[0], work_dir)
-    return SubsPick((path,), "lang") if path else SubsPick()
+    if not path:
+        return SubsPick()
+    return SubsPick((path,), "lang", alternates=tuple(pool[1:]))
 
 
 retime_srt = srt.retime
 to_vtt = srt.to_vtt
+
+
+def align_local(
+    cfg: Config, pick: SubsPick, media_path: str, work_dir: str, opts: PlayOpts
+) -> SubsPick:
+    """Tier 2 of the selection pipeline (ADR 0020): audio-anchored verification and
+    correction of the delivered subtitle against a LOCAL media file — the Tier-2 remux
+    output, the very file the receiver will play. Full-signal alignment is the regime
+    where interval alignment is proven; the sparse remote mode was measured unviable
+    (100-300 MB/cast) and lives only in the Phase-0 bench.
+
+    Measure-then-apply: the engine never touches files; the intact original is retimed
+    here. Refusals leave the pick unchanged (honest `"lang"`) with the reason logged.
+    A refusing delivered track falls back to the alternate candidates: a garbage SRT
+    refuses, the next family may align. Manual `--sub-offset`/`--sub-fps` wins (the
+    engine steps aside), as does a protocol hash match."""
+    manual_retime = bool(opts.sub_offset) or opts.sub_scale != 1.0
+    if not pick.paths or pick.match != "lang" or manual_retime:
+        return pick
+    if not cfg.sub_align or not subalign.available():
+        return pick
+    duration = tracks.probe_tracks(media_path).duration
+    fp = subalign.probe_local(media_path, duration=duration)
+    if isinstance(fp, str):
+        _log.info("align_local: fingerprint rifiutato (%s)", fp)
+        return pick
+    candidates: list[tuple[str, Subtitle | None]] = [(pick.paths[0], None)]
+    for alt in pick.alternates[:3]:
+        candidates.append(("", alt))
+    for path, alt in candidates:
+        if not path:
+            path = _download_subtitle(alt, work_dir) or ""
+            if not path:
+                continue
+        verdict = subalign.align(srt.cue_spans(path), fp)
+        d = verdict.diag
+        if verdict.reason != "aligned" or verdict.offset_s is None:
+            _log.info(
+                "align_local: candidato rifiutato (%s%s)",
+                verdict.reason,
+                f", score {d.score:.2f}" if d else "",
+            )
+            continue
+        offset = verdict.offset_s
+        if abs(offset) >= 0.5 and not srt.retime(path, offset, 1.0):
+            continue
+        print(
+            f"nstream: sottotitoli allineati all'audio del file (offset {offset:+.1f}s)",
+            file=sys.stderr,
+        )
+        return SubsPick((path,), "audio", offset_s=offset)
+    return pick
 
 
 def auto_subs(
@@ -305,30 +321,6 @@ def auto_subs(
             cfg, typ, video_id, work_dir,
             mode=opts.sub_mode, lang=opts.sub_lang, video_url=video_url, filename=filename,
         )  # fmt: skip
-    # ADR 0019: without a protocol hash match, let the media's own audio arbitrate the
-    # sync (the runtime-fit was falsified live: end-cue adherence picked a track 14 s
-    # late). An explicit manual retime is a user override → the auto pass steps aside.
-    manual_retime = bool(opts.sub_offset) or opts.sub_scale != 1.0
-    if (
-        pick.paths
-        and pick.match != "hash"
-        and not manual_retime
-        and cfg.sub_autosync
-        and video_url
-        and subsync.available()
-    ):
-        offset = subsync.measure_offset(
-            pick.paths[0], video_url, work_dir, window_s=cfg.sub_autosync_window_s
-        )
-        # Measure-then-apply: alass only reports the constant offset (gated for
-        # plausibility inside measure_offset); the intact original is retimed HERE, so
-        # alass's rewritten file (clamped negatives, fps rescale) never reaches the TV.
-        if offset is not None and (abs(offset) < 0.5 or retime_srt(pick.paths[0], offset, 1.0)):
-            pick = SubsPick(pick.paths, "audio")
-            print(
-                f"nstream: sottotitoli allineati all'audio (offset {offset:+.1f}s)",
-                file=sys.stderr,
-            )
     if pick.paths and (opts.sub_offset or opts.sub_scale != 1.0):
         for p in pick.paths:
             retime_srt(p, opts.sub_offset, opts.sub_scale)

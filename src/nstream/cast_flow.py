@@ -82,7 +82,8 @@ class CastOutcome:
     audio_verified: bool  # True when decided from real ffprobe tracks
     safety_sub_lang: str | None  # effective safety-subtitle language, or None
     sub_paths: tuple[str, ...]
-    sub_match: str | None  # "hash" (exact-file OSHash match) | "lang" (guess) | None
+    sub_match: str | None  # "hash" | "audio" (local-media aligned) | "lang" | None
+    sub_offset: float | None  # measured+applied correction when sub_match == "audio"
     subs_delivered: bool  # False when the delivery couldn't attach them (castbridge LOAD)
 
 
@@ -216,6 +217,11 @@ def run_cast(
             else None
         )
         if remux_path:
+            # Tier 2 of the subtitle pipeline (ADR 0020): the remux output IS the local
+            # media file the receiver will play — align the delivered subtitle against
+            # its real audio (free of network cost) before the VTT is built from it.
+            subs_pick = subs.align_local(cfg, subs_pick, remux_path, work_dir, opts)
+            sub_paths = subs_pick.paths
             pos, dur, advance, subs_delivered = remux.cast_file(
                 cfg, title, remux_path,
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang, follow=follow,
@@ -264,5 +270,6 @@ def run_cast(
         reencoded=reencoded, notice=notice,
         audio_lang=plan.real_lang, audio_verified=plan.verified,
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
-        sub_match=subs_pick.match, subs_delivered=subs_delivered,
+        sub_match=subs_pick.match, sub_offset=subs_pick.offset_s,
+        subs_delivered=subs_delivered,
     )  # fmt: skip

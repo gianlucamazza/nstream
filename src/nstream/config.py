@@ -185,12 +185,11 @@ class Config:
     # fetch cost). 0 = never auto-switch (always remux). Only applies when the mirror backend
     # is available; `cast_mode: "mirror"`/`--mirror` still force the mirror regardless.
     cast_mirror_over_remux_gb: int = 10
-    # ADR 0019: audio-anchored subtitle correction (alass optdepend), EXPERIMENTAL and
-    # off by default: windowed alass measurement was field-falsified twice on 2026-07-16
-    # (bounded windows yield noise on real content). When on, it only applies an offset
-    # when three dialogue-dense windows agree (consensus gate) — no fabricated sync.
-    sub_autosync: bool = False
-    sub_autosync_window_s: int = 300
+    # ADR 0020: audio-anchored subtitle alignment against the LOCAL media file (the
+    # Tier-2 remux output). Full-signal, confidence-gated, refusal-first; the sparse
+    # remote mode was measured unviable (100-300 MB/cast) and lives only in the bench.
+    sub_align: bool = True
+    sub_align_budget_s: int = 240
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
@@ -299,7 +298,7 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "mirror_bitrate": (0, 100_000_000),
     "mirror_playout_ms": (0, 5000),
     "cast_mirror_over_remux_gb": (0, 1000),
-    "sub_autosync_window_s": (60, 3600),
+    "sub_align_budget_s": (60, 600),
     "min_seeders": (0, 100),
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
@@ -395,6 +394,8 @@ def load() -> Config:
         engine_download_dir=str(raw.get("engine_download_dir", Config.engine_download_dir) or ""),
         p2p_ack=bool(raw.get("p2p_ack", Config.p2p_ack)),
         p2p_require_vpn=bool(raw.get("p2p_require_vpn", Config.p2p_require_vpn)),
+        sub_align=bool(raw.get("sub_align", Config.sub_align)),
+        sub_align_budget_s=_bounded_int(raw, "sub_align_budget_s", Config.sub_align_budget_s),
     )
 
 

@@ -52,6 +52,7 @@ _N_MIN = 6
 _D_MIN_S, _D_MAX_S = 4.0, 30.0  # per-probe duration bounds
 _USABLE = (0.03, 0.97)  # skip intro/credits fractions (music-heavy)
 _FFMPEG_TIMEOUT = 20.0
+_FFMPEG_LOCAL_TIMEOUT = 180.0  # one full-file decode pass (local IO, CPU-bound)
 _MAX_WORKERS = 4
 
 # --- signal ---------------------------------------------------------------------
@@ -67,7 +68,10 @@ _INFORMATIVE = (0.05, 0.90)  # windows outside this speech-fraction are excluded
 # --- alignment ------------------------------------------------------------------
 _SEARCH_S = 120.0  # |δ| search bound
 _STEPS = (0.25, 0.05, 0.01)  # hierarchical grid
-_MIN_DEN_S = 8.0  # anti-degenerate coverage floor per score evaluation
+_MIN_DEN_S = 8.0  # anti-degenerate coverage floor per score evaluation (full fingerprint)
+_MIN_DEN_ONE_S = 2.0  # per-window floor (a single window holds only a few sub seconds)
+_VOTE_TOL_S = 0.75  # peak clustering tolerance for the cross-window vote
+_VOTE_PEAKS_K = 6  # peaks each window may nominate
 
 # --- verdict gates (initial values; Phase-0 calibrated with ≥30% margin) ----------
 _MIN_SCORE = 0.50
@@ -93,6 +97,7 @@ _REASONS = frozenset(
         "low_coverage",
         "low_score",
         "ambiguous_peak",
+        "cross_window_disagree",
         "split_half_disagree",
         "drift_suspected",
         "implausible_offset",
@@ -122,6 +127,8 @@ class Alignment:
     cues_in_window: int
     split_delta: float  # |δ(even windows) − δ(odd windows)|
     drift_total_s: float  # |per-window residual slope| × duration
+    votes: int  # windows whose own peak list supports the winning δ
+    windows_n: int  # informative windows available for the vote
 
 
 @dataclass(frozen=True)
@@ -203,7 +210,9 @@ def _to_abs(t0: float, t_rel: float) -> float:
     return t0 + t_rel
 
 
-def _rms_series(url: str, t0: float, d: float) -> list[tuple[float, float]] | None:
+def _rms_series(
+    url: str, t0: float, d: float, *, timeout: float = _FFMPEG_TIMEOUT
+) -> list[tuple[float, float]] | None:
     """(t_rel, rms_db) at 100 ms resolution for the window, or None on failure."""
     proc = util.run_cmd(
         [
@@ -224,13 +233,16 @@ def _rms_series(url: str, t0: float, d: float) -> list[tuple[float, float]] | No
             "-sn",
             "-dn",
             "-af",
-            f"{_SPEECH_FILTER},astats=metadata=1:reset=0.1,"
+            # asetnsamples makes 100 ms frames; astats reset=1 → per-frame RMS. `reset`
+            # takes INTEGER frames: a fractional value silently disables the reset and
+            # the cumulative RMS flattens all contrast (found live in Phase 0).
+            f"{_SPEECH_FILTER},asetnsamples=n=4800,astats=metadata=1:reset=1,"
             "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
             "-f",
             "null",
             "-",
         ],  # fmt: skip
-        timeout=_FFMPEG_TIMEOUT,
+        timeout=timeout,
     )
     if proc is None or proc.returncode != 0:
         return None
@@ -361,6 +373,7 @@ def probe(
     size_bytes: int,
     *,
     budget_s: float = 30.0,
+    budget_bytes: int = _BUDGET_BYTES,
     cue_starts: list[float] | None = None,
 ) -> Fingerprint | str:
     """Extract the media's sparse speech fingerprint, or a refusal reason. Network is
@@ -369,7 +382,7 @@ def probe(
     # not here — the Phase-0 bench legitimately probes through a local counting proxy.
     if not available():
         return "no_ffmpeg"
-    plan = plan_probes(duration, size_bytes, cue_starts or [])
+    plan = plan_probes(duration, size_bytes, cue_starts or [], budget_bytes=budget_bytes)
     if isinstance(plan, str):
         return plan
     deadline = time.monotonic() + max(budget_s - 5.0, 5.0)
@@ -397,6 +410,43 @@ def probe(
     windows = tuple(w for w, _ in results)
     speech = tuple(s for _, spans in results for s in spans)
     return Fingerprint(duration=duration, windows=windows, speech=speech)
+
+
+def probe_local(path: str, *, duration: float, segments: int = 8) -> Fingerprint | str:
+    """Full-signal fingerprint from a LOCAL media file (the Tier-2 remux cast: the whole
+    file is already on disk, so the audio evidence is free — no network, only one ffmpeg
+    decode pass). The full RMS series is split into `segments` VIRTUAL windows so the
+    cross-window vote, split-half and drift gates keep their power: each segment holds
+    minutes of speech instead of seconds. This is the regime where interval alignment is
+    proven; the sparse remote mode remains bench-only (Phase 0 measured its budget at
+    100-300 MB/cast — see ADR 0020)."""
+    if not available():
+        return "no_ffmpeg"
+    if duration <= 60 or segments < 4:
+        return "no_media_geometry"
+    series = _rms_series(path, 0.0, duration, timeout=_FFMPEG_LOCAL_TIMEOUT)
+    if not series:
+        return "probe_failures"
+    seg_len = duration / segments
+    windows: list[Span] = []
+    speech: list[Span] = []
+    for i in range(segments):
+        t0, t1 = i * seg_len, (i + 1) * seg_len
+        chunk = [(t, v) for t, v in series if t0 <= t < t1]
+        if len(chunk) < 50:
+            continue
+        spans = _spans_from_rms(chunk)
+        eff: Span = (t0 + (_WARMUP_S if i == 0 else 0.0) + _EDGE_S, t1 - _EDGE_S)
+        clipped = [(max(s, eff[0]), min(e, eff[1])) for s, e in spans if e > eff[0] and s < eff[1]]
+        frac = sum(e - s for s, e in clipped) / (eff[1] - eff[0])
+        if not (_INFORMATIVE[0] <= frac <= _INFORMATIVE[1]):
+            continue
+        windows.append(eff)
+        speech.extend(clipped)
+    if len(windows) < max(4, segments - 2):
+        _log.info("subalign: %d/%d segmenti utili → low_speech", len(windows), segments)
+        return "low_speech"
+    return Fingerprint(duration=duration, windows=tuple(windows), speech=tuple(speech))
 
 
 # --- alignment (pure) ----------------------------------------------------------------
@@ -429,22 +479,39 @@ def _prefilter(sub_spans: list[Span], windows: tuple[Span, ...]) -> list[Span]:
     return out
 
 
-def _score(sub: list[Span], fp: Fingerprint, delta: float) -> tuple[float, float, int]:
-    """(score, den_seconds, cues_in_window) at one δ."""
-    den = _total_overlap(sub, fp.windows, delta)
-    if den < _MIN_DEN_S:
-        return 0.0, den, 0
-    num = _total_overlap(sub, fp.speech, delta)
+def _score(
+    sub: list[Span], fp: Fingerprint, delta: float, *, min_den: float = _MIN_DEN_S
+) -> tuple[float, float, int]:
+    """(score, sub_coverage_seconds, cues_in_window) at one δ.
+
+    Score = BALANCED AGREEMENT of the two binary signals inside the probed windows:
+    (speech∩cue + silence∩non-cue) / |windows|. Precision-only overlap flat-lined in
+    Phase 0 (dialogue-dense windows → the base rate dominates and every δ scores the
+    same); agreement also rewards CONCORDANT SILENCE, where the discriminating signal
+    actually lives. For uncorrelated signals it sits near f·g+(1−f)(1−g); at the true
+    δ it approaches 1."""
+    w_total = sum(e - s for s, e in fp.windows)
+    if w_total <= 0:
+        return 0.0, 0.0, 0
+    sub_in_w = _total_overlap(sub, fp.windows, delta)
+    if sub_in_w < min_den:
+        return 0.0, sub_in_w, 0
+    speech_in_w = sum(e - s for s, e in fp.speech)  # speech is already window-clipped
+    both = _total_overlap(sub, fp.speech, delta)
+    agree = 2.0 * both + w_total - sub_in_w - speech_in_w
     cues = sum(1 for s, e in sub if any(e + delta > w0 and s + delta < w1 for w0, w1 in fp.windows))
-    return num / den, den, cues
+    return agree / w_total, sub_in_w, cues
 
 
-def _grid_best(sub: list[Span], fp: Fingerprint, center: float, half: float, step: float):
+def _grid_best(
+    sub: list[Span], fp: Fingerprint, center: float, half: float, step: float,
+    *, min_den: float = _MIN_DEN_S,
+):  # fmt: skip
     best = (-1.0, 0.0)  # (score, delta)
     curve: list[tuple[float, float]] = []
     d = center - half
     while d <= center + half + 1e-9:
-        sc, _, _ = _score(sub, fp, d)
+        sc, _, _ = _score(sub, fp, d, min_den=min_den)
         curve.append((d, sc))
         if sc > best[0]:
             best = (sc, d)
@@ -453,12 +520,39 @@ def _grid_best(sub: list[Span], fp: Fingerprint, center: float, half: float, ste
 
 
 def _local_best(sub: list[Span], fp_one: Fingerprint, center: float) -> float:
-    d, _ = _grid_best(sub, fp_one, center, 3.0, 0.05)
+    d, _ = _grid_best(sub, fp_one, center, 3.0, 0.05, min_den=_MIN_DEN_ONE_S)
     return d
 
 
+def _local_maxima(curve: list[tuple[float, float]], k: int = 6) -> list[float]:
+    """Top-k separated local maxima deltas of a coarse curve (peaks ≥ 2 s apart)."""
+    peaks = [
+        (sc, d)
+        for i, (d, sc) in enumerate(curve)
+        if sc > 0
+        and (i == 0 or curve[i - 1][1] <= sc)
+        and (i == len(curve) - 1 or curve[i + 1][1] < sc)
+    ]
+    peaks.sort(reverse=True)
+    picked: list[float] = []
+    for _, d in peaks:
+        if all(abs(d - q) >= 2.0 for q in picked):
+            picked.append(d)
+        if len(picked) >= k:
+            break
+    return picked
+
+
 def align(sub_spans: list[Span] | tuple[Span, ...], fp: Fingerprint) -> Verdict:
-    """Pure alignment of one candidate against the fingerprint. No I/O, no clock."""
+    """Pure alignment of one candidate against the fingerprint. No I/O, no clock.
+
+    CROSS-WINDOW VOTE (Phase-0 lesson): a global score curve over sparse windows is
+    nearly flat and quasi-periodic dialogue creates spurious global peaks that beat the
+    true one by a hair — but those peaks are INCONSISTENT across windows, while the true
+    δ recurs in most of them. Each window therefore nominates its own top peaks; only
+    δ clusters supported by a majority of windows are refined on the full fingerprint,
+    and the runner-up is the best OTHER supported cluster (a real alternative, not
+    curve noise)."""
     sub_all = sorted(sub_spans)
     if not sub_all:
         return Verdict(None, 1.0, "no_cues", None)
@@ -466,33 +560,61 @@ def align(sub_spans: list[Span] | tuple[Span, ...], fp: Fingerprint) -> Verdict:
     if not sub:
         return Verdict(None, 1.0, "low_coverage", None)
 
-    # hierarchical search
-    center = 0.0
-    half = _SEARCH_S
-    coarse_curve: list[tuple[float, float]] = []
-    for i, step in enumerate(_STEPS):
-        center, curve = _grid_best(sub, fp, center, half, step)
-        if i == 0:
-            coarse_curve = curve
-        half = _STEPS[i] * 8  # refine around the previous argmax
+    # 1. per-window peak nomination (each window sees only its own zone of cues)
+    singles: list[Fingerprint] = [
+        Fingerprint(fp.duration, (w,), _clip_speech(fp.speech, (w,))) for w in fp.windows
+    ]
+    nominations: list[list[float]] = []
+    for fp1 in singles:
+        local_sub = _prefilter(sub_all, fp1.windows)
+        if not local_sub:
+            nominations.append([])
+            continue
+        _, curve = _grid_best(local_sub, fp1, 0.0, _SEARCH_S, _STEPS[0], min_den=_MIN_DEN_ONE_S)
+        nominations.append(_local_maxima(curve, _VOTE_PEAKS_K))
 
-    best_delta = center
-    best_score, coverage, cues = _score(sub, fp, best_delta)
-    runner = max((sc for d, sc in coarse_curve if abs(d - best_delta) > _EXCLUDE_S), default=0.0)
+    # 2. cluster nominations across windows (≤ _VOTE_TOL_S apart = same candidate δ)
+    flat = sorted(d for ps in nominations for d in ps)
+    clusters: list[tuple[float, int]] = []  # (center, votes)
+    for d in flat:
+        for i, (c, n) in enumerate(clusters):
+            if abs(d - c) <= _VOTE_TOL_S:
+                clusters[i] = ((c * n + d) / (n + 1), n + 1)
+                break
+        else:
+            clusters.append((d, 1))
+    voting = sum(1 for ps in nominations if ps)
+    need = max(3, (voting + 1) // 2)
+    supported = sorted((c for c in clusters if c[1] >= need), key=lambda c: -c[1])
+    if not supported:
+        best_votes = max((n for _, n in clusters), default=0)
+        diag = Alignment(0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, best_votes, voting)
+        return Verdict(None, 1.0, "cross_window_disagree", diag)
 
-    # split-half agreement (even vs odd informative windows)
+    # 3. refine each supported cluster on the FULL fingerprint; best refined wins
+    refined: list[tuple[float, float, int]] = []  # (score, delta, votes)
+    for center, votes in supported:
+        d1, _ = _grid_best(sub, fp, center, 1.5, _STEPS[1])
+        d2, _ = _grid_best(sub, fp, d1, _STEPS[1] * 2, _STEPS[2])
+        sc, _, _ = _score(sub, fp, d2)
+        refined.append((sc, d2, votes))
+    refined.sort(reverse=True)
+    best_score, best_delta, best_votes = refined[0]
+    _, coverage, cues = _score(sub, fp, best_delta)
+    runner = refined[1][0] if len(refined) > 1 else 0.0
+
+    # 4. split-half agreement (even vs odd informative windows) around the winner
     even = Fingerprint(fp.duration, fp.windows[0::2], _clip_speech(fp.speech, fp.windows[0::2]))
     odd = Fingerprint(fp.duration, fp.windows[1::2], _clip_speech(fp.speech, fp.windows[1::2]))
     split = 0.0
     if len(even.windows) >= 2 and len(odd.windows) >= 2:
         split = abs(_local_best(sub, even, best_delta) - _local_best(sub, odd, best_delta))
 
-    # drift: per-window local best vs window center, least-squares slope
+    # 5. drift: per-window local best vs window center, least-squares slope
     drift_total = 0.0
     pts: list[tuple[float, float]] = []
-    for w in fp.windows:
-        fp_one = Fingerprint(fp.duration, (w,), _clip_speech(fp.speech, (w,)))
-        pts.append(((w[0] + w[1]) / 2, _local_best(sub, fp_one, best_delta)))
+    for w, fp1 in zip(fp.windows, singles, strict=True):
+        pts.append(((w[0] + w[1]) / 2, _local_best(sub, fp1, best_delta)))
     if len(pts) >= 3:
         xs = [x for x, _ in pts]
         ys = [y for _, y in pts]
@@ -505,6 +627,7 @@ def align(sub_spans: list[Span] | tuple[Span, ...], fp: Fingerprint) -> Verdict:
     diag = Alignment(
         offset=best_delta, score=best_score, runner_up=runner, coverage_s=coverage,
         cues_in_window=cues, split_delta=split, drift_total_s=drift_total,
+        votes=best_votes, windows_n=voting,
     )  # fmt: skip
     return _judge(diag)
 
@@ -526,8 +649,11 @@ def _judge(a: Alignment) -> Verdict:
         return Verdict(None, 1.0, "low_coverage", a)
     if a.score < _MIN_SCORE:
         return Verdict(None, 1.0, "low_score", a)
-    if a.score - a.runner_up < _PEAK_DELTA or (
-        a.runner_up > 0 and a.score / a.runner_up < _PEAK_RATIO
+    if a.votes < max(3, (a.windows_n + 1) // 2):
+        return Verdict(None, 1.0, "cross_window_disagree", a)
+    # runner_up is the best OTHER majority-supported cluster: a real alternative.
+    if a.runner_up > 0 and (
+        a.score - a.runner_up < _PEAK_DELTA or a.score / a.runner_up < _PEAK_RATIO
     ):
         return Verdict(None, 1.0, "ambiguous_peak", a)
     if a.split_delta > _MAX_SPLIT_S:

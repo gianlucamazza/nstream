@@ -184,7 +184,8 @@ def main(argv: list[str]) -> int:
         t_start = time.monotonic()
         got = subalign.probe(
             url, duration, size,
-            budget_s=60.0, cue_starts=[s for s, _ in cue_sets[0]],
+            budget_s=120.0, budget_bytes=args.budget_mb * 1_000_000,
+            cue_starts=[s for s, _ in cue_sets[0]],
         )  # fmt: skip
         wall = time.monotonic() - t_start
         if isinstance(got, str):
