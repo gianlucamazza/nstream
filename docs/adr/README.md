@@ -28,5 +28,9 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0014](0014-verified-cache-preranking.md)            | Verify cached availability before committing to a pick                             | Accepted |
 | [0015](0015-mirror-over-4k-remux.md)                 | Prefer the realtime mirror over a 4K remux for Dolby-only releases                 | Accepted |
 | [0016](0016-receiver-track-observability.md)         | Surface the receiver's real track + error state                                    | Accepted |
+| [0017](0017-cast-video-codec-vetting.md)             | Vet the REAL video codec before casting                                            | Accepted |
+| [0018](0018-subtitle-hash-match-and-retime.md)       | Subtitle sync: exact-file hash match + manual retime                               | Accepted |
+| [0019](0019-audio-anchored-subtitle-sync.md)         | Audio-anchored subtitle sync via alass                                             | Superseded by 0020 |
+| [0020](0020-native-subtitle-alignment.md)            | Native sparse-evidence subtitle alignment and audio arbitration                    | Accepted |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

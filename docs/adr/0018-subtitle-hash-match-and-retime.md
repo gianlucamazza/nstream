@@ -54,3 +54,9 @@ fixed at LOAD. Any correction must therefore land in the FILE, upstream of both 
   common — measure before optimizing.
 - Changing the retime on a running cast requires a re-cast (caption track is fixed at
   LOAD); resume makes that cheap.
+
+## Post-scriptum (2026-07-16)
+
+The runtime-fit refinement (last-cue adherence) was field-falsified the same day
+and is superseded by ADR 0020; hash-first matching, the manual retime and the
+honest `subtitles_match` reporting stand.

@@ -76,21 +76,21 @@ Modules in `src/nstream/`:
   and the headless volume guard stay in the callers (`cli`/`headless`). Same tier as
   `stream_select`: imports `caster`/`engine`/`mirror`/`remux`/`quality`/`stream_select`/`subs`/
   `config`/`log`/`ui`; never `cli`.
-- `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download),
-  `auto_subs` (no-menu paths + safety-subtitle net → `SubsPick(paths, match)`; applies the
-  `--sub-offset`/`--sub-fps` retime, `retime_srt`), and `choose_tracks` (pre-play audio/sub fzf
-  menu). Ranking is hash-first within a language (ADR 0018): with the resolved stream url the
-  addon is also queried with the `videoHash`/`videoSize`/`filename` extras and exact-file
-  matches win. Leaf below `cli`; imports `api`/`oshash`/`picker`/`tracks`/`labels`/`ui`/`config`.
-- `srt.py` — subtitle text-format toolbox: `decode` (UTF-8→latin-1, accent-safe), `retime`
-  (in-place t'=t·scale+offset, UTF-8 out), `to_vtt` (Cast caption track), `cue_spans` (the
-  alignment engine's view). Top-tier leaf (imports nothing from nstream); the single owner of
-  subtitle TEXT concerns — delivery (`caster`/`remux`) uses it directly, never `subs`.
-- `oshash.py` — OpenSubtitles moviehash of a remote stream via two 64 KB ranged HTTP reads
-  (`hash_url` → `(hash, size)`, best-effort None). Leaf (stdlib + `log`); never logs the URL.
-- `subsync.py` — audio-anchored subtitle correction (ADR 0019): bounded ffmpeg audio segment
-  from the resolved url + `alass --no-split` → constant offset fixed in place; best-effort
-  `(ran, offset)`. Gated on the alass optdepend. Leaf (`log`/`util` + stdlib).
+- `subs.py` — subtitle selection pipeline as evidence tiers (ADR 0020): `_pick` (oshash +
+  `videoHash`/`videoSize`/`filename` extras, hash-first within language) → tier 1 protocol hash
+  (`m=="h"`) → tier 3 honest "lang" guess carrying the same-language `alternates`; tier 2 is
+  `align_local` (called by `cast_flow` after a Tier-2 remux): full-signal audio alignment of the
+  delivered SRT against the remux output via `subalign`, measure-then-apply with alternate
+  fallback. `auto_subs` → `SubsPick(paths, match∈{hash,audio,lang}, offset_s, alternates)`;
+  manual `--sub-offset`/`--sub-fps` overrides everything. Also `choose_tracks` (pre-play menu),
+  `_download_subtitle`, `available_subtitle_langs`. Imports `api`/`log`/`oshash`/`srt`/
+  `subalign`/`tracks`/`ui` (+`config`/`labels`/`picker`); never `cli`.
+- `subalign.py` — native alignment engine (ADR 0020), leaf (`log`/`util` + stdlib; ffmpeg is the
+  only external tool): `probe_local` (full-signal fingerprint of a LOCAL file, virtual
+  segmentation) / `probe` (sparse remote — bench-only, measured unviable at sane budgets),
+  `align` (PURE: balanced-agreement score, cross-window peak vote, multi-gate Verdict with typed
+  refusal reasons — no confidence scalar). Recorded fixtures in `tests/data/` are the permanent
+  gate; Phase-0 bench = `python -m nstream.subalign` (`_bench.py`).
 - `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
   `display_title`/`track_label`/`audio_summary`/`sub_summary`). Reads active caps on demand via
   `ui.active_caps()`. Top tier: imports only `ui`/`quality`/`tracks`/`config`.
