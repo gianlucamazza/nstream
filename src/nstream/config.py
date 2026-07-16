@@ -185,11 +185,12 @@ class Config:
     # fetch cost). 0 = never auto-switch (always remux). Only applies when the mirror backend
     # is available; `cast_mode: "mirror"`/`--mirror` still force the mirror regardless.
     cast_mirror_over_remux_gb: int = 10
-    # ADR 0019: audio-anchored subtitle correction (alass optdepend). When the pick is
-    # not a protocol hash match, a bounded audio segment of the stream arbitrates the
-    # constant offset. Zero cost when alass is absent or a real hash match exists.
-    sub_autosync: bool = True
-    sub_autosync_window_s: int = 900
+    # ADR 0019: audio-anchored subtitle correction (alass optdepend), EXPERIMENTAL and
+    # off by default: windowed alass measurement was field-falsified twice on 2026-07-16
+    # (bounded windows yield noise on real content). When on, it only applies an offset
+    # when three dialogue-dense windows agree (consensus gate) — no fabricated sync.
+    sub_autosync: bool = False
+    sub_autosync_window_s: int = 300
     # Autoplay the next episode of a series via the in-video overlay.
     autoplay: bool = True
     # Seconds before the end of an episode at which the overlay appears.
