@@ -466,17 +466,31 @@ def _auto_play(
                     }
                 )
 
-            # Shared decision tree (see cast_flow.run_cast): vet the audio plan, then
-            # mirror / Tier-2 remux / direct. Default fire-and-return unless --follow;
-            # no in-cast switch (headless has no 'a' key) → allow_lang_switch stays False.
-            outcome = cast_flow.run_cast(
-                cfg, results, chosen,
-                device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
-                opts=opts, start=start, follow=bool(args.follow),
-                meta=cast_meta or caster.CastMeta(),
-                on_event=on_cast_event if args.follow else None,
-                safety_sub_lang=vetted.safety_sub_lang,
-            )  # fmt: skip
+            # Shared decision tree (see cast_flow.run_cast): vet the video codec and the
+            # audio plan, then mirror / Tier-2 remux / direct. Default fire-and-return
+            # unless --follow; no in-cast switch (headless has no 'a' key) →
+            # allow_lang_switch stays False.
+            try:
+                outcome = cast_flow.run_cast(
+                    cfg, results, chosen,
+                    device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
+                    opts=opts, start=start, follow=bool(args.follow),
+                    meta=cast_meta or caster.CastMeta(),
+                    on_event=on_cast_event if args.follow else None,
+                    safety_sub_lang=vetted.safety_sub_lang,
+                )  # fmt: skip
+            except cast_flow.CastVideoUnsupported as e:
+                _emit_json(
+                    {
+                        "ok": False,
+                        "error": "video_codec_unsupported",
+                        "message": f"video {e.codec} non decodificabile dal Chromecast e "
+                        "nessuna release alternativa castabile; riprova con --local "
+                        "o con un'altra qualità (--quality)",
+                        "video_codec": e.codec,
+                    }
+                )
+                return 1
             chosen = outcome.stream
             stream_block = _stream_block(cfg, chosen)  # may have been reselected
             if outcome.audio_lang:

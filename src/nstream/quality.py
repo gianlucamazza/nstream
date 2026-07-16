@@ -169,6 +169,15 @@ def _parse_codec(text: str) -> str:
         return "hevc"
     if re.search(r"x264|h\.?264|\bavc\b", text, re.I):
         return "h264"
+    # Legacy tokens AFTER the modern ones: "MPEG-4 AVC" in a remux name must stay h264.
+    # These codecs exist only in pre-2010 rips no receiver decodes (ADR 0017) — naming
+    # them here (instead of "") denies them the unknown-codec benefit of the doubt.
+    if re.search(r"xvid|divx|\bmp4v\b|\bmpe?g-?4\b", text, re.I):
+        return "mpeg4"
+    if re.search(r"\bmpe?g-?[12]\b", text, re.I):
+        return "mpeg2"
+    if re.search(r"\bvc-?1\b|\bwmv\b", text, re.I):
+        return "vc1"
     return ""
 
 
@@ -319,6 +328,15 @@ def preferred_hwdec(caps: Caps) -> str | None:
     return None and let mpv decide. Verified live on Iris Xe: `vaapi` decodes zero-copy
     cleanly even under `gpu-api=vulkan`."""
     return "vaapi" if caps.vaapi else None
+
+
+# Video codecs (ffprobe `codec_name`) the Default Media Receiver actually renders. The
+# probe-time twin of `cast_caps().codecs` (name-guess): `stream_select` checks the REAL
+# codec of a resolved stream against this before casting, because a release whose name
+# tags no codec gets the benefit of the doubt in ranking — and an MPEG-4 ASP/DivX rip
+# then "plays" as PLAYING + black screen with no receiver error (ADR 0017). AV1 is left
+# out to match `cast_caps` (not guaranteed on older models).
+CAST_VIDEO_DECODABLE = frozenset({"h264", "hevc", "vp8", "vp9"})
 
 
 def cast_caps() -> Caps:

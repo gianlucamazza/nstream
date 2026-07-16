@@ -1056,3 +1056,78 @@ def test_reselect_verified_direct_beats_tagged_guess(monkeypatch):
     )  # fmt: skip
     plan = stream_select._reselect_cast_for_lang(_ccfg(), [], wrong, "ita")
     assert plan is not None and plan.stream is real and plan.verified is True
+
+
+# --- cast video-codec vetting (vet_cast_video, ADR 0017) ---------------------
+
+
+def _video_env(monkeypatch, codecs, candidates=()):
+    """Wire the probe seam: `codecs` maps url → probed video codec ("" = unprobeable);
+    `candidates` are the ranked cast-playable alternatives (as _R stand-ins)."""
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks",
+        lambda url: stream_select.tracks.Tracks(video_codec=codecs.get(url, "")),
+    )  # fmt: skip
+    monkeypatch.setattr(stream_select, "_cast_playable", lambda cfg, results: list(candidates))
+
+
+def test_vet_cast_video_passes_supported_and_unknown(monkeypatch):
+    good: Stream = {"url": "good"}
+    unknown: Stream = {"url": "nope"}
+    _video_env(monkeypatch, {"good": "h264"})
+    assert stream_select.vet_cast_video(_ccfg(), [], good) == (good, "")
+    # Unprobeable keeps the benefit of the doubt, mirroring the audio vetting's stance.
+    assert stream_select.vet_cast_video(_ccfg(), [], unknown) == (unknown, "")
+
+
+def test_vet_cast_video_reselects_castable_candidate(monkeypatch, capsys):
+    bad: Stream = {"url": "divx"}
+    alt: Stream = {"url": "h264-rel"}
+    _video_env(monkeypatch, {"divx": "mpeg4", "h264-rel": "h264"}, [_R(alt, frozenset())])
+    assert stream_select.vet_cast_video(_ccfg(), [bad, alt], bad) == (alt, "")
+    assert "MPEG4" in capsys.readouterr().err
+
+
+def test_vet_cast_video_reports_codec_when_no_candidate(monkeypatch):
+    """Nothing castable: the caller gets the codec verdict (mirror fallback or explicit
+    failure) — never a silent black cast."""
+    bad: Stream = {"url": "divx"}
+    worse: Stream = {"url": "vc1-rel"}
+    _video_env(monkeypatch, {"divx": "mpeg4", "vc1-rel": "vc1"}, [_R(worse, frozenset())])
+    assert stream_select.vet_cast_video(_ccfg(), [bad, worse], bad) == (bad, "mpeg4")
+
+
+def test_vet_cast_video_respects_probe_cap(monkeypatch):
+    bad: Stream = {"url": "divx"}
+    dead = [_R({"url": f"u{i}"}, frozenset()) for i in range(6)]
+    probed: list[str] = []
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks",
+        lambda url: probed.append(url)
+        or stream_select.tracks.Tracks(video_codec="mpeg4"),
+    )  # fmt: skip
+    monkeypatch.setattr(stream_select, "_cast_playable", lambda cfg, results: dead)
+    stream, verdict = stream_select.vet_cast_video(_ccfg(), [], bad, probe_cap=2)
+    assert (stream, verdict) == (bad, "mpeg4")
+    assert len(probed) == 3  # chosen + exactly probe_cap candidates
+
+
+def test_reselect_for_lang_skips_undecodable_video(monkeypatch):
+    """Live regression (Coherence, 2026-07-16): the ITA-dub reselect picked a cached DivX
+    rip the DMR renders as a black screen. A candidate whose probed video the receiver
+    can't decode is not a candidate — silent-wrong-language must not become black-screen."""
+    chosen: Stream = {"url": "eng-only"}
+    divx: Stream = {"url": "divx-ita"}
+
+    def probe(url):
+        if url == "divx-ita":
+            return stream_select.tracks.Tracks(audio=[Track(1, "ita", "aac")], video_codec="mpeg4")
+        return stream_select.tracks.Tracks(audio=[Track(1, "eng", "aac")], video_codec="h264")
+
+    monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results: [_R(divx, frozenset({"ita"}))],
+    )  # fmt: skip
+    plan = stream_select.vet_cast_audio(_ccfg(), [chosen, divx], chosen, "ita")
+    assert plan.stream is chosen and plan.mode == "absent"  # fallback + safety subs, not black

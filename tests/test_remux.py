@@ -25,6 +25,10 @@ def _state(tmp_path, monkeypatch):
 
     monkeypatch.setattr(remux, "_state_path", lambda: tmp_path / "remux.json")
     monkeypatch.setattr(remux, "_cache_dir", lambda: tmp_path)
+    # Hermeticity: the free-disk pre-check must not read the HOST's real /tmp usage
+    # (a nearly-full tmpfs made the remux refuse and three tests fail). Tests that
+    # exercise the guard itself re-stub this with their own value.
+    monkeypatch.setattr(remux, "_free_gb", lambda path: 100.0)
     tracks.clear_cache()  # _probe_meta reads the per-url probe memo — keep tests isolated
     yield
     tracks.clear_cache()

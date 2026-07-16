@@ -164,6 +164,14 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
 - `no_streams` — title found but no sources (often "not released yet"); surface `message`.
 - `no_playable_stream` — sources exist but none pass the hardware/cast filters; try `--local`,
   or a lower tier with `--quality 1080` / `720`.
+- `video_codec_unsupported` — the REAL (ffprobe-verified) video codec of every candidate is one
+  the Chromecast can't render (e.g. a DivX/MPEG-4 ASP rip) and the mirror fallback isn't
+  available — casting would show a black screen. `video_codec` carries the codec; offer
+  `--local` (mpv decodes anything) or a different `--quality`.
+- `video_codec_unsupported` — the REAL (ffprobe-verified) video codec of every candidate is one
+  the Chromecast can't render (e.g. a DivX/MPEG-4 ASP rip) and the mirror fallback isn't
+  available — casting would show a black screen. `video_codec` carries the codec; offer
+  `--local` (mpv decodes anything) or a different `--quality`.
 - `audio_lang_unavailable` — the requested `--audio-lang` isn't in any (remaining) stream; show
   the `available_audio` list and ask which dub to use (or drop `--audio-lang`).
 - `quality_unavailable` — the requested `--quality` isn't among playable streams; show

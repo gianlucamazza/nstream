@@ -46,6 +46,9 @@ class Tracks:
     # Dolby-Vision dual-layer source) and duration in seconds (feeds the progress line).
     n_video: int = 0
     duration: float = 0.0
+    # Real codec of the first video stream ("" = no video/probe failed) — the cast video
+    # vetting (`stream_select.vet_cast_video`, ADR 0017) reads it from the same probe.
+    video_codec: str = ""
 
     def empty(self) -> bool:
         return not self.audio and not self.subs
@@ -56,10 +59,13 @@ def _parse_ffprobe(data: dict) -> Tracks:
     audio: list[Track] = []
     subs: list[Track] = []
     n_video = 0
+    video_codec = ""
     for s in data.get("streams", []):
         kind = s.get("codec_type")
         if kind == "video":
             n_video += 1
+            if not video_codec:
+                video_codec = str(s.get("codec_name") or "")
         if kind not in ("audio", "subtitle"):
             continue
         bucket = audio if kind == "audio" else subs
@@ -77,7 +83,9 @@ def _parse_ffprobe(data: dict) -> Tracks:
         duration = float((data.get("format") or {}).get("duration") or 0.0)
     except (TypeError, ValueError):
         duration = 0.0
-    return Tracks(audio=audio, subs=subs, n_video=n_video, duration=duration)
+    return Tracks(
+        audio=audio, subs=subs, n_video=n_video, duration=duration, video_codec=video_codec
+    )
 
 
 # Per-url probe memo (see module docstring): failures (empty Tracks) are cached on purpose.
