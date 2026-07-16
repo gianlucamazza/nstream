@@ -502,3 +502,48 @@ def test_run_cast_video_verdict_cleared_by_audio_reselect(monkeypatch):
     )  # fmt: skip
     out = _run(_opts(), stream)
     assert seen["cast_url"] == good["url"] and out.action == "cast"
+
+
+# --- local-media subtitle alignment wiring (ADR 0020) -------------------------
+
+
+def test_remux_path_runs_align_local_on_remux_output(monkeypatch):
+    """Tier 2 of the subtitle pipeline runs against the REMUX OUTPUT (the file the
+    receiver plays), after the remux and before the VTT is built: the aligned paths
+    must be what cast_file serves, and the outcome must carry match/offset."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(
+        cast_flow.remux,
+        "remux_for_cast",
+        lambda url, cfg, *, audio_index, size_gb=0.0: "/tmp/out.mp4",
+    )
+    aligned = subs.SubsPick(("/tmp/ita-aligned.srt",), "audio", offset_s=-7.5)
+    calls = []
+    monkeypatch.setattr(
+        cast_flow.subs, "align_local",
+        lambda cfg, pick, media, wd, opts: calls.append((pick.match, media)) or aligned,
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_file",
+        lambda cfg, title, path, **k: (
+            seen.update(served_subs=k.get("sub_paths")) or (0.0, 0.0, False, True)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("direct cast must not run"))
+    out = _run(_opts(), stream)
+    assert calls == [(None, "/tmp/out.mp4")]  # invoked once, on the remux output
+    assert seen["served_subs"] == ("/tmp/ita-aligned.srt",)  # the ALIGNED file is served
+    assert out.sub_match == "audio" and out.sub_offset == -7.5
+
+
+def test_direct_path_never_runs_align_local(monkeypatch):
+    """No remux → no local media → tier 2 must not run (honest lang delivery)."""
+    stream = dict(_STREAM)
+    _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.subs, "align_local", _boom("align_local must not run without a local file")
+    )
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, True))
+    out = _run(_opts(), stream)
+    assert out.sub_match is None and out.sub_offset is None
