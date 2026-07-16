@@ -33,6 +33,19 @@ MIRROR_NOT_NEEDED = (
     "nstream: audio decodificabile dal TV → cast diretto nativo (mirror non necessario)"
 )
 
+
+class CastVideoUnsupported(Exception):
+    """No cast candidate carries video the DMR can render, and the mirror fallback is not
+    available (ADR 0017). Casting anyway would play black with state PLAYING and no receiver
+    error — the callers surface this instead (headless: `video_codec_unsupported`)."""
+
+    def __init__(self, codec: str):
+        self.codec = codec
+        super().__init__(
+            f"video {codec} non decodificabile dal Chromecast e nessuna release alternativa"
+        )
+
+
 # Resolution (px height) at/above which a release is 4K/UHD: a remux of one is a tens-of-GB
 # fetch regardless of the parsed size, so it trips the mirror-over-remux rule even when the
 # size is unlabelled. Matches the cast resolution ceiling (`quality.cast_caps`).
@@ -101,11 +114,21 @@ def run_cast(
     an extra rank pass) — leave it False on headless paths. `follow=False` (headless
     fire-and-return) also detaches a TorrServer the engine may have spawned, so the TV
     keeps streaming past process exit."""
+    # Video first (ADR 0017): a video codec the DMR can't render casts as PLAYING + black
+    # screen with no receiver error, so the REAL codec is verified before any side effect.
+    # No castable candidate and no mirror to decode locally → explicit failure, not a black cast.
+    chosen, bad_video = stream_select.vet_cast_video(cfg, results, chosen)
+    if bad_video and not mirror.available():
+        raise CastVideoUnsupported(bad_video)
     # A new cast replaces the TV's content: a previous fire-and-return session no longer
     # describes it (the headless caller re-writes a fresh one right after this returns).
     state.clear_cast_session()
     target_lang = opts.audio_lang or cfg.primary
     plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
+    if plan.stream is not chosen:
+        # The language reselect only offers video-castable candidates (its guard shares
+        # this vetting), so a swap clears the bad-video verdict along with the stream.
+        bad_video = ""
     chosen = plan.stream
     # Remux is a codec decision, orthogonal to language availability: `remux` mode selects a
     # target-language track, but an `absent` fallback whose default track is Dolby/DTS must be
@@ -144,14 +167,24 @@ def run_cast(
     # (native video/HDR). For decodable audio, `--mirror` is transparently downgraded to a
     # direct cast.
     info = quality.parse_stream(chosen)
-    mirror_ok = needs_remux and mirror.available()
+    # `bad_video` forces the mirror regardless of audio: mpv decodes the legacy video
+    # locally, the only remaining way to show this title on the TV (availability was
+    # already vetted above — reaching here with `bad_video` implies mirror.available()).
+    force_mirror = bool(bad_video)
+    mirror_ok = (needs_remux or force_mirror) and mirror.available()
     auto_mirror = (
         mirror_ok
         and not opts.mirror
         and _remux_is_pathological(info, cfg.cast_mirror_over_remux_gb)
     )
-    if mirror_ok and (opts.mirror or auto_mirror):
-        if auto_mirror:
+    if mirror_ok and (opts.mirror or auto_mirror or force_mirror):
+        if force_mirror:
+            notice = (
+                f"video {bad_video.upper()} non decodificabile dal TV"
+                " → mirror 1080p (decodifica locale)"
+            )
+            print(f"nstream: {notice}", file=sys.stderr)
+        elif auto_mirror:
             size = f" (~{info.size_gb:.0f} GB)" if info.size_gb else ""
             notice = (
                 f"remux 4K troppo pesante{size} → mirror 1080p (avvio immediato, senza download)"

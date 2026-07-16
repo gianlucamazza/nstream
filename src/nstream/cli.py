@@ -213,12 +213,22 @@ def _play_on_cast(
     """Interactive cast: thin wrapper over the shared decision tree (`cast_flow.run_cast`),
     with the interactive knobs on — blocking follow, next-episode label, and the in-cast
     audio switch (re-cast a differently-dubbed release) when several dubs exist."""
-    outcome = cast_flow.run_cast(
-        cfg, results, chosen,
-        device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
-        opts=opts, start=start, follow=True, next_label=next_label,
-        allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
-    )  # fmt: skip
+    try:
+        outcome = cast_flow.run_cast(
+            cfg, results, chosen,
+            device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
+            opts=opts, start=start, follow=True, next_label=next_label,
+            allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
+        )  # fmt: skip
+    except cast_flow.CastVideoUnsupported as e:
+        # Casting anyway would show a black screen (ADR 0017): back out to the list with
+        # an honest message instead. Local mpv decodes anything → suggest it.
+        print(
+            f"nstream: {ui.g().warn} video {e.codec.upper()} non decodificabile dal TV "
+            "e nessuna alternativa castabile — riproduci in locale o scegli un'altra release",
+            file=sys.stderr,
+        )
+        return (0.0, 0.0, False)
     return (outcome.pos, outcome.dur, outcome.advance)
 
 

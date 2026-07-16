@@ -752,3 +752,31 @@ def test_parse_stream_memoized_and_key_complete():
     c = quality.parse_stream({**s1, "fileIdx": 2})
     assert c is not a and c.file_idx == 2
     quality._PARSE_CACHE.clear()
+
+
+def test_parse_legacy_codecs_named_not_unknown():
+    """Pre-2010 rip tokens must parse to a REAL codec name, not "" — the unknown-codec
+    benefit of the doubt is what let a DivX rip through the cast filter (ADR 0017)."""
+    assert quality._parse_codec("Coherence.2013.iTALiAN.XviD-GRP") == "mpeg4"
+    assert quality._parse_codec("Movie.1999.DivX.iTA") == "mpeg4"
+    assert quality._parse_codec("Old.Doc.DVDRip.MP4V") == "mpeg4"
+    assert quality._parse_codec("Concert.2001.MPEG-2.DVD") == "mpeg2"
+    assert quality._parse_codec("Film.2006.VC-1.1080p") == "vc1"
+    assert quality._parse_codec("Clip.2005.WMV-HD") == "vc1"
+
+
+def test_parse_legacy_does_not_shadow_modern_tokens():
+    """ "MPEG-4 AVC" (Blu-ray remux naming) is h264; a modern token always wins."""
+    assert quality._parse_codec("Movie.BluRay.REMUX.MPEG-4.AVC.DTS-HD") == "h264"
+    assert quality._parse_codec("Show.2160p.MPEG-4.HEVC") == "hevc"
+
+
+def test_cast_filter_excludes_legacy_codec():
+    """A named legacy codec is excluded by the cast profile like AV1 (no-HW), instead of
+    sailing through as unknown and casting a black screen."""
+    info = quality.parse_stream(
+        {"name": "[RD+] T", "title": "Coherence.2013.iTALiAN.XviD-GRP\n👤 5 💾 1.37 GB"}
+    )
+    assert info.codec == "mpeg4"
+    reason = quality.unsupported_reason(info, quality.cast_caps(), quality.FilterSpec())
+    assert reason == "MPEG4 no-HW"

@@ -124,3 +124,12 @@ def test_clear_cache_forces_a_new_probe(monkeypatch):
     tracks.clear_cache()
     tracks.probe_tracks("http://u")
     assert len(calls) == 2
+
+
+def test_parse_captures_first_video_codec():
+    """The cast video vetting (ADR 0017) reads the real codec from the same probe."""
+    assert tracks._parse_ffprobe(FFPROBE_JSON).video_codec == "h264"
+
+
+def test_parse_video_codec_empty_without_video_stream():
+    assert tracks._parse_ffprobe({"streams": []}).video_codec == ""

@@ -41,9 +41,12 @@ def _boom(msg):
 
 
 def _wire(monkeypatch, plan, *, langs=("ita",)):
-    """Hermetic run_cast: stub vet_cast_audio (the real one ffprobes the url), the in-cast
-    switch helpers, auto_subs and detach_spawned. Returns the spy dict."""
+    """Hermetic run_cast: stub vet_cast_video/vet_cast_audio (the real ones ffprobe the
+    url), the in-cast switch helpers, auto_subs and detach_spawned. Returns the spy dict."""
     seen = {"subs": [], "detached": 0}
+    monkeypatch.setattr(
+        cast_flow.stream_select, "vet_cast_video", lambda cfg, results, chosen: (chosen, "")
+    )
     monkeypatch.setattr(cast_flow.stream_select, "vet_cast_audio", lambda *a, **k: plan)
     monkeypatch.setattr(cast_flow.stream_select, "cast_languages", lambda cfg, results: langs)
     monkeypatch.setattr(
@@ -434,3 +437,68 @@ def test_run_cast_clears_previous_session(monkeypatch, tmp_path):
     )  # fmt: skip
     assert state.util.RunState(state.CAST_SESSION).read() is None
     assert seen is not None  # wiring sanity
+
+
+# --- video-codec vetting (ADR 0017) ------------------------------------------
+
+
+def test_run_cast_raises_when_video_unsupported_and_no_mirror(monkeypatch):
+    """No castable video anywhere and no mirror: run_cast must fail explicitly BEFORE any
+    side effect (session clear, subs fetch) — casting would play black with state PLAYING
+    and no receiver error (the Coherence DivX incident, 2026-07-16)."""
+    stream = dict(_STREAM)
+    _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.stream_select, "vet_cast_video", lambda cfg, results, chosen: (chosen, "mpeg4")
+    )
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("must not cast undecodable video"))
+    monkeypatch.setattr(
+        cast_flow.state, "clear_cast_session", _boom("failure must be side-effect free")
+    )
+    with pytest.raises(cast_flow.CastVideoUnsupported) as exc:
+        _run(_opts(), stream)
+    assert exc.value.codec == "mpeg4"
+
+
+def test_run_cast_mirrors_when_video_unsupported(monkeypatch):
+    """Undecodable video + mirror available → forced mirror (mpv decodes locally), even
+    though the audio alone would have allowed a direct cast; the notice says why."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.stream_select, "vet_cast_video", lambda cfg, results, chosen: (chosen, "mpeg4")
+    )
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.mirror, "cast_via_mirror",
+        lambda cfg, title, url, **k: seen.update(mirrored=url) or (0.0, 0.0, False),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.caster, "cast", _boom("direct cast must not run on undecodable video")
+    )
+    out = _run(_opts(), stream)
+    assert seen["mirrored"] == stream["url"]
+    assert out.action == "mirror" and "MPEG4" in (out.notice or "")
+
+
+def test_run_cast_video_verdict_cleared_by_audio_reselect(monkeypatch):
+    """vet_cast_audio swapping the stream clears the bad-video verdict: the language
+    reselect only offers video-castable candidates, so the swap must cast directly
+    instead of forcing the mirror for the abandoned stream's codec."""
+    stream = dict(_STREAM)
+    good = {"name": "S", "title": "T", "url": "http://u/good.mkv"}
+    seen = _wire(monkeypatch, _plan("direct", good))  # audio vet swaps to `good`
+    monkeypatch.setattr(
+        cast_flow.stream_select, "vet_cast_video", lambda cfg, results, chosen: (chosen, "mpeg4")
+    )
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.mirror, "cast_via_mirror", _boom("swap resolved the video → no mirror")
+    )
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
+    )  # fmt: skip
+    out = _run(_opts(), stream)
+    assert seen["cast_url"] == good["url"] and out.action == "cast"

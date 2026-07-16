@@ -312,6 +312,52 @@ def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
     return list(tracks.probe_tracks(url).audio) if url else []
 
 
+def _cast_video_codec(cfg: Config, stream: Stream) -> str:
+    """REAL video codec of `stream` per ffprobe, "" when unprobeable. Memoized with the
+    audio probe (same url, same call) — the video vetting costs no extra network read."""
+    url = _playable_url(cfg, stream)
+    return tracks.probe_tracks(url).video_codec if url else ""
+
+
+def _video_castable(cfg: Config, stream: Stream) -> bool:
+    """Whether the DMR can render `stream`'s probed video. Unknown ("" — no ffprobe, probe
+    failed) keeps the benefit of the doubt, mirroring the audio vetting's stance."""
+    codec = _cast_video_codec(cfg, stream)
+    return not codec or codec in quality.CAST_VIDEO_DECODABLE
+
+
+def vet_cast_video(
+    cfg: Config, results: list[Stream], chosen: Stream, *, probe_cap: int = 4
+) -> tuple[Stream, str]:
+    """Verify the DMR can render `chosen`'s REAL video before casting (ADR 0017). The name
+    parse gives an untagged release the benefit of the doubt, but an MPEG-4 ASP/DivX rip
+    casts as PLAYING + black screen with no receiver error — selection time is the only
+    place this class of failure can be caught.
+
+    Returns `(stream, "")` when `chosen` (or a reselected candidate) is castable, or
+    `(chosen, bad_codec)` when nothing qualifies — the caller falls back to the mirror
+    (mpv decodes locally) or fails explicitly instead of casting black. Reselection walks
+    the ranked cast-playable candidates, probing at most `probe_cap`."""
+    bad = _cast_video_codec(cfg, chosen)
+    if not bad or bad in quality.CAST_VIDEO_DECODABLE:
+        return chosen, ""
+    probed = 0
+    for r in _cast_playable(cfg, results):
+        s = r.stream
+        if s is chosen or s.get("url") == chosen.get("url"):
+            continue
+        if probed >= probe_cap:
+            break
+        probed += 1
+        if _video_castable(cfg, s):
+            print(
+                f"nstream: video {bad.upper()} non decodificabile dal TV → altra release",
+                file=sys.stderr,
+            )
+            return s, ""
+    return chosen, bad
+
+
 def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) -> CastAudioPlan:
     """Decide the cast plan for one resolved `stream` given its probed `audio` tracks and the
     desired `target_lang` (a canonical code, or "" for no preference → codec-only legacy
@@ -374,6 +420,11 @@ def _reselect_cast_for_lang(
         if probed >= probe_cap:
             break
         probed += 1
+        # A dub with video the DMR can't render is not a candidate: reselecting it trades
+        # silent-wrong-language for a black screen (the live failure behind ADR 0017 —
+        # a cached ITA DivX rip won this loop). Same probe as the audio read below (memoized).
+        if not _video_castable(cfg, s):
+            continue
         plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
         if plan.mode == "direct" and plan.verified:
             return plan  # cheapest *verified* correct option (no download) → take it
