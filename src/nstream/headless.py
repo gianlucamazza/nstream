@@ -44,6 +44,7 @@ from .config import Config, HistoryEntry, Meta, PlayOpts, Stream, Video
 from .labels import display_title
 from .player import play
 from .subs import auto_subs, available_subtitle_langs
+from .subs import stream_filename as subs_filename
 
 
 def typ_filter(args: argparse.Namespace) -> str | None:
@@ -431,6 +432,7 @@ def _auto_play(
     cast_audio_lang = opts.audio_lang or (cfg.primary or None)
     cast_audio_verified = audio_verified
     cast_sub_lang = vetted.safety_sub_lang or opts.sub_lang
+    sub_match: str | None = None  # "hash" | "lang" — how the subtitle track was chosen
     subs_delivered = True  # local mpv always renders requested subs; cast paths override
     # History bookkeeping: the plain show name (the decorated `title` would break the
     # `-c <titolo>` normalized-title match), and the end position when a path can know it.
@@ -497,6 +499,7 @@ def _auto_play(
                 cast_audio_lang, cast_audio_verified = outcome.audio_lang, outcome.audio_verified
             cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang
             sub_paths = outcome.sub_paths
+            sub_match = outcome.sub_match
             subs_delivered = outcome.subs_delivered
             action, reencoded, notice = outcome.action, outcome.reencoded, outcome.notice
             if args.follow:
@@ -527,9 +530,11 @@ def _auto_play(
                     notice = f"{notice}; {vol_notice}" if notice else vol_notice
                     print(f"nstream: {vol_notice}", file=sys.stderr)
         else:
-            sub_paths = auto_subs(
-                cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang
-            )
+            subs_pick = auto_subs(
+                cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang,
+                video_url=chosen.get("url"), filename=subs_filename(chosen),
+            )  # fmt: skip
+            sub_paths, sub_match = subs_pick.paths, subs_pick.match
             # Local mpv blocks until the window closes (intended; the user is watching).
             hist_pos, hist_dur, _sig = play(
                 cfg, title, chosen["url"],
@@ -567,6 +572,9 @@ def _auto_play(
             # castbridge (side-loaded WebVTT track) and catt (`-s`) paths carry them now, but a
             # mirror cast or a failed conversion may not — don't report those as active.
             "subtitles": cast_sub_lang if (sub_paths and subs_delivered) else None,
+            # How the track was chosen: "hash" = OSHash exact-file match (sync verified by
+            # construction), "lang" = best language guess. Honest reporting (ADR 0018).
+            "subtitles_match": sub_match if (sub_paths and subs_delivered) else None,
             "notice": notice,
             "error": None,
         }

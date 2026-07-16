@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from nstream import cast_flow
+from nstream import cast_flow, subs
 from nstream.config import Config, PlayOpts, Stream
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
@@ -54,8 +54,8 @@ def _wire(monkeypatch, plan, *, langs=("ita",)):
     )
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs",
-        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None: (
-            seen["subs"].append(safety_sub_lang) or ()
+        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None, **kw: (
+            seen["subs"].append(safety_sub_lang) or subs.SubsPick()
         ),
     )  # fmt: skip
     monkeypatch.setattr(

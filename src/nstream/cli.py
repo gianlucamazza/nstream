@@ -33,6 +33,7 @@ from . import (
 from . import (
     quality as quality_mod,
 )
+from . import subs as subs_mod
 from .api import CAT_MAP, CATALOG_PAGE, GENRES
 from .caster import CastUnavailable, cast
 from .caster import resolve_device as _resolve_device
@@ -251,7 +252,10 @@ def _play_on_mpv(
     audio_id: int | None = None
     sub_id: str | int | None = None
     if auto:
-        sub_paths = auto_subs(cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang)
+        sub_paths = auto_subs(
+            cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
+            video_url=chosen.get("url"), filename=subs_mod.stream_filename(chosen),
+        ).paths  # fmt: skip
     else:
         sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
         if sel is None:
@@ -662,6 +666,22 @@ def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     return run_home(cfg, opts)  # the home has the typed sections; flags don't apply
 
 
+def _parse_sub_fps(raw: str) -> float | None:
+    """`--sub-fps SRC:DST` → retime scale (SRC/DST), or None when invalid. SRC = the fps
+    the subtitle was authored for, DST = the video's fps: subs timed for 25 on a 23.976
+    video must stretch by 25/23.976 (events land later in the slower-playing video)."""
+    parts = raw.split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        src, dst = float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+    if src <= 0 or dst <= 0:
+        return None
+    return src / dst
+
+
 def _sub_options(args: argparse.Namespace) -> tuple[str | None, str | None]:
     if args.sub_lang:
         return ("auto", args.sub_lang)
@@ -742,6 +762,15 @@ def main() -> int:
     )
     parser.add_argument("--sub-menu", action="store_true", help="scegli i sottotitoli a mano (fzf)")
     parser.add_argument("--sub-lang", metavar="CODE", help="lingua sottotitoli da auto-scegliere")
+    parser.add_argument(
+        "--sub-offset", metavar="SEC", type=float, default=0.0,
+        help="ritima i sottotitoli di ±SEC secondi (es. -2.5)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--sub-fps", metavar="SRC:DST",
+        help="corregge il drift da framerate: fps per cui i sottotitoli sono stati creati"
+        " : fps del video (es. 25:23.976)",
+    )  # fmt: skip
     parser.add_argument(
         "--browse", nargs="?", const="popolari", choices=list(CAT_MAP),
         help="sfoglia un catalogo Cinemeta invece di cercare (default: popolari)",
@@ -861,6 +890,15 @@ def main() -> int:
         return 0
 
     sub_mode, sub_lang = _sub_options(args)
+    sub_scale = 1.0
+    if getattr(args, "sub_fps", None):
+        sub_scale = _parse_sub_fps(args.sub_fps)
+        if sub_scale is None:
+            msg = f"--sub-fps non valido: «{args.sub_fps}» (formato SRC:DST, es. 25:23.976)"
+            if args.json:
+                _json_error("usage", msg)
+            print(f"nstream: {msg}", file=sys.stderr)
+            return 2
     # Mirror is a cast backend: it implies cast routing (device resolution), unless local.
     mirror_mode = (args.mirror or cfg.cast_mode == "mirror") and not args.local
     quality: int | None = None
@@ -884,6 +922,8 @@ def main() -> int:
         audio_lang=args.audio_lang or None,
         mirror=mirror_mode,
         quality=quality,
+        sub_offset=args.sub_offset or 0.0,
+        sub_scale=sub_scale,
     )
     try:
         return _dispatch(cfg, args, opts)

@@ -76,9 +76,14 @@ Modules in `src/nstream/`:
   and the headless volume guard stay in the callers (`cli`/`headless`). Same tier as
   `stream_select`: imports `caster`/`engine`/`mirror`/`remux`/`quality`/`stream_select`/`subs`/
   `config`/`log`/`ui`; never `cli`.
-- `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download), `auto_subs`
-  (no-menu paths + safety-subtitle net), and `choose_tracks` (pre-play audio/sub fzf menu).
-  Leaf below `cli`; imports `api`/`picker`/`tracks`/`labels`/`ui`/`config`.
+- `subs.py` — subtitle acquisition: `pick_subtitles` (OpenSubtitles fetch/rank/download),
+  `auto_subs` (no-menu paths + safety-subtitle net → `SubsPick(paths, match)`; applies the
+  `--sub-offset`/`--sub-fps` retime, `retime_srt`), and `choose_tracks` (pre-play audio/sub fzf
+  menu). Ranking is hash-first within a language (ADR 0018): with the resolved stream url the
+  addon is also queried with the `videoHash`/`videoSize`/`filename` extras and exact-file
+  matches win. Leaf below `cli`; imports `api`/`oshash`/`picker`/`tracks`/`labels`/`ui`/`config`.
+- `oshash.py` — OpenSubtitles moviehash of a remote stream via two 64 KB ranged HTTP reads
+  (`hash_url` → `(hash, size)`, best-effort None). Leaf (stdlib + `log`); never logs the URL.
 - `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
   `display_title`/`track_label`/`audio_summary`/`sub_summary`). Reads active caps on demand via
   `ui.active_caps()`. Top tier: imports only `ui`/`quality`/`tracks`/`config`.

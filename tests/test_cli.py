@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from nstream import cast_flow, cli
+from nstream import cast_flow, cli, subs
 from nstream.config import Config, HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
@@ -724,7 +724,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
         raise AssertionError("choose_tracks must not run in cast mode")
 
     monkeypatch.setattr(cli, "choose_tracks", boom)
-    monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: subs.SubsPick())
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast",
@@ -898,8 +898,8 @@ def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
     )
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs",
-        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None: (
-            seen["subs"].append(safety_sub_lang) or ()
+        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None, **kw: (
+            seen["subs"].append(safety_sub_lang) or subs.SubsPick()
         ),
     )  # fmt: skip
     return seen
@@ -1071,7 +1071,7 @@ def test_play_history_on_save_roundtrip(monkeypatch, tmp_path):
         cli.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: subs.SubsPick())
     monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 100.0, ""))
     entry = HistoryEntry(video_id="tt3", type="movie", title="Dune")
     opts = cli.PlayOpts(
@@ -1097,7 +1097,7 @@ def test_play_history_resume_start_threaded(monkeypatch, tmp_path):
         cli.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: ())
+    monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: subs.SubsPick())
     seen = {}
     monkeypatch.setattr(
         cli, "play", lambda *a, **k: seen.update(start=k.get("start")) or (600.0, 10000.0, "")

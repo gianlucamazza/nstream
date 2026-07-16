@@ -68,6 +68,9 @@ class Subtitle(TypedDict, total=False):
     id: str
     url: str
     lang: str
+    # Set by `api.subtitles` on tracks returned by the videoHash query: timed for the
+    # exact file being played (OSHash match) → preferred within a language (ADR 0018).
+    hash_match: bool
 
 
 class HistoryEntry(TypedDict, total=False):
@@ -102,6 +105,11 @@ class PlayOpts:
     #   0    = Auto (no exact-resolution filter; skip picker — binge sticky)
     #   N    = hard-filter to streams with StreamInfo.resolution == N (e.g. 1080)
     quality: int | None = None
+    # Manual subtitle retime (ADR 0018), applied to the downloaded SRT before use so it
+    # holds identically for mpv and for the cast's WebVTT: t' = t * sub_scale + sub_offset.
+    # Offset fixes a constant shift; scale fixes framerate drift (--sub-fps SRC:DST).
+    sub_offset: float = 0.0
+    sub_scale: float = 1.0
 
 
 @dataclass(frozen=True)
