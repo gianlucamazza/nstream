@@ -35,6 +35,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -444,21 +445,43 @@ def _sub_server_state() -> Path:
     return _cache_dir() / "sub-server.pid"
 
 
-def register_sub_server(pid: int) -> None:
-    """Record the detached standalone subtitle server so a later cast / `--stop` can reap it."""
+def persist_sub(vtt_path: str) -> str | None:
+    """Copy a per-play VTT into the cache so the DETACHED server can keep serving it after
+    the play's work_dir is cleaned up (fire-and-return exits while the receiver may still
+    re-fetch the track, e.g. on seek — serving a deleted path broke that silently). The
+    copy's lifecycle is the server's: reaped together in `reap_sub_server`. None on failure
+    (caller degrades to the old serve-from-work_dir behaviour)."""
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "nstream" / "subs"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        fd, dst = tempfile.mkstemp(prefix="cast-sub-", suffix=".vtt", dir=str(base))
+        with os.fdopen(fd, "wb") as out, open(vtt_path, "rb") as src:
+            shutil.copyfileobj(src, out)
+        return dst
+    except OSError:
+        return None
+
+
+def register_sub_server(pid: int, persist_path: str | None = None) -> None:
+    """Record the detached standalone subtitle server (and its persisted VTT copy, if any)
+    so a later cast / `--stop` can reap both."""
     with contextlib.suppress(OSError):
-        _sub_server_state().write_text(str(pid))
+        _sub_server_state().write_text(f"{pid}\n{persist_path or ''}")
 
 
 def reap_sub_server() -> bool:
-    """Kill and forget a leftover standalone subtitle server. True if there was one (best-effort,
-    idempotent)."""
+    """Kill and forget a leftover standalone subtitle server, removing its persisted VTT
+    copy. True if there was one (best-effort, idempotent)."""
     p = _sub_server_state()
     try:
-        pid = int(p.read_text().strip())
-    except (OSError, ValueError):
+        lines = p.read_text().splitlines()
+        pid = int(lines[0].strip())
+    except (OSError, ValueError, IndexError):
         return False
     kill_detached(pid)
+    if len(lines) > 1 and lines[1].strip():
+        with contextlib.suppress(OSError):
+            os.unlink(lines[1].strip())
     with contextlib.suppress(OSError):
         p.unlink()
     return True

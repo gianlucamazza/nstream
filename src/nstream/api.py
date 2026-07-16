@@ -392,12 +392,15 @@ def _stream_key(s: Stream) -> object:
 
 
 def _hash_subtitles(url: str, name: str) -> list[Subtitle]:
-    """One addon's videoHash query, each result tagged `hash_match` (timed for the exact
-    file — ADR 0018). Addons answer a hash query with ONLY the hash matches (verified on
-    opensubtitles-v3: an unknown hash → empty list), never the id-wide set."""
+    """One addon's videoHash query. Only entries whose match marker says MOVIEHASH
+    (`m == "h"`) are tagged `hash_match`: when the hash has no associations the addon
+    falls back to the full imdb set (`m == "i"` — verified live on opensubtitles-v3,
+    97/97 "i" for a hash with no DB entry), and tagging those would fabricate the very
+    sync guarantee ADR 0018 exists to make honest."""
     subs = http_get_json(url, what=f"sottotitoli hash ({name})").get("subtitles", [])
     for s in subs:
-        s["hash_match"] = True
+        if s.get("m") == "h":
+            s["hash_match"] = True
     return subs
 
 

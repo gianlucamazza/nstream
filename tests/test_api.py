@@ -101,9 +101,10 @@ def test_subtitles_aggregate(monkeypatch):
 
 
 def test_subtitles_video_hash_query_tags_and_wins_dedup(monkeypatch):
-    """With a videoHash the addon is queried twice (hash extra + plain); hash results are
-    tagged `hash_match` and, being fetched first, survive the by-url dedup over the plain
-    duplicate of the same track (ADR 0018)."""
+    """With a videoHash the addon is queried twice (hash extra + plain). Only entries the
+    addon marks `m == "h"` (MOVIEHASH match) are tagged: on an unknown hash the addon
+    falls back to the full imdb set (`m == "i"`) and tagging those would fabricate the sync
+    guarantee. The tagged copy, fetched first, survives the by-url dedup (ADR 0018)."""
     a = _addon("A", "http://a", "subtitles", idp=())
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])
     urls: list[str] = []
@@ -111,7 +112,12 @@ def test_subtitles_video_hash_query_tags_and_wins_dedup(monkeypatch):
     def fake_get(url, **k):
         urls.append(url)
         if "videoHash=" in url:
-            return {"subtitles": [{"id": "s1", "url": "same.srt"}]}
+            return {
+                "subtitles": [
+                    {"id": "s1", "url": "same.srt", "m": "h"},
+                    {"id": "s3", "url": "fallback.srt", "m": "i"},  # imdb fallback: no tag
+                ]
+            }
         return {"subtitles": [{"id": "s1", "url": "same.srt"}, {"id": "s2", "url": "other.srt"}]}
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
@@ -122,7 +128,8 @@ def test_subtitles_video_hash_query_tags_and_wins_dedup(monkeypatch):
     assert len(hash_urls) == 1 and len(urls) == 2
     assert "videoSize=1000" in hash_urls[0] and "filename=V%20x.mkv" in hash_urls[0]
     by_url = {s["url"]: s for s in out}
-    assert by_url["same.srt"].get("hash_match") is True  # tagged copy survived the dedup
+    assert by_url["same.srt"].get("hash_match") is True  # m=="h" → tagged, survived dedup
+    assert by_url["fallback.srt"].get("hash_match") is None  # m=="i" → NOT a hash match
     assert by_url["other.srt"].get("hash_match") is None
 
 

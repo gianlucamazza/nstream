@@ -8,6 +8,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -332,3 +333,36 @@ def test_ensure_firewall_noop_without_sudo(monkeypatch):
 def test_firewall_hint_mentions_rule():
     hint = serve.firewall_hint("192.168.1.75", 45123)
     assert "192.168.1.0/24" in hint and "45000:47000" in hint and "45123" in hint
+
+
+# --- persisted VTT lifecycle (detached sub server, ADR 0018 refinement) -------
+
+
+def test_persist_sub_copies_into_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = tmp_path / "a.vtt"
+    src.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nciao\n")
+    dst = serve.persist_sub(str(src))
+    assert dst is not None and dst != str(src)
+    assert Path(dst).read_text() == src.read_text()
+    assert Path(dst).parent == tmp_path / "nstream" / "subs"
+
+
+def test_reap_sub_server_removes_persisted_copy(tmp_path, monkeypatch):
+    """The persisted VTT's lifecycle is the server's: reaping the one removes the other
+    (otherwise every fire-and-return cast would leak a file in the cache)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(serve, "kill_detached", lambda pid: None)
+    persisted = tmp_path / "cast-sub-x.vtt"
+    persisted.write_text("WEBVTT\n")
+    serve.register_sub_server(12345, str(persisted))
+    assert serve.reap_sub_server() is True
+    assert not persisted.exists()
+
+
+def test_reap_sub_server_backcompat_pid_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    killed = []
+    monkeypatch.setattr(serve, "kill_detached", lambda pid: killed.append(pid))
+    serve.register_sub_server(999)
+    assert serve.reap_sub_server() is True and killed == [999]

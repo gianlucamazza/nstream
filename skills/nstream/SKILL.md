@@ -61,13 +61,15 @@ Always pass `--json`. Quote the title.
 - **Subtitles**: `--sub-lang ita` forces Italian subs; `--subs` picks your preferred language.
   The play result reports the active `subtitles` lang. Selection is **hash-first** (ADR 0018):
   nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
-  track timed for the EXACT file — the result's `subtitles_match` says how it was chosen:
-  `"hash"` = sync verified by construction, `"lang"` = best language guess (correct it with
+  track timed for the EXACT file; with no hash match it picks the same-language candidate whose
+  last cue best fits the media's REAL duration. `subtitles_match` says how it was chosen:
+  `"hash"` = protocol-verified match, `"runtime"` = duration-fitted, `"lang"` = guess (correct it with
   `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
   it cheap). Selection is **hash-first** (ADR 0018):
   nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
-  track timed for the EXACT file — the result's `subtitles_match` says how it was chosen:
-  `"hash"` = sync verified by construction, `"lang"` = best language guess (correct it with
+  track timed for the EXACT file; with no hash match it picks the same-language candidate whose
+  last cue best fits the media's REAL duration. `subtitles_match` says how it was chosen:
+  `"hash"` = protocol-verified match, `"runtime"` = duration-fitted, `"lang"` = guess (correct it with
   `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
   it cheap).
 - **Audio/dub**: `--audio-lang CODE` forces a specific dub (e.g. `eng` for original audio). If no
