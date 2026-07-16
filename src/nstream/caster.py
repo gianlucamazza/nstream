@@ -20,7 +20,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, cast_delivery, discovery, languages, log, serve, subs, ui, util
+from . import bridge, cast_delivery, discovery, languages, log, serve, srt, ui, util
 from .config import Config
 from .picker import confirm as _confirm
 from .picker import fzf
@@ -373,7 +373,7 @@ def _cast_via_bridge(
         "content_type": meta.content_type,
         "current_time": float(start or 0.0),
     }
-    vtt = subs.to_vtt(sub_paths[0]) if sub_paths else None
+    vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
     sub_shutdown, sub_delivered = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
 
     def announce() -> None:

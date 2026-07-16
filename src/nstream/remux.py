@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import bridge, cast_delivery, caster, log, picker, serve, subs, ui, util
+from . import bridge, cast_delivery, caster, log, picker, serve, srt, ui, util
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -530,7 +530,7 @@ def _cast_file_via_bridge(
     re-raises so `cast_file` does NOT fall back to catt re-casting what was just cancelled."""
     bind_ip = serve.lan_ip(device)
     kwargs = _bridge_meta_kwargs(title, meta, start)
-    vtt = subs.to_vtt(sub_paths[0]) if sub_paths else None
+    vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
 
     if not follow:
         # The vtt lives in the caller's per-play temp dir, deleted on a headless return — under a
