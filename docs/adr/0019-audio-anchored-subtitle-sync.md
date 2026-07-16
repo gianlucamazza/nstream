@@ -47,3 +47,24 @@ and as the only fallback without alass.
 - New optdepend (alass) — consistent with the external-CLI philosophy (mpv/ffmpeg/catt).
 - Drift (fps) correction stays manual (`--sub-fps`): detecting it reliably needs a
   reference longer than the bounded window; revisit only if the field shows drift cases.
+
+## Post-scriptum — field falsification of the implementation (same day)
+
+The bounded-window premise of the Decision was **falsified twice on 2026-07-16**, the
+day it shipped (record rectified per working-style doctrine):
+
+1. Aligning the FULL subtitle against a bounded reference is unsafe: a large wrong
+   shift that crams many cues into the window beats the true small offset (-514 s
+   measured on a 300 s window, -381 s on 900 s), alass "guessed" a spurious fps ratio,
+   and its rewritten file clamps negative cues to zero (151 cues at 0.000 delivered to
+   the TV before remediation).
+2. Even with the sub trimmed to the window, `-g -l`, and dialogue-dense window
+   selection, measurements are noise on real content: the file KNOWN to be +14 s late
+   (human-validated) measured +0.4 / -0.6 / -9.0 s across three dense windows.
+
+Shipped state therefore: `sub_autosync` **defaults to off** (experimental opt-in);
+when enabled, the measurement requires **consensus of three dialogue-dense windows**
+(spread ≤ 1.5 s) and a plausible median, otherwise it refuses — an honest guess beats
+a fabricated correction. The offset is applied by the caller to the intact original;
+alass's output file is never delivered. The robust path (full-signal alignment without
+a full download) is tracked in the "integrate alass logic natively" issue.

@@ -62,16 +62,20 @@ Always pass `--json`. Quote the title.
   The play result reports the active `subtitles` lang. Selection is **hash-first** (ADR 0018):
   nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
   track timed for the EXACT file; with no hash match it picks the same-language candidate whose
-  last cue best fits the media's REAL duration; with the `alass` optdepend installed the chosen
-  track is then CORRECTED against a bounded segment of the stream's real audio (ADR 0019).
+  last cue best fits the media's REAL duration. An audio-anchored correction (alass, ADR 0019)
+  exists but is EXPERIMENTAL and off by default (`sub_autosync`): windowed measurement proved
+  unreliable in the field — when on it only applies a three-window consensus offset. The
+  dependable manual lever remains `--sub-offset`.
   `subtitles_match` says how it was chosen: `"hash"` = protocol-verified match, `"audio"` =
   alass-corrected, `"runtime"` = duration-fitted, `"lang"` = guess (correct it with
   `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes
   it cheap). Selection is **hash-first** (ADR 0018):
   nstream computes the stream's OpenSubtitles moviehash (two 64 KB ranged reads) and prefers a
   track timed for the EXACT file; with no hash match it picks the same-language candidate whose
-  last cue best fits the media's REAL duration; with the `alass` optdepend installed the chosen
-  track is then CORRECTED against a bounded segment of the stream's real audio (ADR 0019).
+  last cue best fits the media's REAL duration. An audio-anchored correction (alass, ADR 0019)
+  exists but is EXPERIMENTAL and off by default (`sub_autosync`): windowed measurement proved
+  unreliable in the field — when on it only applies a three-window consensus offset. The
+  dependable manual lever remains `--sub-offset`.
   `subtitles_match` says how it was chosen: `"hash"` = protocol-verified match, `"audio"` =
   alass-corrected, `"runtime"` = duration-fitted, `"lang"` = guess (correct it with
   `--sub-offset`/`--sub-fps`; changing them for a running cast needs a re-cast, resume makes

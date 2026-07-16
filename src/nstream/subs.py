@@ -26,9 +26,10 @@ from .picker import fzf
 @dataclass(frozen=True)
 class SubsPick:
     """Outcome of the no-menu subtitle acquisition: the downloaded file(s) plus HOW the
-    track was chosen — `"hash"` (OSHash match: timed for the exact file being played,
-    ADR 0018) or `"lang"` (best preferred-language guess, sync not guaranteed). Reported
-    in the headless JSON (`subtitles_match`) so a guess is never presented as a match."""
+    track was chosen — `"hash"` (protocol-verified OSHash match), `"audio"` (offset
+    measured on the media's real audio, ADR 0019), `"runtime"` (last cue fits the media
+    duration) or `"lang"` (best language guess, sync not guaranteed). Reported in the
+    headless JSON (`subtitles_match`) so a guess is never presented as a match."""
 
     paths: tuple[str, ...] = ()
     match: str | None = None  # "hash" | "lang" when paths is non-empty
@@ -377,13 +378,18 @@ def auto_subs(
         and video_url
         and subsync.available()
     ):
-        ran, offset = subsync.sync_to_audio(
+        offset = subsync.measure_offset(
             pick.paths[0], video_url, work_dir, window_s=cfg.sub_autosync_window_s
         )
-        if ran:
+        # Measure-then-apply: alass only reports the constant offset (gated for
+        # plausibility inside measure_offset); the intact original is retimed HERE, so
+        # alass's rewritten file (clamped negatives, fps rescale) never reaches the TV.
+        if offset is not None and (abs(offset) < 0.5 or retime_srt(pick.paths[0], offset, 1.0)):
             pick = SubsPick(pick.paths, "audio")
-            detail = f" (offset {offset:+.1f}s)" if offset is not None else ""
-            print(f"nstream: sottotitoli allineati all'audio{detail}", file=sys.stderr)
+            print(
+                f"nstream: sottotitoli allineati all'audio (offset {offset:+.1f}s)",
+                file=sys.stderr,
+            )
     if pick.paths and (opts.sub_offset or opts.sub_scale != 1.0):
         for p in pick.paths:
             retime_srt(p, opts.sub_offset, opts.sub_scale)
