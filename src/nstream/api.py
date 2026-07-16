@@ -421,7 +421,9 @@ def subtitles(
             params["videoSize"] = str(video_size)
         if filename:
             params["filename"] = filename
-        extra = urllib.parse.urlencode(params)
+        # quote (not quote_plus): the extra rides in a PATH segment, where '+' is a
+        # literal plus for a spec-correct parser — spaces must be %20.
+        extra = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     tasks: list[Callable[[], list]] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "subtitles", typ, video_id):

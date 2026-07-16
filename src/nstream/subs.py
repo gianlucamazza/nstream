@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import tempfile
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import cast as typecast
@@ -157,7 +158,10 @@ def _pick(
     perfectly synced track in the wrong language helps nobody."""
     video_hash: str | None = None
     video_size = 0
-    if video_url and (hashed := oshash.hash_url(video_url)):
+    # Loopback = the local P2P gateway (TorrServer): a tail Range read there forces the
+    # torrent's LAST piece at startup, the exact anti-pattern piece-deadline scheduling
+    # avoids. Hash only direct (debrid/CDN) urls, where a ranged read is cheap.
+    if video_url and not _is_loopback(video_url) and (hashed := oshash.hash_url(video_url)):
         video_hash, video_size = hashed
     try:
         subs = api.subtitles(
@@ -198,6 +202,28 @@ def _pick(
     return SubsPick((path,), match)
 
 
+def _is_loopback(url: str) -> bool:
+    host = urllib.parse.urlsplit(url).hostname or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def _decode_sub(path: str) -> str | None:
+    """Decode a subtitle file WITHOUT destroying accents: UTF-8 (BOM-aware) first, then
+    latin-1 (total: every byte decodes) for the common CP1252/latin-1 Italian tracks —
+    the addon's `SubEncoding` field is unreliable, and `errors="replace"` used to turn
+    every `è`/`à` into `\ufffd` on the TV. Downstream always re-writes UTF-8 (the WebVTT
+    spec REQUIRES it; mpv is happiest with it too)."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
 # Cue-timing timestamp (`HH:MM:SS,mmm`, `.` accepted) — only lines with `-->` are touched.
 _SRT_TS = re.compile(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})")
 
@@ -216,10 +242,11 @@ def retime_srt(path: str, offset: float, scale: float) -> bool:
         hh, mm = divmod(mm, 60)
         return f"{hh:02d}:{mm:02d}:{ss:02d},{milli:03d}"
 
+    text = _decode_sub(path)
+    if text is None:
+        return False
+    out = "\n".join(_SRT_TS.sub(_shift, ln) if "-->" in ln else ln for ln in text.splitlines())
     try:
-        with open(path, "rb") as f:
-            text = f.read().decode("utf-8-sig", errors="replace")
-        out = "\n".join(_SRT_TS.sub(_shift, ln) if "-->" in ln else ln for ln in text.splitlines())
         with open(path, "w", encoding="utf-8") as f:
             f.write(out + "\n")
     except OSError:
@@ -233,10 +260,8 @@ def to_vtt(srt_path: str) -> str | None:
     `WEBVTT` header and turn the `,` millisecond separator into `.` on cue-timing lines only
     (`-->`), leaving cue identifiers and text untouched. Idempotent-ish: a file already starting
     with `WEBVTT` is copied through unchanged."""
-    try:
-        with open(srt_path, "rb") as f:
-            text = f.read().decode("utf-8-sig", errors="replace")
-    except OSError:
+    text = _decode_sub(srt_path)
+    if text is None:
         return None
     if text.lstrip().startswith("WEBVTT"):
         out = text
