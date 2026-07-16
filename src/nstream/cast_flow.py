@@ -119,14 +119,19 @@ def run_cast(
     # Video first (ADR 0017): a video codec the DMR can't render casts as PLAYING + black
     # screen with no receiver error, so the REAL codec is verified before any side effect.
     # No castable candidate and no mirror to decode locally → explicit failure, not a black cast.
-    chosen, bad_video = stream_select.vet_cast_video(cfg, results, chosen)
-    if bad_video and not mirror.available():
+    # ADR 0021: the resolved per-invocation quality (opts.quality, always an int here —
+    # the callers replace() it with VettedStream.quality) constrains EVERY reselect below.
+    exact = stream_select.exact_resolution(opts.quality or 0)
+    chosen, bad_video = stream_select.vet_cast_video(cfg, results, chosen, exact_resolution=exact)
+    # --no-mirror is an explicit user intent: with undecodable video and the mirror
+    # suppressed, fail explicitly rather than override the user (ADR 0021).
+    if bad_video and (not mirror.available() or opts.mirror is False):
         raise CastVideoUnsupported(bad_video)
     # A new cast replaces the TV's content: a previous fire-and-return session no longer
     # describes it (the headless caller re-writes a fresh one right after this returns).
     state.clear_cast_session()
     target_lang = opts.audio_lang or cfg.primary
-    plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang)
+    plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang, exact_resolution=exact)
     if plan.stream is not chosen:
         # The language reselect only offers video-castable candidates (its guard shares
         # this vetting), so a swap clears the bad-video verdict along with the stream.
@@ -179,12 +184,15 @@ def run_cast(
     # already vetted above — reaching here with `bad_video` implies mirror.available()).
     force_mirror = bool(bad_video)
     mirror_ok = (needs_remux or force_mirror) and mirror.available()
+    # Tri-state opts.mirror (ADR 0021): the ADR-0015 auto-switch applies only when the
+    # user expressed NO per-invocation preference (None); --no-mirror (False) suppresses
+    # it without touching the global config knob.
     auto_mirror = (
         mirror_ok
-        and not opts.mirror
+        and opts.mirror is None
         and _remux_is_pathological(info, cfg.cast_mirror_over_remux_gb)
     )
-    if mirror_ok and (opts.mirror or auto_mirror or force_mirror):
+    if mirror_ok and (opts.mirror is True or auto_mirror or force_mirror):
         if force_mirror:
             notice = (
                 f"video {bad_video.upper()} non decodificabile dal TV"
@@ -204,7 +212,7 @@ def run_cast(
         subs_delivered = bool(sub_paths)  # mpv renders them into the mirrored frame
         action = "mirror"
     else:
-        if opts.mirror and not needs_remux:
+        if opts.mirror is True and not needs_remux:
             print(MIRROR_NOT_NEEDED, file=sys.stderr)
         remux_path = (
             remux.remux_for_cast(
@@ -242,10 +250,10 @@ def run_cast(
             langs: tuple[str, ...] = ()
             resolver = None
             if allow_lang_switch:
-                cast_langs = stream_select.cast_languages(cfg, results)
+                cast_langs = stream_select.cast_languages(cfg, results, exact_resolution=exact)
                 if len(cast_langs) > 1:
                     langs = cast_langs
-                    resolver = stream_select.cast_resolver(cfg, results)
+                    resolver = stream_select.cast_resolver(cfg, results, exact_resolution=exact)
             pos, dur, advance, subs_delivered = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,

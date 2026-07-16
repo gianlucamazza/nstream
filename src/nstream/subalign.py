@@ -412,7 +412,9 @@ def probe(
     return Fingerprint(duration=duration, windows=windows, speech=speech)
 
 
-def probe_local(path: str, *, duration: float, segments: int = 8) -> Fingerprint | str:
+def probe_local(
+    path: str, *, duration: float, segments: int = 8, timeout_s: float = _FFMPEG_LOCAL_TIMEOUT
+) -> Fingerprint | str:
     """Full-signal fingerprint from a LOCAL media file (the Tier-2 remux cast: the whole
     file is already on disk, so the audio evidence is free — no network, only one ffmpeg
     decode pass). The full RMS series is split into `segments` VIRTUAL windows so the
@@ -424,7 +426,7 @@ def probe_local(path: str, *, duration: float, segments: int = 8) -> Fingerprint
         return "no_ffmpeg"
     if duration <= 60 or segments < 4:
         return "no_media_geometry"
-    series = _rms_series(path, 0.0, duration, timeout=_FFMPEG_LOCAL_TIMEOUT)
+    series = _rms_series(path, 0.0, duration, timeout=timeout_s)
     if not series:
         return "probe_failures"
     seg_len = duration / segments

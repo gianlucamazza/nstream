@@ -273,7 +273,7 @@ def _align_env(monkeypatch, *, verdict_offset=-13.9, reason="aligned", duration=
     fp = subalign.Fingerprint(duration, ((0.0, 100.0),), ((1.0, 2.0),))
     monkeypatch.setattr(
         subs.subalign, "probe_local",
-        lambda path, *, duration: calls["probe"].append(path) or fp,
+        lambda path, *, duration, timeout_s=180.0: calls["probe"].append(path) or fp,
     )  # fmt: skip
     diag = subalign.Alignment(verdict_offset or 0.0, 0.9, 0.2, 100.0, 50, 0.1, 0.2, 6, 8)
     monkeypatch.setattr(

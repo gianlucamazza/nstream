@@ -267,7 +267,9 @@ def align_local(
     if not cfg.sub_align or not subalign.available():
         return pick
     duration = tracks.probe_tracks(media_path).duration
-    fp = subalign.probe_local(media_path, duration=duration)
+    fp = subalign.probe_local(
+        media_path, duration=duration, timeout_s=float(cfg.sub_align_budget_s)
+    )
     if isinstance(fp, str):
         _log.info("align_local: fingerprint rifiutato (%s)", fp)
         return pick

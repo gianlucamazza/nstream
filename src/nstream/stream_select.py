@@ -191,17 +191,25 @@ def _playable_set(
     return playable
 
 
-def _cast_playable(cfg: Config, results: list[Stream]) -> list[quality.RankedStream]:
-    """Streams the Chromecast can play (cast profile + Cast-compatible audio)."""
-    return _playable_set(cfg, results, cast=True)
+def _cast_playable(
+    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
+) -> list[quality.RankedStream]:
+    """Streams the Chromecast can play (cast profile + Cast-compatible audio).
+
+    `exact_resolution` is the resolved per-invocation quality choice (ADR 0021): EVERY
+    cast (re)selection path must thread it, or a reselect can legally return a release
+    the user's `--quality` excluded — the parity defect that bit three times in one day."""
+    return _playable_set(cfg, results, cast=True, exact_resolution=exact_resolution)
 
 
-def audio_languages(cfg: Config, results: list[Stream], *, cast: bool) -> tuple[str, ...]:
+def audio_languages(
+    cfg: Config, results: list[Stream], *, cast: bool, exact_resolution: int = 0
+) -> tuple[str, ...]:
     """Audio languages available among playable streams (local or cast profile), with the
     user's preferred languages first. Name-tag based, like the rest of the language ranking."""
     langs = {
         lang
-        for r in _playable_set(cfg, results, cast=cast)
+        for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution)
         for lang in r.info.languages
         if lang != "multi"
     }
@@ -262,15 +270,19 @@ def pick_audio_stream_verified(
     return (None, False) if name_pick is not None and probed else (name_pick, False)
 
 
-def cast_languages(cfg: Config, results: list[Stream]) -> tuple[str, ...]:
+def cast_languages(
+    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
+) -> tuple[str, ...]:
     """Audio languages available among Cast-compatible streams, preferred ones first."""
-    return audio_languages(cfg, results, cast=True)
+    return audio_languages(cfg, results, cast=True, exact_resolution=exact_resolution)
 
 
-def cast_resolver(cfg: Config, results: list[Stream]) -> Callable[[str], str | None]:
+def cast_resolver(
+    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
+) -> Callable[[str], str | None]:
     """Return a fn picking the best Cast-compatible stream URL for a language, or None.
     Closes over the already-fetched `results` so switching needs no extra network call."""
-    playable = _cast_playable(cfg, results)
+    playable = _cast_playable(cfg, results, exact_resolution=exact_resolution)
 
     def resolve(lang: str) -> str | None:
         for r in playable:  # already ranked best-first
@@ -327,7 +339,12 @@ def _video_castable(cfg: Config, stream: Stream) -> bool:
 
 
 def vet_cast_video(
-    cfg: Config, results: list[Stream], chosen: Stream, *, probe_cap: int = 4
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    *,
+    probe_cap: int = 4,
+    exact_resolution: int = 0,
 ) -> tuple[Stream, str]:
     """Verify the DMR can render `chosen`'s REAL video before casting (ADR 0017). The name
     parse gives an untagged release the benefit of the doubt, but an MPEG-4 ASP/DivX rip
@@ -342,7 +359,7 @@ def vet_cast_video(
     if not bad or bad in quality.CAST_VIDEO_DECODABLE:
         return chosen, ""
     probed = 0
-    for r in _cast_playable(cfg, results):
+    for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
         if s is chosen or s.get("url") == chosen.get("url"):
             continue
@@ -392,7 +409,13 @@ def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) 
 
 
 def _reselect_cast_for_lang(
-    cfg: Config, results: list[Stream], current: Stream, target_lang: str, *, probe_cap: int = 6
+    cfg: Config,
+    results: list[Stream],
+    current: Stream,
+    target_lang: str,
+    *,
+    probe_cap: int = 6,
+    exact_resolution: int = 0,
 ) -> CastAudioPlan | None:
     """Find another cast candidate (best-first) carrying `target_lang`, preferring one castable
     directly (target is the first decodable track) over one needing a remux. Probes up to
@@ -410,7 +433,7 @@ def _reselect_cast_for_lang(
     remux_fallback: CastAudioPlan | None = None
     tagged_guess: CastAudioPlan | None = None
     probed = 0
-    for r in _cast_playable(cfg, results):
+    for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
         if s is current or s.get("url") == current.get("url"):
             continue
@@ -443,7 +466,12 @@ def _reselect_cast_for_lang(
 
 
 def vet_cast_audio(
-    cfg: Config, results: list[Stream], chosen: Stream, target_lang: str
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    target_lang: str,
+    *,
+    exact_resolution: int = 0,
 ) -> CastAudioPlan:
     """Decide how to cast `chosen` so the audio plays in `target_lang` (default `cfg.primary`;
     "" = no preference). Probes the real tracks — the DMR plays the first one and can't switch —
@@ -457,7 +485,12 @@ def vet_cast_audio(
     # absent from this release) search the other dubs for a *verified* one before falling back.
     if (plan.mode == "direct" and plan.verified) or plan.mode == "remux":
         return plan
-    return _reselect_cast_for_lang(cfg, results, chosen, target_lang) or plan
+    return (
+        _reselect_cast_for_lang(
+            cfg, results, chosen, target_lang, exact_resolution=exact_resolution
+        )
+        or plan
+    )
 
 
 def _native_resolve(cfg: Config, stream: Stream) -> str | None:
