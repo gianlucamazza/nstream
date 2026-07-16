@@ -82,6 +82,10 @@ Modules in `src/nstream/`:
   menu). Ranking is hash-first within a language (ADR 0018): with the resolved stream url the
   addon is also queried with the `videoHash`/`videoSize`/`filename` extras and exact-file
   matches win. Leaf below `cli`; imports `api`/`oshash`/`picker`/`tracks`/`labels`/`ui`/`config`.
+- `srt.py` — subtitle text-format toolbox: `decode` (UTF-8→latin-1, accent-safe), `retime`
+  (in-place t'=t·scale+offset, UTF-8 out), `to_vtt` (Cast caption track), `cue_spans` (the
+  alignment engine's view). Top-tier leaf (imports nothing from nstream); the single owner of
+  subtitle TEXT concerns — delivery (`caster`/`remux`) uses it directly, never `subs`.
 - `oshash.py` — OpenSubtitles moviehash of a remote stream via two 64 KB ranged HTTP reads
   (`hash_url` → `(hash, size)`, best-effort None). Leaf (stdlib + `log`); never logs the URL.
 - `subsync.py` — audio-anchored subtitle correction (ADR 0019): bounded ffmpeg audio segment

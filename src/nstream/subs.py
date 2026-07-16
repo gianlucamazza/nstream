@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import gzip
 import os
-import re
 import sys
 import tempfile
 import urllib.parse
@@ -17,7 +16,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import cast as typecast
 
-from . import api, oshash, subsync, tracks, ui
+from . import api, oshash, srt, subsync, tracks, ui
 from .config import Config, PlayOpts, Stream, Subtitle
 from .labels import audio_summary, sub_summary, track_label
 from .picker import fzf
@@ -207,25 +206,12 @@ def _is_loopback(url: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
-def _decode_sub(path: str) -> str | None:
-    """Decode a subtitle file WITHOUT destroying accents: UTF-8 (BOM-aware) first, then
-    latin-1 (total: every byte decodes) for the common CP1252/latin-1 Italian tracks —
-    the addon's `SubEncoding` field is unreliable, and `errors="replace"` used to turn
-    every `è`/`à` into `\ufffd` on the TV. Downstream always re-writes UTF-8 (the WebVTT
-    spec REQUIRES it; mpv is happiest with it too)."""
-    try:
-        with open(path, "rb") as f:
-            raw = f.read()
-    except OSError:
-        return None
-    try:
-        return raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return raw.decode("latin-1")
+# Text-format concerns moved to the `srt` leaf module (shared with the alignment
+# engine and the delivery tier). Thin aliases keep the existing call sites and the
+# public test surface stable; `_decode_sub` dies with the runtime-fit in ADR 0020.
+_decode_sub = srt.decode
+_SRT_TS = srt._TS
 
-
-# Cue-timing timestamp (`HH:MM:SS,mmm`, `.` accepted) — only lines with `-->` are touched.
-_SRT_TS = re.compile(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})")
 
 # Runtime-fit knobs (ADR 0018 refinement): candidates checked per language, and the
 # last-cue-vs-duration gap past which the fit is not trusted (reported as a plain guess).
@@ -293,55 +279,8 @@ def _auto_choose(
     return SubsPick((path,), "lang") if path else SubsPick()
 
 
-def retime_srt(path: str, offset: float, scale: float) -> bool:
-    """Retime an SRT in place: t' = t * scale + offset (clamped at 0), on cue-timing lines
-    only. `scale` fixes framerate drift (e.g. subs authored for 25 fps on a 23.976 video →
-    25/23.976), `offset` a constant shift. Upstream of BOTH delivery paths, so mpv and the
-    cast's WebVTT see the same corrected timings (ADR 0018). False on I/O failure."""
-
-    def _shift(m: re.Match[str]) -> str:
-        h, mnt, s, ms = int(m[1]), int(m[2]), int(m[3]), int(m[4].ljust(3, "0"))
-        t = max(0.0, (h * 3600 + mnt * 60 + s + ms / 1000) * scale + offset)
-        whole, milli = divmod(round(t * 1000), 1000)
-        mm, ss = divmod(whole, 60)
-        hh, mm = divmod(mm, 60)
-        return f"{hh:02d}:{mm:02d}:{ss:02d},{milli:03d}"
-
-    text = _decode_sub(path)
-    if text is None:
-        return False
-    out = "\n".join(_SRT_TS.sub(_shift, ln) if "-->" in ln else ln for ln in text.splitlines())
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(out + "\n")
-    except OSError:
-        return False
-    return True
-
-
-def to_vtt(srt_path: str) -> str | None:
-    """Convert an SRT file to WebVTT, required for a side-loaded Cast caption track. Writes a
-    sibling `<name>.vtt` and returns its path (or None on failure). Minimal and safe: prepend the
-    `WEBVTT` header and turn the `,` millisecond separator into `.` on cue-timing lines only
-    (`-->`), leaving cue identifiers and text untouched. Idempotent-ish: a file already starting
-    with `WEBVTT` is copied through unchanged."""
-    text = _decode_sub(srt_path)
-    if text is None:
-        return None
-    if text.lstrip().startswith("WEBVTT"):
-        out = text
-    else:
-        lines = ["WEBVTT", ""]
-        lines += [ln.replace(",", ".") if "-->" in ln else ln for ln in text.splitlines()]
-        out = "\n".join(lines) + "\n"
-    base = srt_path[:-4] if srt_path.lower().endswith(".srt") else srt_path
-    vtt_path = f"{base}.vtt"
-    try:
-        with open(vtt_path, "w", encoding="utf-8") as f:
-            f.write(out)
-    except OSError:
-        return None
-    return vtt_path
+retime_srt = srt.retime
+to_vtt = srt.to_vtt
 
 
 def auto_subs(
