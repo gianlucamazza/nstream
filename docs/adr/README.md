@@ -32,5 +32,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0018](0018-subtitle-hash-match-and-retime.md)       | Subtitle sync: exact-file hash match + manual retime                               | Accepted |
 | [0019](0019-audio-anchored-subtitle-sync.md)         | Audio-anchored subtitle sync via alass                                             | Superseded by 0020 |
 | [0020](0020-native-subtitle-alignment.md)            | Native sparse-evidence subtitle alignment and audio arbitration                    | Accepted |
+| [0021](0021-per-invocation-constraint-parity.md)     | Per-invocation constraints hold across every selection path                        | Accepted |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

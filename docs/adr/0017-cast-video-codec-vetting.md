@@ -49,3 +49,7 @@ Selection time is the only defense.
 - Known gap (follow-up, not this ADR): the language reselect still ignores the per-session
   `--quality` choice — it can legally return a different resolution than the exact filter
   picked. Video decodability is corrected here; quality parity is a separate decision.
+
+## Post-scriptum (2026-07-16)
+
+The known gap above (quality parity in the reselects) is closed by ADR 0021.
