@@ -84,6 +84,9 @@ Modules in `src/nstream/`:
   matches win. Leaf below `cli`; imports `api`/`oshash`/`picker`/`tracks`/`labels`/`ui`/`config`.
 - `oshash.py` — OpenSubtitles moviehash of a remote stream via two 64 KB ranged HTTP reads
   (`hash_url` → `(hash, size)`, best-effort None). Leaf (stdlib + `log`); never logs the URL.
+- `subsync.py` — audio-anchored subtitle correction (ADR 0019): bounded ffmpeg audio segment
+  from the resolved url + `alass --no-split` → constant offset fixed in place; best-effort
+  `(ran, offset)`. Gated on the alass optdepend. Leaf (`log`/`util` + stdlib).
 - `labels.py` — presentation helpers (`meta_label`/`stream_label`/`episode_label`/`history_label`/
   `display_title`/`track_label`/`audio_summary`/`sub_summary`). Reads active caps on demand via
   `ui.active_caps()`. Top tier: imports only `ui`/`quality`/`tracks`/`config`.

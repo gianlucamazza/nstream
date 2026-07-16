@@ -572,8 +572,9 @@ def _auto_play(
             # castbridge (side-loaded WebVTT track) and catt (`-s`) paths carry them now, but a
             # mirror cast or a failed conversion may not — don't report those as active.
             "subtitles": cast_sub_lang if (sub_paths and subs_delivered) else None,
-            # How the track was chosen: "hash" = protocol-verified OSHash match, "runtime" =
-            # last cue fits the real media duration, "lang" = best language guess (ADR 0018).
+            # How the track was chosen: "hash" = protocol-verified OSHash match, "audio" =
+            # alass-corrected against the real audio (ADR 0019), "runtime" = last cue fits
+            # the media duration, "lang" = best language guess (ADR 0018).
             "subtitles_match": sub_match if (sub_paths and subs_delivered) else None,
             "notice": notice,
             "error": None,
