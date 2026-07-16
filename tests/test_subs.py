@@ -287,3 +287,74 @@ def test_pick_skips_hash_on_loopback_url(monkeypatch, stub_download, tmp_path):
         CFG, "movie", "id", str(tmp_path), video_url="http://127.0.0.1:8090/stream?link=x"
     )
     assert out.match == "lang"
+
+
+# --- runtime-fit fallback (ADR 0018 refinement) -------------------------------
+
+
+def _srt_ending_at(tmp_path, name, last_s):
+    mm, ss = divmod(int(last_s), 60)
+    hh, mm = divmod(mm, 60)
+    p = tmp_path / name
+    p.write_text(
+        f"1\n00:00:01,000 --> 00:00:02,000\nciao\n\n"
+        f"2\n{hh:02d}:{mm:02d}:{ss:02d},000 --> {hh:02d}:{mm:02d}:{ss + 1:02d},000\nfine\n",
+        encoding="utf-8",
+    )
+    return str(p)
+
+
+def _fit_env(monkeypatch, tmp_path, lasts: dict[str, float], duration: float):
+    """Candidates u1..uN whose downloaded SRTs end at the given times; media lasts
+    `duration` seconds."""
+    files = {u: _srt_ending_at(tmp_path, f"{u}.srt", t) for u, t in lasts.items()}
+    monkeypatch.setattr(subs, "_download_subtitle", lambda s, wd: files.get(s["url"]))
+    monkeypatch.setattr(
+        subs.tracks, "probe_tracks",
+        lambda url: subs.tracks.Tracks(duration=duration, video_codec="h264"),
+    )  # fmt: skip
+    monkeypatch.setattr(subs.oshash, "hash_url", lambda url: None)
+
+
+def test_auto_pick_fits_by_runtime(monkeypatch, tmp_path, capsys):
+    """Live regression (Coherence, 2026-07-16): two timing clusters, the addon's arbitrary
+    order picked the one 80 s short of the file → visible desync. With no protocol hash
+    match, the candidate whose last cue fits the REAL media duration must win."""
+    _fit_env(
+        monkeypatch, tmp_path,
+        {"u1": 5197.0, "u2": 5263.0, "u3": 5277.0}, duration=5276.4,
+    )  # fmt: skip
+    tracks_list = [{"lang": "ita", "url": u} for u in ("u1", "u2", "u3")]
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
+    out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
+    assert out.match == "runtime"
+    assert out.paths[0].endswith("u3.srt")  # 5277.0 vs 5276.4: the fitting cluster
+    assert "aderenza al runtime" in capsys.readouterr().err
+
+
+def test_auto_pick_runtime_gap_too_large_is_honest_lang(monkeypatch, tmp_path, capsys):
+    """Every candidate far from the media duration → still delivered (better than
+    nothing) but reported as a plain guess, with a warning."""
+    _fit_env(monkeypatch, tmp_path, {"u1": 4000.0, "u2": 4100.0}, duration=5276.4)
+    tracks_list = [{"lang": "ita", "url": "u1"}, {"lang": "ita", "url": "u2"}]
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
+    out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
+    assert out.match == "lang" and out.paths[0].endswith("u2.srt")
+    assert "non garantita" in capsys.readouterr().err
+
+
+def test_auto_pick_true_hash_match_skips_runtime_probe(monkeypatch, tmp_path):
+    """A protocol-verified hash match (m=='h' → hash_match) is synced by construction:
+    no candidate downloads beyond it, no duration probe."""
+    monkeypatch.setattr(
+        subs.tracks, "probe_tracks", lambda url: pytest.fail("hash match → no probe")
+    )
+    monkeypatch.setattr(subs.oshash, "hash_url", lambda url: ("00" * 8, 200_000))
+    monkeypatch.setattr(subs, "_download_subtitle", lambda s, wd: str(tmp_path / "x.srt"))
+    tracks_list = [
+        {"lang": "ita", "url": "u1", "hash_match": True},
+        {"lang": "ita", "url": "u2"},
+    ]
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks_list))
+    out = subs._pick(CFG, "movie", "id", str(tmp_path), video_url="http://cdn/v.mkv")
+    assert out.match == "hash"

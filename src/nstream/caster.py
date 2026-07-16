@@ -419,11 +419,15 @@ def _serve_subtitle(
         if sub_lang:
             kwargs["subtitle_lang"] = sub_lang
         return server.shutdown, True
-    spawned = serve.spawn_detached(bind_ip, sub_path=vtt)
+    # The VTT lives in the per-play work_dir, which dies with this process, while the
+    # detached server opens it PER REQUEST and the receiver re-fetches the track (seek):
+    # serve a persisted copy instead, reaped together with the server.
+    persisted = serve.persist_sub(vtt)
+    spawned = serve.spawn_detached(bind_ip, sub_path=persisted or vtt)
     if spawned is None:
         return None, False
     pid, port, token = spawned
-    serve.register_sub_server(pid)
+    serve.register_sub_server(pid, persisted)
     kwargs["subtitle_url"] = serve.served_sub_url(bind_ip, port, token)
     if sub_lang:
         kwargs["subtitle_lang"] = sub_lang

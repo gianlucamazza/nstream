@@ -187,19 +187,18 @@ def _pick(
             for s in subs
         ]
         chosen = fzf(items, "sottotitoli> ")
-    else:  # auto: take the best preferred-language track, else skip silently
-        chosen = subs[0] if subs[0].get("lang", "") in pref else None
-        if chosen is None:
-            print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
-    if not chosen:
+        if not chosen:
+            return SubsPick()
+        path = _download_subtitle(chosen, work_dir)
+        if not path:
+            return SubsPick()
+        return SubsPick((path,), "hash" if chosen.get("hash_match") else "lang")
+    # auto: hash-match (protocol-verified) → runtime fit → best language guess.
+    pick = _auto_choose(subs, pref, video_url, work_dir)
+    if pick is None:
+        print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
         return SubsPick()
-    path = _download_subtitle(chosen, work_dir)
-    if not path:
-        return SubsPick()
-    match = "hash" if chosen.get("hash_match") else "lang"
-    if match == "hash":
-        print("nstream: sottotitoli sincronizzati al file (hash-match)", file=sys.stderr)
-    return SubsPick((path,), match)
+    return pick
 
 
 def _is_loopback(url: str) -> bool:
@@ -226,6 +225,72 @@ def _decode_sub(path: str) -> str | None:
 
 # Cue-timing timestamp (`HH:MM:SS,mmm`, `.` accepted) — only lines with `-->` are touched.
 _SRT_TS = re.compile(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})")
+
+# Runtime-fit knobs (ADR 0018 refinement): candidates checked per language, and the
+# last-cue-vs-duration gap past which the fit is not trusted (reported as a plain guess).
+_FIT_CAP = 6
+_FIT_WARN_S = 120.0
+
+
+def _last_cue_s(path: str) -> float | None:
+    """Last cue timestamp (seconds) of an SRT, or None when unparsable."""
+    text = _decode_sub(path)
+    if not text:
+        return None
+    times = [
+        int(h) * 3600 + int(m) * 60 + int(sec) + int(ms.ljust(3, "0")) / 1000
+        for ln in text.splitlines()
+        if "-->" in ln
+        for h, m, sec, ms in _SRT_TS.findall(ln)
+    ]
+    return max(times) if times else None
+
+
+def _auto_choose(
+    subs: list[Subtitle], pref: dict[str, int], video_url: str | None, work_dir: str
+) -> SubsPick | None:
+    """Auto-mode selection over the (lang, hash)-sorted candidates. A REAL hash match
+    (protocol `m == "h"`) is synced by construction and wins. Otherwise, with several
+    same-language candidates and a known media duration, pick by RUNTIME FIT: the track
+    whose last cue lands closest to the file's real duration — measurable sync evidence
+    (live case: two timing clusters 80 s apart; the addon's arbitrary order picked the
+    wrong one). Downloads are a few KB gzipped each, capped at `_FIT_CAP`. None when no
+    candidate is in a preferred language."""
+    best_lang = subs[0].get("lang", "")
+    if best_lang not in pref:
+        return None
+    pool = [s for s in subs if s.get("lang", "") == best_lang][:_FIT_CAP]
+    if pool[0].get("hash_match"):  # sorted hash-first within the language
+        path = _download_subtitle(pool[0], work_dir)
+        if not path:
+            return SubsPick()
+        print("nstream: sottotitoli sincronizzati al file (hash-match)", file=sys.stderr)
+        return SubsPick((path,), "hash")
+    if len(pool) > 1 and video_url:
+        duration = tracks.probe_tracks(video_url).duration  # memoized: probed at vetting
+        if duration > 600:
+            scored: list[tuple[float, str]] = []
+            for s in pool:
+                p = _download_subtitle(s, work_dir)
+                last = _last_cue_s(p) if p else None
+                if last:
+                    scored.append((abs(last - duration), p))
+            if scored:
+                gap, path = min(scored)
+                if gap > _FIT_WARN_S:
+                    print(
+                        f"nstream: nessun sottotitolo combacia col runtime "
+                        f"(scarto minimo {gap:.0f}s) — sync non garantita",
+                        file=sys.stderr,
+                    )
+                    return SubsPick((path,), "lang")
+                print(
+                    f"nstream: sottotitoli scelti per aderenza al runtime (scarto {gap:.0f}s)",
+                    file=sys.stderr,
+                )
+                return SubsPick((path,), "runtime")
+    path = _download_subtitle(pool[0], work_dir)
+    return SubsPick((path,), "lang") if path else SubsPick()
 
 
 def retime_srt(path: str, offset: float, scale: float) -> bool:
