@@ -80,7 +80,7 @@ def _wire_movie(monkeypatch, *, name="Dune", stream=None):
     stream = stream or {
         "name": "[RD+] Torrentio\n1080p",
         "title": "Dune.2024.1080p.WEB-DL.HEVC.ITA-GRP\n👤 9 💾 8 GB",
-        "url": "http://rd.example/secret-token-abc/dune.mkv",
+        "url": "http://rd.example/secret-token-abc/dune.mp4",
     }
     monkeypatch.setattr(
         headless.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": name}]
@@ -280,7 +280,7 @@ def test_run_auto_no_debrid_url_leak(monkeypatch, capsys):
         stream={
             "name": "[RD+] Torrentio\n1080p",
             "title": "Dune.2021.1080p\n💾 8 GB",
-            "url": "http://rd.example/secret-token-abc123/dune.mkv",
+            "url": "http://rd.example/secret-token-abc123/dune.mp4",
         },
     )
     monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
@@ -1106,7 +1106,7 @@ def test_json_explain_is_read_only_and_structured(monkeypatch, capsys):
     stream = {
         "name": "[RD+] Torrentio\n1080p",
         "title": "Dune.2024.1080p.WEB-DL.HEVC.ITA-GRP\n👤 9 💾 8 GB",
-        "url": "http://rd.example/secret-token-abc/dune.mkv",
+        "url": "http://rd.example/secret-token-abc/dune.mp4",
     }
     monkeypatch.setattr(
         headless.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": "Dune"}]

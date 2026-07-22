@@ -1139,6 +1139,100 @@ def test_reselect_for_lang_skips_undecodable_video(monkeypatch):
     assert plan.stream is chosen and plan.mode == "absent"  # fallback + safety subs, not black
 
 
+# --- cast container vetting (vet_cast_container, ADR 0022) --------------------
+
+
+def _container_env(monkeypatch, probes, candidates=()):
+    """Wire the probe seam for container vetting: `probes` maps url → (ffprobe format_name,
+    video_codec[, audio_tracks]). `candidates` are the ranked cast-playable alternatives."""
+
+    def probe(url):
+        fmt, vc, *rest = probes.get(url, ("", "", []))
+        return stream_select.tracks.Tracks(
+            container=fmt, video_codec=vc, audio=list(rest[0]) if rest else []
+        )
+
+    monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable", lambda cfg, results, exact_resolution=0: list(candidates)
+    )
+
+
+def test_vet_cast_container_passes_castable(monkeypatch):
+    """mp4/webm/unknown containers cast directly (no rewrap flag)."""
+    mp4: Stream = {"url": "http://x/a.mp4"}
+    webm: Stream = {"url": "http://x/a.webm"}
+    unknown: Stream = {"url": "http://x/resolve/id"}  # no extension, probe empty
+    _container_env(monkeypatch, {"http://x/a.mp4": ("mov,mp4,m4a,3gp,3g2,mj2", "hevc")})
+    assert stream_select.vet_cast_container(_ccfg(), [], mp4, "ita") == (mp4, False)
+    assert stream_select.vet_cast_container(_ccfg(), [], webm, "ita") == (webm, False)
+    assert stream_select.vet_cast_container(_ccfg(), [], unknown, "ita") == (unknown, False)
+
+
+def test_vet_cast_container_reselects_verified_target_mp4_twin(monkeypatch, capsys):
+    """An MKV pick swaps only to an MP4 that is a VERIFIED direct cast in the target language
+    (its real first track is ita/aac) — a free direct cast, no rewrap."""
+    mkv: Stream = {"url": "http://x/a.mkv"}
+    mp4: Stream = {"url": "http://x/b.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/a.mkv": ("matroska,webm", "hevc"),
+            "http://x/b.mp4": ("mov,mp4,m4a", "hevc", [Track(1, "ita", "aac")]),
+        },
+        [_R(mp4, frozenset({"ita"}))],
+    )
+    assert stream_select.vet_cast_container(_ccfg(), [mkv, mp4], mkv, "ita") == (mp4, False)
+    assert "MP4" in capsys.readouterr().err
+
+
+def test_vet_cast_container_keeps_mkv_over_wrong_language_multi_mp4(monkeypatch):
+    """Regression (Independence Day, ita→spa): a name-`multi` MP4 whose REAL first track is
+    Spanish must NOT preempt the Italian rewrap. Keep the mkv (→ rewrap, ita selected later)."""
+    mkv: Stream = {"url": "http://x/a.mkv"}
+    multi_mp4: Stream = {"url": "http://x/b.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/a.mkv": ("matroska,webm", "hevc"),
+            "http://x/b.mp4": (
+                "mov,mp4,m4a",
+                "hevc",
+                [Track(1, "spa", "aac"), Track(2, "eng", "aac")],
+            ),
+        },
+        [_R(multi_mp4, frozenset({"multi", "spa"}))],
+    )
+    assert stream_select.vet_cast_container(_ccfg(), [mkv, multi_mp4], mkv, "ita") == (mkv, True)
+
+
+def test_vet_cast_container_no_twin_flags_rewrap(monkeypatch):
+    """No compatible-container candidate → keep the mkv and return True (caller rewraps)."""
+    mkv: Stream = {"url": "http://x/a.mkv"}
+    _container_env(monkeypatch, {"http://x/a.mkv": ("matroska,webm", "hevc")})
+    assert stream_select.vet_cast_container(_ccfg(), [mkv], mkv, "ita") == (mkv, True)
+
+
+def test_vet_cast_container_skips_bad_video_candidate(monkeypatch):
+    """An mp4 twin whose video the DMR can't render is not a candidate (would trade a
+    rewrap for a black screen) → fall back to the rewrap flag."""
+    mkv: Stream = {"url": "http://x/a.mkv"}
+    mp4_divx: Stream = {"url": "http://x/b.mp4"}
+    _container_env(
+        monkeypatch,
+        {"http://x/a.mkv": ("matroska,webm", "hevc"), "http://x/b.mp4": ("mov,mp4,m4a", "mpeg4")},
+        [_R(mp4_divx, frozenset({"ita"}))],
+    )
+    assert stream_select.vet_cast_container(_ccfg(), [mkv, mp4_divx], mkv, "ita") == (mkv, True)
+
+
+def test_vet_cast_container_lying_mp4_extension(monkeypatch):
+    """A .mp4 that ffprobe reveals as Matroska is treated INCOMPATIBLE (rewrap), not black cast."""
+    liar: Stream = {"url": "http://x/a.mp4"}
+    _container_env(monkeypatch, {"http://x/a.mp4": ("matroska,webm", "hevc")})
+    assert stream_select.vet_cast_container(_ccfg(), [liar], liar, "ita") == (liar, True)
+
+
 # --- per-invocation constraint parity (ADR 0021) -----------------------------
 
 

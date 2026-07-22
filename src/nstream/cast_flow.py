@@ -10,8 +10,12 @@ Three deliberate normalizations vs the historical copies (everything else is a 1
      BOTH paths (it used to be interactive-only);
   2. `auto_subs` runs exactly ONCE (the headless copy used to call it twice in the absent
      branch: pre-decision, then again with the safety language);
-  3. the "mirror not needed → direct cast" message is a single constant (the two copies
-     had drifted by one word).
+  3. the mirror-fallback notice is a single constant.
+
+The cast is also vetted for CONTAINER (ADR 0022): the DMR refuses .mkv on a direct cast, so
+`vet_cast_container` reselects an MP4 twin or routes the pick through the Tier-2 copy/copy
+rewrap to MP4. And an explicit `--mirror` now forces the mirror even for a DMR-decodable
+title (ADR 0023); it only downgrades to a direct cast when the mirror backend is unavailable.
 
 What stays in the callers: device resolution, the headless volume guard (gated on
 `CastOutcome.action == "cast"`), and the JSON protocol/accounting. The per-cast
@@ -21,17 +25,16 @@ What stays in the callers: device resolution, the headless volume guard (gated o
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from . import caster, engine, log, mirror, quality, remux, state, stream_select, subs, ui
 from .config import Config, PlayOpts, Stream
 
 _log = log.get_logger("cast_flow")
 
-# Single source for the `--mirror`-downgrade notice (normalization 3).
-MIRROR_NOT_NEEDED = (
-    "nstream: audio decodificabile dal TV → cast diretto nativo (mirror non necessario)"
-)
+# Printed when `--mirror` is forced but the mirror backend isn't available (ADR 0023): an
+# explicit --mirror otherwise forces the mirror even for a DMR-decodable title.
+MIRROR_UNAVAILABLE = "nstream: mirror non disponibile → cast diretto"
 
 
 class CastVideoUnsupported(Exception):
@@ -131,6 +134,15 @@ def run_cast(
     # describes it (the headless caller re-writes a fresh one right after this returns).
     state.clear_cast_session()
     target_lang = opts.audio_lang or cfg.primary
+    # Container gate (ADR 0022): the DMR refuses .mkv on a direct cast though it decodes the
+    # same HEVC/AAC in .mp4. Prefer an MP4 twin (a free direct cast) over a download+rewrap;
+    # this is the optimization, the settled-stream check below is the guarantee.
+    pre_container = chosen
+    chosen, _bad_container = stream_select.vet_cast_container(
+        cfg, results, chosen, target_lang, exact_resolution=exact
+    )
+    if chosen is not pre_container:
+        bad_video = ""  # a vetted MP4 candidate supersedes the original's video verdict
     plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang, exact_resolution=exact)
     if plan.stream is not chosen:
         # The language reselect only offers video-castable candidates (its guard shares
@@ -140,7 +152,12 @@ def run_cast(
     # Remux is a codec decision, orthogonal to language availability: `remux` mode selects a
     # target-language track, but an `absent` fallback whose default track is Dolby/DTS must be
     # remuxed too, or it casts silent (the DMR can't decode it). `plan.needs_remux` carries that.
-    needs_remux = plan.mode == "remux" or plan.needs_remux
+    # A DMR-incompatible container (.mkv) on the SETTLED stream also forces the Tier-2 rewrap to
+    # MP4 (ADR 0022) — the guarantee that no path hands the DMR an .mkv LOAD, whichever release
+    # the audio reselect landed on. A decodable-audio rewrap is `-c:v copy -c:a copy` (remux.py).
+    final_container = stream_select.cast_container(cfg, chosen)
+    needs_rewrap = not quality.container_castable(final_container)
+    needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
     # No dub carries the target language: cast the best pick anyway, with target-language
     # subtitles as a safety net (mirrors the local guard). Printed on both paths (norm. 1).
     # An EXPLICIT `--sub-lang` wins over this primary-language safety default: the user asked
@@ -176,14 +193,14 @@ def run_cast(
     # (`--mirror`/`cast_mode`), OR the remux would be a pathological multi-GB fetch (a 4K
     # Dolby-only pick) and the mirror is available (ADR 0015): instant start + no download beats
     # a 30-60 GB fetch, at the cost of 1080p SDR. Below the size threshold the remux still wins
-    # (native video/HDR). For decodable audio, `--mirror` is transparently downgraded to a
-    # direct cast.
+    # (native video/HDR). An EXPLICIT `--mirror` now forces the mirror even for a decodable
+    # title (ADR 0023): the manual intent wins, mirroring how `--no-mirror` suppresses it.
     info = quality.parse_stream(chosen)
     # `bad_video` forces the mirror regardless of audio: mpv decodes the legacy video
     # locally, the only remaining way to show this title on the TV (availability was
     # already vetted above — reaching here with `bad_video` implies mirror.available()).
     force_mirror = bool(bad_video)
-    mirror_ok = (needs_remux or force_mirror) and mirror.available()
+    mirror_ok = (needs_remux or force_mirror or opts.mirror is True) and mirror.available()
     # Tri-state opts.mirror (ADR 0021): the ADR-0015 auto-switch applies only when the
     # user expressed NO per-invocation preference (None); --no-mirror (False) suppresses
     # it without touching the global config knob.
@@ -212,8 +229,10 @@ def run_cast(
         subs_delivered = bool(sub_paths)  # mpv renders them into the mirrored frame
         action = "mirror"
     else:
-        if opts.mirror is True and not needs_remux:
-            print(MIRROR_NOT_NEEDED, file=sys.stderr)
+        if opts.mirror is True:
+            # Reached the else with --mirror forced ⇒ `mirror.available()` is False (the only
+            # way `mirror_ok` is False here): honour the intent with an honest fallback notice.
+            print(MIRROR_UNAVAILABLE, file=sys.stderr)
         remux_path = (
             remux.remux_for_cast(
                 chosen["url"],
@@ -236,6 +255,19 @@ def run_cast(
                 meta=meta, on_event=on_event,
             )  # fmt: skip
             reencoded = True
+            action = "cast"
+        elif needs_rewrap and mirror.available():
+            # ADR 0022 gap: the container rewrap is unavailable (cfg.cast_remux off or ffmpeg
+            # missing) and the DMR refuses this .mkv LOAD — mirror it (mpv decodes any
+            # container) instead of a silent black direct cast.
+            notice = "rewrap non disponibile → mirror 1080p (il TV non carica questo container)"
+            print(f"nstream: {notice}", file=sys.stderr)
+            pos, dur, advance = mirror.cast_via_mirror(
+                cfg, title, chosen["url"],
+                device=device, start=start, sub_paths=sub_paths, follow=follow,
+            )  # fmt: skip
+            subs_delivered = bool(sub_paths)
+            action = "mirror"
         else:
             if needs_remux:
                 # remux refused (size guard) or failed → direct cast of a file whose first
@@ -245,6 +277,12 @@ def run_cast(
                     "risultare muto o in un'altra lingua"
                 )
                 print(f"nstream: {ui.g().warn} {notice}", file=sys.stderr)
+            # Declare the container's MIME on the LOAD instead of leaving the DMR to sniff
+            # (ADR 0022): reaching a direct cast means the container is DMR-compatible
+            # (mp4/webm) or unknown; set contentType when known so the receiver doesn't guess.
+            mime = quality.container_mime(final_container)
+            if mime and not (meta and meta.content_type):
+                meta = replace(meta or caster.CastMeta(), content_type=mime)
             # In-cast audio switch ('a'): only the interactive path pays the extra rank
             # passes; headless callers leave allow_lang_switch False.
             langs: tuple[str, ...] = ()
@@ -260,7 +298,7 @@ def run_cast(
                 next_label=next_label, langs=langs, resolve_lang=resolver, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
-        action = "cast"
+            action = "cast"
     if sub_paths and not subs_delivered:
         # Honesty over silence: the subtitles were fetched but not attached to the cast
         # (e.g. WebVTT conversion/serving failed, or the mirror path with no burn-in).

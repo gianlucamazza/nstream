@@ -892,6 +892,14 @@ def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
     plus the in-cast switch helpers and auto_subs. Returns the spy dict."""
     seen = {"subs": []}
     monkeypatch.setattr(cli.stream_select, "vet_cast_audio", lambda *a, **k: plan)
+    # Container vetting (ADR 0022): treat the container as castable so these tests keep the
+    # direct/mirror paths they assert (the mkv-url stream would otherwise route to a rewrap).
+    monkeypatch.setattr(
+        cli.stream_select,
+        "vet_cast_container",
+        lambda cfg, results, chosen, target, exact_resolution=0: (chosen, False),
+    )
+    monkeypatch.setattr(cli.stream_select, "cast_container", lambda cfg, stream: "mp4")
     monkeypatch.setattr(
         cli.stream_select, "cast_languages", lambda cfg, results, exact_resolution=0: langs
     )
@@ -1001,20 +1009,18 @@ def test_play_on_cast_mirror_gates_on_remux_audio(monkeypatch):
     assert seen["device"] == "192.168.1.5" and seen["start"] == 7.0
 
 
-def test_play_on_cast_mirror_downgraded_when_decodable(monkeypatch, capsys):
-    """--mirror with DMR-decodable audio (plan direct) → transparent direct cast + notice."""
+def test_play_on_cast_explicit_mirror_forces_mirror(monkeypatch):
+    """--mirror with DMR-decodable audio now forces the mirror (ADR 0023)."""
     stream = dict(_CAST_STREAM)
     seen = _wire_cast_tree(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
-        cast_flow.mirror, "cast_via_mirror", _boom("mirror must not run for decodable audio")
-    )
-    monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False, False)
-    )
+        cast_flow.mirror, "cast_via_mirror",
+        lambda *a, **k: seen.update(mirror=True) or (0.0, 0.0, False),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("direct cast must not run when forced"))
     _call_cast(_cast_opts(mirror=True), stream)
-    assert "mirror non necessario" in capsys.readouterr().err
-    assert seen.get("cast") is True
+    assert seen.get("mirror") is True
 
 
 def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
