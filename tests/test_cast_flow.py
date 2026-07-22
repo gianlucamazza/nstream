@@ -49,6 +49,15 @@ def _wire(monkeypatch, plan, *, langs=("ita",)):
         "vet_cast_video",
         lambda cfg, results, chosen, exact_resolution=0: (chosen, ""),
     )
+    # Container vetting (ADR 0022): default to a castable container so the existing tests take
+    # the direct/remux paths they assert. The reselect returns (chosen, False) and the settled
+    # guarantee (`quality.container_castable(cast_container(...))`) sees mp4. Container tests override.
+    monkeypatch.setattr(
+        cast_flow.stream_select,
+        "vet_cast_container",
+        lambda cfg, results, chosen, target, exact_resolution=0: (chosen, False),
+    )
+    monkeypatch.setattr(cast_flow.stream_select, "cast_container", lambda cfg, stream: "mp4")
     monkeypatch.setattr(cast_flow.stream_select, "vet_cast_audio", lambda *a, **k: plan)
     monkeypatch.setattr(
         cast_flow.stream_select, "cast_languages",
@@ -261,20 +270,31 @@ def test_mirror_gates_on_remux_audio(monkeypatch):
     assert out.action == "mirror" and out.reencoded is False
 
 
-def test_mirror_downgraded_when_decodable(monkeypatch, capsys):
-    """--mirror with DMR-decodable audio (plan direct) → transparent direct cast + the
-    single shared notice (normalization 3)."""
+def test_explicit_mirror_forces_mirror_when_available(monkeypatch):
+    """--mirror with DMR-decodable audio now FORCES the mirror (ADR 0023): the manual intent
+    wins even for a title the DMR could play directly."""
     stream = dict(_STREAM)
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
-        cast_flow.mirror, "cast_via_mirror", _boom("mirror must not run for decodable audio")
-    )
+        cast_flow.mirror, "cast_via_mirror",
+        lambda *a, **k: seen.update(mirror=True) or (0.0, 0.0, False),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("direct cast must not run when forced"))
+    out = _run(_opts(mirror=True), stream)
+    assert seen.get("mirror") is True and out.action == "mirror"
+
+
+def test_explicit_mirror_falls_back_when_unavailable(monkeypatch, capsys):
+    """--mirror but the mirror backend is unavailable → honest fallback notice + direct cast."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
     monkeypatch.setattr(
         cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False, False)
     )
     out = _run(_opts(mirror=True), stream)
-    assert cast_flow.MIRROR_NOT_NEEDED in capsys.readouterr().err
+    assert cast_flow.MIRROR_UNAVAILABLE in capsys.readouterr().err
     assert seen.get("cast") is True and out.action == "cast"
 
 
@@ -366,6 +386,72 @@ def test_remux_pathological_helper():
     assert cast_flow._remux_is_pathological(StreamInfo(size_gb=55.0), 0) is False  # disabled
 
 
+# --- cast container gate (ADR 0022) ------------------------------------------
+
+
+def test_bad_container_triggers_rewrap(monkeypatch):
+    """A DMR-incompatible container (mkv) with decodable audio still routes through the Tier-2
+    rewrap to MP4 — the direct cast (which the DMR would refuse) never runs."""
+    stream = dict(_STREAM)  # 1080p, 8 GB → rewrap (not pathological), not the mirror
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.stream_select, "cast_container", lambda cfg, s: "mkv")
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda url, cfg, **k: "/tmp/out.mp4")
+    monkeypatch.setattr(cast_flow.subs, "align_local", lambda cfg, pick, path, wd, opts: pick)
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_file",
+        lambda *a, **k: seen.update(remuxed=True) or (0.0, 0.0, False, False),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("bad container must not direct-cast"))
+    out = _run(_opts(), stream)
+    assert seen.get("remuxed") is True and out.reencoded is True and out.action == "cast"
+
+
+def test_bad_container_4k_prefers_mirror(monkeypatch):
+    """A 4K MKV with no MP4 twin and decodable audio: the rewrap would be a huge fetch, so the
+    pathological-4K auto-switch (ADR 0015) prefers the mirror over the container rewrap."""
+    stream = dict(_STREAM_4K)  # 2160p, 55 GB
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.stream_select, "cast_container", lambda cfg, s: "mkv")
+    _wire_mirror(monkeypatch, seen)
+    out = _run(_opts(mirror=None), stream)
+    assert seen["mirror"] == stream["url"] and out.action == "mirror"
+
+
+def test_bad_container_mirrors_when_rewrap_unavailable(monkeypatch, capsys):
+    """ADR 0022 gap: a bad-container pick with the rewrap unavailable (cast_remux off / ffmpeg
+    missing → remux_for_cast None) mirrors instead of a silent black .mkv direct cast."""
+    stream = dict(_STREAM)  # 1080p, not pathological
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.stream_select, "cast_container", lambda cfg, s: "mkv")
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.remux, "remux_for_cast", lambda *a, **k: None
+    )  # rewrap off/failed
+    monkeypatch.setattr(
+        cast_flow.mirror, "cast_via_mirror",
+        lambda *a, **k: seen.update(mirror=True) or (0.0, 0.0, False),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("must not direct-cast an unsupported .mkv"))
+    out = _run(_opts(), stream)
+    assert seen.get("mirror") is True and out.action == "mirror"
+    assert "rewrap non disponibile" in capsys.readouterr().err
+
+
+def test_direct_cast_declares_container_mime(monkeypatch):
+    """A castable-container direct cast declares the container MIME on the LOAD instead of
+    leaving the DMR to sniff (ADR 0022)."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.stream_select, "cast_container", lambda cfg, s: "mp4")
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: seen.update(mime=k["meta"].content_type) or (0.0, 0.0, False, False),
+    )  # fmt: skip
+    _run(_opts(), stream)
+    assert seen.get("mime") == "video/mp4"
+
+
 # --- in-cast audio switch wiring ----------------------------------------------
 
 
@@ -396,9 +482,10 @@ def test_lang_switch_wired_only_when_allowed(monkeypatch):
 
 
 def test_next_label_and_meta_threaded(monkeypatch):
-    """next_label/meta (the interactive knobs) reach the direct cast untouched."""
+    """next_label reaches the direct cast; meta is threaded with its fields preserved and the
+    container contentType added (ADR 0022 augments meta, it does not replace its content)."""
     stream = dict(_STREAM)
-    seen = _wire(monkeypatch, _plan("direct", stream))
+    seen = _wire(monkeypatch, _plan("direct", stream))  # cast_container stubbed → mp4
     meta = cast_flow.caster.CastMeta(poster="http://img/p.jpg")
     monkeypatch.setattr(
         cast_flow.caster, "cast",
@@ -408,7 +495,9 @@ def test_next_label_and_meta_threaded(monkeypatch):
         ),
     )  # fmt: skip
     out = _run(_opts(), stream, next_label="S01E02", meta=meta)
-    assert seen["next_label"] == "S01E02" and seen["meta"] is meta
+    assert seen["next_label"] == "S01E02"
+    assert seen["meta"].poster == "http://img/p.jpg"  # original field preserved
+    assert seen["meta"].content_type == "video/mp4"  # container MIME declared on the LOAD
     assert (out.pos, out.dur, out.advance) == (1.0, 2.0, True)
 
 
@@ -580,6 +669,13 @@ def test_run_cast_threads_resolved_quality_to_all_reselects(monkeypatch):
         ),
     )  # fmt: skip
     monkeypatch.setattr(
+        cast_flow.stream_select, "vet_cast_container",
+        lambda cfg, results, chosen, target, exact_resolution=0: (
+            seen.update(container=exact_resolution) or (chosen, False)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.stream_select, "cast_container", lambda cfg, s: "mp4")
+    monkeypatch.setattr(
         cast_flow.stream_select, "vet_cast_audio",
         lambda cfg, results, chosen, lang, exact_resolution=0: (
             seen.update(audio=exact_resolution) or _plan("direct", stream)
@@ -605,7 +701,9 @@ def test_run_cast_threads_resolved_quality_to_all_reselects(monkeypatch):
         device="192.168.1.5", title="T", typ="movie", video_id="tt1",
         work_dir="/tmp", opts=_opts(quality=1080), start=None, allow_lang_switch=True,
     )  # fmt: skip
-    assert seen == {"video": 1080, "audio": 1080, "langs": 1080, "resolver": 1080}
+    assert seen == {
+        "video": 1080, "container": 1080, "audio": 1080, "langs": 1080, "resolver": 1080
+    }  # fmt: skip
 
 
 def test_no_mirror_suppresses_pathological_auto_switch(monkeypatch, capsys):

@@ -280,6 +280,17 @@ layer that would narrow (not abandon) this principle is recorded in `docs/adr/` 
     (surfaced in the outcome `notice`). Below the threshold the remux still wins (native video/HDR).
     `0` disables the auto-switch.
   - Dolby/DTS are no longer _excluded_ from cast (they were "silent") — only ranked below native AAC.
+- **Container vetting (ADR 0022):** the DMR loads MP4/WebM/CMAF but **refuses Matroska (.mkv)** —
+  the LOAD is rejected at container-sniff (`player_state UNKNOWN`, `receiver_error ERROR`,
+  `content_id None`), even for HEVC/AAC it would decode. `stream_select.vet_cast_container` (the
+  container twin of `vet_cast_video`) reselects an MP4-container candidate (a free direct cast) or
+  routes the pick through the Tier-2 rewrap to MP4 (`-c:v copy -c:a copy` when audio is decodable —
+  a pure container rewrap). The container is name-parsed from `behaviorHints.filename` and confirmed
+  by the ffprobe `format_name` (same memoized probe); a 4K mkv is demoted in ranking
+  (`_likely_needs_remux`) so an mp4 alternative wins and the rewrap stays rare. A direct-cast LOAD
+  now also declares the container `contentType`. **`--mirror` is an override (ADR 0023):** it forces
+  the mirror even for a DMR-decodable title (with an HDR→SDR tone-map so a 4K HDR source isn't cast
+  black), downgrading to a direct cast only when the mirror backend is unavailable.
 
 ### mpv ↔ nstream signalling
 

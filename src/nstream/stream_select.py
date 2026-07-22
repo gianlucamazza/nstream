@@ -375,6 +375,74 @@ def vet_cast_video(
     return chosen, bad
 
 
+def cast_container(cfg: Config, stream: Stream) -> str:
+    """Canonical container of `stream` for cast compatibility (ADR 0022). The filename
+    extension (name-parsed) is authoritative — it is the only signal that splits the shared
+    matroska/webm ffprobe demuxer name — and the ffprobe `format_name` (same memoized probe
+    as the audio/video vetting) confirms or overrides it toward INCOMPATIBLE, so a `.mp4`
+    that is really Matroska is rewrapped, not cast black. "" = unknown (benefit of the doubt).
+
+    Public (ADR 0022): `cast_flow` reads it for the settled-stream rewrap verdict and the
+    LOAD contentType, so it must not be a leading-underscore reach-through."""
+    ext = quality.parse_stream(stream).container
+    url = _playable_url(cfg, stream)
+    probed = quality.container_from_format(tracks.probe_tracks(url).container, ext) if url else ""
+    return probed or ext
+
+
+def _container_castable(cfg: Config, stream: Stream) -> bool:
+    """Whether the DMR can LOAD `stream`'s container on a direct cast (ADR 0022)."""
+    return quality.container_castable(cast_container(cfg, stream))
+
+
+def vet_cast_container(
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    target_lang: str,
+    *,
+    probe_cap: int = 4,
+    exact_resolution: int = 0,
+) -> tuple[Stream, bool]:
+    """Ensure the DMR can LOAD `chosen`'s container before a direct cast (ADR 0022). The
+    Default Media Receiver refuses Matroska (.mkv) — player UNKNOWN + receiver ERROR,
+    content_id None — yet plays the SAME HEVC/AAC in MP4. Prefer a swap over a download, but
+    only to a **strict win**: a *verified direct cast in `target_lang`* with a DMR-compatible
+    container and castable video. A merely name-`multi`-tagged MP4 whose REAL first audio track
+    is another dub must NOT preempt the target-language rewrap — trusting the name tag here is
+    how an Italian request landed on a Spanish MP4. If nothing qualifies, keep `chosen` and
+    return True so the caller rewraps to MP4 while `vet_cast_audio` still selects the target dub.
+
+    Returns `(stream, needs_container_rewrap)`."""
+    if _container_castable(cfg, chosen):
+        return chosen, False
+    probed = 0
+    for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
+        s = r.stream
+        if s is chosen or s.get("url") == chosen.get("url"):
+            continue
+        langs = r.info.languages
+        if target_lang and target_lang not in langs and "multi" not in langs:
+            continue
+        if probed >= probe_cap:
+            break
+        probed += 1
+        if not (_container_castable(cfg, s) and _video_castable(cfg, s)):
+            continue
+        # Language-safe swap: only a probed, verified direct cast in the target language beats
+        # the target-language rewrap of `chosen`. Same memoized probe as the checks above.
+        plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
+        if not target_lang or (
+            plan.mode == "direct" and plan.verified and plan.real_lang == target_lang
+        ):
+            print(
+                "nstream: container non caricabile dal TV → altra release MP4 (stessa lingua)",
+                file=sys.stderr,
+            )
+            return s, False
+    return chosen, True
+
+
 def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) -> CastAudioPlan:
     """Decide the cast plan for one resolved `stream` given its probed `audio` tracks and the
     desired `target_lang` (a canonical code, or "" for no preference → codec-only legacy
@@ -432,6 +500,7 @@ def _reselect_cast_for_lang(
     doubt `pick_audio_stream_verified` already gives the forced `--audio-lang` path."""
     remux_fallback: CastAudioPlan | None = None
     tagged_guess: CastAudioPlan | None = None
+    direct_bad_container: CastAudioPlan | None = None
     probed = 0
     for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
@@ -450,8 +519,14 @@ def _reselect_cast_for_lang(
             continue
         plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
         if plan.mode == "direct" and plan.verified:
-            return plan  # cheapest *verified* correct option (no download) → take it
-        if plan.mode == "remux" and remux_fallback is None:
+            # A direct dub in an MKV would fail the DMR LOAD (ADR 0022): keep chasing a
+            # DMR-compatible container (a free direct cast), remembering the MKV as a fallback
+            # the caller rewraps to MP4. Same memoized probe as the audio read above.
+            if _container_castable(cfg, s):
+                return plan  # cheapest *verified* correct option (no download) → take it
+            if direct_bad_container is None:
+                direct_bad_container = plan
+        elif plan.mode == "remux" and remux_fallback is None:
             remux_fallback = plan  # remember, but keep looking for a direct one
         elif (
             plan.mode == "direct"
@@ -462,7 +537,7 @@ def _reselect_cast_for_lang(
             # Unprobeable but explicitly target-tagged → a benefit-of-the-doubt last resort,
             # kept only if no verified option turns up (below any remux_fallback).
             tagged_guess = plan
-    return remux_fallback or tagged_guess
+    return remux_fallback or direct_bad_container or tagged_guess
 
 
 def vet_cast_audio(

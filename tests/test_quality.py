@@ -780,3 +780,83 @@ def test_cast_filter_excludes_legacy_codec():
     assert info.codec == "mpeg4"
     reason = quality.unsupported_reason(info, quality.cast_caps(), quality.FilterSpec())
     assert reason == "MPEG4 no-HW"
+
+
+# --- cast container model (ADR 0022) -----------------------------------------
+
+
+def test_parse_container_from_behavior_hints_filename():
+    """The container comes from `behaviorHints.filename` (where the extension lives),
+    not the name+title text `_text` parses."""
+
+    def mk(fn):
+        return {
+            "name": "[RD+] T",
+            "title": "Dune.2024.1080p.HEVC",
+            "behaviorHints": {"filename": fn},
+        }
+
+    assert quality.parse_stream(mk("Dune.2024.mkv")).container == "mkv"
+    assert quality.parse_stream(mk("Dune.2024.mp4")).container == "mp4"
+    assert quality.parse_stream(mk("Dune.2024.m4v")).container == "mp4"
+    assert quality.parse_stream(mk("Dune.2024.webm")).container == "webm"
+    assert quality.parse_stream(mk("Dune.2024.avi")).container == "avi"
+    assert quality.parse_stream(mk("Dune.2024")).container == ""  # no extension → unknown
+
+
+def test_parse_container_falls_back_to_url_extension():
+    """With no behaviorHints.filename, the url path tail supplies the extension."""
+    assert (
+        quality.parse_stream({"name": "t", "title": "t", "url": "http://x/a.mkv"}).container
+        == "mkv"
+    )
+    assert (
+        quality.parse_stream({"name": "t", "title": "t", "url": "http://x/a.mp4?tok=1"}).container
+        == "mp4"
+    )
+    assert (
+        quality.parse_stream({"name": "t", "title": "t", "url": "http://x/resolve/id"}).container
+        == ""
+    )
+
+
+def test_parse_cache_keys_on_container():
+    """Two streams identical but for the container must not collide in the parse cache."""
+    a = {"name": "T", "title": "Dune", "behaviorHints": {"filename": "d.mkv"}}
+    b = {"name": "T", "title": "Dune", "behaviorHints": {"filename": "d.mp4"}}
+    assert quality.parse_stream(a).container == "mkv"
+    assert quality.parse_stream(b).container == "mp4"
+
+
+def test_container_from_format_disambiguates_matroska_webm():
+    """ffprobe reports "matroska,webm" for BOTH .mkv and .webm — the extension splits them."""
+    assert quality.container_from_format("mov,mp4,m4a,3gp,3g2,mj2", "mp4") == "mp4"
+    assert quality.container_from_format("matroska,webm", "mkv") == "mkv"
+    assert quality.container_from_format("matroska,webm", "webm") == "webm"
+    assert quality.container_from_format("matroska,webm", "") == "mkv"  # no ext → assume mkv
+    assert quality.container_from_format("avi", "") == "avi"
+    assert quality.container_from_format("", "mkv") == ""  # probe failed → caller uses ext
+
+
+def test_container_castable_and_mime():
+    assert quality.container_castable("mp4") and quality.container_castable("webm")
+    assert not quality.container_castable("mkv") and not quality.container_castable("avi")
+    assert quality.container_castable("")  # unknown → benefit of the doubt
+    assert quality.container_mime("mp4") == "video/mp4"
+    assert quality.container_mime("webm") == "video/webm"
+    assert quality.container_mime("mkv") == ""  # not a direct-cast MIME
+
+
+def test_likely_needs_remux_counts_bad_container():
+    """A 4K mkv reads as remux-likely so it is demoted below an mp4 alternative and the
+    resolution/size caps apply (ADR 0022) — an AAC mkv would otherwise look direct-castable."""
+    mkv_4k = quality.parse_stream(
+        {"name": "T", "title": "Dune.2024.2160p.HEVC.AAC\n👤 9 💾 40 GB",
+         "behaviorHints": {"filename": "dune.4k.mkv"}}
+    )  # fmt: skip
+    mp4_1080 = quality.parse_stream(
+        {"name": "T", "title": "Dune.2024.1080p.HEVC.AAC\n👤 9 💾 6 GB",
+         "behaviorHints": {"filename": "dune.mp4"}}
+    )  # fmt: skip
+    assert quality._likely_needs_remux(mkv_4k) is True
+    assert quality._likely_needs_remux(mp4_1080) is False

@@ -370,6 +370,21 @@ def test_mpv_args_route_audio_to_null_sink(monkeypatch):
     assert not any(a.startswith(("--start", "--aid", "--sid", "--sub-file")) for a in args)
 
 
+def test_mpv_args_pin_sdr_target_for_hdr_tonemap(monkeypatch):
+    """The mirror pins an SDR (BT.709) target so mpv tone-maps HDR→SDR onto the captured
+    surface (ADR 0023): an HDR source would otherwise arrive near-black on the TV. The flags
+    come BEFORE cfg.mpv_args so a user override still wins."""
+    _stub_player_defaults(monkeypatch)
+    cfg = _cfg(mpv_args=["--tone-mapping=clip"])
+    args = mirror._mpv_args(
+        cfg, "http://u", "/s", start=None, sub_paths=(), audio_id=None, sub_id=None
+    )
+    assert "--target-prim=bt.709" in args and "--target-trc=bt.1886" in args
+    assert "--tone-mapping=bt.2390" in args
+    # user override appears after the default → mpv's last-wins makes it effective
+    assert args.index("--tone-mapping=clip") > args.index("--tone-mapping=bt.2390")
+
+
 def test_mpv_args_start_tracks_and_subs(monkeypatch):
     _stub_player_defaults(monkeypatch)
     args = mirror._mpv_args(

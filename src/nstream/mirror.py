@@ -230,6 +230,19 @@ def stop() -> bool:
 # --- the cast ------------------------------------------------------------
 
 
+# Tone-map HDR→SDR for the mirror (ADR 0023). mpv renders onto an 8-bit SDR Wayland surface
+# that the H.264 Cast Streaming sender captures, so an HDR (BT.2020/PQ) source rendered with no
+# tone-map arrives clipped near-black on the TV (audio, on the independent null sink, plays fine
+# — the exact symptom seen on a 4K HDR cast). Pinning an SDR (BT.709/1886) target makes mpv's GPU
+# renderer tone-map to the captured surface. A no-op for SDR sources. Injected before
+# `cfg.mpv_args`, so a user override still wins.
+_TONEMAP_ARGS = (
+    "--target-prim=bt.709",
+    "--target-trc=bt.1886",
+    "--tone-mapping=bt.2390",
+)
+
+
 def _mpv_args(
     cfg: Config,
     url: str,
@@ -256,6 +269,7 @@ def _mpv_args(
         *player._hwdec_defaults(cfg),
         *player._lang_defaults(cfg),
         *player._stream_cache_defaults(cfg),
+        *_TONEMAP_ARGS,
         *cfg.mpv_args,
     ]
     if start and start > 1:

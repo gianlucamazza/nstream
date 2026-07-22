@@ -133,3 +133,27 @@ def test_parse_captures_first_video_codec():
 
 def test_parse_video_codec_empty_without_video_stream():
     assert tracks._parse_ffprobe({"streams": []}).video_codec == ""
+
+
+def test_parse_captures_container_format_name():
+    """The cast container vetting (ADR 0022) reads the raw ffprobe format_name from the same
+    probe (to confirm a lying filename extension)."""
+    data = {"format": {"duration": "1.0", "format_name": "matroska,webm"}, "streams": []}
+    assert tracks._parse_ffprobe(data).container == "matroska,webm"
+    mp4 = {"format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}, "streams": []}
+    assert tracks._parse_ffprobe(mp4).container == "mov,mp4,m4a,3gp,3g2,mj2"
+    assert tracks._parse_ffprobe({"streams": []}).container == ""
+
+
+def test_probe_tracks_requests_format_name(monkeypatch):
+    """The ffprobe argv asks for format_name (so the container rides the memoized probe)."""
+    seen = {}
+
+    def fake_run(cmd, timeout=None):
+        seen["cmd"] = cmd
+        return None  # ffprobe "missing" → empty Tracks, we only assert on the argv
+
+    monkeypatch.setattr(tracks.util, "run_cmd", fake_run)
+    tracks.probe_tracks("http://x/a.mkv")
+    entries = seen["cmd"][seen["cmd"].index("-show_entries") + 1]
+    assert "format_name" in entries

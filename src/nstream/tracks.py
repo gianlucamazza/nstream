@@ -49,6 +49,10 @@ class Tracks:
     # Real codec of the first video stream ("" = no video/probe failed) — the cast video
     # vetting (`stream_select.vet_cast_video`, ADR 0017) reads it from the same probe.
     video_codec: str = ""
+    # Raw ffprobe `format_name` (e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2") — the cast
+    # container vetting (`stream_select.vet_cast_container`, ADR 0022) reads it from the same
+    # probe to confirm the filename extension (a lying .mp4 that is really Matroska).
+    container: str = ""
 
     def empty(self) -> bool:
         return not self.audio and not self.subs
@@ -79,13 +83,15 @@ def _parse_ffprobe(data: dict) -> Tracks:
             title=str(tags.get("title") or ""),
         )
         bucket.append(track)
+    fmt = data.get("format") or {}
     try:
-        duration = float((data.get("format") or {}).get("duration") or 0.0)
+        duration = float(fmt.get("duration") or 0.0)
     except (TypeError, ValueError):
         duration = 0.0
     return Tracks(
-        audio=audio, subs=subs, n_video=n_video, duration=duration, video_codec=video_codec
-    )
+        audio=audio, subs=subs, n_video=n_video, duration=duration,
+        video_codec=video_codec, container=str(fmt.get("format_name") or ""),
+    )  # fmt: skip
 
 
 # Per-url probe memo (see module docstring): failures (empty Tracks) are cached on purpose.
@@ -107,7 +113,8 @@ def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
         return cached
     cmd = [
         "ffprobe", "-v", "error", "-of", "json", "-show_entries",
-        "format=duration:stream=index,codec_type,codec_name,channels:stream_tags=language,title",
+        "format=duration,format_name"
+        ":stream=index,codec_type,codec_name,channels:stream_tags=language,title",
         url,
     ]  # fmt: skip
     proc = util.run_cmd(cmd, timeout=timeout)

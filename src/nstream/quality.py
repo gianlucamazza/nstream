@@ -45,6 +45,7 @@ class StreamInfo:
     languages: frozenset[str] = frozenset()  # ISO codes + "multi"; empty = untagged
     source: str = ""  # remux|bluray|webdl|webrip|hdtv|dvd|cam|ts|tc|scr|""
     audio: str = ""  # truehd|dtshd|dts|eac3|ac3|aac|""; "headline" track codec
+    container: str = ""  # mp4|mkv|webm|avi|mpegts|""; from the release filename extension
     release_name: str = ""  # title's first line (torrent filename), for dedup
     info_hash: str = ""  # pure-torrent streams only; resolved to a url by the engine
     file_idx: int | None = None  # which file in the torrent (None = largest)
@@ -134,8 +135,16 @@ def _likely_needs_remux(info: StreamInfo) -> bool:
     track (TrueHD/DTS-HD) even when untagged — the same reasoning `unsupported_reason` uses
     to demote unlabelled remuxes. A definitive answer only comes from the cast-time ffprobe;
     this is the ranking heuristic that keeps a huge unlabelled 4K remux from out-ranking a
-    modest alternative (it would otherwise look like decodable/unknown audio)."""
-    return info.audio in _CAST_NEEDS_REMUX or (not info.audio and info.source == "remux")
+    modest alternative (it would otherwise look like decodable/unknown audio).
+
+    A DMR-incompatible container (.mkv/.avi, ADR 0022) also needs a Tier-2 rewrap to MP4, so
+    it counts too: this demotes a 4K mkv so an mp4 alternative out-ranks it and the common
+    path stays a direct mp4 cast (the container twin of "selection prefers AAC")."""
+    return (
+        info.audio in _CAST_NEEDS_REMUX
+        or (not info.audio and info.source == "remux")
+        or (info.container != "" and info.container not in CAST_CONTAINER_DECODABLE)
+    )
 
 
 # Torrentio marks an instantly-available (cached) debrid stream with a per-provider
@@ -152,6 +161,29 @@ def _parse_languages(text: str) -> frozenset[str]:
 
 def _parse_source(text: str) -> str:
     return next((name for name, pat in _SOURCE_PATTERNS if pat.search(text)), "")
+
+
+# Filename extension → canonical container token. The container lives ONLY in the release
+# filename (`behaviorHints.filename`), never in the name+title text `_text` parses — so this
+# is the one parser that reads `behaviorHints`. Used for cast-container vetting (ADR 0022):
+# the Default Media Receiver loads MP4/WebM/CMAF but refuses Matroska (.mkv).
+_CONTAINER_BY_EXT = {
+    "mp4": "mp4", "m4v": "mp4", "mov": "mp4",
+    "webm": "webm", "mkv": "mkv", "avi": "avi", "wmv": "wmv", "ts": "mpegts",
+}  # fmt: skip
+
+
+def _parse_container(stream: Stream) -> str:
+    """Canonical container from the release filename extension (`behaviorHints.filename`),
+    falling back to the `url` path tail. "" when absent/unknown (benefit of the doubt)."""
+    hints = stream.get("behaviorHints")
+    name = hints.get("filename") if isinstance(hints, dict) else None
+    if not (isinstance(name, str) and "." in name):
+        url = stream.get("url") or ""
+        name = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    if not name or "." not in name:
+        return ""
+    return _CONTAINER_BY_EXT.get(name.rsplit(".", 1)[1].lower(), "")
 
 
 def _parse_audio(text: str) -> str:
@@ -209,11 +241,15 @@ _PARSE_CACHE: dict[tuple, StreamInfo] = {}
 
 
 def parse_stream(stream: Stream) -> StreamInfo:
+    hints = stream.get("behaviorHints")
     key = (
         stream.get("name") or "",
         stream.get("title") or "",
         stream.get("infoHash") or "",
         stream.get("fileIdx"),
+        # The container comes from the filename/url, not name+title: key on it so two
+        # releases differing only by container don't collide (ADR 0022).
+        (hints.get("filename") if isinstance(hints, dict) else None) or stream.get("url") or "",
     )
     info = _PARSE_CACHE.get(key)
     if info is None:
@@ -236,6 +272,7 @@ def _parse_stream_uncached(stream: Stream) -> StreamInfo:
         languages=_parse_languages(text),
         source=_parse_source(text),
         audio=_parse_audio(text),
+        container=_parse_container(stream),
         release_name=(stream.get("title") or "").split("\n", 1)[0].strip(),
         info_hash=stream.get("infoHash") or "",
         file_idx=stream.get("fileIdx"),
@@ -337,6 +374,43 @@ def preferred_hwdec(caps: Caps) -> str | None:
 # then "plays" as PLAYING + black screen with no receiver error (ADR 0017). AV1 is left
 # out to match `cast_caps` (not guaranteed on older models).
 CAST_VIDEO_DECODABLE = frozenset({"h264", "hevc", "vp8", "vp9"})
+
+# Containers the Default Media Receiver can LOAD on a direct cast (ADR 0022). The DMR plays
+# MP4/WebM/CMAF but REFUSES Matroska (.mkv): the LOAD is rejected at container-sniff —
+# player_state UNKNOWN, receiver_error ERROR, content_id None (empirically confirmed on a
+# Philips 43PUS9235, app CC1AD845) — even when the HEVC/AAC inside would decode fine. Unlike
+# an undecodable video codec (→ mirror, ADR 0017), a bad container is fixed by the Tier-2
+# copy/copy rewrap to MP4. WebM shares the "matroska,webm" ffprobe demuxer name, so the
+# filename EXTENSION is authoritative for webm-vs-mkv.
+CAST_CONTAINER_DECODABLE = frozenset({"mp4", "webm"})
+
+
+def container_from_format(format_name: str, ext: str) -> str:
+    """Normalize an ffprobe `format_name` to a canonical container token, using the parsed
+    filename `ext` only to split the shared matroska/webm demuxer name. "" when unknown."""
+    if not format_name:
+        return ""
+    fmt = format_name.lower()
+    if fmt.startswith("mov,mp4") or "mp4" in fmt.split(","):
+        return "mp4"
+    if "matroska" in fmt or "webm" in fmt:
+        return "webm" if ext == "webm" else "mkv"
+    if "avi" in fmt:
+        return "avi"
+    if "mpegts" in fmt or fmt == "mpeg":
+        return "mpegts"
+    return ""
+
+
+def container_castable(container: str) -> bool:
+    """Whether the DMR can LOAD this container on a direct cast. Unknown ("") gets the
+    benefit of the doubt, mirroring `_codec_supported("")`."""
+    return not container or container in CAST_CONTAINER_DECODABLE
+
+
+def container_mime(container: str) -> str:
+    """MIME type to declare on a direct-cast LOAD (empty → let the receiver sniff)."""
+    return {"mp4": "video/mp4", "webm": "video/webm"}.get(container, "")
 
 
 def cast_caps() -> Caps:
