@@ -31,9 +31,16 @@ class Addon:
     base: str
     name: str
     resources: dict[str, dict]  # resource -> {"types": [...], "idPrefixes": [...]}
-    catalogs: tuple[tuple[str, str], ...] = ()  # (type, id) pairs
+    # (type, id, display name) — name falls back to id when the manifest omits it.
+    catalogs: tuple[tuple[str, str, str], ...] = ()
     builtin: bool = False
     manifest_url: str = ""
+
+
+# Cinemeta-shaped catalog ids already exposed as fixed TUI rows (Popolari / Novità / Top).
+# User addons that re-declare these still contribute to the fetch fan-out; they just don't
+# get a duplicate menu entry.
+_BUILTIN_CATALOG_IDS = frozenset({"top", "year", "imdbRating"})
 
 
 # --- manifest cache (user addons only) -----------------------------------
@@ -82,13 +89,22 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
                 "types": list(r.get("types", m_types)),
                 "idPrefixes": list(r.get("idPrefixes", m_idp)),
             }
-    catalogs = tuple((c.get("type", ""), c.get("id", "")) for c in data.get("catalogs", []))
+    catalogs: list[tuple[str, str, str]] = []
+    for c in data.get("catalogs", []):
+        if not isinstance(c, dict):
+            continue
+        cat_id = str(c.get("id") or "")
+        if not cat_id:
+            continue
+        typ = str(c.get("type") or "")
+        name = str(c.get("name") or cat_id).strip() or cat_id
+        catalogs.append((typ, cat_id, name))
     base = _base_of(manifest_url)
     return Addon(
         base=base,
         name=data.get("name") or base,
         resources=resources,
-        catalogs=catalogs,
+        catalogs=tuple(catalogs),
         manifest_url=manifest_url,
     )
 
@@ -153,7 +169,7 @@ def _builtins(cfg: Config) -> list[Addon]:
                 "meta": {"types": ["movie", "series"], "idPrefixes": ["tt"]},
             },
             catalogs=tuple(
-                (t, c) for c in ("top", "year", "imdbRating") for t in ("movie", "series")
+                (t, c, c) for c in ("top", "year", "imdbRating") for t in ("movie", "series")
             ),
         ),
         Addon(
@@ -184,6 +200,32 @@ def effective_addons(cfg: Config) -> list[Addon]:
         if addon.base not in seen:
             seen.add(addon.base)
             out.append(addon)
+    return out
+
+
+def has_catalog(addon: Addon, typ: str, cat: str) -> bool:
+    """True if `addon` declares a catalog with this type and id."""
+    return any(t == typ and c == cat for t, c, *_ in addon.catalogs)
+
+
+def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
+    """User-addon catalogs for `typ` as `(catalog_id, display_label)`, in addon order.
+
+    Skips built-ins and the Cinemeta-shaped ids already pinned in the TUI section menu.
+    Dedupes by catalog id (first declaration wins the label). Labels prefer the manifest
+    name and fall back to ``Addon · id`` when the name is just the bare id.
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for addon in effective_addons(cfg):
+        if addon.builtin or not serves(addon, "catalog", typ):
+            continue
+        for t, cat_id, name in addon.catalogs:
+            if t != typ or not cat_id or cat_id in _BUILTIN_CATALOG_IDS or cat_id in seen:
+                continue
+            seen.add(cat_id)
+            label = name if name and name != cat_id else f"{addon.name} · {cat_id}"
+            out.append((cat_id, label))
     return out
 
 

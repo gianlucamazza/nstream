@@ -30,7 +30,7 @@ def test_parse_manifest_string_and_object_resources():
     assert a.base == "https://d"
     assert a.resources["catalog"] == {"types": ["movie", "series"], "idPrefixes": ["tt"]}
     assert a.resources["stream"] == {"types": ["movie"], "idPrefixes": ["tt", "kitsu"]}
-    assert a.catalogs == (("movie", "top"),)
+    assert a.catalogs == (("movie", "top", "top"),)
 
 
 def test_serves_type_and_idprefix():

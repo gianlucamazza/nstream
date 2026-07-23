@@ -14,6 +14,7 @@ import json
 import os
 import threading
 import time
+import unicodedata
 import urllib.parse
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +58,32 @@ def _dedup(items: list, key) -> list:
             seen.add(k)
             out.append(it)
     return out
+
+
+def _norm_text(value: object) -> str:
+    """Accent/punctuation-insensitive text used only for local result ranking."""
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    # Keep separators between words: ``Spider-Man`` and ``Spider Man`` must
+    # normalize to the same value. Combining marks are dropped after NFKD so
+    # accented and unaccented text compare identically.
+    chars = []
+    for c in text:
+        if c.isalnum():
+            chars.append(c)
+        elif c.isspace() or unicodedata.category(c).startswith("P"):
+            chars.append(" ")
+    return " ".join("".join(chars).split())
+
+
+def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, str]:
+    wanted = _norm_text(query)
+    name = _norm_text(meta.get("name"))
+    info = _norm_text(meta.get("releaseInfo"))
+    exact = int(name == wanted)
+    prefix = int(name.startswith(wanted) and bool(wanted))
+    words = int(bool(wanted) and wanted in name)
+    year = int(bool(info) and info in wanted)
+    return (exact, prefix, words, year, name)
 
 
 def _gather(tasks: list[Callable[[], list]]) -> list:
@@ -146,7 +173,19 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     tasks: list[Callable[[], list]] = []
     for t in (typ,) if typ else ("movie", "series"):
         tasks += _catalog_tasks(cfg, t, f"top/search={q}", f"ricerca {t}")
-    return _dedup(_gather(tasks), lambda m: m.get("id") or id(m))
+    results = _dedup(_gather(tasks), lambda m: m.get("id") or id(m))
+    # Rank flags descending while keeping equal-score titles alphabetic and
+    # deterministic, independent of addon response order.
+    return sorted(
+        results,
+        key=lambda m: (
+            -_search_score(m, query)[0],
+            -_search_score(m, query)[1],
+            -_search_score(m, query)[2],
+            -_search_score(m, query)[3],
+            _search_score(m, query)[4],
+        ),
+    )
 
 
 def _catalog_addon_tasks(cfg: Config, typ: str, cat: str, extras: str) -> list[Callable[[], list]]:
@@ -155,7 +194,7 @@ def _catalog_addon_tasks(cfg: Config, typ: str, cat: str, extras: str) -> list[C
         if not addons.serves(addon, "catalog", typ):
             continue
         # Built-in Cinemeta has these catalogs; a user addon must declare them.
-        if not addon.builtin and (typ, cat) not in addon.catalogs:
+        if not addon.builtin and not addons.has_catalog(addon, typ, cat):
             continue
         url = f"{addon.base}/catalog/{typ}/{cat}{extras}.json"
         tasks.append(

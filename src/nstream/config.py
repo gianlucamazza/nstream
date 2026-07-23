@@ -325,6 +325,12 @@ def state_path() -> Path:
     return Path(base) / "nstream" / "history.json"
 
 
+def library_path() -> Path:
+    """Resolve the local discovery library (watchlist and recent searches)."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return Path(base) / "nstream" / "library.json"
+
+
 def _bounded_int(raw: dict, key: str, default: int) -> int:
     """Coerce a config int, falling back to `default` on a bad value and clamping to the
     field's INT_BOUNDS range (so out-of-range values can't break ranking/overlay)."""

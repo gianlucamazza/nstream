@@ -15,6 +15,7 @@ from typing import cast as typecast
 
 from . import (
     __version__,
+    addons,
     api,
     cast_flow,
     caster,
@@ -365,7 +366,7 @@ def _pick_hint(opts: PlayOpts) -> str:
     """Discoverability line for the leaf lists: Tab flips the play mode, Alt-C casts,
     Ctrl-/ toggles the poster preview (wired in every preview-enabled menu)."""
     tab = "Tab: scegli sorgente/tracce" if opts.auto else "Tab: avvia al volo"
-    return ui.key_hint(tab, "Alt-C: casta sul TV", "Ctrl-/: anteprima")
+    return ui.key_hint(tab, "Alt-C: casta sul TV", "Alt-W: watchlist", "Ctrl-/: anteprima")
 
 
 def _apply_key(opts: PlayOpts, key: str) -> PlayOpts:
@@ -398,11 +399,19 @@ def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> in
     header: str | None = None
     while True:
         chosen = fzf_key(
-            items, "titolo> ", header=header or _pick_hint(opts), preview=_meta_preview
+            items,
+            "titolo> ",
+            header=header or _pick_hint(opts),
+            expect=("tab", "alt-c", "alt-w"),
+            preview=_meta_preview,
         )
         if not chosen:
             return 0
         key, meta = chosen
+        if key == "alt-w":
+            enabled = state.toggle_watchlist(cfg, meta)
+            header = "aggiunto alla watchlist" if enabled else "rimosso dalla watchlist"
+            continue
         # Series defer auto/manual to the episode picker, but Alt-C (cast) still applies.
         sel = replace(opts, cast=True, cast_choose=True) if key == "alt-c" else opts
         if meta.get("type") != "series":
@@ -411,11 +420,54 @@ def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> in
 
 
 def run_search(cfg: Config, query: str, opts: PlayOpts, typ: str | None = None) -> int:
+    if opts.history:
+        state.remember_search(cfg, query)
     metas = api.search(cfg, query, typ)
     if not metas:
         print("nstream: nessun risultato", file=sys.stderr)
         return 1
     return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
+
+
+def run_watchlist(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
+    """Play or remove locally saved titles without contacting a catalog addon."""
+    metas = state.watchlist(cfg)
+    if typ:
+        metas = [m for m in metas if m.get("type", "movie") == typ]
+    if not metas:
+        print("nstream: watchlist vuota", file=sys.stderr)
+        return 0
+    header: str | None = "Alt-W: aggiungi/rimuovi dalla watchlist"
+    while True:
+        chosen = fzf_key(
+            [(meta_label(m), m) for m in metas],
+            "watchlist> ",
+            header=header,
+            expect=("tab", "alt-c", "alt-w"),
+            preview=_meta_preview,
+        )
+        if not chosen:
+            return 0
+        key, meta = chosen
+        if key == "alt-w":
+            state.toggle_watchlist(cfg, meta)
+            metas = [m for m in metas if m.get("id") != meta.get("id")]
+            if not metas:
+                return 0
+            header = "rimosso dalla watchlist"
+            continue
+        header = play_meta(cfg, meta, _apply_key(opts, key))
+
+
+def run_recent_searches(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
+    queries = state.recent_searches(cfg)
+    if not queries:
+        print("nstream: nessuna ricerca recente", file=sys.stderr)
+        return 0
+    query = fzf([(q, q) for q in queries], "ricerche> ", header="INVIO: cerca · ESC: indietro")
+    if query is None:
+        return 0
+    return run_search(cfg, query, opts, typ)
 
 
 def run_browse(
@@ -426,8 +478,9 @@ def run_browse(
     *,
     genre: str | None = None,
 ) -> int:
-    """Browse a Cinemeta catalog (typed or mixed), with optional genre filter and
-    in-place pagination via a trailing «altri…» row when a full page is returned."""
+    """Browse a catalog id (Cinemeta or user-addon), typed or mixed, with optional
+    genre filter and in-place pagination via a trailing «altri…» row when a full
+    page is returned."""
     skip = 0
     header: str | None = None
     g = ui.glyphs(ui.active_caps())
@@ -462,6 +515,7 @@ def run_browse(
                 items,
                 "titolo> ",
                 header=page_header or _pick_hint(opts),
+                expect=("tab", "alt-c", "alt-w"),
                 preview=lambda v: None if v is _MORE else _meta_preview(typecast("Meta", v)),
             )
             if not chosen:
@@ -472,6 +526,11 @@ def run_browse(
                 header = None
                 break  # outer loop fetches the next page
             meta = typecast("Meta", value)
+            if key == "alt-w":
+                enabled = state.toggle_watchlist(cfg, meta)
+                header = "aggiunto alla watchlist" if enabled else "rimosso dalla watchlist"
+                page_header = header
+                continue
             sel = replace(opts, cast=True, cast_choose=True) if key == "alt-c" else opts
             if meta.get("type") != "series":
                 sel = _apply_key(opts, key)
@@ -550,6 +609,8 @@ def run_continue(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
 
 # Home-menu action kinds (the value half of an fzf item; history entries are dicts).
 _SEARCH = "search"
+_RECENT_SEARCH = "recent_search"
+_WATCHLIST = "watchlist"
 _BROWSE = "browse"
 _GENRE = "genre"
 _SECTION = "section"
@@ -579,8 +640,9 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 
 
 def run_section(cfg: Config, typ: str, opts: PlayOpts) -> int:
-    """A type-scoped home section: type-filtered continue-watching, search and the
-    three Cinemeta catalogs, all pinned to `typ`. ESC returns to the home menu."""
+    """A type-scoped home section: type-filtered continue-watching, search, the three
+    Cinemeta catalogs, and any extra catalogs declared by user addons — all pinned
+    to `typ`. ESC returns to the home menu."""
     return _home_menu(cfg, opts, typ=typ)
 
 
@@ -599,6 +661,10 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
         if recent:
             items.append((ui.ansi("── azioni ──", pal.dim), _SEP))
         items.append((f"{g.search}  Cerca…", (_SEARCH, "")))
+        if state.recent_searches(cfg):
+            items.append((f"{g.search}  Ricerche recenti", (_RECENT_SEARCH, "")))
+        if state.watchlist(cfg):
+            items.append((f"{g.star}  Watchlist", (_WATCHLIST, "")))
         if typ is None:  # home: the typed sections own the catalogs
             items += [
                 (f"{g.movie}  Film", (_SECTION, "movie")),
@@ -606,13 +672,18 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
                 (ui.ansi("── sistema ──", pal.dim), _SEP),
                 (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
             ]
-        else:  # section: catalogs + genre browse, served per-type by api.catalog
+        else:  # section: Cinemeta catalogs + genre + any user-addon catalogs
+            # _BROWSE values are catalog *ids* (top/year/imdbRating/…), not --browse keywords.
             items += [
-                (f"{g.fire}  Popolari", (_BROWSE, "popolari")),
-                (f"{g.new}  Novità", (_BROWSE, "nuovi")),
-                (f"{g.star}  Top IMDb", (_BROWSE, "top")),
+                (f"{g.fire}  Popolari", (_BROWSE, "top")),
+                (f"{g.new}  Novità", (_BROWSE, "year")),
+                (f"{g.star}  Top IMDb", (_BROWSE, "imdbRating")),
                 (f"{g.folder}  Generi…", (_GENRE, "")),
             ]
+            extras = addons.extra_catalogs(cfg, typ)
+            if extras:
+                items.append((ui.ansi("── cataloghi addon ──", pal.dim), _SEP))
+                items += [(f"{g.folder}  {label}", (_BROWSE, cat_id)) for cat_id, label in extras]
 
         # The Tab hint only applies to the continue-watching rows.
         header = notice or (_pick_hint(opts) if recent else None)
@@ -634,10 +705,14 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
                 continue  # ESC on search → stay in home (not exit the whole TUI)
             if query:
                 run_search(cfg, query, opts, typ)
+        elif kind == _RECENT_SEARCH:
+            run_recent_searches(cfg, opts, typ)
+        elif kind == _WATCHLIST:
+            run_watchlist(cfg, opts, typ)
         elif kind == _SECTION:
             run_section(cfg, typecast(str, value), opts)
         elif kind == _BROWSE:
-            run_browse(cfg, CAT_MAP[typecast(str, value)], opts, typ)
+            run_browse(cfg, typecast(str, value), opts, typ)
         elif kind == _GENRE:
             run_genre(cfg, opts, typecast(str, typ))
         elif kind == _SETTINGS:

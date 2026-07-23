@@ -1,8 +1,17 @@
 """Shared test guards for the nstream suite."""
 
+import os
+from pathlib import Path
+
 import pytest
 
 from nstream import bridge
+
+# Keep subprocess smoke tests on the checkout too. Some developer machines have an
+# older globally installed nstream, which otherwise makes `python -m nstream` test the
+# wrong code even though pytest itself uses pyproject's pythonpath setting.
+_SRC = str(Path(__file__).parents[1] / "src")
+os.environ["PYTHONPATH"] = _SRC + os.pathsep + os.environ.get("PYTHONPATH", "")
 
 
 @pytest.fixture(autouse=True)

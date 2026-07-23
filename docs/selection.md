@@ -22,6 +22,15 @@ the one mpv would select — without playing anything.
 menu (top `max_streams` playable + a "show all" entry that reveals the rest and the
 excluded ones, each marked with its reason).
 
+## Title discovery
+
+Catalog and search results are deduplicated across configured addons. Search then applies a local,
+token-free presentation ranking: exact normalized title matches first, then title prefixes,
+substring matches, and finally the remaining addon results. Case, accents and punctuation do not
+change the comparison, while the original addon result remains the playback source of truth.
+The TUI stores recent queries and a metadata-only local watchlist in
+`XDG_STATE_HOME/nstream/library.json`; no stream URL or provider token is persisted there.
+
 ### 1. Parse (`quality.parse_stream` → `StreamInfo`)
 
 Regex over `name`+`title`: `resolution`, `codec` (av1/hevc/h264), `hdr`, `dv`/`dv_profile`,

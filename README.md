@@ -307,12 +307,15 @@ nstream --json --quality 4k --cast "…"    # headless quality filter; fails wit
 ```
 
 From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
-(continue-watching · 🔍 search · 🎬 Film · 📺 Serie TV · ⚙ settings). The Film/Serie sections are
+(continue-watching · 🔍 search · recent searches · ★ watchlist · 🎬 Film · 📺 Serie TV · ⚙ settings).
+The Film/Serie sections are
 type-scoped: their own continue-watching, search, catalogs (popular/new/top IMDb), and **Generi…**
 (Cinemeta genre filter on Top). Catalog pages that return a full batch show **↓ altri…** to load
 the next page. Multi-season / long series open a **season menu** before episodes. Search is typed
 inside fzf (same chrome as the rest of the TUI). Leaf lists hint **Tab** / **Alt-C** / **Ctrl-/**
-(preview). The top-level search and continue-watching stay mixed. All UI lives in the TUI; the
+(preview); **Alt-W** toggles the selected title in the local watchlist. Search results prioritize
+exact and accent-insensitive matches and show rating/genre context when supplied by the catalog.
+The top-level search and continue-watching stay mixed. All UI lives in the TUI; the
 launcher only opens it. ESC steps back one level; after a title plays (or has no sources) you
 return to the list rather than the app quitting.
 
@@ -372,7 +375,7 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/explain.py`       | `--explain` diagnostic renderer (why a stream/audio was auto-picked)                                                                           |
 | `src/nstream/settings.py`      | native fzf settings menu (config + addons)                                                                                                     |
 | `src/nstream/config.py`        | config load/save (XDG, atomic 0600) + payload types                                                                                            |
-| `src/nstream/state.py`         | watch-history persistence (resume / continue-watching)                                                                                         |
+| `src/nstream/state.py`         | watch-history persistence, local watchlist and recent searches                                                                                   |
 | `src/nstream/log.py`           | rotating file log + debug console; redacting formatter (token never logged)                                                                    |
 | `src/nstream/util.py`          | stdlib-only low-level helpers (atomic write, JSON load, subprocess)                                                                            |
 | `src/nstream/nstream.lua`      | mpv overlay for the next-episode countdown (loaded via `--script`)                                                                             |
