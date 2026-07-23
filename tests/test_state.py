@@ -132,6 +132,27 @@ def test_load_corrupt_history_is_empty(tmp_path, monkeypatch):
     assert state.load_history(CFG) == {}
 
 
+def test_watchlist_toggle_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    meta = {"id": "tt1", "type": "movie", "name": "A", "poster": "https://img"}
+    assert state.toggle_watchlist(CFG, meta) is True
+    assert state.is_watchlisted(CFG, "tt1") is True
+    assert state.watchlist(CFG)[0]["name"] == "A"
+    assert state.toggle_watchlist(CFG, meta) is False
+    assert state.watchlist(CFG) == []
+
+
+def test_recent_searches_are_deduplicated_and_capped(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    for i in range(state.MAX_RECENT_SEARCHES + 3):
+        state.remember_search(CFG, f"Title {i}")
+    state.remember_search(CFG, "title 5")
+    queries = state.recent_searches(CFG)
+    assert queries[0] == "title 5"
+    assert len(queries) == state.MAX_RECENT_SEARCHES
+    assert sum(q.casefold() == "title 5" for q in queries) == 1
+
+
 def test_history_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     cfg = Config(torrentio_base="tb", history_enabled=False)

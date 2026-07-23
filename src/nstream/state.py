@@ -17,7 +17,7 @@ from collections.abc import Iterable, Iterator
 from typing import cast
 
 from . import util
-from .config import Config, HistoryEntry, Video, state_path
+from .config import Config, HistoryEntry, Meta, Video, library_path, state_path
 
 # Past this fraction of the runtime a title counts as watched and drops out of
 # the continue-watching list.
@@ -109,6 +109,77 @@ def _history_lock() -> Iterator[None]:
 # A "started" entry (duration 0, no real position ever merged) is clutter in
 # continue-watching past this age — pruned on every history write.
 STARTED_TTL = 7 * 86400.0
+
+LIBRARY_VERSION = 1
+MAX_RECENT_SEARCHES = 20
+MAX_WATCHLIST = 500
+
+
+def _library_read() -> dict:
+    data = util.load_json(library_path(), {})
+    return data if isinstance(data, dict) else {}
+
+
+def _library_write(data: dict) -> None:
+    library_path().parent.mkdir(parents=True, exist_ok=True)
+    util.atomic_write(
+        library_path(),
+        lambda f: json.dump(data, f, ensure_ascii=False),
+        prefix=".library-",
+    )
+
+
+def watchlist(cfg: Config) -> list[Meta]:
+    """Return locally saved titles, newest first, tolerating old/corrupt entries."""
+    if not cfg.history_enabled:
+        return []
+    entries = _library_read().get("watchlist", [])
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("id") and e.get("name")]
+
+
+def is_watchlisted(cfg: Config, video_id: str) -> bool:
+    return any(m.get("id") == video_id for m in watchlist(cfg))
+
+
+def toggle_watchlist(cfg: Config, meta: Meta) -> bool:
+    """Toggle a title and return its new state. Watchlist entries are metadata-only."""
+    if not cfg.history_enabled or not meta.get("id"):
+        return False
+    data = _library_read()
+    entries = [e for e in data.get("watchlist", []) if isinstance(e, dict)]
+    video_id = meta["id"]
+    if any(e.get("id") == video_id for e in entries):
+        entries = [e for e in entries if e.get("id") != video_id]
+        enabled = False
+    else:
+        fields = ("id", "type", "name", "releaseInfo", "poster", "imdbRating", "genres")
+        compact = {k: meta[k] for k in fields if k in meta}
+        entries.insert(0, compact)
+        entries = entries[:MAX_WATCHLIST]
+        enabled = True
+    data.update(version=LIBRARY_VERSION, watchlist=entries)
+    _library_write(data)
+    return enabled
+
+
+def recent_searches(cfg: Config) -> list[str]:
+    if not cfg.history_enabled:
+        return []
+    values = _library_read().get("searches", [])
+    return [v for v in values if isinstance(v, str) and v.strip()][:MAX_RECENT_SEARCHES]
+
+
+def remember_search(cfg: Config, query: str) -> None:
+    if not cfg.history_enabled or not query.strip():
+        return
+    data = _library_read()
+    query = query.strip()
+    values = [v for v in data.get("searches", []) if isinstance(v, str)]
+    values = [v for v in values if v.casefold() != query.casefold()]
+    data.update(version=LIBRARY_VERSION, searches=([query] + values)[:MAX_RECENT_SEARCHES])
+    _library_write(data)
 
 
 def save_entry(cfg: Config, entry: HistoryEntry, *, drop: Iterable[str] = ()) -> None:

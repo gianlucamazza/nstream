@@ -26,6 +26,12 @@ def meta_label(m: Meta) -> str:
     yr = re.match(r"(\d{4})", str(info))
     if yr and int(yr.group(1)) > datetime.now(UTC).year:
         label += "  " + ui.ansi(f"· {g.movie} in uscita", pal.warn)
+    rating = m.get("imdbRating")
+    if rating:
+        label += "  " + ui.ansi(f"★ {rating}", pal.dim)
+    genres = m.get("genres")
+    if isinstance(genres, list) and genres:
+        label += "  " + ui.ansi(" · ".join(str(x) for x in genres[:2]), pal.dim)
     return label
 
 

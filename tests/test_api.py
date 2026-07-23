@@ -294,6 +294,41 @@ def test_search_untyped_fetches_both_types(monkeypatch):
     assert set(ids) == {"movie1", "series1"}
 
 
+def test_search_ranks_exact_and_accent_insensitive_match(monkeypatch):
+    cine = _addon("Cine", "http://cine", "catalog", types=("movie",))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+
+    def fake_get(url, **k):
+        return {
+            "metas": [
+                {"id": "tt2", "name": "The Matrix Reloaded"},
+                {"id": "tt1", "name": "Matrix"},
+                {"id": "tt3", "name": "Màtrix"},
+            ]
+        }
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    assert [m["id"] for m in api.search(CFG, "Matrix", typ="movie")] == ["tt1", "tt3", "tt2"]
+
+
+def test_search_normalizes_punctuation_and_alphabetic_ties(monkeypatch):
+    cine = _addon("Cine", "http://cine", "catalog", types=("movie",))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+
+    def fake_get(url, **k):
+        return {
+            "metas": [
+                {"id": "tt3", "name": "Zeta"},
+                {"id": "tt2", "name": "Spider Max"},
+                {"id": "tt1", "name": "Spider-Man"},
+                {"id": "tt4", "name": "Alpha"},
+            ]
+        }
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    assert [m["id"] for m in api.search(CFG, "Spider", typ="movie")] == ["tt1", "tt2", "tt4", "tt3"]
+
+
 def test_catalog_caches_within_ttl(monkeypatch):
     cine = addons.Addon(
         base="http://cine",

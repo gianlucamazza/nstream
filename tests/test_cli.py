@@ -365,7 +365,7 @@ def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
     assert cli._pick_meta(items, CFG, opts) == 0
     # First render shows the Tab/Alt-C hint; after the pick the notice is threaded through.
     assert seen["headers"] == [
-        "Tab: avvia al volo  ·  Alt-C: casta sul TV  ·  Ctrl-/: anteprima",
+        "Tab: avvia al volo  ·  Alt-C: casta sul TV  ·  Alt-W: watchlist  ·  Ctrl-/: anteprima",
         "non ancora disponibile",
     ]
 
@@ -416,7 +416,7 @@ def test_run_home_shows_typed_sections_not_mixed_browse(monkeypatch):
     """The home offers the Film / Serie TV sections instead of the old mixed catalog rows."""
     seen = {}
 
-    def fake(items, prompt, *, header=None, preview=None):
+    def fake(items, prompt, *, header=None, expect=("tab",), preview=None):
         seen["values"] = [v for _, v in items]
         seen["labels"] = [label for label, _ in items]
         seen["prompt"] = prompt
@@ -448,11 +448,11 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
         return [entry]
 
     monkeypatch.setattr(cli.state, "recent", fake_recent)
-    actions = [("", (cli._BROWSE, "popolari")), ("", (cli._SEARCH, "")), None]
+    actions = [("", (cli._BROWSE, "top")), ("", (cli._SEARCH, "")), None]
     it = iter(actions)
     prompts = []
 
-    def fake_fzf(items, prompt, *, header=None, preview=None):
+    def fake_fzf(items, prompt, *, header=None, expect=("tab",), preview=None):
         prompts.append(prompt)
         assert items[0][1] is entry  # the filtered continue-watching row leads the menu
         return next(it)
@@ -472,7 +472,7 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
     assert cli.run_section(CFG, "series", opts) == 0
     assert recent_typs == ["series"] * 3  # one per menu render
     assert prompts == ["serie> "] * 3
-    assert called["browse"] == (cli.CAT_MAP["popolari"], "series")
+    assert called["browse"] == ("top", "series")
     assert called["search"] == ("fargo", "series")
 
 
@@ -517,7 +517,7 @@ def test_run_browse_genre_and_pagination(monkeypatch):
     more_sent = None
     calls = []
 
-    def fake_fzf(items, prompt, *, header=None, preview=None):
+    def fake_fzf(items, prompt, *, header=None, expect=("tab",), preview=None):
         calls.append(([(lab, type(v).__name__) for lab, v in items], header))
         nonlocal more_sent
         if more_sent is None:
@@ -554,7 +554,7 @@ def test_run_genre_picks_then_browses(monkeypatch):
 def test_run_section_offers_genres(monkeypatch):
     seen = {}
 
-    def fake(items, prompt, *, header=None, preview=None):
+    def fake(items, prompt, *, header=None, expect=("tab",), preview=None):
         seen["actions"] = [v for _, v in items if isinstance(v, tuple)]
         return None
 
