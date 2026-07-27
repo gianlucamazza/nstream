@@ -66,8 +66,9 @@ Modules in `src/nstream/`:
   `_mark_native_cached`) so the auto-pick re-ranks around what actually responds — keeping it off a
   stale link and out of an accidental Tier-2 remux. Probes are memoized (`_probe_url`) and shared
   with the last-resort `_ensure_playable`. Also `cast_languages`/`cast_resolver` for the in-cast
-  switch. Imports `api`/`debrid`/`engine`/`quality`/`remux`/`tracks`/`languages`/`picker`/
-  `labels`/`config`/`log`/`ui`; never `cli`.
+  switch; `no_streams_message` / `no_stream_source_error` for empty results vs misconfigured
+  sources (ADR 0024). Imports `api`/`addons`/`debrid`/`engine`/`quality`/`remux`/`tracks`/
+  `languages`/`picker`/`labels`/`config`/`log`/`sources`/`ui`; never `cli`.
 - `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the
   interactive cast (`cli._play_on_cast`) and the headless `--json --cast` branch
   (`headless._auto_play`) — vet the audio plan (`vet_cast_audio`) → absent-dub safety subtitles →
@@ -97,7 +98,11 @@ Modules in `src/nstream/`:
 - `api.py` — HTTP addon dispatch (`ThreadPoolExecutor` ≤8; retry/backoff/gzip via `net`); 600s
   in-process metadata cache **plus** an on-disk metadata cache (`meta_cached_disk`,
   `$XDG_CACHE_HOME/nstream/meta/`); streams/subs NOT cached.
-- `addons.py` — Stremio addon protocol client + manifest registry/cache.
+- `addons.py` — Stremio addon protocol client + manifest registry/cache. Built-in Torrentio is
+  optional (`cfg.torrentio_enabled`); `has_stream_source()` gates empty-source UX.
+- `sources.py` — curated stream-source presets (Comet/MediaFusion/AIOStreams/TorrentsDB configure
+  URLs only — no credential-bearing manifests) + `is_playable_stream` / zero-source messages
+  (ADR 0024). Leaf (stdlib only).
 - `net.py` — retrying HTTP-JSON GET (gzip, exponential backoff honouring `Retry-After`) +
   `url_playable` reachability probe, shared by `api`/`addons`; split out of `api` to break the
   former `addons ↔ api` cycle. Leaf (imports only `log`/`util` + stdlib); error messages carry a
@@ -192,9 +197,17 @@ Modules in `src/nstream/`:
 **Import-graph discipline:** `util`/`ui`/`languages`/`labels` sit at the top (little or no internal
 imports), `cli` orchestrates at the bottom; everything below `cli` —
 `headless`/`player`/`caster`/`cast_delivery`/`picker`/`stream_select`/`cast_flow`/`subs`/`series`/`labels`/
-`engine`/`debrid`/`remux`/`mirror`/`serve`/`bridge`/`net`/`discovery`/`preview`/`explain` — never imports
-`cli`. This is the recurring constraint that explains where logic lives — preserve it when
+`engine`/`debrid`/`remux`/`mirror`/`serve`/`bridge`/`net`/`discovery`/`preview`/`explain`/`sources` — never
+imports `cli`. This is the recurring constraint that explains where logic lives — preserve it when
 moving code.
+
+### Stream sources (ADR 0024)
+
+Built-in discovery is **Torrentio** (toggle `torrentio_enabled`) plus any Stremio stream addon
+URLs in `cfg.addons`. Settings → Fonti stream lists presets (configure URL only). `api.streams`
+stamps `addon` on each row, fuses debrid url with pure-torrent infoHash by filename across
+addons, and collapses duplicate releases (cached > url > infoHash). Unplayable shapes
+(`ytId` / `externalUrl` only) are dropped.
 
 ### Debrid: provider-agnostic
 

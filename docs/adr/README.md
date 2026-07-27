@@ -35,5 +35,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0021](0021-per-invocation-constraint-parity.md)     | Per-invocation constraints hold across every selection path                        | Accepted           |
 | [0022](0022-cast-container-vetting.md)               | Vet the cast CONTAINER (mkv → MP4 rewrap) before casting                           | Accepted           |
 | [0023](0023-mirror-fidelity-and-explicit-force.md)   | Mirror fidelity (HDR→SDR) and an explicit `--mirror` that forces                   | Accepted           |
+| [0024](0024-multi-source-stream-discovery.md)        | Multi-source stream discovery beyond Torrentio                                     | Accepted           |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

@@ -1,9 +1,15 @@
 # Stream & audio selection — how nstream decides
 
-Torrentio returns ~150 streams per title (sorted by `qualitysize`, so the first is the
-biggest/most extreme file — often an 8K upscale or a 60–100 GB Dolby Vision remux that an
-integrated GPU can't play). nstream parses, filters and ranks them to auto-pick the best
-playable one. This document is the reference for *why* a given file/audio is chosen.
+Stream addons (built-in **Torrentio** when `torrentio_enabled`, plus any `cfg.addons`
+manifests — Comet, MediaFusion, AIOStreams, …) return on the order of ~100+ streams per
+title. Torrentio sorts by `qualitysize`, so the first is often the biggest/most extreme
+file (8K upscale or a 60–100 GB Dolby Vision remux that an integrated GPU can't play).
+Before ranking, `api.streams` drops unplayable shapes, fuses debrid `url` with pure-torrent
+`infoHash` by filename across addons, and collapses duplicate releases (cached > url >
+infoHash); each row carries `addon` provenance for labels/`--explain` (ADR 0024).
+
+nstream then parses, filters and ranks the list to auto-pick the best playable one. This
+document is the reference for *why* a given file/audio is chosen.
 
 To see the decision for a real title live:
 

@@ -175,13 +175,14 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
 
 - `no_result` — nothing matched the title (or empty history for `-c`). Offer to retry with a
   different spelling or add a year / `--movies`/`--series`.
-- `no_streams` — title found but no sources (often "not released yet"); surface `message`.
+- `no_stream_sources` — no stream addon is configured (`torrentio_enabled: false` and empty
+  `addons`). Tell the user to enable Torrentio or add a stream addon
+  (`nstream --settings` → Fonti stream / plugin: preset Comet/MediaFusion/AIOStreams or a
+  custom `…/manifest.json`). Do not retry the same play command until sources exist.
+- `no_streams` — title found but no sources for that title (often "not released yet"); surface
+  `message`. Distinct from `no_stream_sources` (config) vs empty catalog for one title.
 - `no_playable_stream` — sources exist but none pass the hardware/cast filters; try `--local`,
   or a lower tier with `--quality 1080` / `720`.
-- `video_codec_unsupported` — the REAL (ffprobe-verified) video codec of every candidate is one
-  the Chromecast can't render (e.g. a DivX/MPEG-4 ASP rip) and the mirror fallback isn't
-  available — casting would show a black screen. `video_codec` carries the codec; offer
-  `--local` (mpv decodes anything) or a different `--quality`.
 - `video_codec_unsupported` — the REAL (ffprobe-verified) video codec of every candidate is one
   the Chromecast can't render (e.g. a DivX/MPEG-4 ASP rip) and the mirror fallback isn't
   available — casting would show a black screen. `video_codec` carries the codec; offer
@@ -200,6 +201,23 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
   command.
 - Missing debrid token / config error → nstream exits non-zero and prints to **stderr** (or JSON
   `error: config` on some paths); surface that line and point the user at `nstream --settings`.
+
+## Stream sources (config — not CLI flags)
+
+Headless play uses whatever is in `~/.config/nstream/config.json` (no `--addon` flag):
+
+- **Default:** built-in Torrentio (`torrentio_enabled: true`) + debrid segment in
+  `torrentio_base` (e.g. `realdebrid=…`) when `playback_backend` is `debrid`.
+- **Extra stream addons:** `addons: ["https://…/manifest.json"]` — Comet / MediaFusion /
+  AIOStreams / TorrentsDB or any Stremio stream addon. Configure the addon in a browser
+  (token lives in the generated URL), then paste the manifest. Settings TUI:
+  **Fonti stream / plugin** (presets + custom URL + Torrentio on/off).
+- Results are aggregated, provenance is internal (`addon` name); JSON play output still
+  never leaks stream URLs. Ranking prefers cached debrid markers as before.
+
+Do **not** invent or paste third-party manifest URLs that embed secrets into chat logs.
+If the user wants a second source, guide them through settings or ask them to paste the
+manifest path themselves.
 
 ## HDR on the external monitor (local playback only)
 
