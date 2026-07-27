@@ -10,7 +10,7 @@ import getpass
 import re
 import sys
 
-from . import addons, config, debrid, discovery, engine, languages, picker, ui
+from . import addons, config, debrid, discovery, engine, languages, picker, sources, ui
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -281,12 +281,20 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
         ),
         (
             "__addons__",
-            "Plugin / Addon Stremio",
+            "Fonti stream / plugin",
             "submenu",
-            f"{len(cfg.addons)} extra",
-            "Aggiungi/rimuovi addon compatibili Stremio (stream, sottotitoli, cataloghi).",
+            _sources_status(cfg),
+            "Torrentio on/off · preset Comet/MediaFusion/AIOStreams/… · addon custom "
+            "(stream, sottotitoli, cataloghi).",
         ),
     ]
+
+
+def _sources_status(cfg: Config) -> str:
+    """Compact status for the settings row: Torrentio state + extra manifest count."""
+    t = "T on" if cfg.torrentio_enabled else "T off"
+    n = len(cfg.addons)
+    return f"{t} · {n} extra" if n else t
 
 
 def run_settings(cfg: Config | None = None) -> None:
@@ -401,29 +409,67 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
             print(f"nstream: token {provider_name} aggiornato", file=sys.stderr)
 
 
-# --- addons submenu ------------------------------------------------------
+# --- stream sources / addons submenu -------------------------------------
 
 
 def _addons_menu(cfg: Config) -> None:
+    """Fonti stream: toggle Torrentio, manage extras, add from curated presets or URL."""
     while True:
         eff = addons.effective_addons(cfg)
         rows: list[str] = []
+        actions: list[tuple[str, object]] = []  # (kind, payload)
+
+        # Torrentio is the only stream builtin that can be disabled without removing meta/subs.
+        t_state = "on" if cfg.torrentio_enabled else "off"
+        rows.append(f"📡 {'Torrentio':18s} stream  · built-in [{t_state}]")
+        actions.append(("torrentio", None))
+
         for a in eff:
+            if a.name == "Torrentio":
+                continue  # already shown as the toggle row
             suffix = "  · built-in" if a.builtin else ""
-            rows.append(f"🧩 {a.name:18s} {','.join(a.resources)}{suffix}")
-        rows.append(f"{ui.g().add} Aggiungi addon…")
+            res = ",".join(a.resources) if a.resources else "?"
+            rows.append(f"🧩 {a.name:18s} {res}{suffix}")
+            actions.append(("addon", a))
+
+        rows.append(f"{ui.g().add} Aggiungi da preset…")
+        actions.append(("preset", None))
+        rows.append(f"{ui.g().add} Aggiungi URL custom…")
+        actions.append(("custom", None))
+
         idx = _fzf_select(
-            rows, prompt="plugin> ", header="INVIO: aggiungi / rimuovi (solo extra) · ESC: indietro"
+            rows,
+            prompt="fonti> ",
+            header="INVIO: attiva/disattiva Torrentio · rimuovi extra · aggiungi · ESC: indietro",
         )
-        if idx is None:  # ESC backs out, like every other menu
+        if idx is None:
             return
-        if idx == len(rows) - 1:
+        kind, payload = actions[idx]
+        if kind == "torrentio":
+            config.save({"torrentio_enabled": not cfg.torrentio_enabled})
+            state = "disabilitato" if cfg.torrentio_enabled else "abilitato"
+            print(f"nstream: Torrentio {state}", file=sys.stderr)
+            if cfg.torrentio_enabled and not cfg.addons:
+                print(
+                    "nstream: senza Torrentio e senza addon extra non ci sono fonti stream — "
+                    "aggiungi Comet/MediaFusion/AIO o un URL",
+                    file=sys.stderr,
+                )
+            cfg = config.load()
+            continue
+        if kind == "preset":
+            _add_from_preset(cfg)
+            cfg = config.load()
+            continue
+        if kind == "custom":
             _add_addon(cfg)
             cfg = config.load()
             continue
-        addon = eff[idx]
+        # kind == "addon"
+        addon = payload
+        assert isinstance(addon, addons.Addon)
         if addon.builtin:
-            print("nstream: addon built-in, non rimovibile", file=sys.stderr)
+            print("nstream: addon built-in, non rimovibile qui", file=sys.stderr)
             continue
         if _ask(f"Rimuovere '{addon.name}'? [y/N] ").lower() == "y":
             remaining = [u for u in cfg.addons if u != addon.manifest_url]
@@ -431,12 +477,42 @@ def _addons_menu(cfg: Config) -> None:
             cfg = config.load()
 
 
-def _add_addon(cfg: Config) -> None:
-    url = _ask("URL manifest addon (…/manifest.json): ")
+def _add_from_preset(cfg: Config) -> None:
+    """Pick a curated stream source, show its configure URL, then paste the manifest."""
+    presets = sources.STREAM_PRESETS
+    rows = [f"{p.name:14s}  {p.blurb}" for p in presets]
+    previews = [
+        f"Configura qui:\n{p.configure_url}\n\nPoi incolla l'URL …/manifest.json generato."
+        for p in presets
+    ]
+    i = _fzf_select(
+        rows,
+        prompt="preset> ",
+        header="Scegli una fonte · apri il link di configure · ESC: annulla",
+        previews=previews,
+    )
+    if i is None:
+        return
+    p = presets[i]
+    print(
+        f"nstream: configura {p.name} nel browser:\n  {p.configure_url}\n"
+        "poi incolla qui l'URL del manifest generato.",
+        file=sys.stderr,
+    )
+    _add_addon(cfg, hint=p.name)
+
+
+def _add_addon(cfg: Config, *, hint: str = "") -> None:
+    if hint:
+        label = f"URL manifest {hint} (…/manifest.json): "
+    else:
+        label = "URL manifest addon (…/manifest.json): "
+    url = _ask(label)
     if not url:
         return
-    if not url.endswith("manifest.json"):
-        print("nstream: l'URL deve terminare con manifest.json", file=sys.stderr)
+    # Accept plain …/manifest.json and URLs with a query/fragment after it.
+    if "/manifest.json" not in url and not url.endswith("manifest.json"):
+        print("nstream: l'URL deve contenere manifest.json", file=sys.stderr)
         return
     if url in cfg.addons:
         print("nstream: addon già presente", file=sys.stderr)

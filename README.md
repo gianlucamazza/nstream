@@ -93,9 +93,16 @@ Runtime stays stdlib-only; `ruff`/`ty`/`pytest` are dev-group tools.
   sources for one that does, and otherwise plays the best fallback (e.g. English) **with
   primary-language subtitles turned on automatically** — so you're never left watching a foreign dub
   with no safety net. Releases that explicitly name a preferred language outrank bare "Dual" ones.
-- `addons`: extra Stremio addon manifest URLs (e.g. another stream or subtitle provider). Streams
-  and subtitles are aggregated across the built-in providers plus these. Manage them from the
-  settings menu.
+- `torrentio_enabled`: include the built-in **Torrentio** stream provider (`true` by default).
+  Set `false` when Torrentio is down or you prefer only alternative stream addons (Comet,
+  MediaFusion, AIOStreams, …). Without Torrentio and without extras there are no stream sources.
+- `addons`: extra Stremio addon manifest URLs (stream / subtitle / catalog providers). Streams
+  and subtitles are aggregated across the built-ins plus these; ready-url and pure-torrent
+  results are fused by filename so a debrid hit can fall back to local P2P across sources.
+  Manage them from **settings → Fonti stream / plugin** (toggle Torrentio, add from curated
+  presets — Comet, MediaFusion, AIOStreams, TorrentsDB — or paste a custom `…/manifest.json`).
+  Presets only open the public configure page; you paste the **user-generated** manifest URL
+  (tokens live in the path — nstream never hard-codes them).
 - `history_enabled`: keep a watch history for resume / continue-watching (`true` by default).
 - `hwdec`: mpv hardware decoding mode (default `auto-safe`). An explicit `--hwdec` in `mpv_args`,
   or a **concrete** method in `~/.config/mpv/mpv.conf`, is always respected. The ambiguous `auto`

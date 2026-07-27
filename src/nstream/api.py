@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast
 
-from . import addons, log, util
+from . import addons, log, sources, util
 from .config import Config, Meta, Stream, Subtitle, Video
 
 # HTTP-JSON primitives live in `net` (below both api and addons) to break the addons↔api
@@ -340,9 +340,14 @@ def episodes(cfg: Config, series_id: str) -> list[Video]:
 
 
 def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
-    # NB: a stream addon's base may embed the Real-Debrid token — `what` uses the
-    # addon name, never the URL, so errors never leak it. NOT cached (RD availability
-    # changes between calls, and the URLs carry the token).
+    # NB: a stream addon's base may embed a debrid token — `what` uses the
+    # addon name, never the URL, so errors never leak it. NOT cached (availability
+    # changes between calls, and the URLs may carry the token).
+    # Fan-out covers every effective stream addon (Torrentio if enabled + cfg.addons
+    # presets like Comet/MediaFusion/AIOStreams). Unplayable shapes (ytId /
+    # externalUrl only) are dropped; ready-url and pure-torrent rows are fused by
+    # filename so a debrid hit can fall back to local P2P (any source, not only
+    # Torrentio).
     tasks: list[Callable[[], list]] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "stream", typ, video_id):
@@ -353,21 +358,20 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
                 "streams", []
             )
         )
-    # Hybrid "auto" backend: the main query carries the debrid token (cached urls); fetch the
-    # token-less Torrentio variant too (pure-torrent infoHash) and merge, so a release can be
-    # played via debrid AND fall back to local P2P. Run it as another concurrent task.
-    if cfg.playback_backend == "auto":
+    # Hybrid "auto" backend: the main Torrentio query carries the debrid token
+    # (cached urls); also fetch the token-less variant (pure-torrent infoHash) so
+    # a release can play via debrid AND fall back to local P2P. Only when Torrentio
+    # is enabled — otherwise multi-addon fuse below still pairs url↔infoHash.
+    if cfg.playback_backend == "auto" and cfg.torrentio_enabled:
         tl = f"{addons.torrentio_token_less(cfg)}/stream/{typ}/{video_id}.json"
         tasks.append(
             lambda tl=tl: _tagged(
                 http_get_json(tl, what="stream (Torrentio P2P)").get("streams", [])
             )
         )
-        gathered = _gather(tasks)  # flat list of streams, task order preserved
-        debrid = [s for s in gathered if not _is_p2p(s)]
-        torrents = [s for s in gathered if _is_p2p(s)]
-        return _dedup(_merge_hybrid(debrid, torrents), _stream_key)
-    return _dedup(_gather(tasks), _stream_key)
+    gathered = _gather(tasks)
+    playable = [s for s in gathered if sources.is_playable_stream(s)]
+    return _dedup(_fuse_url_and_torrent(playable), _stream_key)
 
 
 # Marker key (private, stripped before returning) tagging the pure-torrent batch in the
@@ -377,47 +381,82 @@ _P2P_TAG = "__p2p__"
 
 def _tagged(streams: list[Stream]) -> list[Stream]:
     # _P2P_TAG is a transient, non-schema marker; operate via a plain-dict view so the
-    # TypedDict stays type-clean (the key is stripped again in _merge_hybrid).
+    # TypedDict stays type-clean (the key is stripped again in _fuse_url_and_torrent).
     for s in streams:
         cast("dict", s)[_P2P_TAG] = True
     return streams
 
 
-def _is_p2p(s: Stream) -> bool:
-    return bool(cast("dict", s).get(_P2P_TAG))
-
-
 def _filename(s: Stream) -> str:
-    """Torrentio's per-file name (behaviorHints.filename) — identical across the debrid and
-    token-less queries for the same release, so it's the join key for the hybrid merge.
-    Falls back to the title's first line when absent."""
+    """Per-file name (behaviorHints.filename) — identical across debrid and pure-torrent
+    queries for the same release, so it's the join key for the hybrid fuse.
+    Falls back to the title's first line when absent (Torrentio / Comet / MediaFusion
+    style)."""
     fn = (s.get("behaviorHints") or {}).get("filename")
     return fn or (s.get("title") or "").split("\n", 1)[0].strip()
 
 
-def _merge_hybrid(debrid: list[Stream], torrents: list[Stream]) -> list[Stream]:
-    """Fuse the debrid (url) and token-less (infoHash) Torrentio results by filename: a matched
-    release gets both a debrid `url` and the torrent's `infoHash`/`fileIdx`/`sources`, so it can
-    play via debrid and fall back to local P2P. Token-less-only releases are kept as pure-torrent;
-    the internal _P2P_TAG marker is stripped from everything."""
-    by_name = {_filename(s): s for s in torrents}
-    out: list[Stream] = []
-    for s in debrid:
-        t = by_name.pop(_filename(s), None)
-        if t:
-            # Copy the torrent identity onto the matched debrid stream so it can fall back to
-            # local P2P. Explicit keys (not a loop) keep the TypedDict access type-safe.
-            if "infoHash" in t and "infoHash" not in s:
-                s["infoHash"] = t["infoHash"]
-            if "fileIdx" in t and "fileIdx" not in s:
-                s["fileIdx"] = t["fileIdx"]
-            if "sources" in t and "sources" not in s:
-                s["sources"] = t["sources"]
-        out.append(s)
-    out.extend(by_name.values())  # pure-torrent releases with no debrid match
-    for s in out:
+def _copy_torrent_identity(dst: Stream, src: Stream) -> None:
+    """Copy infoHash/fileIdx/sources onto a ready-url stream for P2P fallback."""
+    if "infoHash" in src and "infoHash" not in dst:
+        dst["infoHash"] = src["infoHash"]
+    if "fileIdx" in src and "fileIdx" not in dst:
+        dst["fileIdx"] = src["fileIdx"]
+    if "sources" in src and "sources" not in dst:
+        dst["sources"] = src["sources"]
+
+
+def _fuse_url_and_torrent(streams: list[Stream]) -> list[Stream]:
+    """Fuse ready-url rows with pure-torrent siblings across *all* stream addons.
+
+    Match key: `behaviorHints.filename` (else title first line). A matched release
+    keeps the debrid/HTTP `url` and gains `infoHash`/`fileIdx`/`sources` so playback
+    can fall back to local P2P. Unmatched pure-torrent rows stay; internal `_P2P_TAG`
+    is stripped. Same-infoHash pure rows already covered by a ready stream are dropped.
+    """
+    ready: list[Stream] = []
+    pure: list[Stream] = []
+    for s in streams:
         cast("dict", s).pop(_P2P_TAG, None)
+        if s.get("url"):
+            ready.append(s)
+        elif s.get("infoHash"):
+            pure.append(s)
+
+    by_name: dict[str, Stream] = {}
+    for t in pure:
+        fn = _filename(t)
+        if fn and fn not in by_name:
+            by_name[fn] = t
+
+    used_names: set[str] = set()
+    out: list[Stream] = []
+    for s in ready:
+        fn = _filename(s)
+        t = by_name.get(fn) if fn else None
+        if t is not None:
+            used_names.add(fn)
+            _copy_torrent_identity(s, t)
+        out.append(s)
+
+    ready_hashes = {(s.get("infoHash"), s.get("fileIdx")) for s in out if s.get("infoHash")}
+    for t in pure:
+        fn = _filename(t)
+        if fn and fn in used_names:
+            continue
+        if (t.get("infoHash"), t.get("fileIdx")) in ready_hashes:
+            continue
+        out.append(t)
     return out
+
+
+def _merge_hybrid(debrid: list[Stream], torrents: list[Stream]) -> list[Stream]:
+    """Backward-compatible wrapper: fuse tagged Torrentio debrid + P2P batches.
+
+    Prefer `_fuse_url_and_torrent` for new call sites; kept for tests and clarity of
+    the auto-backend Torrentio split.
+    """
+    return _fuse_url_and_torrent([*debrid, *torrents])
 
 
 def _stream_key(s: Stream) -> object:

@@ -400,6 +400,59 @@ def test_merge_hybrid_fuses_by_filename():
     assert all(api._P2P_TAG not in s for s in out)
 
 
+def test_fuse_url_and_torrent_cross_addon():
+    """Ready url from Comet + pure torrent from another addon fuse by filename."""
+    fn = "Movie.2020.1080p.mkv"
+    streams = [
+        {"name": "Comet", "url": "https://debrid/x", **_bh(fn)},
+        {"name": "Other", "infoHash": "deadbeef", "fileIdx": 1, **_bh(fn)},
+        {"ytId": "nope"},  # filtered before fuse in streams(); fuse itself ignores non-playable
+        {"infoHash": "deadbeef", "fileIdx": 1, **_bh(fn)},  # same pure → dropped after fuse
+    ]
+    # Only playable rows (as streams() would pass)
+    playable = [s for s in streams if s.get("url") or s.get("infoHash")]
+    out = api._fuse_url_and_torrent(playable)
+    fused = next(s for s in out if s.get("url") == "https://debrid/x")
+    assert fused["infoHash"] == "deadbeef" and fused["fileIdx"] == 1
+    # pure absorbed into ready — no orphan duplicate
+    assert sum(1 for s in out if s.get("infoHash") == "deadbeef") == 1
+
+
+def test_streams_drops_unplayable_shapes(monkeypatch):
+    a = _addon("A", "http://a", "stream")
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])
+
+    def fake_get(url, **k):
+        return {
+            "streams": [
+                {"url": "http://ok"},
+                {"ytId": "abc"},
+                {"externalUrl": "https://x"},
+                {"infoHash": "hash1"},
+            ]
+        }
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    out = api.streams(CFG, "movie", "tt1")
+    assert {s.get("url") or s.get("infoHash") for s in out} == {"http://ok", "hash1"}
+
+
+def test_streams_auto_skips_tokenless_when_torrentio_disabled(monkeypatch):
+    a = _addon("Comet", "http://comet", "stream")
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])
+    urls: list[str] = []
+
+    def fake_get(url, **k):
+        urls.append(url)
+        return {"streams": [{"url": "http://c1"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    cfg = Config(torrentio_base="tb", playback_backend="auto", torrentio_enabled=False)
+    assert [s["url"] for s in api.streams(cfg, "movie", "tt1")] == ["http://c1"]
+    assert all("torrentio" not in u for u in urls)
+    assert all("P2P" not in u for u in urls)
+
+
 def test_url_playable_true_on_partial(monkeypatch):
     class _Resp:
         status = 206

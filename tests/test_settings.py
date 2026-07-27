@@ -312,19 +312,46 @@ def test_add_addon_success(monkeypatch):
     assert saved == [{"addons": ["http://x/manifest.json"]}]
 
 
-# --- _addons_menu ----------------------------------------------------------
+# --- _addons_menu (fonti stream) -------------------------------------------
+# Row layout: [0] Torrentio toggle · [1..n] extras/builtins · [n+1] preset · [n+2] custom
 
 
 def test_addons_menu_add_row_calls_add(monkeypatch):
     cfg = Config(torrentio_base="tb")
     monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [])
     monkeypatch.setattr(settings.config, "load", lambda: cfg)
-    idxs = iter([0, None])  # the only row is "➕ Aggiungi…" (len-1), then ESC
+    # empty eff → rows: Torrentio(0), preset(1), custom(2)
+    idxs = iter([2, None])
     monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
     added = []
-    monkeypatch.setattr(settings, "_add_addon", lambda c: added.append(1))
+    monkeypatch.setattr(settings, "_add_addon", lambda c, **k: added.append(1))
     settings._addons_menu(cfg)
     assert added == [1]
+
+
+def test_addons_menu_preset_row_calls_preset(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [])
+    monkeypatch.setattr(settings.config, "load", lambda: cfg)
+    idxs = iter([1, None])  # preset row
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
+    called = []
+    monkeypatch.setattr(settings, "_add_from_preset", lambda c: called.append(1))
+    settings._addons_menu(cfg)
+    assert called == [1]
+
+
+def test_addons_menu_toggles_torrentio(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    cfg = Config(torrentio_base="tb", torrentio_enabled=True)
+    monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [])
+    monkeypatch.setattr(
+        settings.config, "load", lambda: Config(torrentio_base="tb", torrentio_enabled=False)
+    )
+    idxs = iter([0, None])  # toggle, then ESC
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
+    settings._addons_menu(cfg)
+    assert saved == [{"torrentio_enabled": False}]
 
 
 def test_addons_menu_removes_extra(monkeypatch):
@@ -335,7 +362,7 @@ def test_addons_menu_removes_extra(monkeypatch):
     cfg = Config(torrentio_base="tb", addons=["http://x/manifest.json"])
     monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [extra])
     monkeypatch.setattr(settings.config, "load", lambda: cfg)
-    idxs = iter([0, None])  # pick the extra, then ESC
+    idxs = iter([1, None])  # 0=Torrentio, 1=extra
     monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
     monkeypatch.setattr(settings, "_ask", lambda *a: "y")  # confirm removal
     settings._addons_menu(cfg)
@@ -347,11 +374,20 @@ def test_addons_menu_builtin_not_removable(monkeypatch, capsys):
     builtin = Addon(base="http://c", name="Cinemeta", resources={"catalog": {}}, builtin=True)
     cfg = Config(torrentio_base="tb")
     monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [builtin])
-    idxs = iter([0, None])
+    idxs = iter([1, None])  # 0=Torrentio, 1=Cinemeta
     monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
     settings._addons_menu(cfg)
     assert saved == []
     assert "built-in" in capsys.readouterr().err
+
+
+def test_sources_status():
+    assert settings._sources_status(Config(torrentio_base="tb")) == "T on"
+    assert settings._sources_status(Config(torrentio_base="tb", torrentio_enabled=False)) == "T off"
+    assert (
+        settings._sources_status(Config(torrentio_base="tb", addons=["http://x/manifest.json"]))
+        == "T on · 1 extra"
+    )
 
 
 # --- onboard ---------------------------------------------------------------

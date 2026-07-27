@@ -159,7 +159,7 @@ def torrentio_token_less(cfg: Config) -> str:
 
 
 def _builtins(cfg: Config) -> list[Addon]:
-    return [
+    out = [
         Addon(
             base=cfg.cinemeta.rstrip("/"),
             name="Cinemeta",
@@ -172,19 +172,27 @@ def _builtins(cfg: Config) -> list[Addon]:
                 (t, c, c) for c in ("top", "year", "imdbRating") for t in ("movie", "series")
             ),
         ),
-        Addon(
-            base=torrentio_base(cfg),
-            name="Torrentio",
-            builtin=True,
-            resources={"stream": {"types": ["movie", "series"], "idPrefixes": ["tt", "kitsu"]}},
-        ),
+    ]
+    # Torrentio is optional: when disabled, stream discovery is only from cfg.addons
+    # (Comet / MediaFusion / AIOStreams / custom). Meta + subs builtins stay.
+    if cfg.torrentio_enabled:
+        out.append(
+            Addon(
+                base=torrentio_base(cfg),
+                name="Torrentio",
+                builtin=True,
+                resources={"stream": {"types": ["movie", "series"], "idPrefixes": ["tt", "kitsu"]}},
+            )
+        )
+    out.append(
         Addon(
             base=cfg.opensubtitles.rstrip("/"),
             name="OpenSubtitles",
             builtin=True,
             resources={"subtitles": {"types": ["movie", "series"], "idPrefixes": []}},
-        ),
-    ]
+        )
+    )
+    return out
 
 
 def effective_addons(cfg: Config) -> list[Addon]:

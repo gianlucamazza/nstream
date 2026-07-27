@@ -135,8 +135,14 @@ class Config:
     # audio_langs; the remaining audio_langs are acceptable fallbacks.
     primary_lang: str = ""
     # Extra Stremio addon manifest URLs (beyond the built-in Cinemeta/Torrentio/
-    # OpenSubtitles), aggregated for streams/subtitles/catalogs.
+    # OpenSubtitles), aggregated for streams/subtitles/catalogs. Stream alternatives
+    # to Torrentio (Comet, MediaFusion, AIOStreams, …) land here as user-generated
+    # manifest URLs — see `sources.STREAM_PRESETS` and the settings "Fonti stream" menu.
     addons: list[str] = field(default_factory=list)
+    # Include the built-in Torrentio stream provider. Off = discovery only from
+    # `addons` (and any other non-stream builtins stay). Useful when Torrentio is
+    # down or the user prefers Comet/MediaFusion/AIO as the sole stream source.
+    torrentio_enabled: bool = True
     history_enabled: bool = True
     # mpv hardware decoding, injected only if the user hasn't set hwdec themselves
     # (in mpv.conf or mpv_args). Empty string disables the injection.
@@ -366,6 +372,7 @@ def load() -> Config:
         audio_langs=list(raw.get("audio_langs", ["ita", "eng"])),
         primary_lang=str(raw.get("primary_lang", "") or ""),
         addons=list(raw.get("addons", [])),
+        torrentio_enabled=bool(raw.get("torrentio_enabled", Config.torrentio_enabled)),
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,
         auto_play=bool(raw.get("auto_play", Config.auto_play)),

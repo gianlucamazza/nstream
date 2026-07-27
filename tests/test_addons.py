@@ -59,6 +59,14 @@ def test_effective_addons_builtins(monkeypatch):
     assert "stream" in torrentio.resources
 
 
+def test_effective_addons_torrentio_disabled(monkeypatch):
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: None)
+    cfg = Config(torrentio_base="tb", torrentio_enabled=False)
+    names = [a.name for a in addons.effective_addons(cfg)]
+    assert names == ["Cinemeta", "OpenSubtitles"]
+    assert "Torrentio" not in names
+
+
 def test_effective_addons_includes_extras(monkeypatch):
     extra = addons.Addon(
         base="https://x", name="Extra", resources={"stream": {"types": [], "idPrefixes": []}}

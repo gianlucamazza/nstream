@@ -38,6 +38,7 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.nerd_font == "auto"
     assert cfg.posters is True
     assert cfg.image_mode == "auto"
+    assert cfg.torrentio_enabled is True
 
 
 def test_ui_fields_override_and_validate(tmp_path, monkeypatch):
@@ -137,6 +138,14 @@ def test_autoplay_disabled(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     write_config(tmp_path, {"torrentio_base": "tb", "autoplay": False})
     assert config.load().autoplay is False
+
+
+def test_torrentio_enabled_default_and_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb"})
+    assert config.load().torrentio_enabled is True
+    write_config(tmp_path, {"torrentio_base": "tb", "torrentio_enabled": False})
+    assert config.load().torrentio_enabled is False
 
 
 def test_audio_langs_and_addons_defaults(tmp_path, monkeypatch):

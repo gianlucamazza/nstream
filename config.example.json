@@ -11,6 +11,7 @@
     "eng"
   ],
   "primary_lang": "",
+  "torrentio_enabled": true,
   "addons": [],
   "history_enabled": true,
   "hwdec": "auto-safe",
