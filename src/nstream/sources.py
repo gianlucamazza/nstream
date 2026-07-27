@@ -84,3 +84,11 @@ def is_playable_stream(stream: object) -> bool:
     if not isinstance(stream, dict):
         return False
     return bool(stream.get("url") or stream.get("infoHash"))
+
+
+def no_stream_source_message() -> str:
+    """User-facing notice when Torrentio is off and no stream addon is configured."""
+    return (
+        "nessuna fonte stream attiva — abilita Torrentio o aggiungi un addon "
+        "(impostazioni → Fonti stream / plugin)"
+    )

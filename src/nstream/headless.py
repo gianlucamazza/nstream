@@ -253,10 +253,11 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         # fall through to the PLAY path and cast the title it was asked to explain).
         results = api.streams(cfg, typ, video_id)
         if not results:
+            err = stream_select.no_stream_source_error(cfg) or "no_streams"
             _emit_json(
                 {
                     "ok": False,
-                    "error": "no_streams",
+                    "error": err,
                     "message": stream_select.no_streams_message(cfg, typ, video_id, title),
                 }
             )
@@ -340,10 +341,11 @@ def _auto_play(
     print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
     results = api.streams(cfg, typ, video_id)
     if not results:
+        err = stream_select.no_stream_source_error(cfg) or "no_streams"
         _emit_json(
             {
                 "ok": False,
-                "error": "no_streams",
+                "error": err,
                 "message": stream_select.no_streams_message(cfg, typ, video_id, title),
             }
         )

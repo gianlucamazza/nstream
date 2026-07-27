@@ -43,6 +43,14 @@ def test_future_release_parsing():
     assert stream_select._future_release("not-a-date") is None
 
 
+def test_no_streams_message_no_source(monkeypatch):
+    cfg = Config(torrentio_base="tb", torrentio_enabled=False, addons=[])
+    monkeypatch.setattr(stream_select.addons, "load_addon", lambda *a, **k: None)
+    msg = stream_select.no_streams_message(cfg, "movie", "tt1", "X")
+    assert "fonte stream" in msg
+    assert stream_select.no_stream_source_error(cfg) == "no_stream_sources"
+
+
 def test_no_streams_message_upcoming(monkeypatch):
     monkeypatch.setattr(
         stream_select.api, "meta", lambda *a, **k: {"released": "2999-12-18T00:00:00.000Z"}

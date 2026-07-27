@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import api, debrid, engine, languages, log, quality, remux, tracks, ui
+from . import addons, api, debrid, engine, languages, log, quality, remux, sources, tracks, ui
 from . import config as config_mod
 from .config import Config, ConfigError, PlayOpts, Stream
 from .labels import stream_label
@@ -38,7 +38,9 @@ def _future_release(iso: str | None) -> datetime | None:
 
 
 def no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
-    """A specific 'not released yet' notice when a title has no streams, else generic."""
+    """A specific notice when a title has no streams (config / unreleased / empty)."""
+    if not addons.has_stream_source(cfg):
+        return sources.no_stream_source_message()
     released = _future_release(api.meta(cfg, typ, video_id).get("released"))
     if released:
         return (
@@ -46,6 +48,13 @@ def no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
             f"uscita prevista il {released:%d/%m/%Y}"
         )
     return f"nessuno stream disponibile per «{title}»"
+
+
+def no_stream_source_error(cfg: Config) -> str | None:
+    """JSON/headless error code when no stream addon is configured, else None."""
+    if addons.has_stream_source(cfg):
+        return None
+    return "no_stream_sources"
 
 
 def exact_resolution(quality_choice: int | None) -> int:

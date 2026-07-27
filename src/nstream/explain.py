@@ -98,7 +98,9 @@ def _row(
     comp = quality.score_components(r.info, audio_langs, cast=cast, title=title)
     # Release names are untrusted: strip control/ESC chars before they reach the terminal.
     name = ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:60]
-    return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {name}"
+    addon = ui.sanitize(r.stream.get("addon") or "").strip()
+    src = f"{addon} · " if addon else ""
+    return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {src}{name}"
 
 
 def explain_streams(
@@ -111,7 +113,7 @@ def explain_streams(
 ) -> str:
     """Render the full ranking decision for one profile (local GPU or Chromecast)."""
     if not results:
-        return "nessuno stream restituito da Torrentio."
+        return "nessuno stream restituito dalle fonti configurate."
     playable, excluded, caps, spec = _rank(
         cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
     )

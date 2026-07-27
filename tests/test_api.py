@@ -435,6 +435,50 @@ def test_streams_drops_unplayable_shapes(monkeypatch):
     monkeypatch.setattr(api, "http_get_json", fake_get)
     out = api.streams(CFG, "movie", "tt1")
     assert {s.get("url") or s.get("infoHash") for s in out} == {"http://ok", "hash1"}
+    assert all(s.get("addon") == "A" for s in out)
+
+
+def test_streams_stamps_addon_and_collapses_same_filename(monkeypatch):
+    """Same release from two addons → one row; cached+url wins; infoHash kept."""
+    a = _addon("Torrentio", "http://t", "stream")
+    b = _addon("Comet", "http://c", "stream")
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a, b])
+    fn = "Same.2020.1080p.mkv"
+
+    def fake_get(url, **k):
+        if url.startswith("http://t"):
+            return {
+                "streams": [
+                    {
+                        "name": "[RD+] 1080p",
+                        "url": "http://rd/1",
+                        "behaviorHints": {"filename": fn},
+                    }
+                ]
+            }
+        return {
+            "streams": [
+                {
+                    "name": "1080p",
+                    "infoHash": "abc",
+                    "fileIdx": 0,
+                    "behaviorHints": {"filename": fn},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    out = api.streams(CFG, "movie", "tt1")
+    assert len(out) == 1
+    s = out[0]
+    assert s["url"] == "http://rd/1" and s["infoHash"] == "abc"
+    assert s["addon"] == "Torrentio"
+
+
+def test_streams_no_source_returns_empty(monkeypatch):
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [])
+    monkeypatch.setattr(api, "http_get_json", lambda *a, **k: pytest.fail("no fetch"))
+    assert api.streams(CFG, "movie", "tt1") == []
 
 
 def test_streams_auto_skips_tokenless_when_torrentio_disabled(monkeypatch):

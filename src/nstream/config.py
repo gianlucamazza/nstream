@@ -47,9 +47,9 @@ class Video(TypedDict, total=False):
 
 
 class Stream(TypedDict, total=False):
-    """A Torrentio stream result. Debrid/cached results carry a ready HTTP `url`;
-    pure-torrent results (debrid off) carry `infoHash` (+ optional `fileIdx`/`sources`)
-    instead, resolved to a local HTTP url by the P2P engine before playback."""
+    """A stream-addon result. Debrid/cached rows carry a ready HTTP `url`; pure-torrent
+    rows carry `infoHash` (+ optional `fileIdx`/`sources`) resolved to a local HTTP url
+    by the P2P engine before playback. `addon` is set by `api.streams` (provenance)."""
 
     name: str
     title: str
@@ -58,8 +58,9 @@ class Stream(TypedDict, total=False):
     fileIdx: int
     sources: list[str]
     behaviorHints: (
-        dict  # Torrentio extra (e.g. {"filename": "..."}) — used for hybrid/native file match
+        dict  # Torrentio/Comet extra (e.g. {"filename": "..."}) — hybrid/native file match
     )
+    addon: str  # stream-addon display name (Torrentio, Comet, …) — set by api.streams
 
 
 class Subtitle(TypedDict, total=False):

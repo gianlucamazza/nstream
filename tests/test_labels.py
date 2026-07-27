@@ -88,3 +88,8 @@ def test_stream_label_strips_ansi_from_release_names():
     # ESC/BEL stripped → the leftover printable chars can't be interpreted by the terminal
     assert "\x1b" not in label and "\x07" not in label
     assert "Grp" in label and "Movie" in label
+
+
+def test_stream_label_shows_addon_provenance():
+    s: Stream = {"name": "[RD+] 1080p", "title": "Film.mkv", "addon": "Comet"}
+    assert "[Comet]" in labels.stream_label(s)

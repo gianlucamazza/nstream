@@ -44,7 +44,12 @@ def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
     # Release names are untrusted: strip control/ESC chars before they reach the terminal.
     name = ui.sanitize(s.get("name") or "").replace("\n", " ")
     title = ui.sanitize(s.get("title") or "").replace("\n", " · ")
-    base = f"{name}  |  {title}"[:cap]
+    base = f"{name}  |  {title}"
+    # Provenance badge when api.streams stamped the source addon (multi-source clarity).
+    addon = ui.sanitize(s.get("addon") or "").strip()
+    if addon:
+        base = f"[{addon}] {base}"
+    base = base[:cap]
     if info is None:
         return base
     tags = []

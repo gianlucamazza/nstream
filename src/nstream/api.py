@@ -12,6 +12,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import unicodedata
@@ -32,6 +33,9 @@ from .net import TIMEOUT, UA, NetworkError, http_get_json, url_playable
 _log = log.get_logger("api")
 
 __all__ = ["TIMEOUT", "UA", "NetworkError", "http_get_json", "url_playable"]
+
+# Same family as quality._CACHED_RE — kept local so api stays above quality in the graph.
+_CACHED_NAME_RE = re.compile(r"\[[A-Za-z]{2,6}\+\]")
 
 _MAX_WORKERS = 8
 # Overall deadline (seconds) for one concurrent gather. A single stuck addon can take
@@ -354,8 +358,9 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
             continue
         url = f"{addon.base}/stream/{typ}/{video_id}.json"
         tasks.append(
-            lambda url=url, name=addon.name: http_get_json(url, what=f"stream ({name})").get(
-                "streams", []
+            lambda url=url, name=addon.name: _stamp_addon(
+                http_get_json(url, what=f"stream ({name})").get("streams", []),
+                name,
             )
         )
     # Hybrid "auto" backend: the main Torrentio query carries the debrid token
@@ -366,12 +371,22 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
         tl = f"{addons.torrentio_token_less(cfg)}/stream/{typ}/{video_id}.json"
         tasks.append(
             lambda tl=tl: _tagged(
-                http_get_json(tl, what="stream (Torrentio P2P)").get("streams", [])
+                _stamp_addon(
+                    http_get_json(tl, what="stream (Torrentio P2P)").get("streams", []),
+                    "Torrentio",
+                )
             )
         )
+    if not tasks:
+        return []  # no stream source configured (Torrentio off + empty addons)
     gathered = _gather(tasks)
     playable = [s for s in gathered if sources.is_playable_stream(s)]
-    return _dedup(_fuse_url_and_torrent(playable), _stream_key)
+    fused = _fuse_url_and_torrent(playable)
+    # Collapse the same release seen on multiple addons (filename join), keeping the
+    # best row (cached > url > pure torrent) while enriching the winner with any
+    # missing infoHash from the losers.
+    collapsed = _dedup_by_release(fused)
+    return _dedup(collapsed, _stream_key)
 
 
 # Marker key (private, stripped before returning) tagging the pure-torrent batch in the
@@ -385,6 +400,16 @@ def _tagged(streams: list[Stream]) -> list[Stream]:
     for s in streams:
         cast("dict", s)[_P2P_TAG] = True
     return streams
+
+
+def _stamp_addon(streams: list, addon_name: str) -> list[Stream]:
+    """Tag each stream dict with its source addon name (provenance for labels/explain)."""
+    out: list[Stream] = []
+    for s in streams:
+        if isinstance(s, dict):
+            s["addon"] = addon_name
+            out.append(cast("Stream", s))
+    return out
 
 
 def _filename(s: Stream) -> str:
@@ -457,6 +482,48 @@ def _merge_hybrid(debrid: list[Stream], torrents: list[Stream]) -> list[Stream]:
     the auto-backend Torrentio split.
     """
     return _fuse_url_and_torrent([*debrid, *torrents])
+
+
+def _release_rank(s: Stream) -> tuple[int, int, int]:
+    """Preference for cross-addon release collapse: cached marker > has url > has infoHash."""
+    cached = 1 if _CACHED_NAME_RE.search(s.get("name") or "") else 0
+    has_url = 1 if s.get("url") else 0
+    has_hash = 1 if s.get("infoHash") else 0
+    return (cached, has_url, has_hash)
+
+
+def _dedup_by_release(streams: list[Stream]) -> list[Stream]:
+    """Collapse rows that share the same release filename across addons.
+
+    Keeps the higher `_release_rank` row; copies torrent identity onto the winner when
+    the loser has an infoHash the winner lacks. Streams without a filename key pass
+    through unchanged (still subject to url/infoHash dedup).
+    """
+    best: dict[str, Stream] = {}
+    order: list[str] = []
+    passthrough: list[Stream] = []
+    for s in streams:
+        fn = _filename(s)
+        if not fn:
+            passthrough.append(s)
+            continue
+        prev = best.get(fn)
+        if prev is None:
+            best[fn] = s
+            order.append(fn)
+            continue
+        if _release_rank(s) > _release_rank(prev):
+            _copy_torrent_identity(s, prev)
+            # Keep the richer addon label when the winner lacked one.
+            if not s.get("addon") and prev.get("addon"):
+                s["addon"] = prev["addon"]
+            best[fn] = s
+        else:
+            _copy_torrent_identity(prev, s)
+            if not prev.get("addon") and s.get("addon"):
+                # Prefer showing both when they differ? Keep the winner's; if empty, take loser.
+                prev["addon"] = s["addon"]
+    return [best[fn] for fn in order] + passthrough
 
 
 def _stream_key(s: Stream) -> object:

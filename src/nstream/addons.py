@@ -246,3 +246,12 @@ def serves(addon: Addon, resource: str, typ: str, video_id: str | None = None) -
         return False
     prefixes = spec["idPrefixes"]
     return not (video_id and prefixes and not any(video_id.startswith(p) for p in prefixes))
+
+
+def has_stream_source(cfg: Config) -> bool:
+    """True when at least one effective addon can serve the `stream` resource.
+
+    False means Torrentio is disabled and no stream-capable extra is configured —
+    search/meta still work, but every title will return zero streams.
+    """
+    return any("stream" in a.resources for a in effective_addons(cfg))

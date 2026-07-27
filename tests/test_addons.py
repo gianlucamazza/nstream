@@ -67,6 +67,18 @@ def test_effective_addons_torrentio_disabled(monkeypatch):
     assert "Torrentio" not in names
 
 
+def test_has_stream_source(monkeypatch):
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: None)
+    assert addons.has_stream_source(Config(torrentio_base="tb")) is True
+    assert addons.has_stream_source(Config(torrentio_base="tb", torrentio_enabled=False)) is False
+    extra = addons.Addon(
+        base="https://x", name="Comet", resources={"stream": {"types": [], "idPrefixes": []}}
+    )
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: extra)
+    cfg = Config(torrentio_base="tb", torrentio_enabled=False, addons=["https://x/manifest.json"])
+    assert addons.has_stream_source(cfg) is True
+
+
 def test_effective_addons_includes_extras(monkeypatch):
     extra = addons.Addon(
         base="https://x", name="Extra", resources={"stream": {"types": [], "idPrefixes": []}}

@@ -33,3 +33,9 @@ def test_is_playable_stream():
     assert sources.is_playable_stream({}) is False
     assert sources.is_playable_stream(None) is False
     assert sources.is_playable_stream("nope") is False
+
+
+def test_no_stream_source_message():
+    msg = sources.no_stream_source_message()
+    assert "fonte stream" in msg
+    assert "Torrentio" in msg
