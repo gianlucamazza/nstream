@@ -276,6 +276,11 @@ provider is still transferring it (`[RD download]`) — is skipped for that run 
 remembered: only proof of absence earns memory. `nstream --forget-dead` clears the list (see
 [ADR 0025](docs/adr/0025-dead-source-classification.md)).
 
+A spawned TorrServer keeps its own output in `~/.local/state/nstream/torrserver.log` (truncated at
+each launch), and nstream quotes the failing line when the server dies during startup. If the
+configured `engine_port` is already held by another service, that is reported up front — with the
+setting to change — instead of surfacing as an anonymous startup failure.
+
 nstream writes a rotating log to `~/.local/state/nstream/nstream.log` (512 KB × 3). An unexpected
 crash is captured there (handy when running inside the foot launcher, where the traceback would
 otherwise scroll away) — on a crash nstream prints `errore inatteso — dettagli in <path>`. Run with

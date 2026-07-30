@@ -113,6 +113,42 @@ def _binary() -> str | None:
     return next((p for name in _BINARY_NAMES if (p := shutil.which(name))), None)
 
 
+def server_log_path() -> Path:
+    """Where a spawned TorrServer's own output is kept. It is the only account of why a
+    launch failed: without it a startup error (a busy port, a bad data dir) reaches the user
+    as a bare "exited during startup" — field-found 2026-07-30, when another service held the
+    configured port and the reason was discarded to DEVNULL."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return Path(base) / "nstream" / "torrserver.log"
+
+
+def _port_taken(port: int) -> bool:
+    """True when something already holds `port` on the wildcard address — which is what a
+    spawned TorrServer binds. Distinct from `_alive`: a foreign service (or one bound to a
+    single non-loopback address) answers neither /echo nor our health probe, yet still makes
+    the bind fail. Best-effort: on any error, say no and let the spawn report the truth."""
+    with contextlib.suppress(OSError):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", port))
+        return False
+    return True
+
+
+def _startup_error(path: Path) -> str:
+    """The most informative line TorrServer left behind, for the failure message. Prefers an
+    explicit error/fatal line over the last line, which is often unrelated noise."""
+    try:
+        lines = [ln.strip() for ln in path.read_text(errors="replace").splitlines() if ln.strip()]
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    keyed = [ln for ln in lines if any(k in ln.lower() for k in ("error", "cannot", "fatal"))]
+    line = (keyed or lines)[-1]
+    _, _, tail = line.partition(" ")  # drop TorrServer's leading timestamp
+    return (tail or line)[:200]
+
+
 def installed() -> bool:
     """Whether the TorrServer binary is on PATH (for the settings health check)."""
     return _binary() is not None
@@ -165,20 +201,40 @@ def ensure_running(cfg: Config) -> str:
                 f"{BINARY} non trovato — installalo (es. `yay -S torrserver-bin`) "
                 "o passa a un provider debrid nei settings"
             )
+        # The port answered no health probe, yet may still be held by a foreign service (or
+        # by one bound to a single address): the spawn would die on EADDRINUSE. Say so with
+        # the fix instead of letting the generic startup failure carry the blame.
+        if _port_taken(port):
+            raise EngineUnavailable(
+                f"porta {port} già occupata da un altro servizio — cambia `engine_port` "
+                "nei settings (nstream --settings) su una porta libera"
+            )
         path = _download_dir(cfg)
         with contextlib.suppress(OSError):
             Path(path).mkdir(parents=True, exist_ok=True)
+        logfile = server_log_path()
+        with contextlib.suppress(OSError):
+            logfile.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Keep the server's own output: it is the only explanation available when the
+            # process dies during startup (see `server_log_path`). Truncated per launch.
+            out = open(logfile, "w")  # noqa: SIM115 — handed to the child, closed below
+        except OSError:
+            out = None
         try:
             _spawned = subprocess.Popen(  # noqa: S603 — long-lived, like mpv
                 [binpath, "--port", str(port), "--path", path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=out or subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if out else subprocess.DEVNULL,
                 # Own session: the server must be able to outlive nstream (detach_spawned
                 # hands it off to a fire-and-return cast) — no SIGHUP/SIGINT from our tty.
                 start_new_session=True,
             )
         except OSError as e:
             raise EngineUnavailable(f"avvio {BINARY} fallito: {e}") from e
+        finally:
+            if out is not None:
+                out.close()  # the child keeps its own descriptor
         atexit.register(_shutdown)
         deadline = time.monotonic() + _SPAWN_READY_TIMEOUT
         while time.monotonic() < deadline:
@@ -188,7 +244,9 @@ def ensure_running(cfg: Config) -> str:
                 _configure_cache(base, cfg)
                 return base
             if _spawned.poll() is not None:
-                raise EngineUnavailable(f"{BINARY} è uscito durante l'avvio")
+                detail = _startup_error(logfile)
+                why = f": {detail}" if detail else ""
+                raise EngineUnavailable(f"{BINARY} è uscito durante l'avvio{why} (log: {logfile})")
             time.sleep(0.3)
         raise EngineUnavailable(f"{BINARY} non ha risposto entro {_SPAWN_READY_TIMEOUT:.0f}s")
 

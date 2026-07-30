@@ -7,6 +7,8 @@ resets it so tests don't leak state into one another.
 
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from nstream import engine
@@ -85,10 +87,12 @@ def test_ensure_running_missing_binary_raises(monkeypatch):
         engine.ensure_running(_cfg())
 
 
-def test_ensure_running_spawns_and_waits(monkeypatch):
+def test_ensure_running_spawns_and_waits(monkeypatch, tmp_path):
     # Not alive at first, binary present, then the spawned server starts answering /echo.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     alive = iter([False, False, True])  # ensure() check, spawn-loop miss, then ready
     monkeypatch.setattr(engine, "_alive", lambda base: next(alive))
+    monkeypatch.setattr(engine, "_port_taken", lambda port: False)
     monkeypatch.setattr(engine.shutil, "which", lambda _: "/usr/bin/TorrServer")
 
     class _Proc:
@@ -102,8 +106,10 @@ def test_ensure_running_spawns_and_waits(monkeypatch):
     assert engine.ensure_running(_cfg(engine_port=9000)) == "http://127.0.0.1:9000"
 
 
-def test_ensure_running_raises_if_spawn_exits(monkeypatch):
+def test_ensure_running_raises_if_spawn_exits(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setattr(engine, "_alive", lambda base: False)
+    monkeypatch.setattr(engine, "_port_taken", lambda port: False)
     monkeypatch.setattr(engine.shutil, "which", lambda _: "/usr/bin/TorrServer")
 
     class _Dead:
@@ -266,3 +272,60 @@ def test_wait_buffer_ctrl_c_propagates(monkeypatch):
     monkeypatch.setattr(engine, "_torrent_stat", interrupted)
     with pytest.raises(KeyboardInterrupt):
         engine._wait_buffer("http://127.0.0.1:1", "hash")
+
+
+# --- startup diagnostics (field case 2026-07-30) ---------------------------
+
+
+def test_ensure_running_reports_a_busy_port_with_the_fix(monkeypatch):
+    """A foreign service holding the port answers no health probe, so the old code spawned
+    anyway and reported a bare "exited during startup". Name the cause and the remedy."""
+    monkeypatch.setattr(engine, "_alive", lambda base: False)
+    monkeypatch.setattr(engine.shutil, "which", lambda _: "/usr/bin/TorrServer")
+    monkeypatch.setattr(engine, "_port_taken", lambda port: True)
+    monkeypatch.setattr(
+        engine.subprocess, "Popen", lambda *a, **k: pytest.fail("must not spawn onto a busy port")
+    )
+    with pytest.raises(engine.EngineUnavailable, match="engine_port"):
+        engine.ensure_running(_cfg(engine_port=8090))
+
+
+def test_port_taken_detects_a_bound_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+        assert engine._port_taken(port) is True
+    assert engine._port_taken(port) is False  # released again
+
+
+def test_startup_error_prefers_the_error_line(tmp_path):
+    log = tmp_path / "torrserver.log"
+    log.write_text(
+        "2026/07/30 19:30:59 =========== START ===========\n"
+        "2026/07/30 19:30:59 Cannot bind HTTP port 8090: listen tcp :8090: address already in use\n"
+        "2026/07/30 19:30:59 bye\n"
+    )
+    assert "address already in use" in engine._startup_error(log)
+
+
+def test_startup_error_is_empty_without_a_log(tmp_path):
+    assert engine._startup_error(tmp_path / "missing.log") == ""
+
+
+def test_spawn_failure_carries_the_server_reason(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(engine, "_alive", lambda base: False)
+    monkeypatch.setattr(engine, "_port_taken", lambda port: False)
+    monkeypatch.setattr(engine.shutil, "which", lambda _: "/usr/bin/TorrServer")
+
+    class _Dead:
+        def poll(self):
+            engine.server_log_path().write_text("2026/07/30 19:30 Cannot bind HTTP port 8090\n")
+            return 1
+
+    monkeypatch.setattr(engine.subprocess, "Popen", lambda *a, **k: _Dead())
+    monkeypatch.setattr(engine.time, "sleep", lambda _: None)
+    monkeypatch.setattr(engine.atexit, "register", lambda fn: None)
+    with pytest.raises(engine.EngineUnavailable, match="Cannot bind HTTP port"):
+        engine.ensure_running(_cfg())

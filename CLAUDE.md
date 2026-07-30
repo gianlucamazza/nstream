@@ -166,7 +166,14 @@ Modules in `src/nstream/`:
   contract as a debrid url. Leaf below `cli` (imports only `config`/`log`/`util`/`ui` + stdlib), like
   `caster`/`player`. Best-effort: raises `EngineUnavailable` instead of crashing the picker.
   `magnet_from_stream()` is shared with `debrid`; `detach_spawned()` lets a spawned server outlive
-  a headless fire-and-return cast (the Chromecast keeps streaming from it).
+  a headless fire-and-return cast (the Chromecast keeps streaming from it). **Startup is
+  accountable** (field case 2026-07-30, when another service held `engine_port` and the reason was
+  discarded to DEVNULL): `_port_taken` pre-flights the wildcard bind and names the fix
+  (`engine_port`) instead of letting the spawn die anonymously, and the server's own output is kept
+  in `server_log_path()` (`$XDG_STATE_HOME/nstream/torrserver.log`, truncated per launch) so
+  `_startup_error` can quote the real cause in `EngineUnavailable`. `_alive` answers "is a usable
+  server there?", `_port_taken` answers "can we bind?" — a foreign listener says no to both, and
+  only the second explains why.
 - `debrid.py` — native debrid backend: talks **directly** to a provider's API (TorBox/Premiumize)
   to batch-check the cache and resolve an infoHash to an `http://…` url — same contract as `engine`.
   Used only by the `native` playback backend; RealDebrid is intentionally absent (no cache endpoint
