@@ -350,6 +350,20 @@ def _auto_play(
             }
         )
         return 1
+    # Sources proven removed from the debrid (ADR 0025) are dropped before anything is
+    # measured, so `available_audio`/`available_resolutions` describe what can actually play.
+    results, removed = stream_select.prune_dead(cfg, results)
+    if not results:
+        _emit_json(
+            {
+                "ok": False,
+                "error": "sources_removed",
+                "message": f"tutte le sorgenti note per «{title}» risultano rimosse dal debrid",
+                "removed_sources": removed,
+            }
+        )
+        return 1
+
     available_audio = stream_select.audio_languages(cfg, results, cast=opts.cast)
     available_resolutions = stream_select.available_resolutions(cfg, results, cast=opts.cast)
     exact = stream_select.exact_resolution(opts.quality)
@@ -367,6 +381,7 @@ def _auto_play(
         return 1
 
     audio_verified: bool | None = None
+    candidates_before = 0  # set on the prepare_stream path: sources alive before verification
     if opts.audio_lang:
         # Forced dub: explicit error if no stream carries it (no silent fallback).
         if opts.audio_lang not in available_audio:
@@ -398,10 +413,25 @@ def _auto_play(
             stream=chosen, auto=True, safety_sub_lang=None, quality=opts.quality or 0
         )
     else:
+        candidates_before = len(results)
         vetted = stream_select.prepare_stream(
             cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title
         )
     if vetted is None:
+        # The pre-commit verification may have just proven the remaining sources removed
+        # (ADR 0025): re-prune against the freshly written denylist and say so honestly,
+        # instead of a generic "nothing playable" that invites a pointless retry.
+        # `prepare_stream` prunes `results` in place, so an emptied list is itself the signal.
+        if not results and candidates_before:
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "sources_removed",
+                    "message": f"le sorgenti di «{title}» risultano rimosse dal debrid",
+                    "removed_sources": removed + candidates_before,
+                }
+            )
+            return 1
         # Quality filter may have emptied the set even if the pre-check passed (e.g. HW).
         if exact:
             _emit_json(

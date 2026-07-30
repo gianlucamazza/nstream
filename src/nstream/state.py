@@ -17,7 +17,15 @@ from collections.abc import Iterable, Iterator
 from typing import cast
 
 from . import util
-from .config import Config, HistoryEntry, Meta, Video, library_path, state_path
+from .config import (
+    Config,
+    HistoryEntry,
+    Meta,
+    Video,
+    dead_sources_path,
+    library_path,
+    state_path,
+)
 
 # Past this fraction of the runtime a title counts as watched and drops out of
 # the continue-watching list.
@@ -363,3 +371,68 @@ def recent(cfg: Config, limit: int = 30, typ: str | None = None) -> list[History
         entries = [e for e in entries if e.get("type", "movie") == typ]
     entries.sort(key=lambda e: e.get("ts", 0.0), reverse=True)
     return entries[:limit]
+
+
+# --- dead-source negative cache (ADR 0025) ---------------------------------
+
+# A source proven removed stays banned this long: long enough that a dead release stops
+# costing a probe on every search, short enough that a file which comes back is not banned
+# for ever.
+DEAD_TTL = 30 * 86400.0
+MAX_DEAD_SOURCES = 500
+
+
+def _dead_read() -> dict[str, dict]:
+    data = util.load_json(dead_sources_path(), {})
+    if not isinstance(data, dict):
+        return {}
+    entries = data.get("sources")
+    return entries if isinstance(entries, dict) else {}
+
+
+def dead_sources(now: float | None = None) -> dict[str, dict]:
+    """The non-expired denylist, `key -> {ts, reason}`. Best-effort: a missing or corrupt
+    file yields an empty mapping, so a state error can never block playback."""
+    now = time.time() if now is None else now
+    live: dict[str, dict] = {}
+    for key, rec in _dead_read().items():
+        if not isinstance(rec, dict):
+            continue
+        ts = rec.get("ts")
+        if isinstance(ts, int | float) and now - ts < DEAD_TTL:
+            live[key] = rec
+    return live
+
+
+def is_dead(key: str) -> bool:
+    return bool(key) and key in dead_sources()
+
+
+def mark_dead(key: str, reason: str = "") -> None:
+    """Remember that `key` (infoHash / filename / release name) is provably gone. Never
+    called for a transient failure — only for `net.Probe.dead` (ADR 0025)."""
+    if not key:
+        return
+    entries = dead_sources()
+    entries[key] = {"ts": time.time(), "reason": reason}
+    if len(entries) > MAX_DEAD_SOURCES:  # prune oldest first
+        keep = sorted(entries.items(), key=lambda kv: kv[1].get("ts", 0.0), reverse=True)
+        entries = dict(keep[:MAX_DEAD_SOURCES])
+    _dead_write(entries)
+
+
+def forget_dead() -> int:
+    """Clear the denylist (user escape hatch). Returns how many entries were dropped."""
+    count = len(_dead_read())
+    _dead_write({})
+    return count
+
+
+def _dead_write(entries: dict[str, dict]) -> None:
+    with contextlib.suppress(OSError):  # state is diagnostics: never fail playback over it
+        dead_sources_path().parent.mkdir(parents=True, exist_ok=True)
+        util.atomic_write(
+            dead_sources_path(),
+            lambda f: json.dump({"version": 1, "sources": entries}, f, ensure_ascii=False),
+            prefix=".dead-sources-",
+        )

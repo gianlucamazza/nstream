@@ -251,3 +251,97 @@ def test_url_playable_false_on_connection_error(monkeypatch):
 
     monkeypatch.setattr(net.urllib.request, "urlopen", boom)
     assert net.url_playable("http://x") is False
+
+
+# --- probe_url: three-state classification (ADR 0025) ----------------------------
+
+
+class _ProbeResp:
+    """A probe response with headers, mimicking urlopen's context manager."""
+
+    def __init__(self, status: int, headers: dict | None = None):
+        self.status = status
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _serve(monkeypatch, status: int, headers: dict | None = None):
+    monkeypatch.setattr(net.urllib.request, "urlopen", lambda *a, **k: _ProbeResp(status, headers))
+
+
+def test_probe_live_when_size_matches(monkeypatch):
+    _serve(monkeypatch, 206, {"Content-Range": "bytes 0-0/7686000000"})
+    probe = net.probe_url("http://x", expected_bytes=7_600_000_000)
+    assert probe.state == net.LIVE
+    assert probe.usable and not probe.dead
+
+
+def test_probe_gone_when_placeholder_served(monkeypatch):
+    """A revoked debrid link answers 200 with a few-KB placeholder, not the movie."""
+    _serve(monkeypatch, 206, {"Content-Range": "bytes 0-0/40000"})
+    probe = net.probe_url("http://x", expected_bytes=7_000_000_000)
+    assert probe.state == net.GONE
+    assert probe.dead and not probe.usable
+    assert "annunciati" in probe.reason
+
+
+def test_probe_live_when_size_unknown(monkeypatch):
+    """No Content-Range/Length (chunked): nothing to judge, so don't invent a verdict."""
+    _serve(monkeypatch, 206, {})
+    assert net.probe_url("http://x", expected_bytes=7_000_000_000).state == net.LIVE
+
+
+def test_probe_live_when_expected_unknown(monkeypatch):
+    """A small file is only suspicious against an announced size."""
+    _serve(monkeypatch, 200, {"Content-Length": "40000"})
+    assert net.probe_url("http://x").state == net.LIVE
+
+
+def test_probe_gone_on_404(monkeypatch):
+    monkeypatch.setattr(
+        net.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(_http_error(404))
+    )
+    probe = net.probe_url("http://x")
+    assert probe.dead and probe.status == 404
+
+
+@pytest.mark.parametrize("code", [403, 405, 416])
+def test_probe_unknown_but_usable_on_method_rejection(monkeypatch, code):
+    def reject(*a, **k):
+        raise _http_error(code)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", reject)
+    probe = net.probe_url("http://x")
+    assert probe.state == net.UNKNOWN
+    assert probe.usable and not probe.dead  # benefit of the doubt, never denylisted
+
+
+def test_probe_unknown_on_server_error(monkeypatch):
+    def boom(*a, **k):
+        raise _http_error(503)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", boom)
+    probe = net.probe_url("http://x")
+    assert probe.state == net.UNKNOWN
+    assert not probe.usable and not probe.dead  # falls back, but isn't remembered
+
+
+def test_probe_unknown_on_transport_error(monkeypatch):
+    def boom(*a, **k):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", boom)
+    probe = net.probe_url("http://x")
+    assert not probe.usable and not probe.dead
+
+
+def test_served_total_prefers_content_range():
+    assert net._served_total({"Content-Range": "bytes 0-0/123"}, 206) == 123
+    assert net._served_total({"Content-Length": "99"}, 200) == 99
+    assert net._served_total({"Content-Length": "1"}, 206) is None  # a 1-byte slice, not the total
+    assert net._served_total({}, 200) is None

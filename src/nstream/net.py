@@ -16,6 +16,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 from . import log, util
 
@@ -29,20 +30,104 @@ class NetworkError(Exception):
     """A request failed after exhausting retries, or hit a non-retryable status."""
 
 
-def url_playable(url: str, *, timeout: float = 6.0) -> bool:
-    """Best-effort reachability check for a ready (debrid) stream url: True if the server
-    serves the first byte, False on a clear failure (dead/expired link, 4xx/5xx, connection
-    error). Conservative — a HEAD/Range rejection (403/405/416) still counts as reachable, so
-    we only veto clear misses. Real-Debrid can't reliably report a cached-miss, so this catches
-    dead links and resolve errors, not every non-cached case."""
+# --- stream availability probe (ADR 0025) --------------------------------------------
+
+LIVE = "live"
+GONE = "gone"
+UNKNOWN = "unknown"
+
+# A served total below `max(_MIN_REAL_BYTES, expected * _MIN_REAL_RATIO)` isn't the movie:
+# it's a placeholder ("file not available" clip) or an emptied file. Deliberately generous —
+# no real release lands here, so a false `gone` is practically impossible.
+_MIN_REAL_BYTES = 8 * 1024 * 1024
+_MIN_REAL_RATIO = 0.02
+
+
+def _mib(n: int) -> str:
+    return f"{n / (1024 * 1024):.1f} MiB"
+
+
+@dataclass(frozen=True)
+class Probe:
+    """The classified outcome of an availability probe. `state` separates a source that is
+    provably removed (`gone` — worth remembering) from one that merely failed right now
+    (`unknown` — a transport hiccup must never ban a source)."""
+
+    state: str
+    status: int | None = None
+    served_bytes: int | None = None  # total size the server reports for the resource
+    reason: str = ""
+
+    @property
+    def usable(self) -> bool:
+        """Can we hand this url to a player right now? True for `live` and for the benefit-of-
+        the-doubt `unknown` (method/range rejected but the resource exists); False for `gone`
+        and for a transport failure — preserving the pre-ADR-0025 fallback behaviour."""
+        return self.state == LIVE or (self.state == UNKNOWN and self.status in (403, 405, 416))
+
+    @property
+    def dead(self) -> bool:
+        """Proven removed — the only state that earns a place in the persistent denylist."""
+        return self.state == GONE
+
+
+def _served_total(headers, status: int) -> int | None:
+    """Total resource size from a probe response: `Content-Range` (206) wins, else
+    `Content-Length` on a full 200. None when the server doesn't say (chunked/no header)."""
+    if headers is None:
+        return None
+    crange = headers.get("Content-Range") or ""
+    if "/" in crange:
+        total = crange.rsplit("/", 1)[1].strip()
+        if total.isdigit():
+            return int(total)
+    if status == 200:
+        length = headers.get("Content-Length")
+        if length and str(length).isdigit():
+            return int(length)
+    return None
+
+
+def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Probe:
+    """Classify a ready (debrid) stream url (ADR 0025). Asks for the first byte and judges
+    both the status AND the size the server reports: a `200` proves the url resolves, not
+    that the content is still there — a revoked debrid link is often served as a few-KB
+    placeholder. When `expected_bytes` is known (from the release's announced size), a total
+    orders of magnitude smaller is classified `gone`.
+
+    Real-Debrid can't report a cached-miss, so this catches removed/dead links and resolve
+    errors, not every non-cached case."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status < 400
+            status = int(resp.status)
+            served = _served_total(getattr(resp, "headers", None), status)
     except urllib.error.HTTPError as e:
-        return e.code in (403, 405, 416)  # method/range not allowed, but the resource exists
-    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
-        return False
+        if e.code in (403, 405, 416):  # method/range not allowed, but the resource exists
+            return Probe(UNKNOWN, status=e.code, reason="metodo o range rifiutato")
+        if 500 <= e.code < 600:
+            return Probe(UNKNOWN, status=e.code, reason=f"errore server HTTP {e.code}")
+        return Probe(GONE, status=e.code, reason=f"HTTP {e.code}")
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+        return Probe(UNKNOWN, reason=f"irraggiungibile ({type(e).__name__})")
+
+    if status >= 400:
+        return Probe(GONE, status=status, reason=f"HTTP {status}")
+    if expected_bytes > 0 and served is not None:
+        floor = max(_MIN_REAL_BYTES, int(expected_bytes * _MIN_REAL_RATIO))
+        if served < floor:
+            return Probe(
+                GONE,
+                status=status,
+                served_bytes=served,
+                reason=f"{_mib(served)} serviti contro {_mib(expected_bytes)} annunciati",
+            )
+    return Probe(LIVE, status=status, served_bytes=served)
+
+
+def url_playable(url: str, *, timeout: float = 6.0) -> bool:
+    """Boolean façade over `probe_url` for callers that only need "can I play this now?"."""
+    return probe_url(url, timeout=timeout).usable
 
 
 def _read_json(resp) -> dict:

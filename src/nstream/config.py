@@ -338,6 +338,14 @@ def library_path() -> Path:
     return Path(base) / "nstream" / "library.json"
 
 
+def dead_sources_path() -> Path:
+    """Resolve the negative cache of sources proven removed/dead (ADR 0025). Separate from
+    the library because it is machine-written diagnostics, not user-curated data, and must
+    work regardless of `history_enabled`."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return Path(base) / "nstream" / "dead-sources.json"
+
+
 def _bounded_int(raw: dict, key: str, default: int) -> int:
     """Coerce a config int, falling back to `default` on a bad value and clamping to the
     field's INT_BOUNDS range (so out-of-range values can't break ranking/overlay)."""

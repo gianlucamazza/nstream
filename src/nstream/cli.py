@@ -779,6 +779,13 @@ def _json_error(error: str, message: str) -> None:
     sys.stdout.flush()
 
 
+def _emit_forget_dead(dropped: int, message: str) -> None:
+    """`--json --forget-dead`: same one-object contract as every other headless command."""
+    payload = {"ok": True, "action": "forget_dead", "removed_sources": dropped, "message": message}
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
 def _ensure_config(*, headless_mode: bool = False) -> Config:
     """Load config, running first-run onboarding if it's missing. Headless (`--json`)
     never onboards: the wizard is an interactive fzf/getpass flow, which would hang an
@@ -886,6 +893,11 @@ def main() -> int:
         help="diagnostica: prova cache+resolve del provider debrid nativo (aggiunge il torrent)",
     )
     parser.add_argument(
+        "--forget-dead",
+        action="store_true",
+        help="svuota l'elenco delle sorgenti marcate come rimosse (non riproduce)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="modalità headless non-interattiva: niente fzf, un oggetto JSON su stdout",
@@ -971,6 +983,15 @@ def main() -> int:
 
     if args.debrid_test:
         print(debrid.selftest(cfg, args.debrid_test))
+        return 0
+
+    if args.forget_dead:
+        dropped = state.forget_dead()
+        msg = f"elenco sorgenti rimosse svuotato ({dropped} voci)"
+        if args.json:
+            _emit_forget_dead(dropped, msg)
+        else:
+            print(f"nstream: {msg}")
         return 0
 
     sub_mode, sub_lang = _sub_options(args)

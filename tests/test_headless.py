@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from nstream import cast_flow, headless, picker, subs
+from nstream import cast_flow, headless, picker, state, subs
 from nstream.config import Config, HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
@@ -1198,3 +1198,51 @@ def test_cast_boundary_forwards_resolved_quality_to_run_cast(monkeypatch, capsys
     monkeypatch.setattr(headless.caster, "device_volume", lambda d: (0.5, False))
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
     assert rc == 0 and seen["quality"] == 1080
+
+
+# --- sources removed from the debrid (ADR 0025) ----------------------------
+
+
+def test_run_auto_sources_removed_when_denylisted(monkeypatch, capsys, tmp_path):
+    """Every known source for the title was proven removed in an earlier run: say so, so the
+    caller doesn't suggest a pointless retry."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "DEAD9", "url": "http://rd/x"})
+    state.mark_dead("dead9", "HTTP 404")
+    monkeypatch.setattr(
+        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+    )
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    rc = headless.run_auto(cfg, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "sources_removed"
+    assert out["removed_sources"] == 1
+
+
+def test_run_auto_sources_removed_when_verification_empties_set(monkeypatch, capsys, tmp_path):
+    """The pre-commit verification itself proves the last candidates gone: same honest error,
+    not a generic no_playable_stream."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "G7", "url": "http://rd/x"})
+
+    def prep(cfg, results, opts, *, auto, reselect_on_wrong_audio, title=""):
+        results[:] = []  # what _verify_availability does when everything probes `gone`
+        return None
+
+    monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "sources_removed"
+
+
+def test_run_auto_no_playable_stream_still_reported(monkeypatch, capsys, tmp_path):
+    """A pick that fails for other reasons (hw filter) keeps the old error."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(
+        headless.stream_select, "prepare_stream",
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": None,
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "no_playable_stream"

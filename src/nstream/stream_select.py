@@ -17,7 +17,21 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
 
-from . import addons, api, debrid, engine, languages, log, quality, remux, sources, tracks, ui
+from . import (
+    addons,
+    api,
+    debrid,
+    engine,
+    languages,
+    log,
+    net,
+    quality,
+    remux,
+    sources,
+    state,
+    tracks,
+    ui,
+)
 from . import config as config_mod
 from .config import Config, ConfigError, PlayOpts, Stream
 from .labels import stream_label
@@ -766,21 +780,78 @@ def _reselect_for_primary(
     return None
 
 
-# Process-lifetime memo of the reachability probe (like the parse/ffprobe memos): a resolved
+# Process-lifetime memo of the availability probe (like the parse/ffprobe memos): a resolved
 # url's availability doesn't change within a run, so probe each at most once — shared by the
-# pre-commit cached verification and `_ensure_playable`'s last-resort net, so a url the
-# verifier already found live isn't re-probed when the pick is confirmed.
-_PROBE_MEMO: dict[str, bool] = {}
-_VERIFY_CACHED_CAP = 5  # top-N cached candidates to probe before committing the auto-pick
+# pre-commit verification and `_ensure_playable`'s last-resort net, so a url the verifier
+# already found live isn't re-probed when the pick is confirmed.
+_PROBE_MEMO: dict[str, net.Probe] = {}
+_VERIFY_CACHED_CAP = 5  # top-N candidates to probe before committing the auto-pick
+
+
+def _source_key(stream: Stream) -> str:
+    """Stable identity of a release across addons (ADR 0025): infoHash first (the same torrent
+    served by Torrentio and Comet keys identically), then the filename hint, then the display
+    name. Empty when the row carries none of them — such a stream is simply never denylisted."""
+    ih = (stream.get("infoHash") or "").strip().lower()
+    if ih:
+        return ih
+    hints = stream.get("behaviorHints") or {}
+    filename = (hints.get("filename") or "").strip() if isinstance(hints, dict) else ""
+    if filename:
+        return f"file:{filename}"
+    name = " ".join((stream.get("name") or "").split())
+    return f"name:{name}" if name else ""
+
+
+def _expected_bytes(stream: Stream) -> int:
+    """Announced release size in bytes (0 when the name carries no size), used by the probe
+    to tell a real file from a placeholder served in place of a removed one."""
+    size_gb = quality.parse_stream(stream).size_gb
+    return int(size_gb * 1024**3) if size_gb > 0 else 0
+
+
+def _probe_stream(stream: Stream) -> net.Probe:
+    """Memoized, classified availability probe for a resolved stream (see `_PROBE_MEMO`).
+    A `gone` verdict is persisted to the negative cache so later runs skip the source
+    entirely instead of paying the probe again."""
+    url = stream.get("url") or ""
+    probe = _PROBE_MEMO.get(url)
+    if probe is None:
+        probe = net.probe_url(url, expected_bytes=_expected_bytes(stream))
+        _PROBE_MEMO[url] = probe
+        if probe.dead:
+            _remember_dead(stream, probe)
+    return probe
+
+
+def _remember_dead(stream: Stream, probe: net.Probe) -> None:
+    """Persist a proven-removed source and say so once, on stderr."""
+    key = _source_key(stream)
+    if not key or state.is_dead(key):
+        return
+    name_line = next(iter((stream.get("name") or "").splitlines()), "") or key
+    print(f"nstream: sorgente non più disponibile ({probe.reason}) — {name_line}", file=sys.stderr)
+    _log.info("sorgente morta: %s (%s)", key, probe.reason)
+    state.mark_dead(key, probe.reason)
 
 
 def _probe_url(url: str) -> bool:
-    """Memoized `api.url_playable` for a resolved stream url (see `_PROBE_MEMO`)."""
-    verdict = _PROBE_MEMO.get(url)
-    if verdict is None:
-        verdict = api.url_playable(url)
-        _PROBE_MEMO[url] = verdict
-    return verdict
+    """Boolean façade kept for callers that only ask "can I play this now?"."""
+    return _probe_stream({"url": url}).usable
+
+
+def prune_dead(cfg: Config, results: list[Stream]) -> tuple[list[Stream], int]:
+    """Drop sources previously proven removed (ADR 0025) before any ranking, and report how
+    many were dropped so a caller can distinguish "nothing playable" from "everything this
+    title had was removed". No-op for the local backend (P2P doesn't go through a debrid) and
+    when the denylist is empty."""
+    if cfg.playback_backend == "local" or not results:
+        return results, 0
+    dead = state.dead_sources()
+    if not dead:
+        return results, 0
+    kept = [s for s in results if _source_key(s) not in dead]
+    return kept, len(results) - len(kept)
 
 
 def _demote_cached(stream: Stream) -> None:
@@ -795,42 +866,53 @@ def _demote_cached(stream: Stream) -> None:
         stream["name"] = stripped
 
 
-def _verify_cached_availability(
+def _verify_availability(
     cfg: Config,
     results: list[Stream],
     *,
     cast: bool,
     title: str,
     exact_resolution: int = 0,
-) -> None:
-    """Pre-commit availability guard (ADR 0014, auto-pick only): the Torrentio `[RD+]` cached
-    marker is a crowdsourced guess that can be stale/evicted, yet `cached` is the top-precedence
-    rank term — so a dead cached release wins the auto-pick and only `_ensure_playable` catches
-    it, after cascading through resolves and possibly landing in an expensive Tier-2 remux.
+) -> list[Stream]:
+    """Pre-commit availability guard (ADR 0014, extended by ADR 0025; auto-pick only): the
+    Torrentio `[RD+]` cached marker is a crowdsourced guess that can be stale/evicted, yet
+    `cached` is the top-precedence rank term — so a dead cached release wins the auto-pick and
+    only `_ensure_playable` catches it, after cascading through resolves and possibly landing
+    in an expensive Tier-2 remux.
 
-    Instead, probe the real reachability of the top-N ranked *cached* candidates concurrently
-    and demote any dead one to uncached-equivalent (strip its marker) so the very next rank pass
-    re-orders around what actually responds — a live 1080p AAC release then outranks a dead 4K
-    cached one. Bounded (≤`_VERIFY_CACHED_CAP`) and memoized (each url probed once, reused by
-    `_ensure_playable`). Only cached candidates are probed; uncached ones are already gated by
-    their seeder count. No-op for the local backend (engine-served urls are buffer-gated, not
-    cached-marked). Mutates `results` in place."""
+    Instead, probe the top-N ranked url-ready candidates concurrently and act on the classified
+    verdict: a `gone` one is denylisted and dropped outright (it isn't coming back this run), a
+    merely unreachable cached one is demoted to uncached-equivalent (marker stripped) so the
+    next rank pass re-orders around what actually responds. ADR 0025 drops the cached-only
+    restriction: the seeder count that gates uncached rows describes swarm health, which says
+    nothing about whether the debrid still has the file. Bounded (≤`_VERIFY_CACHED_CAP`) and
+    memoized (each url probed once, reused by `_ensure_playable`). No-op for the local backend
+    (engine-served urls are buffer-gated). Mutates `results` in place and returns the surviving
+    list."""
     if cfg.playback_backend == "local":
-        return
+        return results
     targets = [
         s
         for s in _auto_candidates(
             cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
         )
-        if s.get("url") and quality.parse_stream(s).cached
+        if s.get("url")
     ][:_VERIFY_CACHED_CAP]
     if not targets:
-        return
+        return results
     with ThreadPoolExecutor(max_workers=min(len(targets), _VERIFY_CACHED_CAP)) as ex:
-        verdicts = list(ex.map(lambda s: _probe_url(s["url"]), targets))
-    for s, live in zip(targets, verdicts, strict=True):
-        if not live:
+        verdicts = list(ex.map(_probe_stream, targets))
+    gone = []
+    for s, probe in zip(targets, verdicts, strict=True):
+        if probe.dead:
+            gone.append(id(s))
+        elif not probe.usable:
             _demote_cached(s)
+    if not gone:
+        return results
+    survivors = [s for s in results if id(s) not in gone]
+    results[:] = survivors
+    return results
 
 
 def _ensure_playable(
@@ -847,14 +929,14 @@ def _ensure_playable(
     stream also carries an infoHash (hybrid 'auto'), else to the next-best reachable candidate.
     Local backend urls are engine-served (`_wait_buffer` already gates them), so skip the check.
 
-    Last-resort net after `_verify_cached_availability` (which already re-ranked around dead
-    cached links up front): this still runs so a url that dies between probe and play, or the
-    non-auto paths, are covered. Shares the `_probe_url` memo, so a candidate already probed
-    live by the verifier isn't hit twice."""
+    Last-resort net after `_verify_availability` (which already re-ranked around dead links up
+    front): this still runs so a url that dies between probe and play, or the non-auto paths,
+    are covered. Shares the `_PROBE_MEMO`, so a candidate already probed live by the verifier
+    isn't hit twice; a `gone` verdict here is denylisted too (ADR 0025)."""
     if cfg.playback_backend == "local":
         return chosen
     url = chosen.get("url")
-    if not url or _probe_url(url):
+    if not url or _probe_stream(chosen).usable:
         return chosen
     print("nstream: la sorgente «cached» non risponde, ripiego…", file=sys.stderr)
     if chosen.get("infoHash"):  # hybrid stream → local P2P fallback
@@ -871,7 +953,7 @@ def _ensure_playable(
             continue
         tried += 1
         ready = _resolve_stream(cfg, s)
-        if ready and (not ready.get("url") or _probe_url(ready["url"])):
+        if ready and (not ready.get("url") or _probe_stream(ready).usable):
             return ready
     return chosen  # nothing better reachable — let the player try anyway
 
@@ -966,6 +1048,12 @@ def prepare_stream(
     Quality: when `opts.quality` is set (CLI / binge sticky) it hard-filters; when None and
     interactive (`reselect_on_wrong_audio`), an in-flow fzf picker offers Auto + available
     resolutions; headless / unattended defaults to Auto (no filter)."""
+    # Sources proven removed in an earlier run never compete again (ADR 0025): filter before
+    # ranking, not after, so a dead release can't win the auto-pick nor clutter the manual
+    # picker. Idempotent — headless already pruned to answer `sources_removed`.
+    kept, _dropped = prune_dead(cfg, results)
+    results[:] = kept
+
     # Native backend: tag cached releases up front so the cached score term ranks them first
     # for both the auto-pick and the cast menu (mutates `results` once, in place).
     _mark_native_cached(cfg, results)
@@ -985,9 +1073,9 @@ def prepare_stream(
     # off a stale link (and out of an accidental Tier-2 remux). Auto only — a manual pick is
     # the user's explicit choice.
     if auto:
-        _verify_cached_availability(
-            cfg, results, cast=opts.cast, title=title, exact_resolution=exact
-        )
+        _verify_availability(cfg, results, cast=opts.cast, title=title, exact_resolution=exact)
+        if not results:
+            return None  # everything url-ready was removed — headless reports sources_removed
     chosen = pick_and_resolve(
         cfg, results, auto=auto, cast=opts.cast, title=title, exact_resolution=exact
     )

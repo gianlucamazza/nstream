@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from nstream import stream_select
+from nstream import net, state, stream_select
 from nstream.config import Config, PlayOpts, Stream
 
 
@@ -26,11 +26,32 @@ def _gopts(*, cast: bool = False, quality: int | None = 0) -> PlayOpts:
 
 @pytest.fixture(autouse=True)
 def _clear_probe_memo():
-    """The reachability probe memo is process-lifetime — clear it between tests so a url's
-    verdict from one test can't leak into another that stubs `url_playable` differently."""
+    """The availability probe memo is process-lifetime — clear it between tests so a url's
+    verdict from one test can't leak into another that stubs `probe_url` differently."""
     stream_select._PROBE_MEMO.clear()
     yield
     stream_select._PROBE_MEMO.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_dead_cache(monkeypatch, tmp_path):
+    """The dead-source denylist (ADR 0025) is persistent: keep test verdicts out of the
+    developer's real state dir, and out of each other's."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+def _probing(*live_urls: str, all_live: bool = False, seen: list[str] | None = None):
+    """Fake `net.probe_url`: the listed urls answer `live`, every other one answers the
+    benign `unknown` (unusable but never denylisted — the pre-ADR-0025 `False`)."""
+
+    def _probe(url: str, **_kw) -> net.Probe:
+        if seen is not None:
+            seen.append(url)
+        if all_live or url in live_urls:
+            return net.Probe(net.LIVE)
+        return net.Probe(net.UNKNOWN, reason="stub")
+
+    return _probe
 
 
 # --- release date message --------------------------------------------------
@@ -471,7 +492,7 @@ def test_cast_resolver_excludes_lossless_without_remux():
 
 
 def test_ensure_playable_passthrough_when_reachable(monkeypatch):
-    monkeypatch.setattr(stream_select.api, "url_playable", lambda u, **k: True)
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True))
     chosen: Stream = {"url": "https://rd/u"}
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     assert stream_select._ensure_playable(cfg, [chosen], chosen, _gopts()) is chosen
@@ -479,8 +500,8 @@ def test_ensure_playable_passthrough_when_reachable(monkeypatch):
 
 def test_ensure_playable_local_skips_check(monkeypatch):
     monkeypatch.setattr(
-        stream_select.api,
-        "url_playable",
+        stream_select.net,
+        "probe_url",
         lambda u, **k: pytest.fail("no reachability check in local mode"),
     )
     chosen: Stream = {"url": "http://127.0.0.1:8090/stream"}
@@ -489,7 +510,7 @@ def test_ensure_playable_local_skips_check(monkeypatch):
 
 
 def test_ensure_playable_hybrid_falls_back_to_p2p(monkeypatch):
-    monkeypatch.setattr(stream_select.api, "url_playable", lambda u, **k: False)
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing())
     monkeypatch.setattr(
         stream_select.engine, "resolve", lambda cfg, s: "http://192.168.1.5:8090/stream"
     )
@@ -502,7 +523,7 @@ def test_ensure_playable_hybrid_falls_back_to_p2p(monkeypatch):
 def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
     dead: Stream = {"url": "https://rd/dead"}
     good: Stream = {"url": "https://rd/good"}
-    monkeypatch.setattr(stream_select.api, "url_playable", lambda u, **k: u == "https://rd/good")
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing("https://rd/good"))
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [dead, good])
     monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
@@ -510,12 +531,12 @@ def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
     assert out is good  # skipped the dead cached link for the next reachable candidate
 
 
-# --- pre-commit cached verification (_verify_cached_availability, ADR 0014) ---
+# --- pre-commit cached verification (_verify_availability, ADR 0014) ---
 
 
 def test_probe_url_memoizes(monkeypatch):
     calls: list[str] = []
-    monkeypatch.setattr(stream_select.api, "url_playable", lambda u, **k: calls.append(u) or True)
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True, seen=calls))
     assert stream_select._probe_url("http://x") is True
     assert stream_select._probe_url("http://x") is True
     assert calls == ["http://x"]  # probed once, second call served from the memo
@@ -525,11 +546,9 @@ def test_verify_cached_demotes_dead_keeps_live(monkeypatch):
     dead: Stream = {"url": "https://rd/dead", "name": "[RD+] Torrentio\n4k"}
     live: Stream = {"url": "https://rd/live", "name": "[RD+] Torrentio\n1080p"}
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [dead, live])
-    monkeypatch.setattr(
-        stream_select.api, "url_playable", lambda u, **k: u == "https://rd/live"
-    )  # fmt: skip
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing("https://rd/live"))
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    stream_select._verify_cached_availability(cfg, [dead, live], cast=False, title="")
+    stream_select._verify_availability(cfg, [dead, live], cast=False, title="")
     assert "[RD+]" not in dead["name"]  # dead cached link demoted to uncached-equivalent
     assert "[RD+]" in live["name"]  # live one keeps its marker
     assert not stream_select.quality.parse_stream(dead).cached  # flows through the rank pipeline
@@ -539,33 +558,32 @@ def test_verify_cached_bounded_to_cap(monkeypatch):
     streams: list[Stream] = [{"url": f"https://rd/{i}", "name": "[RD+] x\n1080p"} for i in range(8)]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: streams)
     probed: list[str] = []
-    monkeypatch.setattr(
-        stream_select.api, "url_playable", lambda u, **k: probed.append(u) or True
-    )  # fmt: skip
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True, seen=probed))
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    stream_select._verify_cached_availability(cfg, streams, cast=False, title="")
+    stream_select._verify_availability(cfg, streams, cast=False, title="")
     assert len(probed) == stream_select._VERIFY_CACHED_CAP  # only the top-N are probed
 
 
-def test_verify_cached_skips_uncached(monkeypatch):
+def test_verify_probes_uncached_too(monkeypatch):
+    """ADR 0025: the seeder count that gates uncached rows describes swarm health, which says
+    nothing about whether the debrid still holds the file — so they get probed as well."""
     uncached: Stream = {"url": "https://rd/u", "name": "Torrentio\n1080p"}  # no [XX+] marker
+    probed: list[str] = []
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [uncached])
-    monkeypatch.setattr(
-        stream_select.api, "url_playable",
-        lambda u, **k: pytest.fail("an uncached candidate must not be probed"),
-    )  # fmt: skip
+    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True, seen=probed))
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    stream_select._verify_cached_availability(cfg, [uncached], cast=False, title="")
+    stream_select._verify_availability(cfg, [uncached], cast=False, title="")
+    assert probed == ["https://rd/u"]
 
 
 def test_verify_cached_noop_local_backend(monkeypatch):
     cached: Stream = {"url": "https://rd/u", "name": "[RD+] x\n1080p"}
     monkeypatch.setattr(
-        stream_select.api, "url_playable",
+        stream_select.net, "probe_url",
         lambda u, **k: pytest.fail("no probe on the local backend"),
     )  # fmt: skip
     cfg = Config(torrentio_base="tb", playback_backend="local")
-    stream_select._verify_cached_availability(cfg, [cached], cast=False, title="")
+    stream_select._verify_availability(cfg, [cached], cast=False, title="")
 
 
 # --- P2P privacy guard -----------------------------------------------------
@@ -1303,3 +1321,109 @@ def test_cast_resolver_and_languages_thread_exact(monkeypatch):
     stream_select.cast_languages(_ccfg(), [], exact_resolution=1080)
     stream_select.cast_resolver(_ccfg(), [], exact_resolution=1080)
     assert seen == [1080, 1080]
+
+
+# --- dead-source classification & denylist (ADR 0025) ----------------------
+
+
+def test_source_key_prefers_infohash():
+    assert stream_select._source_key({"infoHash": "ABC123"}) == "abc123"
+    assert stream_select._source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
+    assert (
+        stream_select._source_key({"name": "[RD+] Torrentio\n1080p"})
+        == "name:[RD+] Torrentio 1080p"
+    )
+    assert stream_select._source_key({}) == ""
+
+
+def test_expected_bytes_from_announced_size():
+    assert stream_select._expected_bytes({"name": "x\n💾 7.16 GB"}) == int(7.16 * 1024**3)
+    assert stream_select._expected_bytes({"name": "x\n1080p"}) == 0
+
+
+def test_probe_marks_gone_source_dead(monkeypatch, capsys):
+    monkeypatch.setattr(
+        stream_select.net,
+        "probe_url",
+        lambda u, **k: net.Probe(net.GONE, status=404, reason="HTTP 404"),
+    )
+    stream: Stream = {"url": "https://rd/x", "infoHash": "DEAD01", "name": "[RD+] x\n1080p"}
+    assert stream_select._probe_stream(stream).dead is True
+    assert state.is_dead("dead01") is True  # remembered across runs
+    assert "non più disponibile" in capsys.readouterr().err
+
+
+def test_probe_does_not_denylist_transient_failure(monkeypatch):
+    monkeypatch.setattr(stream_select.net, "probe_url", lambda u, **k: net.Probe(net.UNKNOWN))
+    stream: Stream = {"url": "https://rd/x", "infoHash": "FLAKY1"}
+    assert stream_select._probe_stream(stream).usable is False
+    assert state.is_dead("flaky1") is False  # a hiccup must never ban a source
+
+
+def test_prune_dead_filters_known_removed():
+    state.mark_dead("abc123", "HTTP 404")
+    alive: Stream = {"infoHash": "ZZZ", "url": "https://rd/ok"}
+    dead: Stream = {"infoHash": "ABC123", "url": "https://rd/gone"}
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    kept, dropped = stream_select.prune_dead(cfg, [dead, alive])
+    assert kept == [alive] and dropped == 1
+
+
+def test_prune_dead_noop_on_local_backend():
+    state.mark_dead("abc123", "HTTP 404")
+    dead: Stream = {"infoHash": "ABC123"}
+    cfg = Config(torrentio_base="tb", playback_backend="local")
+    assert stream_select.prune_dead(cfg, [dead]) == ([dead], 0)
+
+
+def test_verify_drops_gone_and_denylists(monkeypatch):
+    gone: Stream = {"url": "https://rd/gone", "infoHash": "G1", "name": "[RD+] x\n4k"}
+    live: Stream = {"url": "https://rd/live", "infoHash": "L1", "name": "[RD+] x\n1080p"}
+    results = [gone, live]
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
+    monkeypatch.setattr(
+        stream_select.net,
+        "probe_url",
+        lambda u, **k: (
+            net.Probe(net.LIVE) if u == "https://rd/live" else net.Probe(net.GONE, status=404)
+        ),
+    )
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    out = stream_select._verify_availability(cfg, results, cast=False, title="")
+    assert out == [live] and results == [live]  # dropped, not merely demoted
+    assert state.is_dead("g1") and not state.is_dead("l1")
+
+
+def test_prepare_stream_returns_none_when_all_sources_removed(monkeypatch):
+    gone: Stream = {"url": "https://rd/gone", "infoHash": "G9", "name": "[RD+] x\n1080p"}
+    results = [gone]
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
+    monkeypatch.setattr(
+        stream_select.net, "probe_url", lambda u, **k: net.Probe(net.GONE, status=410)
+    )
+    monkeypatch.setattr(
+        stream_select, "_pick_stream", lambda *a, **k: pytest.fail("nothing left to pick")
+    )
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    out = stream_select.prepare_stream(
+        cfg, results, _gopts(), auto=True, reselect_on_wrong_audio=False, title="T"
+    )
+    assert out is None and results == []
+
+
+def test_prepare_stream_prunes_denylisted_before_ranking(monkeypatch):
+    state.mark_dead("old1", "HTTP 404")
+    dead: Stream = {"infoHash": "OLD1", "url": "https://rd/old"}
+    live: Stream = {"infoHash": "NEW1", "url": "https://rd/new"}
+    results = [dead, live]
+    seen: list[list[Stream]] = []
+    monkeypatch.setattr(stream_select, "_verify_availability", lambda cfg, r, **k: r)
+    monkeypatch.setattr(
+        stream_select, "_pick_stream", lambda cfg, r, **k: seen.append(list(r)) or r[0]
+    )
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    out = stream_select.prepare_stream(
+        cfg, results, _gopts(), auto=True, reselect_on_wrong_audio=False, title="T"
+    )
+    assert out is not None and out.stream is live
+    assert seen == [[live]]  # the removed source never reached the ranking

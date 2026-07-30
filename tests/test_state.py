@@ -392,3 +392,56 @@ def test_note_started_retires_watched_sibling(tmp_path, monkeypatch):
     )
     state.note_started(CFG, nxt)  # the advance happened: the finished sibling retires
     assert list(state.load_history(CFG)) == ["tt1:1:5"]
+
+
+# --- dead-source negative cache (ADR 0025) ---------------------------------
+
+
+def test_mark_dead_roundtrip(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert state.is_dead("abc") is False
+    state.mark_dead("abc", "HTTP 404")
+    assert state.is_dead("abc") is True
+    assert state.dead_sources()["abc"]["reason"] == "HTTP 404"
+
+
+def test_mark_dead_ignores_empty_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.mark_dead("", "nope")
+    assert state.dead_sources() == {}
+
+
+def test_dead_entries_expire(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.mark_dead("old", "gone")
+    path = tmp_path / "nstream" / "dead-sources.json"
+    data = json.loads(path.read_text())
+    data["sources"]["old"]["ts"] -= state.DEAD_TTL + 1
+    path.write_text(json.dumps(data))
+    assert state.is_dead("old") is False  # a file may come back: the ban isn't eternal
+
+
+def test_dead_cache_is_capped(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setattr(state, "MAX_DEAD_SOURCES", 3)
+    for i in range(5):
+        state.mark_dead(f"k{i}", "gone")
+    entries = state.dead_sources()
+    assert len(entries) <= 3
+    assert "k4" in entries  # newest survives the prune
+
+
+def test_forget_dead(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    state.mark_dead("a", "gone")
+    state.mark_dead("b", "gone")
+    assert state.forget_dead() == 2
+    assert state.dead_sources() == {}
+
+
+def test_dead_sources_tolerates_corrupt_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = tmp_path / "nstream" / "dead-sources.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    assert state.dead_sources() == {}  # best-effort: state errors never block playback
