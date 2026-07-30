@@ -1427,3 +1427,40 @@ def test_prepare_stream_prunes_denylisted_before_ranking(monkeypatch):
     )
     assert out is not None and out.stream is live
     assert seen == [[live]]  # the removed source never reached the ranking
+
+
+def test_probe_never_denylists_an_uncached_transfer(monkeypatch):
+    """Field case 2026-07-30: `[RD download]` served 2 MiB of an announced 7.16 GB while
+    Real-Debrid was still fetching it. Marking it dead would ban a working title for 30 days."""
+    seen: dict[str, bool] = {}
+
+    def fake_probe(url, *, expected_bytes=0, complete=True, **_kw):
+        seen["complete"] = complete
+        return (
+            net.Probe(net.GONE, reason="short")
+            if complete
+            else net.Probe(net.UNKNOWN, reason="trasferimento in corso")
+        )
+
+    monkeypatch.setattr(stream_select.net, "probe_url", fake_probe)
+    downloading: Stream = {
+        "url": "https://rd/dl",
+        "infoHash": "DL1",
+        "name": "[RD download] Torrentio\n1080p 💾 7.16 GB",
+    }
+    probe = stream_select._probe_stream(downloading)
+    assert seen["complete"] is False  # uncached → judged as a file in flight
+    assert not probe.dead and not state.is_dead("dl1")
+
+
+def test_probe_denylists_a_cached_shortfall(monkeypatch):
+    monkeypatch.setattr(
+        stream_select.net,
+        "probe_url",
+        lambda url, *, expected_bytes=0, complete=True, **_kw: net.Probe(
+            net.GONE if complete else net.UNKNOWN, reason="short"
+        ),
+    )
+    cached: Stream = {"url": "https://rd/c", "infoHash": "C1", "name": "[RD+] x\n1080p 💾 7 GB"}
+    assert stream_select._probe_stream(cached).dead is True
+    assert state.is_dead("c1")

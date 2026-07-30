@@ -271,7 +271,8 @@ A source that probes **provably removed** from the debrid (HTTP 404/410, or a fe
 served in place of a multi-GB file) is remembered in `~/.local/state/nstream/dead-sources.json`
 (30-day TTL) and filtered out before ranking, so it stops costing a probe on every search;
 headless then answers `error: sources_removed` instead of a generic "nothing playable". A merely
-unreachable source is **never** remembered — only proven-gone ones. `nstream --forget-dead` clears
+unreachable source is **never** remembered — nor is an **uncached** one still being transferred
+by the provider (`[RD download]`), whose partial file is "not yet", not "gone". `--forget-dead` clears
 the list (see [ADR 0025](docs/adr/0025-dead-source-classification.md)).
 
 nstream writes a rotating log to `~/.local/state/nstream/nstream.log` (512 KB × 3). An unexpected

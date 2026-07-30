@@ -813,11 +813,16 @@ def _expected_bytes(stream: Stream) -> int:
 def _probe_stream(stream: Stream) -> net.Probe:
     """Memoized, classified availability probe for a resolved stream (see `_PROBE_MEMO`).
     A `gone` verdict is persisted to the negative cache so later runs skip the source
-    entirely instead of paying the probe again."""
+    entirely instead of paying the probe again.
+
+    Only a **cached** release is judged as a finished file: an uncached one (`[RD download]`)
+    is mid-transfer on the provider, so its partial file must read as "not yet" rather than
+    "removed" — see the ADR 0025 post-scriptum."""
     url = stream.get("url") or ""
     probe = _PROBE_MEMO.get(url)
     if probe is None:
-        probe = net.probe_url(url, expected_bytes=_expected_bytes(stream))
+        info = quality.parse_stream(stream)
+        probe = net.probe_url(url, expected_bytes=_expected_bytes(stream), complete=info.cached)
         _PROBE_MEMO[url] = probe
         if probe.dead:
             _remember_dead(stream, probe)

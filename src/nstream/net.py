@@ -37,8 +37,8 @@ GONE = "gone"
 UNKNOWN = "unknown"
 
 # A served total below `max(_MIN_REAL_BYTES, expected * _MIN_REAL_RATIO)` isn't the movie:
-# it's a placeholder ("file not available" clip) or an emptied file. Deliberately generous —
-# no real release lands here, so a false `gone` is practically impossible.
+# it's a placeholder ("file not available" clip), an emptied file, or a transfer still in
+# flight. Deliberately generous — no complete release lands here.
 _MIN_REAL_BYTES = 8 * 1024 * 1024
 _MIN_REAL_RATIO = 0.02
 
@@ -88,12 +88,21 @@ def _served_total(headers, status: int) -> int | None:
     return None
 
 
-def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Probe:
+def probe_url(
+    url: str, *, expected_bytes: int = 0, complete: bool = True, timeout: float = 6.0
+) -> Probe:
     """Classify a ready (debrid) stream url (ADR 0025). Asks for the first byte and judges
     both the status AND the size the server reports: a `200` proves the url resolves, not
     that the content is still there — a revoked debrid link is often served as a few-KB
     placeholder. When `expected_bytes` is known (from the release's announced size), a total
-    orders of magnitude smaller is classified `gone`.
+    orders of magnitude smaller means the file isn't there.
+
+    `complete` says whether the source is *supposed* to be a finished file (a cached debrid
+    release). It decides how a size shortfall is read, and the distinction matters: an
+    UNCACHED release (Torrentio's `[RD download]`) is one the provider is still transferring,
+    so its partial file grows into the real thing within minutes — banning it would lock out
+    a title that is about to work. Short on a cached source → `gone`; short on an uncached
+    one → `unknown` (unusable now, never denylisted).
 
     Real-Debrid can't report a cached-miss, so this catches removed/dead links and resolve
     errors, not every non-cached case."""
@@ -116,12 +125,15 @@ def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Pro
     if expected_bytes > 0 and served is not None:
         floor = max(_MIN_REAL_BYTES, int(expected_bytes * _MIN_REAL_RATIO))
         if served < floor:
-            return Probe(
-                GONE,
-                status=status,
-                served_bytes=served,
-                reason=f"{_mib(served)} serviti contro {_mib(expected_bytes)} annunciati",
-            )
+            short = f"{_mib(served)} serviti contro {_mib(expected_bytes)} annunciati"
+            if not complete:  # still being transferred by the provider — try again later
+                return Probe(
+                    UNKNOWN,
+                    status=status,
+                    served_bytes=served,
+                    reason=f"trasferimento in corso sul debrid ({short})",
+                )
+            return Probe(GONE, status=status, served_bytes=served, reason=short)
     return Probe(LIVE, status=status, served_bytes=served)
 
 

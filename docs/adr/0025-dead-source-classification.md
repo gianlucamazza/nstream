@@ -96,3 +96,28 @@ fonti sono state rimosse dal debrid" invece di suggerire un retry inutile.
 - `net.url_playable` resta come wrapper booleano (`probe.usable`) per non rompere i
   chiamanti esistenti.
 - La denylist è ispezionabile e cancellabile: è un JSON, `--forget-dead` la svuota.
+
+## Post-scriptum (2026-07-30, stesso giorno del rilascio 1.30.0)
+
+**Il caso che ha motivato l'ADR non era una rimozione.** La release che serviva 2.0 MiB contro
+7331.8 MiB annunciati era marcata `[RD download]`: Real-Debrid la stava ancora **scaricando**.
+Il file parziale cresce fino a diventare quello vero nel giro di minuti — bandirla per 30 giorni
+avrebbe bloccato un titolo che stava per funzionare. Il size check è corretto come segnale, la
+sua *interpretazione* era sbagliata.
+
+Correzione (1.30.1): `probe_url` prende `complete`, e `_probe_stream` lo deriva da
+`parse_stream().cached`.
+
+| Sorgente                            | Size shortfall | Verdetto  | Effetto                        |
+| ----------------------------------- | -------------- | --------- | ------------------------------ |
+| cached (`[RD+]`) — file *finito*     | sì             | `gone`    | denylist + drop                |
+| uncached (`[RD download]`) — in volo | sì             | `unknown` | scarta *ora*, nessuna memoria  |
+
+Il principio generale che ne esce, e che vale oltre questo caso: **una misura può essere giusta e
+la sua interpretazione sbagliata**. Il size shortfall è un fatto; "rimosso" era un'inferenza che
+richiedeva un secondo fatto — la promessa di completezza — per reggere. Denylistare è
+un'operazione con memoria: alza l'onere della prova rispetto a scartare-e-basta, perché l'errore
+sopravvive alla sessione in cui è stato commesso.
+
+Restano invariati gli altri percorsi verso `gone` (404/410/4xx), che non dipendono da questa
+inferenza.

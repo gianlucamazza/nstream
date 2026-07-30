@@ -150,7 +150,7 @@ placeholder:
 | --------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
 | `live`    | 2xx and a plausible total size                             | keep                                                        |
 | `gone`    | 404/410/4xx, or served total << announced size             | denylist + drop                                             |
-| `unknown` | 403/405/416 (method rejected), 5xx, timeout, transport err | keep (benefit of doubt) or fall back — **never** denylisted |
+| `unknown` | 403/405/416 (method rejected), 5xx, timeout, transport err, or a short read on an **uncached** (still-transferring) source | keep (benefit of doubt) or fall back — **never** denylisted |
 
 A `gone` verdict is persisted to `XDG_STATE_HOME/nstream/dead-sources.json` (key: infoHash →
 filename → name; TTL 30 days, 500 entries max) and applied as a **pre-ranking filter**
