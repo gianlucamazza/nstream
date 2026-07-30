@@ -1,6 +1,6 @@
 pkgbase = nstream
 	pkgdesc = Native, terminal-first Stremio-like client (Cinemeta + Torrentio/debrid or local P2P + mpv)
-	pkgver = 1.30.2
+	pkgver = 1.31.0
 	pkgrel = 1
 	url = https://github.com/gianlucamazza/nstream
 	install = nstream.install
@@ -21,7 +21,7 @@ pkgbase = nstream
 	optdepends = chafa: poster thumbnails in the fzf preview pane
 	optdepends = torrserver-bin: local P2P playback without a debrid provider (AUR)
 	optdepends = libva-utils: GPU decode detection (vainfo) for hardware-aware stream ranking
-	source = nstream::git+ssh://git@github.com/gianlucamazza/nstream.git#tag=v1.30.2
+	source = nstream::git+ssh://git@github.com/gianlucamazza/nstream.git#tag=v1.31.0
 	sha256sums = SKIP
 
 pkgname = nstream
