@@ -60,15 +60,19 @@ Modules in `src/nstream/`:
   pick+resolve → cached-miss fallback → primary-language audio guard), returning a `VettedStream`
   (incl. sticky `quality`). Quality: `PlayOpts.quality` / `--quality` (exact-res hard filter via
   `FilterSpec.exact_resolution`); TUI offers an in-flow picker when undecided; headless fails with
-  `quality_unavailable` + `available_resolutions`. The pre-commit step (ADR 0014,
-  `_verify_cached_availability`, auto + non-local only) probes the top-N `[XX+]` cached candidates
-  concurrently and demotes any dead one (strips its marker via `quality._CACHED_RE`, the inverse of
-  `_mark_native_cached`) so the auto-pick re-ranks around what actually responds — keeping it off a
-  stale link and out of an accidental Tier-2 remux. Probes are memoized (`_probe_url`) and shared
-  with the last-resort `_ensure_playable`. Also `cast_languages`/`cast_resolver` for the in-cast
-  switch; `no_streams_message` / `no_stream_source_error` for empty results vs misconfigured
-  sources (ADR 0024). Imports `api`/`addons`/`debrid`/`engine`/`quality`/`remux`/`tracks`/
-  `languages`/`picker`/`labels`/`config`/`log`/`sources`/`ui`; never `cli`.
+  `quality_unavailable` + `available_resolutions`. The pre-commit step (ADR 0014 + 0025,
+  `_verify_availability`, auto + non-local only) probes the top-N url-ready candidates
+  concurrently — cached **and** uncached, since seeders describe swarm health, not debrid
+  availability — demoting a merely unreachable cached one (strips its marker via
+  `quality._CACHED_RE`, the inverse of `_mark_native_cached`) and **dropping** a provably removed
+  one, so the auto-pick re-ranks around what actually responds and stays out of an accidental
+  Tier-2 remux. Probes are classified and memoized (`_probe_stream` → `net.Probe`), shared with the
+  last-resort `_ensure_playable`; a `gone` verdict is persisted (`state.mark_dead`) and filtered
+  pre-ranking by `prune_dead`, which headless turns into `sources_removed`. Also
+  `cast_languages`/`cast_resolver` for the in-cast switch; `no_streams_message` /
+  `no_stream_source_error` for empty results vs misconfigured sources (ADR 0024). Imports
+  `api`/`addons`/`debrid`/`engine`/`net`/`quality`/`remux`/`state`/`tracks`/`languages`/`picker`/
+  `labels`/`config`/`log`/`sources`/`ui`; never `cli`.
 - `cast_flow.py` — shared cast decision tree: `run_cast()` is the single body behind the
   interactive cast (`cli._play_on_cast`) and the headless `--json --cast` branch
   (`headless._auto_play`) — vet the audio plan (`vet_cast_audio`) → absent-dub safety subtitles →
@@ -104,9 +108,11 @@ Modules in `src/nstream/`:
   URLs only — no credential-bearing manifests) + `is_playable_stream` / zero-source messages
   (ADR 0024). Leaf (stdlib only).
 - `net.py` — retrying HTTP-JSON GET (gzip, exponential backoff honouring `Retry-After`) +
-  `url_playable` reachability probe, shared by `api`/`addons`; split out of `api` to break the
-  former `addons ↔ api` cycle. Leaf (imports only `log`/`util` + stdlib); error messages carry a
-  `what=` label, never the URL.
+  the availability probe shared by `api`/`addons`: `probe_url` → `Probe(state=live|gone|unknown)`
+  (ADR 0025 — status **and** served-vs-announced size, so a placeholder served for a removed file
+  isn't mistaken for the movie), with `url_playable` kept as its boolean façade. Split out of `api`
+  to break the former `addons ↔ api` cycle. Leaf (imports only `log`/`util` + stdlib); error
+  messages carry a `what=` label, never the URL.
 - `quality.py` — stream parsing + hardware-aware ranking (GPU caps via `vainfo`, cached).
 - `player.py` — local mpv playback: launch, position tracking over the IPC socket, and the
   `*_defaults` helpers (hwdec/quiet/lang/stream-cache) that decide what to inject without
@@ -185,7 +191,10 @@ Modules in `src/nstream/`:
   `--local`, fire-and-return). Staleness guards: session TTL (6h) + opportunistic receiver
   title match; zero-progress "started" entries are pruned after 7 days and a series binge
   retires its started siblings; every new cast clears the previous session
-  (`clear_cast_session` in `cast_flow.run_cast` / Alt-C).
+  (`clear_cast_session` in `cast_flow.run_cast` / Alt-C). Also the **dead-source denylist**
+  (ADR 0025): `mark_dead`/`is_dead`/`dead_sources`/`forget_dead` over
+  `dead-sources.json` — independent of `history_enabled` (it's machine diagnostics), TTL 30d,
+  capped at 500 entries, best-effort like every other state write.
 - `tracks.py` — ffprobe audio/subtitle track probing (graceful degradation if absent).
 - `settings.py` — fzf-based settings menu (debrid token, addons, hwdec, cast device…); uses
   `picker.fzf_index` for chrome (no parallel fzf argv builder).
@@ -354,7 +363,8 @@ the `what=` addon-name string in errors; `addons.py` caches manifests keyed by U
 ## Config & paths
 
 - Config: `$XDG_CONFIG_HOME/nstream/config.json` (chmod 600; template `config.example.json`).
-- History: `$XDG_STATE_HOME/nstream/history.json`.
+- History: `$XDG_STATE_HOME/nstream/history.json`; dead-source denylist:
+  `$XDG_STATE_HOME/nstream/dead-sources.json` (ADR 0025, `--forget-dead` clears it).
 - Caches: `$XDG_CACHE_HOME/nstream/` (`manifests.json`, `vainfo.json`, `devices.json` Chromecast
   discovery, `meta/` disk metadata, `posters/` thumbnails).
 - Runtime deps: `mpv`, `fzf` (required); `ffmpeg`/`ffprobe`, `catt`, `vainfo`, `chafa`, `foot` (optional).

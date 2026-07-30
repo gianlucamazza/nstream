@@ -9,7 +9,7 @@ Before ranking, `api.streams` drops unplayable shapes, fuses debrid `url` with p
 infoHash); each row carries `addon` provenance for labels/`--explain` (ADR 0024).
 
 nstream then parses, filters and ranks the list to auto-pick the best playable one. This
-document is the reference for *why* a given file/audio is chosen.
+document is the reference for _why_ a given file/audio is chosen.
 
 To see the decision for a real title live:
 
@@ -54,7 +54,7 @@ playable).
 The **cast audio** exclusion (TrueHD/DTS/DTS-HD, and remux, when casting) only applies when
 Tier-2 remux is **off** (`cfg.cast_remux = false`). With remux on (the default), those titles
 are no longer excluded — the host remuxes their audio to AAC (`remux.py`) — so they're only
-*ranked* below native-AAC releases, not dropped (see the cast score below and `docs/adr/0005`).
+_ranked_ below native-AAC releases, not dropped (see the cast score below and `docs/adr/0005`).
 
 Language filter only excludes a stream **tagged exclusively with non-preferred languages**.
 **Untagged streams are never excluded** (they usually carry the common audio, and most good
@@ -66,15 +66,15 @@ web releases are untagged) — see the trade-off below.
 (cached, resolution, lang, source, hevc, seeders_bucketed, -size)
 ```
 
-| term | meaning |
-|------|---------|
-| `cached` | instant debrid stream (`[RD+]`) ranks first — zero wait beats raw quality |
-| `resolution` | higher wins |
-| `lang` | 2 = tagged with a preferred language (or `multi`), 1 = untagged, 0 = non-preferred only. Neutral (1) with no `audio_langs`. Makes the picked file likely to *contain* the wanted track |
-| `source` | remux(6) > bluray(5) > webdl(4) > *unknown*(3) > webrip(2) > hdtv/dvd(1) > camrip(0) |
-| `hevc` | HEVC over H.264 at equal source |
-| `seeders` | capped at 40 (`_SEED_BUCKET`) so popularity doesn't force a huge file |
-| `-size` | smaller file = faster streaming start, among equals |
+| term         | meaning                                                                                                                                                                                |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cached`     | instant debrid stream (`[RD+]`) ranks first — zero wait beats raw quality                                                                                                              |
+| `resolution` | higher wins                                                                                                                                                                            |
+| `lang`       | 2 = tagged with a preferred language (or `multi`), 1 = untagged, 0 = non-preferred only. Neutral (1) with no `audio_langs`. Makes the picked file likely to _contain_ the wanted track |
+| `source`     | remux(6) > bluray(5) > webdl(4) > _unknown_(3) > webrip(2) > hdtv/dvd(1) > camrip(0)                                                                                                   |
+| `hevc`       | HEVC over H.264 at equal source                                                                                                                                                        |
+| `seeders`    | capped at 40 (`_SEED_BUCKET`) so popularity doesn't force a huge file                                                                                                                  |
+| `-size`      | smaller file = faster streaming start, among equals                                                                                                                                    |
 
 `cached` and `resolution` stay dominant, so language/source only break ties **below** them
 (no surprising resolution downgrade). See `quality.score_components` — `--explain` renders
@@ -86,19 +86,19 @@ exactly these terms per stream.
 (cached, remux_within_size, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
 ```
 
-| term | meaning |
-|------|---------|
-| `remux_within_size` | demotes a **likely-remux** release bigger than `cast_remux_max_size_gb` (default 20) below any feasible alternative — size is the real download cost. A *likely-remux* is Dolby/DTS audio **or** an unlabelled REMUX (its name omits the codec but it carries the lossless disc track, so it reads as decodable/unknown yet really needs a huge remux — the resolution cap can't see it). Ranked right after `cached`: avoiding a pick the cast-time size guard would reject matters more than codec/resolution. AAC releases never trip it (no remux, streamed directly even at 4K). A preference, not an exclusion |
-| `cast_audio` | 2 = receiver decodes it natively (AAC/Opus/FLAC…), 1 = untagged, 0 = Dolby/DTS (needs a Tier-2 remux). Prefers AAC so the **direct, instant** cast wins and a remux (a prepare wait) only triggers when no AAC release exists |
-| `remux_within_cap` | among releases that need a remux, prefers those ≤ `cast_remux_max_resolution` (default 1080p) — a remux downloads the whole file, so a 4K Dolby release is a 30-60 GB fetch while a direct 4K cast is free. A preference, not an exclusion |
-| `cast_h264` | tie-breaker only (the receiver decodes HEVC natively too) |
+| term                | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `remux_within_size` | demotes a **likely-remux** release bigger than `cast_remux_max_size_gb` (default 20) below any feasible alternative — size is the real download cost. A _likely-remux_ is Dolby/DTS audio **or** an unlabelled REMUX (its name omits the codec but it carries the lossless disc track, so it reads as decodable/unknown yet really needs a huge remux — the resolution cap can't see it). Ranked right after `cached`: avoiding a pick the cast-time size guard would reject matters more than codec/resolution. AAC releases never trip it (no remux, streamed directly even at 4K). A preference, not an exclusion |
+| `cast_audio`        | 2 = receiver decodes it natively (AAC/Opus/FLAC…), 1 = untagged, 0 = Dolby/DTS (needs a Tier-2 remux). Prefers AAC so the **direct, instant** cast wins and a remux (a prepare wait) only triggers when no AAC release exists                                                                                                                                                                                                                                                                                                                                                                                        |
+| `remux_within_cap`  | among releases that need a remux, prefers those ≤ `cast_remux_max_resolution` (default 1080p) — a remux downloads the whole file, so a 4K Dolby release is a 30-60 GB fetch while a direct 4K cast is free. A preference, not an exclusion                                                                                                                                                                                                                                                                                                                                                                           |
+| `cast_h264`         | tie-breaker only (the receiver decodes HEVC natively too)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 The receiver plays HEVC/4K/HDR natively, so after audio the **resolution** wins; H.264-vs-HEVC
 no longer matters. Native-AAC titles are never capped (they cast direct, no download).
 
 After ranking, the cast pick passes through `stream_select.vet_cast_audio`, which **enforces the
 audio language**: the Default Media Receiver plays a file's first track and can't switch embedded
-audio tracks (Google Cast: only *text* tracks are selectable without a custom receiver), so it
+audio tracks (Google Cast: only _text_ tracks are selectable without a custom receiver), so it
 ffprobes the dub and either casts directly (first track already primary + decodable), remuxes to
 keep only the primary-language track (ffmpeg `0:a:N`), reselects another dub, or casts with
 primary-language safety subtitles. This is why a high-ranked but wrong-language pick still ends up
@@ -108,11 +108,11 @@ in the right language.
 
 Per-session **exact resolution** filter (`PlayOpts.quality` / `--quality`):
 
-| Value | Meaning |
-|-------|---------|
-| `None` | Undecided: TUI shows an in-flow fzf picker (Auto + resolutions present); headless = no filter |
-| `0` | Auto (no exact filter; binge sticky so the picker is not re-shown) |
-| `720` / `1080` / `2160` / … | Hard-filter: only streams with `StreamInfo.resolution == N` |
+| Value                       | Meaning                                                                                       |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| `None`                      | Undecided: TUI shows an in-flow fzf picker (Auto + resolutions present); headless = no filter |
+| `0`                         | Auto (no exact filter; binge sticky so the picker is not re-shown)                            |
+| `720` / `1080` / `2160` / … | Hard-filter: only streams with `StreamInfo.resolution == N`                                   |
 
 Applied in `unsupported_reason` **after** the hardware `max_resolution` cap and **before**
 cast-audio/camrip/lang. Unknown resolution (`0`) is excluded when the filter is active.
@@ -129,6 +129,34 @@ the first episode's choice via `VettedStream.quality`.
 `auto` → `playable[0]`. Manual → fzf menu capped at `max_streams` with a "show all". With
 `hw_filter` off, ranking is skipped entirely (Torrentio order), but an exact quality filter
 still subsets the list first.
+
+## Availability: the cached marker is a guess (ADR 0014 + 0025)
+
+`[RD+]`/`[TB+]` come from a crowdsourced database, not from the provider (Real-Debrid removed
+its cache endpoint in 2024 — ADR 0002), so a "cached" release can be evicted, expired, or
+**removed** (DMCA) while still advertised. Two guards, both auto-pick only:
+
+1. **Pre-commit verification** (`_verify_availability`): the top 5 url-ready candidates are
+   probed concurrently before anything is committed — _all_ of them, cached or not, since the
+   seeder count that gates uncached rows describes swarm health, not debrid availability.
+2. **Last-resort fallback** (`_ensure_playable`): the committed pick is re-checked (memoized,
+   so no double probe) and falls back to local P2P (hybrid stream) or the next candidate.
+
+The probe (`net.probe_url`) is **classified, not boolean**, because an HTTP 200 proves the url
+resolves, not that the content is still there — a revoked link is often served as a few-KB
+placeholder:
+
+| Verdict   | Signal                                                     | Effect                                                      |
+| --------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
+| `live`    | 2xx and a plausible total size                             | keep                                                        |
+| `gone`    | 404/410/4xx, or served total << announced size             | denylist + drop                                             |
+| `unknown` | 403/405/416 (method rejected), 5xx, timeout, transport err | keep (benefit of doubt) or fall back — **never** denylisted |
+
+A `gone` verdict is persisted to `XDG_STATE_HOME/nstream/dead-sources.json` (key: infoHash →
+filename → name; TTL 30 days, 500 entries max) and applied as a **pre-ranking filter**
+(`prune_dead`), so a removed release stops costing a probe on every search and never reaches
+the picker. `nstream --forget-dead` clears the list. When the filter empties the set, headless
+answers `error: sources_removed` (distinct from `no_playable_stream`) with `removed_sources`.
 
 ## Config knobs
 
@@ -147,7 +175,7 @@ The selected languages are a **single ordered allow-list**: `audio_langs` / `sub
 in config. They drive `--alang`/`--slang`, the `lang` score term, and the soft `lang_filter`
 demotion — there is deliberately **no separate "hard view filter"** concept (it would risk
 hiding untagged/multi releases that usually carry the wanted audio). Edit them in
-`nstream --settings` → *Lingue audio/sottotitoli*, a multi-select (TAB to toggle, Enter to
+`nstream --settings` → _Lingue audio/sottotitoli_, a multi-select (TAB to toggle, Enter to
 confirm) built from the registry; order is preserved (selected-first) so `--alang` priority
 is kept. `lang_filter` remains the one knob that governs whether non-preferred tagged streams
 are demoted.
@@ -170,7 +198,7 @@ container. They can disagree (a release tagged `ITA.ENG` may actually hold ita/e
   (`ita`). Best-effort: a missing/failed probe never blocks playback; binge advances warn and
   continue. Well-tagged preferred releases skip the probe.
 - **Cast (Chromecast):** the receiver plays the file's **default** track and cannot switch
-  embedded tracks. The in-cast `a` hotkey re-casts a *different* release tagged in the chosen
+  embedded tracks. The in-cast `a` hotkey re-casts a _different_ release tagged in the chosen
   language; it can only pick a file whose tag matches, not force a track, so a file whose
   default track isn't that language may still play the wrong audio (best-effort).
 

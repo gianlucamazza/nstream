@@ -267,6 +267,13 @@ in realtime (instant start, 1080p SDR).
 
 ## Logging & diagnostics
 
+A source that probes **provably removed** from the debrid (HTTP 404/410, or a few-KB placeholder
+served in place of a multi-GB file) is remembered in `~/.local/state/nstream/dead-sources.json`
+(30-day TTL) and filtered out before ranking, so it stops costing a probe on every search;
+headless then answers `error: sources_removed` instead of a generic "nothing playable". A merely
+unreachable source is **never** remembered — only proven-gone ones. `nstream --forget-dead` clears
+the list (see [ADR 0025](docs/adr/0025-dead-source-classification.md)).
+
 nstream writes a rotating log to `~/.local/state/nstream/nstream.log` (512 KB × 3). An unexpected
 crash is captured there (handy when running inside the foot launcher, where the traceback would
 otherwise scroll away) — on a crash nstream prints `errore inatteso — dettagli in <path>`. Run with
@@ -311,6 +318,7 @@ nstream --json --stop       # stop a cast started by nstream; --status shows its
 nstream --json --audio-lang eng ...       # force the dub language for a headless play/cast
 nstream --quality 1080 "matrix"           # hard-filter to 1080p (TUI + --json; aliases: 4k, 720, auto)
 nstream --json --quality 4k --cast "…"    # headless quality filter; fails with quality_unavailable
+nstream --forget-dead       # clear the denylist of sources proven removed from the debrid
 ```
 
 From Hyprland: launch **nstream** from your app launcher → it opens a **home menu** in foot
@@ -353,7 +361,7 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 
 | Path                           | Role                                                                                                                                           |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections (Generi…, paginated browse), resume                                          |
+| `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections (Generi…, paginated browse), resume                                         |
 | `src/nstream/headless.py`      | headless `--json` subsystem: non-interactive play/cast/probe/stop/status, one JSON object on stdout (no fzf, no TTY)                           |
 | `src/nstream/series.py`        | series-only flow: season-first/episode picker, binge auto-advance, per-episode resume (injected player)                                        |
 | `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards                                     |
@@ -382,7 +390,7 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/explain.py`       | `--explain` diagnostic renderer (why a stream/audio was auto-picked)                                                                           |
 | `src/nstream/settings.py`      | native fzf settings menu (config + addons)                                                                                                     |
 | `src/nstream/config.py`        | config load/save (XDG, atomic 0600) + payload types                                                                                            |
-| `src/nstream/state.py`         | watch-history persistence, local watchlist and recent searches                                                                                   |
+| `src/nstream/state.py`         | watch-history persistence, local watchlist and recent searches                                                                                 |
 | `src/nstream/log.py`           | rotating file log + debug console; redacting formatter (token never logged)                                                                    |
 | `src/nstream/util.py`          | stdlib-only low-level helpers (atomic write, JSON load, subprocess)                                                                            |
 | `src/nstream/nstream.lua`      | mpv overlay for the next-episode countdown (loaded via `--script`)                                                                             |
