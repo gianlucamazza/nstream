@@ -64,11 +64,14 @@ Modules in `src/nstream/`:
   `_verify_availability`, auto + non-local only) probes the top-N url-ready candidates
   concurrently — cached **and** uncached, since seeders describe swarm health, not debrid
   availability — demoting a merely unreachable cached one (strips its marker via
-  `quality._CACHED_RE`, the inverse of `_mark_native_cached`) and **dropping** a provably removed
-  one, so the auto-pick re-ranks around what actually responds and stays out of an accidental
-  Tier-2 remux. Probes are classified and memoized (`_probe_stream` → `net.Probe`), shared with the
-  last-resort `_ensure_playable`; a `gone` verdict is persisted (`state.mark_dead`) and filtered
-  pre-ranking by `prune_dead`, which headless turns into `sources_removed`. Also
+  `quality._CACHED_RE`, the inverse of `_mark_native_cached`) and dropping every unusable one, so
+  the auto-pick re-ranks around what actually responds and stays out of an accidental Tier-2
+  remux. Probes are classified and memoized (`_probe_stream` → `net.Probe`), shared with the
+  last-resort `_ensure_playable`. **Consequence follows evidence**: any unusable verdict drops the
+  candidate _for that run_, but only `gone` (404/410/4xx — the resource isn't there) is persisted
+  (`state.mark_dead`) and filtered pre-ranking by `prune_dead`; an incomplete read never proves
+  removal (see the ADR 0025 post-scriptum), and headless reports `sources_removed` only when the
+  denylist accounts for every candidate (`source_key`). Also
   `cast_languages`/`cast_resolver` for the in-cast switch; `no_streams_message` /
   `no_stream_source_error` for empty results vs misconfigured sources (ADR 0024). Imports
   `api`/`addons`/`debrid`/`engine`/`net`/`quality`/`remux`/`state`/`tracks`/`languages`/`picker`/

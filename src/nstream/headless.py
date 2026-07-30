@@ -381,7 +381,7 @@ def _auto_play(
         return 1
 
     audio_verified: bool | None = None
-    candidates_before = 0  # set on the prepare_stream path: sources alive before verification
+    keys_before: list[str] = []  # set on the prepare_stream path (see `sources_removed` below)
     if opts.audio_lang:
         # Forced dub: explicit error if no stream carries it (no silent fallback).
         if opts.audio_lang not in available_audio:
@@ -413,22 +413,25 @@ def _auto_play(
             stream=chosen, auto=True, safety_sub_lang=None, quality=opts.quality or 0
         )
     else:
-        candidates_before = len(results)
+        # Keys, not just a count: after the verification runs, `sources_removed` must rest on
+        # what was actually proven gone (ADR 0025), never on "the list came back empty" — a
+        # source merely unusable right now is a different answer for the caller.
+        keys_before = [stream_select.source_key(s) for s in results]
         vetted = stream_select.prepare_stream(
             cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title
         )
     if vetted is None:
-        # The pre-commit verification may have just proven the remaining sources removed
-        # (ADR 0025): re-prune against the freshly written denylist and say so honestly,
-        # instead of a generic "nothing playable" that invites a pointless retry.
-        # `prepare_stream` prunes `results` in place, so an emptied list is itself the signal.
-        if not results and candidates_before:
+        # The pre-commit verification may have just proven the remaining sources gone
+        # (ADR 0025): report that only when the denylist says so, so the caller learns
+        # "removed" instead of a generic "nothing playable" that invites a pointless retry.
+        proven_gone = sum(1 for k in keys_before if state.is_dead(k))
+        if proven_gone and proven_gone == len(keys_before):
             _emit_json(
                 {
                     "ok": False,
                     "error": "sources_removed",
                     "message": f"le sorgenti di «{title}» risultano rimosse dal debrid",
-                    "removed_sources": removed + candidates_before,
+                    "removed_sources": removed + proven_gone,
                 }
             )
             return 1

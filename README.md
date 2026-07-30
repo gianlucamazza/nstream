@@ -267,13 +267,14 @@ in realtime (instant start, 1080p SDR).
 
 ## Logging & diagnostics
 
-A source that probes **provably removed** from the debrid (HTTP 404/410, or a few-KB placeholder
-served in place of a multi-GB file) is remembered in `~/.local/state/nstream/dead-sources.json`
-(30-day TTL) and filtered out before ranking, so it stops costing a probe on every search;
-headless then answers `error: sources_removed` instead of a generic "nothing playable". A merely
-unreachable source is **never** remembered — nor is an **uncached** one still being transferred
-by the provider (`[RD download]`), whose partial file is "not yet", not "gone". `--forget-dead` clears
-the list (see [ADR 0025](docs/adr/0025-dead-source-classification.md)).
+Before committing to a stream, nstream probes it: a source that answers **404/410** is
+_provably gone_ and is remembered in `~/.local/state/nstream/dead-sources.json` (30-day TTL),
+filtered out before ranking so it stops costing a probe on every search — headless then answers
+`error: sources_removed` instead of a generic "nothing playable". A source that is merely
+unusable right now — unreachable, or serving a few MB of an announced multi-GB file because the
+provider is still transferring it (`[RD download]`) — is skipped for that run and **never**
+remembered: only proof of absence earns memory. `nstream --forget-dead` clears the list (see
+[ADR 0025](docs/adr/0025-dead-source-classification.md)).
 
 nstream writes a rotating log to `~/.local/state/nstream/nstream.log` (512 KB × 3). An unexpected
 crash is captured there (handy when running inside the foot launcher, where the traceback would

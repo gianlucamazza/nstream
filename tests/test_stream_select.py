@@ -1327,13 +1327,12 @@ def test_cast_resolver_and_languages_thread_exact(monkeypatch):
 
 
 def test_source_key_prefers_infohash():
-    assert stream_select._source_key({"infoHash": "ABC123"}) == "abc123"
-    assert stream_select._source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
+    assert stream_select.source_key({"infoHash": "ABC123"}) == "abc123"
+    assert stream_select.source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
     assert (
-        stream_select._source_key({"name": "[RD+] Torrentio\n1080p"})
-        == "name:[RD+] Torrentio 1080p"
+        stream_select.source_key({"name": "[RD+] Torrentio\n1080p"}) == "name:[RD+] Torrentio 1080p"
     )
-    assert stream_select._source_key({}) == ""
+    assert stream_select.source_key({}) == ""
 
 
 def test_expected_bytes_from_announced_size():
@@ -1429,38 +1428,38 @@ def test_prepare_stream_prunes_denylisted_before_ranking(monkeypatch):
     assert seen == [[live]]  # the removed source never reached the ranking
 
 
-def test_probe_never_denylists_an_uncached_transfer(monkeypatch):
+def test_incomplete_source_is_skipped_but_never_denylisted(monkeypatch):
     """Field case 2026-07-30: `[RD download]` served 2 MiB of an announced 7.16 GB while
-    Real-Debrid was still fetching it. Marking it dead would ban a working title for 30 days."""
-    seen: dict[str, bool] = {}
-
-    def fake_probe(url, *, expected_bytes=0, complete=True, **_kw):
-        seen["complete"] = complete
-        return (
-            net.Probe(net.GONE, reason="short")
-            if complete
-            else net.Probe(net.UNKNOWN, reason="trasferimento in corso")
-        )
-
-    monkeypatch.setattr(stream_select.net, "probe_url", fake_probe)
+    Real-Debrid was still fetching it. Skipping it this run is right; remembering it for 30
+    days would lock out a title that is about to work."""
+    monkeypatch.setattr(
+        stream_select.net,
+        "probe_url",
+        lambda url, **_kw: net.Probe(net.UNKNOWN, status=206, reason="file incompleto"),
+    )
     downloading: Stream = {
         "url": "https://rd/dl",
         "infoHash": "DL1",
         "name": "[RD download] Torrentio\n1080p 💾 7.16 GB",
     }
     probe = stream_select._probe_stream(downloading)
-    assert seen["complete"] is False  # uncached → judged as a file in flight
-    assert not probe.dead and not state.is_dead("dl1")
+    assert not probe.usable and not probe.dead
+    assert not state.is_dead("dl1")
 
 
-def test_probe_denylists_a_cached_shortfall(monkeypatch):
+def test_verify_drops_unusable_for_this_run_without_remembering(monkeypatch):
+    """The two consequences are distinct: dropped now (any unusable verdict) vs remembered
+    (only a proven-gone one)."""
+    flaky: Stream = {"url": "https://rd/flaky", "infoHash": "F1", "name": "[RD+] x\n1080p"}
+    live: Stream = {"url": "https://rd/live", "infoHash": "L1", "name": "[RD+] x\n1080p"}
+    results = [flaky, live]
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
     monkeypatch.setattr(
         stream_select.net,
         "probe_url",
-        lambda url, *, expected_bytes=0, complete=True, **_kw: net.Probe(
-            net.GONE if complete else net.UNKNOWN, reason="short"
-        ),
+        lambda u, **k: net.Probe(net.LIVE) if u.endswith("live") else net.Probe(net.UNKNOWN),
     )
-    cached: Stream = {"url": "https://rd/c", "infoHash": "C1", "name": "[RD+] x\n1080p 💾 7 GB"}
-    assert stream_select._probe_stream(cached).dead is True
-    assert state.is_dead("c1")
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    out = stream_select._verify_availability(cfg, results, cast=False, title="")
+    assert out == [live]
+    assert not state.is_dead("f1")  # dropped for this run only — nothing proven

@@ -1219,20 +1219,37 @@ def test_run_auto_sources_removed_when_denylisted(monkeypatch, capsys, tmp_path)
     assert out["removed_sources"] == 1
 
 
-def test_run_auto_sources_removed_when_verification_empties_set(monkeypatch, capsys, tmp_path):
+def test_run_auto_sources_removed_when_verification_proves_them_gone(monkeypatch, capsys, tmp_path):
     """The pre-commit verification itself proves the last candidates gone: same honest error,
     not a generic no_playable_stream."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "G7", "url": "http://rd/x"})
 
     def prep(cfg, results, opts, *, auto, reselect_on_wrong_audio, title=""):
-        results[:] = []  # what _verify_availability does when everything probes `gone`
+        state.mark_dead("g7", "HTTP 404")  # what _verify_availability does on a `gone` verdict
+        results[:] = []
         return None
 
     monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "sources_removed"
+
+
+def test_run_auto_empty_set_without_proof_is_not_sources_removed(monkeypatch, capsys, tmp_path):
+    """An unusable-right-now source (incomplete transfer, flaky link) empties the candidate
+    list too — but nothing was proven removed, so the caller must not be told it was."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "T7", "url": "http://rd/x"})
+
+    def prep(cfg, results, opts, *, auto, reselect_on_wrong_audio, title=""):
+        results[:] = []  # dropped for this run only
+        return None
+
+    monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "no_playable_stream"
 
 
 def test_run_auto_no_playable_stream_still_reported(monkeypatch, capsys, tmp_path):

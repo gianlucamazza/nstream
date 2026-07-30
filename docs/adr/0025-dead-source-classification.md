@@ -103,21 +103,35 @@ fonti sono state rimosse dal debrid" invece di suggerire un retry inutile.
 7331.8 MiB annunciati era marcata `[RD download]`: Real-Debrid la stava ancora **scaricando**.
 Il file parziale cresce fino a diventare quello vero nel giro di minuti — bandirla per 30 giorni
 avrebbe bloccato un titolo che stava per funzionare. Il size check è corretto come segnale, la
-sua *interpretazione* era sbagliata.
+sua _interpretazione_ era sbagliata.
 
-Correzione (1.30.1): `probe_url` prende `complete`, e `_probe_stream` lo deriva da
-`parse_stream().cached`.
+**Prima correzione (1.30.1), scartata subito.** `probe_url` aveva preso un parametro `complete`
+derivato da `parse_stream().cached`: shortfall su cached → `gone`, su uncached → `unknown`. È
+un doppio regime che fa dipendere una struttura **con memoria** dal marker cached — lo stesso
+marker che questo ADR dichiara inaffidabile al §1. Marker sbagliato = stesso bug, solo più raro:
+debito tecnico, non una soluzione. Rimosso in 1.30.2.
 
-| Sorgente                            | Size shortfall | Verdetto  | Effetto                        |
-| ----------------------------------- | -------------- | --------- | ------------------------------ |
-| cached (`[RD+]`) — file *finito*     | sì             | `gone`    | denylist + drop                |
-| uncached (`[RD download]`) — in volo | sì             | `unknown` | scarta *ora*, nessuna memoria  |
+**Correzione definitiva (1.30.2): ogni segnale decide solo ciò che prova davvero.**
 
-Il principio generale che ne esce, e che vale oltre questo caso: **una misura può essere giusta e
-la sua interpretazione sbagliata**. Il size shortfall è un fatto; "rimosso" era un'inferenza che
-richiedeva un secondo fatto — la promessa di completezza — per reggere. Denylistare è
-un'operazione con memoria: alza l'onere della prova rispetto a scartare-e-basta, perché l'errore
-sopravvive alla sessione in cui è stato commesso.
+| Segnale                                     | Prova                   | Verdetto  | Conseguenza               |
+| ------------------------------------------- | ----------------------- | --------- | ------------------------- |
+| status 404/410/4xx                          | la risorsa non c'è      | `gone`    | scarta **e** ricorda      |
+| size servito << annunciato                  | non è riproducibile ora | `unknown` | scarta per questo run     |
+| 403/405/416, 5xx, timeout, errore trasporto | niente di conclusivo    | `unknown` | scarta / benefit of doubt |
 
-Restano invariati gli altri percorsi verso `gone` (404/410/4xx), che non dipendono da questa
-inferenza.
+Il size shortfall non promuove più a `gone` in nessun caso: **non può** distinguere un
+trasferimento in corso da un file svuotato, e quella distinzione è l'intero contenuto
+dell'inferenza "rimosso". Resta pienamente utile come segnale di non-riproducibilità, che è il
+motivo per cui è stato introdotto — evitare il cast di un file inservibile.
+
+Simmetricamente in `_verify_availability`: **qualunque** verdetto non-usable fa cadere il
+candidato per questa esecuzione (drop in-memory + demozione del marker), mentre solo `gone`
+scrive nella denylist. E `sources_removed` in headless non si deduce più da "la lista è vuota"
+ma da quali chiavi risultano effettivamente in denylist: una lista svuotata da sorgenti
+semplicemente non pronte è `no_playable_stream`, che è la verità.
+
+Il principio generale, valido oltre questo caso: **una misura può essere giusta e la sua
+interpretazione sbagliata**. Denylistare è un'operazione con memoria, quindi esige una prova più
+forte del semplice scartare: l'errore sopravvive alla sessione in cui è stato commesso. Quando
+la prova disponibile non regge la conseguenza, si abbassa la conseguenza — non si puntella
+l'inferenza con un secondo indizio debole.

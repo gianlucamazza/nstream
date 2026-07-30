@@ -182,13 +182,15 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
   custom `…/manifest.json`). Do not retry the same play command until sources exist.
 - `no_streams` — title found but no sources for that title (often "not released yet"); surface
   `message`. Distinct from `no_stream_sources` (config) vs empty catalog for one title.
-- `no_playable_stream` — sources exist but none pass the hardware/cast filters; try `--local`,
-  or a lower tier with `--quality 1080` / `720`.
-- `sources_removed` — the title's sources were **proven removed from the debrid** (probed dead,
-  or already in the denylist from an earlier run); `removed_sources` counts them. Do **not**
-  retry the same command: it will fail identically. Say the title is unavailable for now, and
-  offer `--local` (P2P, if the swarm is alive) or trying again in a few days. If the user
-  believes a source is back, `nstream --json --forget-dead` clears the denylist.
+- `no_playable_stream` — sources exist but none pass the hardware/cast filters, **or** the
+  ones that had a ready url weren't usable at that moment (unreachable, or a file the debrid is
+  still transferring — a brand-new title often has only uncached releases). This one **is** worth
+  retrying after a while: a `[RD download]` release becomes playable once the provider finishes
+  fetching it. Meanwhile offer a lower tier (`--quality 1080` / `720`) or `--local`.
+- `sources_removed` — every source for the title answered 404/410: **proven gone**, not merely
+  not-ready; `removed_sources` counts them. Do **not** retry the same command: it will fail
+  identically. Say the title is unavailable, and offer `--local` (P2P, if the swarm is alive).
+  If the user believes a source is back, `nstream --json --forget-dead` clears the denylist.
 - `video_codec_unsupported` — the REAL (ffprobe-verified) video codec of every candidate is one
   the Chromecast can't render (e.g. a DivX/MPEG-4 ASP rip) and the mirror fallback isn't
   available — casting would show a black screen. `video_codec` carries the codec; offer

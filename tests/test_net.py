@@ -281,13 +281,14 @@ def test_probe_live_when_size_matches(monkeypatch):
     assert probe.usable and not probe.dead
 
 
-def test_probe_gone_when_placeholder_served(monkeypatch):
-    """A revoked debrid link answers 200 with a few-KB placeholder, not the movie."""
+def test_probe_incomplete_is_unusable_but_not_gone(monkeypatch):
+    """A few KB where GBs were announced proves the file isn't playable — it does NOT prove
+    it was removed (a transfer still in flight looks identical), so it is never remembered."""
     _serve(monkeypatch, 206, {"Content-Range": "bytes 0-0/40000"})
     probe = net.probe_url("http://x", expected_bytes=7_000_000_000)
-    assert probe.state == net.GONE
-    assert probe.dead and not probe.usable
-    assert "annunciati" in probe.reason
+    assert probe.state == net.UNKNOWN
+    assert not probe.usable and not probe.dead
+    assert "incompleto" in probe.reason
 
 
 def test_probe_live_when_size_unknown(monkeypatch):
@@ -347,17 +348,10 @@ def test_served_total_prefers_content_range():
     assert net._served_total({}, 200) is None
 
 
-def test_probe_partial_uncached_is_not_gone(monkeypatch):
-    """`[RD download]`: the provider is still transferring the file, so the partial size must
-    read as "not yet", never as removed — banning it would lock out a title about to work."""
+def test_probe_partial_transfer_is_never_remembered(monkeypatch):
+    """Field case 2026-07-30: `[RD download]` served 2 MiB of an announced 7.16 GB while the
+    provider was still fetching it. Only the status can promote a verdict to `gone`; size
+    alone cannot tell a growing transfer from an emptied file."""
     _serve(monkeypatch, 206, {"Content-Range": "bytes 0-0/2097152"})
-    probe = net.probe_url("http://x", expected_bytes=7_000_000_000, complete=False)
-    assert probe.state == net.UNKNOWN
-    assert not probe.dead and not probe.usable  # fall back now, remember nothing
-    assert "trasferimento in corso" in probe.reason
-
-
-def test_probe_partial_cached_is_gone(monkeypatch):
-    """A release advertised as cached is supposed to be a finished file: short = removed."""
-    _serve(monkeypatch, 206, {"Content-Range": "bytes 0-0/2097152"})
-    assert net.probe_url("http://x", expected_bytes=7_000_000_000, complete=True).dead is True
+    probe = net.probe_url("http://x", expected_bytes=7_000_000_000)
+    assert not probe.dead and not probe.usable  # skip it now, remember nothing

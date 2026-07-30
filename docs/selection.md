@@ -143,20 +143,26 @@ its cache endpoint in 2024 — ADR 0002), so a "cached" release can be evicted, 
    so no double probe) and falls back to local P2P (hybrid stream) or the next candidate.
 
 The probe (`net.probe_url`) is **classified, not boolean**, because an HTTP 200 proves the url
-resolves, not that the content is still there — a revoked link is often served as a few-KB
-placeholder:
+resolves, not that the content is playable — the server may be serving a file that is still
+arriving, or a placeholder left where the content used to be. Each signal decides only what it
+can actually prove:
 
-| Verdict   | Signal                                                     | Effect                                                      |
-| --------- | ---------------------------------------------------------- | ----------------------------------------------------------- |
-| `live`    | 2xx and a plausible total size                             | keep                                                        |
-| `gone`    | 404/410/4xx, or served total << announced size             | denylist + drop                                             |
-| `unknown` | 403/405/416 (method rejected), 5xx, timeout, transport err, or a short read on an **uncached** (still-transferring) source | keep (benefit of doubt) or fall back — **never** denylisted |
+| Verdict   | Signal                                                                                       | Effect                                   |
+| --------- | -------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `live`    | 2xx with a plausible total size                                                              | keep                                     |
+| `gone`    | 404/410/4xx — the resource isn't there                                                       | drop **and** denylist                    |
+| `unknown` | served total << announced (incomplete/in flight), 403/405/416, 5xx, timeout, transport error | drop for this run — **never** denylisted |
+
+The size check never escalates to `gone`: it cannot tell a transfer still in flight (Torrentio's
+`[RD download]`) from an emptied file, and that distinction is the whole of the "removed"
+inference. It stays exactly as useful for what it does prove — this file is not playable now.
 
 A `gone` verdict is persisted to `XDG_STATE_HOME/nstream/dead-sources.json` (key: infoHash →
 filename → name; TTL 30 days, 500 entries max) and applied as a **pre-ranking filter**
 (`prune_dead`), so a removed release stops costing a probe on every search and never reaches
-the picker. `nstream --forget-dead` clears the list. When the filter empties the set, headless
-answers `error: sources_removed` (distinct from `no_playable_stream`) with `removed_sources`.
+the picker. `nstream --forget-dead` clears the list. Headless answers `error: sources_removed`
+(with `removed_sources`) only when the denylist accounts for every candidate — an empty set of
+merely-not-ready sources is `no_playable_stream`, which is the truth.
 
 ## Config knobs
 

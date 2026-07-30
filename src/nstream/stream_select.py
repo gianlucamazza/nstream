@@ -788,7 +788,7 @@ _PROBE_MEMO: dict[str, net.Probe] = {}
 _VERIFY_CACHED_CAP = 5  # top-N candidates to probe before committing the auto-pick
 
 
-def _source_key(stream: Stream) -> str:
+def source_key(stream: Stream) -> str:
     """Stable identity of a release across addons (ADR 0025): infoHash first (the same torrent
     served by Torrentio and Comet keys identically), then the filename hint, then the display
     name. Empty when the row carries none of them — such a stream is simply never denylisted."""
@@ -812,17 +812,12 @@ def _expected_bytes(stream: Stream) -> int:
 
 def _probe_stream(stream: Stream) -> net.Probe:
     """Memoized, classified availability probe for a resolved stream (see `_PROBE_MEMO`).
-    A `gone` verdict is persisted to the negative cache so later runs skip the source
-    entirely instead of paying the probe again.
-
-    Only a **cached** release is judged as a finished file: an uncached one (`[RD download]`)
-    is mid-transfer on the provider, so its partial file must read as "not yet" rather than
-    "removed" — see the ADR 0025 post-scriptum."""
+    Only a `gone` verdict is persisted: it is the only one proving the source isn't there,
+    as opposed to not being ready right now."""
     url = stream.get("url") or ""
     probe = _PROBE_MEMO.get(url)
     if probe is None:
-        info = quality.parse_stream(stream)
-        probe = net.probe_url(url, expected_bytes=_expected_bytes(stream), complete=info.cached)
+        probe = net.probe_url(url, expected_bytes=_expected_bytes(stream))
         _PROBE_MEMO[url] = probe
         if probe.dead:
             _remember_dead(stream, probe)
@@ -831,7 +826,7 @@ def _probe_stream(stream: Stream) -> net.Probe:
 
 def _remember_dead(stream: Stream, probe: net.Probe) -> None:
     """Persist a proven-removed source and say so once, on stderr."""
-    key = _source_key(stream)
+    key = source_key(stream)
     if not key or state.is_dead(key):
         return
     name_line = next(iter((stream.get("name") or "").splitlines()), "") or key
@@ -855,7 +850,7 @@ def prune_dead(cfg: Config, results: list[Stream]) -> tuple[list[Stream], int]:
     dead = state.dead_sources()
     if not dead:
         return results, 0
-    kept = [s for s in results if _source_key(s) not in dead]
+    kept = [s for s in results if source_key(s) not in dead]
     return kept, len(results) - len(kept)
 
 
@@ -885,15 +880,23 @@ def _verify_availability(
     only `_ensure_playable` catches it, after cascading through resolves and possibly landing
     in an expensive Tier-2 remux.
 
-    Instead, probe the top-N ranked url-ready candidates concurrently and act on the classified
-    verdict: a `gone` one is denylisted and dropped outright (it isn't coming back this run), a
-    merely unreachable cached one is demoted to uncached-equivalent (marker stripped) so the
-    next rank pass re-orders around what actually responds. ADR 0025 drops the cached-only
-    restriction: the seeder count that gates uncached rows describes swarm health, which says
-    nothing about whether the debrid still has the file. Bounded (≤`_VERIFY_CACHED_CAP`) and
-    memoized (each url probed once, reused by `_ensure_playable`). No-op for the local backend
-    (engine-served urls are buffer-gated). Mutates `results` in place and returns the surviving
-    list."""
+    Instead, probe the top-N ranked url-ready candidates concurrently and let each verdict
+    carry exactly the consequence its evidence supports:
+
+    | verdict            | evidence                          | consequence                     |
+    | ------------------ | --------------------------------- | ------------------------------- |
+    | `live`             | serves a plausible first byte      | keep, ranking untouched         |
+    | `unknown` unusable | unreachable, or an incomplete file | drop for **this run** only      |
+    | `gone`             | the resource isn't there (4xx)     | drop **and** denylist (ADR 0025)|
+
+    Nothing that merely failed now is remembered, and nothing remembered rests on an inference.
+    A dropped cached candidate also loses its marker (`_demote_cached`), so any later ranking
+    over the same objects can't resurrect it as instantly-available. ADR 0025 drops the
+    cached-only restriction: the seeder count that gates uncached rows describes swarm health,
+    which says nothing about whether the debrid can serve the file. Bounded
+    (≤`_VERIFY_CACHED_CAP`) and memoized (each url probed once, reused by `_ensure_playable`).
+    No-op for the local backend (engine-served urls are buffer-gated). Mutates `results` in
+    place and returns the surviving list."""
     if cfg.playback_backend == "local":
         return results
     targets = [
@@ -907,16 +910,14 @@ def _verify_availability(
         return results
     with ThreadPoolExecutor(max_workers=min(len(targets), _VERIFY_CACHED_CAP)) as ex:
         verdicts = list(ex.map(_probe_stream, targets))
-    gone = []
+    unusable = []
     for s, probe in zip(targets, verdicts, strict=True):
-        if probe.dead:
-            gone.append(id(s))
-        elif not probe.usable:
+        if not probe.usable:
             _demote_cached(s)
-    if not gone:
+            unusable.append(id(s))
+    if not unusable:
         return results
-    survivors = [s for s in results if id(s) not in gone]
-    results[:] = survivors
+    results[:] = [s for s in results if id(s) not in unusable]
     return results
 
 

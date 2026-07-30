@@ -61,13 +61,16 @@ class Probe:
     @property
     def usable(self) -> bool:
         """Can we hand this url to a player right now? True for `live` and for the benefit-of-
-        the-doubt `unknown` (method/range rejected but the resource exists); False for `gone`
-        and for a transport failure — preserving the pre-ADR-0025 fallback behaviour."""
+        the-doubt `unknown` (method/range rejected but the resource exists); False for `gone`,
+        for a transport failure, and for an incomplete file — preserving the pre-ADR-0025
+        fallback behaviour."""
         return self.state == LIVE or (self.state == UNKNOWN and self.status in (403, 405, 416))
 
     @property
     def dead(self) -> bool:
-        """Proven removed — the only state that earns a place in the persistent denylist."""
+        """Proven absent — the only state that earns a place in the persistent denylist.
+        Deliberately narrow: a verdict that outlives the run carries a higher burden of proof
+        than one that only skips a candidate."""
         return self.state == GONE
 
 
@@ -88,24 +91,23 @@ def _served_total(headers, status: int) -> int | None:
     return None
 
 
-def probe_url(
-    url: str, *, expected_bytes: int = 0, complete: bool = True, timeout: float = 6.0
-) -> Probe:
+def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Probe:
     """Classify a ready (debrid) stream url (ADR 0025). Asks for the first byte and judges
     both the status AND the size the server reports: a `200` proves the url resolves, not
-    that the content is still there — a revoked debrid link is often served as a few-KB
-    placeholder. When `expected_bytes` is known (from the release's announced size), a total
-    orders of magnitude smaller means the file isn't there.
+    that the content is playable — the server may be serving a file that is still arriving,
+    or a placeholder left where the content used to be.
 
-    `complete` says whether the source is *supposed* to be a finished file (a cached debrid
-    release). It decides how a size shortfall is read, and the distinction matters: an
-    UNCACHED release (Torrentio's `[RD download]`) is one the provider is still transferring,
-    so its partial file grows into the real thing within minutes — banning it would lock out
-    a title that is about to work. Short on a cached source → `gone`; short on an uncached
-    one → `unknown` (unusable now, never denylisted).
+    Each signal decides only what it can actually prove:
 
-    Real-Debrid can't report a cached-miss, so this catches removed/dead links and resolve
-    errors, not every non-cached case."""
+    - **status** (404/410/4xx) proves the resource is *not there* → `gone`, the one verdict
+      strong enough to be remembered across runs.
+    - **size** (served total far below `expected_bytes`) proves the file is *not usable now*
+      → `unknown`. It cannot tell a growing transfer from an emptied file, so it never
+      escalates to `gone`: inferring removal from an incomplete read is exactly the mistake
+      the ADR 0025 post-scriptum records.
+
+    Real-Debrid can't report a cached-miss, so this catches dead links and resolve errors,
+    not every non-cached case."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-0"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -125,15 +127,13 @@ def probe_url(
     if expected_bytes > 0 and served is not None:
         floor = max(_MIN_REAL_BYTES, int(expected_bytes * _MIN_REAL_RATIO))
         if served < floor:
-            short = f"{_mib(served)} serviti contro {_mib(expected_bytes)} annunciati"
-            if not complete:  # still being transferred by the provider — try again later
-                return Probe(
-                    UNKNOWN,
-                    status=status,
-                    served_bytes=served,
-                    reason=f"trasferimento in corso sul debrid ({short})",
-                )
-            return Probe(GONE, status=status, served_bytes=served, reason=short)
+            return Probe(
+                UNKNOWN,
+                status=status,
+                served_bytes=served,
+                reason="file incompleto sul debrid "
+                f"({_mib(served)} di {_mib(expected_bytes)} annunciati)",
+            )
     return Probe(LIVE, status=status, served_bytes=served)
 
 
