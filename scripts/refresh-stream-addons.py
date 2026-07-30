@@ -15,7 +15,9 @@ import sys
 import urllib.request
 from pathlib import Path
 
-CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nstream" / "config.json"
+CONFIG = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "nstream" / "config.json"
+)
 
 # Catalog-only extras (no secrets) — discovery surface beyond Cinemeta.
 CATALOG_ADDONS = [
