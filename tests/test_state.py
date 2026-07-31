@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import stat
 
-from nstream import state
+from nstream import state, util
 from nstream.config import Config
 
 CFG = Config(torrentio_base="tb")
@@ -37,16 +37,20 @@ def test_make_entry_series_explicit():
 
 
 def test_watched_threshold():
-    assert state._watched({"position": 95.0, "duration": 100.0}) is True
-    assert state._watched({"position": 50.0, "duration": 100.0}) is False
-    assert state._watched({"position": 10.0, "duration": 0.0}) is False
+    assert state.history._watched({"position": 95.0, "duration": 100.0}) is True
+    assert state.history._watched({"position": 50.0, "duration": 100.0}) is False
+    assert state.history._watched({"position": 10.0, "duration": 0.0}) is False
 
 
 def test_watched_absolute_tail():
     # Within END_TAIL_SECONDS of the end counts as finished even below 0.9
     # (e.g. long credits / padded duration / mpv paused at EOF with keep-open).
-    assert state._watched({"position": 8800.0, "duration": 8850.0}) is True  # 99.4%, <60s left
-    assert state._watched({"position": 5000.0, "duration": 10000.0}) is False  # 50%, far from end
+    assert (
+        state.history._watched({"position": 8800.0, "duration": 8850.0}) is True
+    )  # 99.4%, <60s left
+    assert (
+        state.history._watched({"position": 5000.0, "duration": 10000.0}) is False
+    )  # 50%, far from end
 
 
 def test_save_load_roundtrip(tmp_path, monkeypatch):
@@ -238,14 +242,14 @@ def test_update_from_receiver_watched_retires_entry(tmp_path, monkeypatch):
 
 def test_history_lock_degrades_when_unopenable(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    real_open = state.os.open
+    real_open = state.history.os.open
 
     def deny(path, *a, **k):
         if str(path).endswith(".history.lock"):
             raise OSError("no lock for you")
         return real_open(path, *a, **k)
 
-    monkeypatch.setattr(state.os, "open", deny)
+    monkeypatch.setattr(state.history.os, "open", deny)
     state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10.0, 100.0))
     assert state.load_history(CFG)["tt1"]["position"] == 10.0  # unlocked but not blocked
 
@@ -261,7 +265,7 @@ def _session(tmp_path, monkeypatch, entry, device="192.168.1.9"):
 
 def test_update_from_receiver_stale_ttl_clears(tmp_path, monkeypatch):
     _session(tmp_path, monkeypatch, state.make_entry("tt1", "A", "movie", 0.0, 0.0))
-    rs = state.util.RunState(state.CAST_SESSION)
+    rs = util.RunState(state.CAST_SESSION)
     old = rs.read()
     assert old is not None
     old["ts"] = old["ts"] - state.CAST_SESSION_TTL - 3600
@@ -275,7 +279,7 @@ def test_update_from_receiver_title_mismatch_clears(tmp_path, monkeypatch):
     _session(tmp_path, monkeypatch, state.make_entry("tt1", "Mr. Robot", "movie", 0.0, 0.0))
     ok = state.update_from_receiver(CFG, "192.168.1.9", 500.0, 3000.0, title="Big Buck Bunny")
     assert ok is False
-    assert state.util.RunState(state.CAST_SESSION).read() is None
+    assert util.RunState(state.CAST_SESSION).read() is None
     assert state.load_history(CFG) == {}
 
 
@@ -348,14 +352,14 @@ def test_clear_cast_session_idempotent(tmp_path, monkeypatch):
     state.clear_cast_session()  # nothing to clear: no error
     state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), None)
     state.clear_cast_session()
-    assert state.util.RunState(state.CAST_SESSION).read() is None
+    assert util.RunState(state.CAST_SESSION).read() is None
 
 
 def test_expire_cast_session_by_ttl(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     state.remember_cast(CFG, state.make_entry("tt1", "A", "movie", 0.0, 0.0), None)
     state.expire_cast_session()  # fresh → kept
-    rs = state.util.RunState(state.CAST_SESSION)
+    rs = util.RunState(state.CAST_SESSION)
     assert rs.read() is not None
     stale = rs.read()
     assert stale is not None
@@ -423,7 +427,7 @@ def test_dead_entries_expire(monkeypatch, tmp_path):
 
 def test_dead_cache_is_capped(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    monkeypatch.setattr(state, "MAX_DEAD_SOURCES", 3)
+    monkeypatch.setattr(state.dead, "MAX_DEAD_SOURCES", 3)
     for i in range(5):
         state.mark_dead(f"k{i}", "gone")
     entries = state.dead_sources()

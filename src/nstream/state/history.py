@@ -1,9 +1,4 @@
-"""Watch-history persistence for resume and continue-watching.
-
-State lives in ``XDG_STATE_HOME/nstream/history.json`` as a mapping
-``video_id -> HistoryEntry``. All reads are best-effort: a missing or corrupt
-file yields an empty history so playback is never blocked by state errors.
-"""
+"""Watch history and local library (watchlist + recent searches)."""
 
 from __future__ import annotations
 
@@ -11,24 +6,13 @@ import contextlib
 import fcntl
 import json
 import os
-import re
 import time
 from collections.abc import Iterable, Iterator
-from typing import cast
 
-from . import util
-from .config import (
-    Config,
-    HistoryEntry,
-    Meta,
-    Video,
-    dead_sources_path,
-    library_path,
-    state_path,
-)
+from .. import util
+from ..config import Config, library_path, state_path
+from ..types import HistoryEntry, Meta, Video
 
-# Past this fraction of the runtime a title counts as watched and drops out of
-# the continue-watching list.
 WATCHED_THRESHOLD = 0.9
 
 
@@ -258,102 +242,6 @@ def note_started(cfg: Config, entry: HistoryEntry) -> None:
     save_entry(cfg, entry, drop=drop)
 
 
-# RunState slot for the receiver-side session of a fire-and-return cast: which entry is
-# on the TV, so a later `--stop`/`--status` can attribute the receiver's position to it.
-CAST_SESSION = "watch"
-
-# Past this age a session no longer plausibly describes what's on the TV (any film plus
-# a generous pause fits well within it; every new cast rewrites the session anyway).
-CAST_SESSION_TTL = 6 * 3600.0
-
-
-def clear_cast_session() -> None:
-    """Drop the fire-and-return cast session, if any. Called at the start of every new
-    cast (`cast_flow.run_cast` / Alt-C): the new content replaces what the session
-    described, and a stale session would attribute the receiver's position to it."""
-    util.RunState(CAST_SESSION).clear()
-
-
-def expire_cast_session() -> None:
-    """Best-effort: drop the cast session once its TTL has passed. Called at every
-    headless entry, so an agent that never issues `--stop` doesn't leave a dead session
-    around for a later poll to trip on."""
-    run_state = util.RunState(CAST_SESSION)
-    session = run_state.read()
-    if session and time.time() - (session.get("ts") or 0.0) > CAST_SESSION_TTL:
-        run_state.clear()
-
-
-def _norm_title(s: str) -> str:
-    """Casefold + alnum-only for tolerant title comparison. Deliberate small duplicate
-    of `headless._norm_title`: state must not import headless (layering)."""
-    return "".join(c for c in s.casefold() if c.isalnum())
-
-
-def _session_title_matches(session_title: str, receiver_title: str) -> bool:
-    """Whether the receiver's now-playing title plausibly IS the session's content.
-    The receiver title varies by sender — castbridge reports the decorated display
-    title ("Mr. Robot · S01E04 · …"), catt the release filename, and the Tier-2 catt
-    fallback our own `cast-*.mp4` temp name — so match by normalized substring in
-    either direction, and treat an empty/artifact title as not-applicable (True:
-    the session TTL decides alone)."""
-    r = _norm_title(receiver_title)
-    if not r or re.fullmatch(r"cast[0-9a-z_]*mp4", r):
-        return True
-    s = _norm_title(session_title)
-    if not s:
-        return True
-    return s in r or r in s
-
-
-def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
-    """Persist the fire-and-return cast session (entry + device) across nstream runs.
-    Interactive and `--follow` casts don't need this — their poll loop saves directly."""
-    if not cfg.history_enabled:
-        return
-    util.RunState(CAST_SESSION).write({**entry, "device": device or ""})
-
-
-def update_from_receiver(
-    cfg: Config,
-    device: str | None,
-    position: float,
-    duration: float,
-    *,
-    title: str | None = None,
-    clear: bool = False,
-) -> bool:
-    """Merge a receiver-reported position into the session entry saved by `remember_cast`,
-    if one exists for `device` and still plausibly describes what the TV is playing.
-    Returns True when the merged position was accepted (written, or the entry retired by
-    the watched logic). `clear` drops the session file afterwards (the `--stop` one-shot);
-    a zero/idle position still clears but persists nothing. Two staleness guards protect
-    the entry from a position that belongs to some other content: the session TTL, and an
-    opportunistic match of `title` (the receiver's now-playing title, when it carries one)
-    against the session's — a stale session is dropped so later polls can't corrupt it."""
-    run_state = util.RunState(CAST_SESSION)
-    session = run_state.read()
-    if not session:
-        return False
-    if time.time() - (session.get("ts") or 0.0) > CAST_SESSION_TTL:
-        run_state.clear()
-        return False
-    # No clear on a device mismatch: the session may belong to another (still live) TV.
-    if device and session.get("device") and session["device"] != device:
-        return False
-    if title and not _session_title_matches(session.get("title") or "", title):
-        run_state.clear()  # the TV is playing something else: this session is dead
-        return False
-    if clear:
-        run_state.clear()
-    if not (position > 0 and duration > 0):
-        return False
-    merged = {k: v for k, v in session.items() if k != "device"}
-    merged.update(position=position, duration=duration, ts=time.time())
-    save_entry(cfg, cast(HistoryEntry, merged))
-    return True
-
-
 def watched_series(cfg: Config) -> list[HistoryEntry]:
     """Finished series episodes, most recent first. Kept in history (hidden from
     `recent()` by the watched logic) exactly for this: a headless resume on a finished
@@ -371,68 +259,3 @@ def recent(cfg: Config, limit: int = 30, typ: str | None = None) -> list[History
         entries = [e for e in entries if e.get("type", "movie") == typ]
     entries.sort(key=lambda e: e.get("ts", 0.0), reverse=True)
     return entries[:limit]
-
-
-# --- dead-source negative cache (ADR 0025) ---------------------------------
-
-# A source proven removed stays banned this long: long enough that a dead release stops
-# costing a probe on every search, short enough that a file which comes back is not banned
-# for ever.
-DEAD_TTL = 30 * 86400.0
-MAX_DEAD_SOURCES = 500
-
-
-def _dead_read() -> dict[str, dict]:
-    data = util.load_json(dead_sources_path(), {})
-    if not isinstance(data, dict):
-        return {}
-    entries = data.get("sources")
-    return entries if isinstance(entries, dict) else {}
-
-
-def dead_sources(now: float | None = None) -> dict[str, dict]:
-    """The non-expired denylist, `key -> {ts, reason}`. Best-effort: a missing or corrupt
-    file yields an empty mapping, so a state error can never block playback."""
-    now = time.time() if now is None else now
-    live: dict[str, dict] = {}
-    for key, rec in _dead_read().items():
-        if not isinstance(rec, dict):
-            continue
-        ts = rec.get("ts")
-        if isinstance(ts, int | float) and now - ts < DEAD_TTL:
-            live[key] = rec
-    return live
-
-
-def is_dead(key: str) -> bool:
-    return bool(key) and key in dead_sources()
-
-
-def mark_dead(key: str, reason: str = "") -> None:
-    """Remember that `key` (infoHash / filename / release name) is provably gone. Never
-    called for a transient failure — only for `net.Probe.dead` (ADR 0025)."""
-    if not key:
-        return
-    entries = dead_sources()
-    entries[key] = {"ts": time.time(), "reason": reason}
-    if len(entries) > MAX_DEAD_SOURCES:  # prune oldest first
-        keep = sorted(entries.items(), key=lambda kv: kv[1].get("ts", 0.0), reverse=True)
-        entries = dict(keep[:MAX_DEAD_SOURCES])
-    _dead_write(entries)
-
-
-def forget_dead() -> int:
-    """Clear the denylist (user escape hatch). Returns how many entries were dropped."""
-    count = len(_dead_read())
-    _dead_write({})
-    return count
-
-
-def _dead_write(entries: dict[str, dict]) -> None:
-    with contextlib.suppress(OSError):  # state is diagnostics: never fail playback over it
-        dead_sources_path().parent.mkdir(parents=True, exist_ok=True)
-        util.atomic_write(
-            dead_sources_path(),
-            lambda f: json.dump({"version": 1, "sources": entries}, f, ensure_ascii=False),
-            prefix=".dead-sources-",
-        )
