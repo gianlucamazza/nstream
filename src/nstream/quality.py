@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import languages, util
-from .config import Config, Stream
+from .config import Config
+from .types import Stream
 
 _CACHE_VERSION = 2
 # Conservative default for integrated GPUs when vainfo is unavailable: H.264, HEVC
@@ -283,7 +284,7 @@ def _parse_stream_uncached(stream: Stream) -> StreamInfo:
 
 
 @dataclass(frozen=True)
-class Caps:
+class HwCaps:
     codecs: frozenset[str] = field(default_factory=lambda: frozenset(_FALLBACK_CODECS))
     max_resolution: int = _DEFAULT_MAX_RESOLUTION
     # True only when a real vainfo probe succeeded → VAAPI decode is available, so
@@ -318,14 +319,14 @@ def _cache_path() -> Path:
     return Path(base) / "nstream" / "hwcaps.json"
 
 
-def detect_caps(*, use_cache: bool = True) -> Caps:
+def detect_caps(*, use_cache: bool = True) -> HwCaps:
     """Detect HW decode capabilities via vainfo (cached). Conservative fallback."""
     path = _cache_path()
     if use_cache:
         data = util.load_json(path, {})
         with contextlib.suppress(KeyError, TypeError, ValueError):
             if data.get("version") == _CACHE_VERSION:
-                return Caps(
+                return HwCaps(
                     codecs=frozenset(data["codecs"]),
                     max_resolution=int(data["max_resolution"]),
                     vaapi=bool(data["vaapi"]),
@@ -338,7 +339,7 @@ def detect_caps(*, use_cache: bool = True) -> Caps:
     vaapi = bool(probed)
     codecs = probed or frozenset(_FALLBACK_CODECS)
 
-    caps = Caps(codecs=codecs, max_resolution=_DEFAULT_MAX_RESOLUTION, vaapi=vaapi)
+    caps = HwCaps(codecs=codecs, max_resolution=_DEFAULT_MAX_RESOLUTION, vaapi=vaapi)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -356,7 +357,7 @@ def detect_caps(*, use_cache: bool = True) -> Caps:
     return caps
 
 
-def preferred_hwdec(caps: Caps) -> str | None:
+def preferred_hwdec(caps: HwCaps) -> str | None:
     """The mpv hwdec method to force for this GPU, or None to leave mpv's choice.
 
     Returns ``vaapi`` when a real VAAPI probe succeeded (Intel/AMD): it's the mature
@@ -413,13 +414,13 @@ def container_mime(container: str) -> str:
     return {"mp4": "video/mp4", "webm": "video/webm"}.get(container, "")
 
 
-def cast_caps() -> Caps:
+def cast_caps() -> HwCaps:
     """Decode profile for a Chromecast/Google TV receiver — NOT the laptop GPU.
 
     Casting plays on the TV, so the laptop's vainfo codecs are irrelevant. A modern
     Google TV decodes H.264/HEVC(+10bit)/VP9 up to 4K; AV1 is not guaranteed on older
     models, so it's left out (such streams drop to the ⚠ section, still pickable)."""
-    return Caps(
+    return HwCaps(
         codecs=frozenset({"h264", "hevc", "hevc10", "vp9"}),
         max_resolution=2160,
         vaapi=False,
@@ -429,7 +430,7 @@ def cast_caps() -> Caps:
 # --- support check + ranking ---------------------------------------------
 
 
-def _codec_supported(codec: str, caps: Caps) -> bool:
+def _codec_supported(codec: str, caps: HwCaps) -> bool:
     if not codec:
         return True  # unknown codec: give the benefit of the doubt (usually h264/hevc)
     if codec == "hevc":
@@ -501,7 +502,7 @@ class FilterSpec:
         )
 
 
-def unsupported_reason(info: StreamInfo, caps: Caps, spec: FilterSpec) -> str | None:
+def unsupported_reason(info: StreamInfo, caps: HwCaps, spec: FilterSpec) -> str | None:
     """Why this stream is excluded from the main list, or None if it belongs there.
     Order: hardware (codec/resolution/DV5) → exact quality → Cast audio → camrip → language
     → near-dead. The opt-in filters on `spec` default to no-ops, leaving the HW-only behaviour."""
@@ -742,7 +743,7 @@ def _dedup_by_release(
 
 
 def rank_streams(
-    streams: list[Stream], caps: Caps, spec: FilterSpec
+    streams: list[Stream], caps: HwCaps, spec: FilterSpec
 ) -> tuple[list[RankedStream], list[RankedStream]]:
     """Split streams into (playable_sorted, excluded). `spec.allow_software` keeps codecs
     the GPU can't decode; `spec.allow_dv5` keeps Dolby Vision Profile 5. The opt-in filters

@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol, cast, runtime_checkable
 
 from . import engine, log, util
-from .config import Config, Stream, debrid_credentials
+from .config import Config, debrid_credentials
+from .types import Stream
 
 _log = log.get_logger("debrid")
 

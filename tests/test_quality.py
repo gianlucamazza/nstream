@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from nstream import quality
-from nstream.config import Config, Stream
-from nstream.quality import Caps, FilterSpec
+from nstream.config import Config
+from nstream.quality import FilterSpec, HwCaps
+from nstream.types import Stream
 
 # Real Torrentio samples (name, title) captured from "Superman" (2025).
 S_8K: Stream = {
@@ -96,7 +97,7 @@ def test_parse_no_false_positive_group():
 
 # --- new exclusion reasons -------------------------------------------------
 
-CAPS = Caps(codecs=frozenset({"h264", "hevc", "hevc10", "vp9", "av1"}), max_resolution=2160)
+CAPS = HwCaps(codecs=frozenset({"h264", "hevc", "hevc10", "vp9", "av1"}), max_resolution=2160)
 
 
 def test_reason_camrip():
@@ -263,13 +264,13 @@ def test_detect_caps_sets_vaapi_and_caches(tmp_path, monkeypatch):
 
 
 def test_preferred_hwdec():
-    assert quality.preferred_hwdec(Caps(vaapi=True)) == "vaapi"
-    assert quality.preferred_hwdec(Caps(vaapi=False)) is None
+    assert quality.preferred_hwdec(HwCaps(vaapi=True)) == "vaapi"
+    assert quality.preferred_hwdec(HwCaps(vaapi=False)) is None
 
 
 # --- ranking ---------------------------------------------------------------
 
-CAPS_NO_AV1 = Caps(codecs=frozenset({"h264", "hevc", "hevc10", "vp9"}), max_resolution=2160)
+CAPS_NO_AV1 = HwCaps(codecs=frozenset({"h264", "hevc", "hevc10", "vp9"}), max_resolution=2160)
 
 
 def _rank(streams, *, max_resolution=2160, allow_software=False, allow_dv5=False):
@@ -533,7 +534,7 @@ def test_cached_marker_provider_agnostic():
 
 # --- language- and source-aware scoring ------------------------------------
 
-_CAPS_HW = Caps(codecs=frozenset({"h264", "hevc", "hevc10"}), max_resolution=2160, vaapi=True)
+_CAPS_HW = HwCaps(codecs=frozenset({"h264", "hevc", "hevc10"}), max_resolution=2160, vaapi=True)
 
 S_1080_ITA: Stream = {
     "name": "Torrentio\n1080p",

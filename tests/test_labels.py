@@ -1,6 +1,6 @@
 from nstream import labels, ui
-from nstream.config import HistoryEntry, Meta, Stream, Video
 from nstream.tracks import Track, Tracks
+from nstream.types import HistoryEntry, Meta, Stream, Video
 
 
 def test_display_title_movie():

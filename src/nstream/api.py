@@ -23,12 +23,13 @@ from pathlib import Path
 from typing import cast
 
 from . import addons, log, sources, util
-from .config import Config, Meta, Stream, Subtitle, Video
+from .config import Config
 
 # HTTP-JSON primitives live in `net` (below both api and addons) to break the addons↔api
 # cycle. Re-exported here so existing `api.http_get_json` / `api.NetworkError` / `api.url_playable`
 # / `api.UA` / `api.TIMEOUT` references (and their monkeypatching in tests) keep working.
 from .net import TIMEOUT, UA, NetworkError, http_get_json, url_playable
+from .types import Meta, Stream, Subtitle, Video
 
 _log = log.get_logger("api")
 

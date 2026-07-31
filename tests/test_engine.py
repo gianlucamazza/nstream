@@ -12,7 +12,8 @@ import socket
 import pytest
 
 from nstream import engine
-from nstream.config import Config, Stream
+from nstream.config import Config
+from nstream.types import Stream
 
 
 @pytest.fixture(autouse=True)

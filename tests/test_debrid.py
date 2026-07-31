@@ -13,7 +13,8 @@ import urllib.request
 import pytest
 
 from nstream import debrid
-from nstream.config import Config, Stream, debrid_credentials
+from nstream.config import Config, debrid_credentials
+from nstream.types import Stream
 
 
 class FakeResp:

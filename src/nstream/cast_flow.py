@@ -27,8 +27,9 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, replace
 
-from . import caster, engine, log, mirror, quality, remux, state, stream_select, subs, ui
-from .config import Config, PlayOpts, Stream
+from . import cast_vet, caster, engine, log, mirror, quality, remux, state, stream_select, subs, ui
+from .config import Config, PlayOpts
+from .types import Stream
 
 _log = log.get_logger("cast_flow")
 
@@ -125,7 +126,7 @@ def run_cast(
     # ADR 0021: the resolved per-invocation quality (opts.quality, always an int here —
     # the callers replace() it with VettedStream.quality) constrains EVERY reselect below.
     exact = stream_select.exact_resolution(opts.quality or 0)
-    chosen, bad_video = stream_select.vet_cast_video(cfg, results, chosen, exact_resolution=exact)
+    chosen, bad_video = cast_vet.vet_cast_video(cfg, results, chosen, exact_resolution=exact)
     # --no-mirror is an explicit user intent: with undecodable video and the mirror
     # suppressed, fail explicitly rather than override the user (ADR 0021).
     if bad_video and (not mirror.available() or opts.mirror is False):
@@ -138,12 +139,12 @@ def run_cast(
     # same HEVC/AAC in .mp4. Prefer an MP4 twin (a free direct cast) over a download+rewrap;
     # this is the optimization, the settled-stream check below is the guarantee.
     pre_container = chosen
-    chosen, _bad_container = stream_select.vet_cast_container(
+    chosen, _bad_container = cast_vet.vet_cast_container(
         cfg, results, chosen, target_lang, exact_resolution=exact
     )
     if chosen is not pre_container:
         bad_video = ""  # a vetted MP4 candidate supersedes the original's video verdict
-    plan = stream_select.vet_cast_audio(cfg, results, chosen, target_lang, exact_resolution=exact)
+    plan = cast_vet.vet_cast_audio(cfg, results, chosen, target_lang, exact_resolution=exact)
     if plan.stream is not chosen:
         # The language reselect only offers video-castable candidates (its guard shares
         # this vetting), so a swap clears the bad-video verdict along with the stream.
@@ -155,7 +156,7 @@ def run_cast(
     # A DMR-incompatible container (.mkv) on the SETTLED stream also forces the Tier-2 rewrap to
     # MP4 (ADR 0022) — the guarantee that no path hands the DMR an .mkv LOAD, whichever release
     # the audio reselect landed on. A decodable-audio rewrap is `-c:v copy -c:a copy` (remux.py).
-    final_container = stream_select.cast_container(cfg, chosen)
+    final_container = cast_vet.cast_container(cfg, chosen)
     needs_rewrap = not quality.container_castable(final_container)
     needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
     # No dub carries the target language: cast the best pick anyway, with target-language
@@ -288,10 +289,10 @@ def run_cast(
             langs: tuple[str, ...] = ()
             resolver = None
             if allow_lang_switch:
-                cast_langs = stream_select.cast_languages(cfg, results, exact_resolution=exact)
+                cast_langs = cast_vet.cast_languages(cfg, results, exact_resolution=exact)
                 if len(cast_langs) > 1:
                     langs = cast_langs
-                    resolver = stream_select.cast_resolver(cfg, results, exact_resolution=exact)
+                    resolver = cast_vet.cast_resolver(cfg, results, exact_resolution=exact)
             pos, dur, advance, subs_delivered = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,

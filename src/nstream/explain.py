@@ -10,7 +10,8 @@ status, the auto-pick, and the audio tracks mpv would choose. Read-only: it neve
 from __future__ import annotations
 
 from . import languages, player, quality, tracks, ui
-from .config import Config, Stream
+from .config import Config
+from .types import Stream
 
 
 def _rank(
@@ -21,7 +22,7 @@ def _rank(
     title: str = "",
     exact_resolution: int = 0,
 ) -> tuple[
-    list[quality.RankedStream], list[quality.RankedStream], quality.Caps, quality.FilterSpec
+    list[quality.RankedStream], list[quality.RankedStream], quality.HwCaps, quality.FilterSpec
 ]:
     caps = quality.cast_caps() if cast else quality.detect_caps()
     spec = quality.FilterSpec.from_config(

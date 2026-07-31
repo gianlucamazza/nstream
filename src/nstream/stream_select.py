@@ -1,18 +1,15 @@
 """Stream selection, resolution, and the auto-play vetting guards.
 
-Owns everything between "we have a list of streams" and "we have one playable,
-language-vetted stream ready to hand to the player/caster": quality choice (CLI /
-in-flow picker), ranking + fzf curation, debrid/P2P resolution, the cached-miss
-fallback, and the primary-language audio guard (re-pick / safety-subtitles).
-`prepare_stream` is the single entry point the orchestrator calls; the rest are
-module-internal helpers (also exercised directly by the tests)."""
+Owns ranking, quality UX, URL resolve, and the primary-language audio guard.
+`prepare_stream` is the single entry the orchestrator calls.
+
+Availability probes / dead-source denylist: `availability`.
+Cast-path vetting: `cast_vet`."""
 
 from __future__ import annotations
 
 import contextlib
 import sys
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import cast as typecast
@@ -20,22 +17,21 @@ from typing import cast as typecast
 from . import (
     addons,
     api,
+    availability,
     debrid,
     engine,
     languages,
     log,
-    net,
     quality,
-    remux,
     sources,
-    state,
     tracks,
     ui,
 )
 from . import config as config_mod
-from .config import Config, ConfigError, PlayOpts, Stream
+from .config import Config, ConfigError, PlayOpts
 from .labels import stream_label
 from .picker import fzf
+from .types import Stream
 
 _log = log.get_logger("stream_select")
 
@@ -293,304 +289,6 @@ def pick_audio_stream_verified(
     return (None, False) if name_pick is not None and probed else (name_pick, False)
 
 
-def cast_languages(
-    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
-) -> tuple[str, ...]:
-    """Audio languages available among Cast-compatible streams, preferred ones first."""
-    return audio_languages(cfg, results, cast=True, exact_resolution=exact_resolution)
-
-
-def cast_resolver(
-    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
-) -> Callable[[str], str | None]:
-    """Return a fn picking the best Cast-compatible stream URL for a language, or None.
-    Closes over the already-fetched `results` so switching needs no extra network call."""
-    playable = _cast_playable(cfg, results, exact_resolution=exact_resolution)
-
-    def resolve(lang: str) -> str | None:
-        for r in playable:  # already ranked best-first
-            if lang in r.info.languages:
-                return _playable_url(cfg, r.stream)
-        return None
-
-    return resolve
-
-
-@dataclass(frozen=True)
-class CastAudioPlan:
-    """How to cast a stream so the audio plays in the target language. The Chromecast Default
-    Media Receiver plays a file's FIRST audio track and can't switch tracks in place, so the
-    language is decided here (selection time), not on the device:
-      - `direct`: the first track is already the target language + DMR-decodable → cast the url.
-      - `remux`:  the target language is present but not the first decodable track → remux
-                  keeping only `audio_index` (a single-track AAC/copy file the DMR plays right).
-      - `absent`: no candidate carries the target language → caller falls back (other dub + subs).
-    `real_lang` is the language that will actually play (for honest `audio_lang` reporting).
-
-    `needs_remux` is orthogonal to `mode`: it flags that the track we'll actually cast
-    (`audio_index`) has a codec the DMR can't decode (AC-3/E-AC-3/DTS/…), so it must be
-    remuxed to AAC regardless of the language decision. `mode == "remux"` already implies it;
-    the field carries the same requirement into the `absent` fallback, where we still cast a
-    (wrong-language) dub and it would otherwise go out silent as a direct cast."""
-
-    mode: str
-    stream: Stream
-    audio_index: int = 0  # audio-relative index of the chosen track → ffmpeg `-map 0:a:<i>`
-    real_lang: str | None = None
-    verified: bool = False  # True when decided from real ffprobe tracks (not a name guess)
-    needs_remux: bool = False  # cast track's codec is undecodable → Tier-2 remux even if `absent`
-
-
-def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
-    """Probed audio tracks of `stream` (url resolved first), or [] when unprobeable."""
-    url = _playable_url(cfg, stream)
-    return list(tracks.probe_tracks(url).audio) if url else []
-
-
-def _cast_video_codec(cfg: Config, stream: Stream) -> str:
-    """REAL video codec of `stream` per ffprobe, "" when unprobeable. Memoized with the
-    audio probe (same url, same call) — the video vetting costs no extra network read."""
-    url = _playable_url(cfg, stream)
-    return tracks.probe_tracks(url).video_codec if url else ""
-
-
-def _video_castable(cfg: Config, stream: Stream) -> bool:
-    """Whether the DMR can render `stream`'s probed video. Unknown ("" — no ffprobe, probe
-    failed) keeps the benefit of the doubt, mirroring the audio vetting's stance."""
-    codec = _cast_video_codec(cfg, stream)
-    return not codec or codec in quality.CAST_VIDEO_DECODABLE
-
-
-def vet_cast_video(
-    cfg: Config,
-    results: list[Stream],
-    chosen: Stream,
-    *,
-    probe_cap: int = 4,
-    exact_resolution: int = 0,
-) -> tuple[Stream, str]:
-    """Verify the DMR can render `chosen`'s REAL video before casting (ADR 0017). The name
-    parse gives an untagged release the benefit of the doubt, but an MPEG-4 ASP/DivX rip
-    casts as PLAYING + black screen with no receiver error — selection time is the only
-    place this class of failure can be caught.
-
-    Returns `(stream, "")` when `chosen` (or a reselected candidate) is castable, or
-    `(chosen, bad_codec)` when nothing qualifies — the caller falls back to the mirror
-    (mpv decodes locally) or fails explicitly instead of casting black. Reselection walks
-    the ranked cast-playable candidates, probing at most `probe_cap`."""
-    bad = _cast_video_codec(cfg, chosen)
-    if not bad or bad in quality.CAST_VIDEO_DECODABLE:
-        return chosen, ""
-    probed = 0
-    for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
-        s = r.stream
-        if s is chosen or s.get("url") == chosen.get("url"):
-            continue
-        if probed >= probe_cap:
-            break
-        probed += 1
-        if _video_castable(cfg, s):
-            print(
-                f"nstream: video {bad.upper()} non decodificabile dal TV → altra release",
-                file=sys.stderr,
-            )
-            return s, ""
-    return chosen, bad
-
-
-def cast_container(cfg: Config, stream: Stream) -> str:
-    """Canonical container of `stream` for cast compatibility (ADR 0022). The filename
-    extension (name-parsed) is authoritative — it is the only signal that splits the shared
-    matroska/webm ffprobe demuxer name — and the ffprobe `format_name` (same memoized probe
-    as the audio/video vetting) confirms or overrides it toward INCOMPATIBLE, so a `.mp4`
-    that is really Matroska is rewrapped, not cast black. "" = unknown (benefit of the doubt).
-
-    Public (ADR 0022): `cast_flow` reads it for the settled-stream rewrap verdict and the
-    LOAD contentType, so it must not be a leading-underscore reach-through."""
-    ext = quality.parse_stream(stream).container
-    url = _playable_url(cfg, stream)
-    probed = quality.container_from_format(tracks.probe_tracks(url).container, ext) if url else ""
-    return probed or ext
-
-
-def _container_castable(cfg: Config, stream: Stream) -> bool:
-    """Whether the DMR can LOAD `stream`'s container on a direct cast (ADR 0022)."""
-    return quality.container_castable(cast_container(cfg, stream))
-
-
-def vet_cast_container(
-    cfg: Config,
-    results: list[Stream],
-    chosen: Stream,
-    target_lang: str,
-    *,
-    probe_cap: int = 4,
-    exact_resolution: int = 0,
-) -> tuple[Stream, bool]:
-    """Ensure the DMR can LOAD `chosen`'s container before a direct cast (ADR 0022). The
-    Default Media Receiver refuses Matroska (.mkv) — player UNKNOWN + receiver ERROR,
-    content_id None — yet plays the SAME HEVC/AAC in MP4. Prefer a swap over a download, but
-    only to a **strict win**: a *verified direct cast in `target_lang`* with a DMR-compatible
-    container and castable video. A merely name-`multi`-tagged MP4 whose REAL first audio track
-    is another dub must NOT preempt the target-language rewrap — trusting the name tag here is
-    how an Italian request landed on a Spanish MP4. If nothing qualifies, keep `chosen` and
-    return True so the caller rewraps to MP4 while `vet_cast_audio` still selects the target dub.
-
-    Returns `(stream, needs_container_rewrap)`."""
-    if _container_castable(cfg, chosen):
-        return chosen, False
-    probed = 0
-    for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
-        s = r.stream
-        if s is chosen or s.get("url") == chosen.get("url"):
-            continue
-        langs = r.info.languages
-        if target_lang and target_lang not in langs and "multi" not in langs:
-            continue
-        if probed >= probe_cap:
-            break
-        probed += 1
-        if not (_container_castable(cfg, s) and _video_castable(cfg, s)):
-            continue
-        # Language-safe swap: only a probed, verified direct cast in the target language beats
-        # the target-language rewrap of `chosen`. Same memoized probe as the checks above.
-        plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
-        if not target_lang or (
-            plan.mode == "direct" and plan.verified and plan.real_lang == target_lang
-        ):
-            print(
-                "nstream: container non caricabile dal TV → altra release MP4 (stessa lingua)",
-                file=sys.stderr,
-            )
-            return s, False
-    return chosen, True
-
-
-def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) -> CastAudioPlan:
-    """Decide the cast plan for one resolved `stream` given its probed `audio` tracks and the
-    desired `target_lang` (a canonical code, or "" for no preference → codec-only legacy
-    behaviour). The DMR plays `audio[0]`, so a direct cast is correct only when that track is
-    the target language and decodable; otherwise, if a target-language track exists anywhere,
-    remux selects it."""
-    if not audio:  # unprobeable (no ffprobe / no tracks) → benefit of the doubt, cast directly
-        return CastAudioPlan("direct", stream, 0, target_lang or None, verified=False)
-    codes = [languages.track_lang(t.lang, t.title) for t in audio]
-    c0 = audio[0].codec.lower()
-    if not target_lang:  # no language preference: codec-only decision on the default track
-        mode = "remux" if remux.needs_remux(c0) else "direct"
-        return CastAudioPlan(mode, stream, 0, codes[0], verified=True)
-    if not any(codes):
-        # Every track's language is unknown (und/untagged): mirror the local guard's benefit
-        # of the doubt instead of declaring the dub absent — a single ita track tagged `und`
-        # was already right, and "absent" would force wrong subs + report the wrong lang.
-        # The codec still decides direct vs remux.
-        mode = "remux" if remux.needs_remux(c0) else "direct"
-        return CastAudioPlan(mode, stream, 0, target_lang or None, verified=False)
-    if codes[0] == target_lang and remux._decodable(c0):
-        return CastAudioPlan("direct", stream, 0, target_lang, verified=True)
-    k = next((i for i, c in enumerate(codes) if c == target_lang), None)
-    if k is not None:
-        return CastAudioPlan("remux", stream, k, target_lang, verified=True)
-    # Target language genuinely absent: the caller casts this dub anyway (+ safety subs). Its
-    # default track still has to be DECODABLE — a Dolby/DTS first track would go out silent on
-    # a direct cast — so flag a remux of track 0, orthogonally to the language being absent.
-    return CastAudioPlan(
-        "absent", stream, 0, codes[0], verified=True, needs_remux=not remux._decodable(c0)
-    )
-
-
-def _reselect_cast_for_lang(
-    cfg: Config,
-    results: list[Stream],
-    current: Stream,
-    target_lang: str,
-    *,
-    probe_cap: int = 6,
-    exact_resolution: int = 0,
-) -> CastAudioPlan | None:
-    """Find another cast candidate (best-first) carrying `target_lang`, preferring one castable
-    directly (target is the first decodable track) over one needing a remux. Probes up to
-    `probe_cap` candidates whose NAME claims the language (tagged `target_lang` or `multi`) —
-    spending the probe budget on releases that actually advertise it, rather than on untagged
-    ones that usually don't. None if none qualifies.
-
-    Preference order: a *verified* direct cast (probed, target is the decodable first track) >
-    a *verified* remux (target present, not first) > a name-tagged-target release whose tracks
-    were unprobeable (benefit of the doubt). The last tier matters because non-cached releases
-    routinely can't be ffprobed cheaply, so a title's only `target_lang` dubs may all come back
-    unverified — and a release literally tagged `ITA` is a far better bet than falling back to
-    the wrong-language pick the caller would otherwise cast. This mirrors the benefit of the
-    doubt `pick_audio_stream_verified` already gives the forced `--audio-lang` path."""
-    remux_fallback: CastAudioPlan | None = None
-    tagged_guess: CastAudioPlan | None = None
-    direct_bad_container: CastAudioPlan | None = None
-    probed = 0
-    for r in _cast_playable(cfg, results, exact_resolution=exact_resolution):
-        s = r.stream
-        if s is current or s.get("url") == current.get("url"):
-            continue
-        langs = r.info.languages
-        if target_lang not in langs and "multi" not in langs:  # only chase claimed-language dubs
-            continue
-        if probed >= probe_cap:
-            break
-        probed += 1
-        # A dub with video the DMR can't render is not a candidate: reselecting it trades
-        # silent-wrong-language for a black screen (the live failure behind ADR 0017 —
-        # a cached ITA DivX rip won this loop). Same probe as the audio read below (memoized).
-        if not _video_castable(cfg, s):
-            continue
-        plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
-        if plan.mode == "direct" and plan.verified:
-            # A direct dub in an MKV would fail the DMR LOAD (ADR 0022): keep chasing a
-            # DMR-compatible container (a free direct cast), remembering the MKV as a fallback
-            # the caller rewraps to MP4. Same memoized probe as the audio read above.
-            if _container_castable(cfg, s):
-                return plan  # cheapest *verified* correct option (no download) → take it
-            if direct_bad_container is None:
-                direct_bad_container = plan
-        elif plan.mode == "remux" and remux_fallback is None:
-            remux_fallback = plan  # remember, but keep looking for a direct one
-        elif (
-            plan.mode == "direct"
-            and not plan.verified
-            and target_lang in langs  # the NAME explicitly claims it (not just "multi")
-            and tagged_guess is None
-        ):
-            # Unprobeable but explicitly target-tagged → a benefit-of-the-doubt last resort,
-            # kept only if no verified option turns up (below any remux_fallback).
-            tagged_guess = plan
-    return remux_fallback or direct_bad_container or tagged_guess
-
-
-def vet_cast_audio(
-    cfg: Config,
-    results: list[Stream],
-    chosen: Stream,
-    target_lang: str,
-    *,
-    exact_resolution: int = 0,
-) -> CastAudioPlan:
-    """Decide how to cast `chosen` so the audio plays in `target_lang` (default `cfg.primary`;
-    "" = no preference). Probes the real tracks — the DMR plays the first one and can't switch —
-    and, when `chosen` carries no `target_lang` track, reselects a candidate that does. Returns
-    a CastAudioPlan; `absent` means no candidate has the language (caller does fallback+subs)."""
-    plan = _cast_plan_for(chosen, _cast_audio_tracks(cfg, chosen), target_lang)
-    if not target_lang:
-        return plan
-    # Confident plans for the best pick win outright: a verified direct cast, or a remux that
-    # selects the target track. Otherwise (probe failed → unverified guess, or the language is
-    # absent from this release) search the other dubs for a *verified* one before falling back.
-    if (plan.mode == "direct" and plan.verified) or plan.mode == "remux":
-        return plan
-    return (
-        _reselect_cast_for_lang(
-            cfg, results, chosen, target_lang, exact_resolution=exact_resolution
-        )
-        or plan
-    )
-
-
 def _native_resolve(cfg: Config, stream: Stream) -> str | None:
     """Resolve a pure-torrent stream through the configured native debrid API, or None
     (best-effort: not the native backend, no resolver for the provider, or a provider error
@@ -780,90 +478,15 @@ def _reselect_for_primary(
     return None
 
 
-# Process-lifetime memo of the availability probe (like the parse/ffprobe memos): a resolved
-# url's availability doesn't change within a run, so probe each at most once — shared by the
-# pre-commit verification and `_ensure_playable`'s last-resort net, so a url the verifier
-# already found live isn't re-probed when the pick is confirmed.
-_PROBE_MEMO: dict[str, net.Probe] = {}
-_VERIFY_CACHED_CAP = 5  # top-N candidates to probe before committing the auto-pick
+# --- availability orchestration (ranking picks targets; probe leaf is availability) ---
 
 
 def source_key(stream: Stream) -> str:
-    """Stable identity of a release across addons (ADR 0025): infoHash first (the same torrent
-    served by Torrentio and Comet keys identically), then the filename hint, then the display
-    name. Empty when the row carries none of them — such a stream is simply never denylisted."""
-    ih = (stream.get("infoHash") or "").strip().lower()
-    if ih:
-        return ih
-    hints = stream.get("behaviorHints") or {}
-    filename = (hints.get("filename") or "").strip() if isinstance(hints, dict) else ""
-    if filename:
-        return f"file:{filename}"
-    name = " ".join((stream.get("name") or "").split())
-    return f"name:{name}" if name else ""
-
-
-def _expected_bytes(stream: Stream) -> int:
-    """Announced release size in bytes (0 when the name carries no size), used by the probe
-    to tell a real file from a placeholder served in place of a removed one."""
-    size_gb = quality.parse_stream(stream).size_gb
-    return int(size_gb * 1024**3) if size_gb > 0 else 0
-
-
-def _probe_stream(stream: Stream) -> net.Probe:
-    """Memoized, classified availability probe for a resolved stream (see `_PROBE_MEMO`).
-    Only a `gone` verdict is persisted: it is the only one proving the source isn't there,
-    as opposed to not being ready right now."""
-    url = stream.get("url") or ""
-    probe = _PROBE_MEMO.get(url)
-    if probe is None:
-        probe = net.probe_url(url, expected_bytes=_expected_bytes(stream))
-        _PROBE_MEMO[url] = probe
-        if probe.dead:
-            _remember_dead(stream, probe)
-    return probe
-
-
-def _remember_dead(stream: Stream, probe: net.Probe) -> None:
-    """Persist a proven-removed source and say so once, on stderr."""
-    key = source_key(stream)
-    if not key or state.is_dead(key):
-        return
-    name_line = next(iter((stream.get("name") or "").splitlines()), "") or key
-    print(f"nstream: sorgente non più disponibile ({probe.reason}) — {name_line}", file=sys.stderr)
-    _log.info("sorgente morta: %s (%s)", key, probe.reason)
-    state.mark_dead(key, probe.reason)
-
-
-def _probe_url(url: str) -> bool:
-    """Boolean façade kept for callers that only ask "can I play this now?"."""
-    return _probe_stream({"url": url}).usable
+    return availability.source_key(stream)
 
 
 def prune_dead(cfg: Config, results: list[Stream]) -> tuple[list[Stream], int]:
-    """Drop sources previously proven removed (ADR 0025) before any ranking, and report how
-    many were dropped so a caller can distinguish "nothing playable" from "everything this
-    title had was removed". No-op for the local backend (P2P doesn't go through a debrid) and
-    when the denylist is empty."""
-    if cfg.playback_backend == "local" or not results:
-        return results, 0
-    dead = state.dead_sources()
-    if not dead:
-        return results, 0
-    kept = [s for s in results if source_key(s) not in dead]
-    return kept, len(results) - len(kept)
-
-
-def _demote_cached(stream: Stream) -> None:
-    """Strip the debrid cached marker (`[RD+]`, `[TB+]`…) from a stream's name so
-    `quality.parse_stream` no longer ranks it as instantly available — its ready url probed
-    dead. The inverse of `_mark_native_cached`: the demotion then flows through the whole
-    ranking/explain pipeline with no downstream special-casing (parse_stream re-keys on the
-    new name). Provider-agnostic via the shared `quality._CACHED_RE`."""
-    name = stream.get("name") or ""
-    stripped = quality._CACHED_RE.sub("", name).strip()
-    if stripped != name:
-        stream["name"] = stripped
+    return availability.prune_dead(cfg, results)
 
 
 def _verify_availability(
@@ -874,29 +497,7 @@ def _verify_availability(
     title: str,
     exact_resolution: int = 0,
 ) -> list[Stream]:
-    """Pre-commit availability guard (ADR 0014, extended by ADR 0025; auto-pick only): the
-    Torrentio `[RD+]` cached marker is a crowdsourced guess that can be stale/evicted, yet
-    `cached` is the top-precedence rank term — so a dead cached release wins the auto-pick and
-    only `_ensure_playable` catches it, after cascading through resolves and possibly landing
-    in an expensive Tier-2 remux.
-
-    Instead, probe the top-N ranked url-ready candidates concurrently and let each verdict
-    carry exactly the consequence its evidence supports:
-
-    | verdict            | evidence                          | consequence                     |
-    | ------------------ | --------------------------------- | ------------------------------- |
-    | `live`             | serves a plausible first byte      | keep, ranking untouched         |
-    | `unknown` unusable | unreachable, or an incomplete file | drop for **this run** only      |
-    | `gone`             | the resource isn't there (4xx)     | drop **and** denylist (ADR 0025)|
-
-    Nothing that merely failed now is remembered, and nothing remembered rests on an inference.
-    A dropped cached candidate also loses its marker (`_demote_cached`), so any later ranking
-    over the same objects can't resurrect it as instantly-available. ADR 0025 drops the
-    cached-only restriction: the seeder count that gates uncached rows describes swarm health,
-    which says nothing about whether the debrid can serve the file. Bounded
-    (≤`_VERIFY_CACHED_CAP`) and memoized (each url probed once, reused by `_ensure_playable`).
-    No-op for the local backend (engine-served urls are buffer-gated). Mutates `results` in
-    place and returns the surviving list."""
+    """Pre-commit availability guard (ADR 0014 + 0025; auto-pick only)."""
     if cfg.playback_backend == "local":
         return results
     targets = [
@@ -905,20 +506,8 @@ def _verify_availability(
             cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
         )
         if s.get("url")
-    ][:_VERIFY_CACHED_CAP]
-    if not targets:
-        return results
-    with ThreadPoolExecutor(max_workers=min(len(targets), _VERIFY_CACHED_CAP)) as ex:
-        verdicts = list(ex.map(_probe_stream, targets))
-    unusable = []
-    for s, probe in zip(targets, verdicts, strict=True):
-        if not probe.usable:
-            _demote_cached(s)
-            unusable.append(id(s))
-    if not unusable:
-        return results
-    results[:] = [s for s in results if id(s) not in unusable]
-    return results
+    ][: availability.VERIFY_CAP]
+    return availability.drop_unusable(results, targets)
 
 
 def _ensure_playable(
@@ -930,22 +519,14 @@ def _ensure_playable(
     title: str = "",
     exact_resolution: int = 0,
 ) -> Stream:
-    """Debrid/auto only: the "cached" marker is a crowdsourced guess, so a ready url may be a
-    dead/expired link. If the chosen url isn't reachable, fall back — to local P2P when the
-    stream also carries an infoHash (hybrid 'auto'), else to the next-best reachable candidate.
-    Local backend urls are engine-served (`_wait_buffer` already gates them), so skip the check.
-
-    Last-resort net after `_verify_availability` (which already re-ranked around dead links up
-    front): this still runs so a url that dies between probe and play, or the non-auto paths,
-    are covered. Shares the `_PROBE_MEMO`, so a candidate already probed live by the verifier
-    isn't hit twice; a `gone` verdict here is denylisted too (ADR 0025)."""
+    """If the chosen debrid url is dead, fall back to P2P or the next reachable candidate."""
     if cfg.playback_backend == "local":
         return chosen
     url = chosen.get("url")
-    if not url or _probe_stream(chosen).usable:
+    if not url or availability.probe_stream(chosen).usable:
         return chosen
     print("nstream: la sorgente «cached» non risponde, ripiego…", file=sys.stderr)
-    if chosen.get("infoHash"):  # hybrid stream → local P2P fallback
+    if chosen.get("infoHash"):
         with contextlib.suppress(engine.EngineUnavailable):
             chosen["url"] = engine.resolve(cfg, chosen)
             return chosen
@@ -959,9 +540,9 @@ def _ensure_playable(
             continue
         tried += 1
         ready = _resolve_stream(cfg, s)
-        if ready and (not ready.get("url") or _probe_stream(ready).usable):
+        if ready and (not ready.get("url") or availability.probe_stream(ready).usable):
             return ready
-    return chosen  # nothing better reachable — let the player try anyway
+    return chosen
 
 
 def _p2p_guard(cfg: Config) -> bool:

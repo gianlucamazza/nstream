@@ -13,9 +13,10 @@ from typing import Protocol
 
 from . import api, state, ui
 from .caster import CastMeta
-from .config import Config, HistoryEntry, Meta, PlayOpts, Video
+from .config import Config, PlayOpts
 from .labels import display_title, episode_label
 from .picker import fzf, fzf_key
+from .types import HistoryEntry, Meta, Video
 
 # Above this many episodes (or when ≥2 seasons exist) the picker is season-first
 # so long series stay scannable. Below: flat list as before.

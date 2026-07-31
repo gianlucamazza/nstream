@@ -1,14 +1,15 @@
 """Unit tests for stream selection, resolution, and the auto-play vetting guards.
 
-Patches are applied on the `stream_select` module (where the helpers are looked up),
-not on `cli` — the orchestrator only calls `prepare_stream`/`pick_and_resolve`."""
+Patches are applied on the `stream_select` module (where the helpers are looked up).
+Cast-path vetting lives in `tests/test_cast_vet.py`."""
 
 from __future__ import annotations
 
 import pytest
 
-from nstream import net, state, stream_select
-from nstream.config import Config, PlayOpts, Stream
+from nstream import availability, net, state, stream_select
+from nstream.config import Config, PlayOpts
+from nstream.types import Stream
 
 
 def _gopts(*, cast: bool = False, quality: int | None = 0) -> PlayOpts:
@@ -28,9 +29,9 @@ def _gopts(*, cast: bool = False, quality: int | None = 0) -> PlayOpts:
 def _clear_probe_memo():
     """The availability probe memo is process-lifetime — clear it between tests so a url's
     verdict from one test can't leak into another that stubs `probe_url` differently."""
-    stream_select._PROBE_MEMO.clear()
+    availability.clear_memo()
     yield
-    stream_select._PROBE_MEMO.clear()
+    availability.clear_memo()
 
 
 @pytest.fixture(autouse=True)
@@ -380,7 +381,7 @@ def _ranked(n, *, reason=None):
 def test_pick_stream_cap_and_show_all(monkeypatch):
     cfg = Config(torrentio_base="tb", max_streams=20)
     monkeypatch.setattr(
-        stream_select.quality, "detect_caps", lambda *a, **k: stream_select.quality.Caps()
+        stream_select.quality, "detect_caps", lambda *a, **k: stream_select.quality.HwCaps()
     )
     playable, excluded = _ranked(25), _ranked(2, reason="camrip (cam)")
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, excluded))
@@ -409,7 +410,7 @@ def test_pick_stream_cap_and_show_all(monkeypatch):
 def test_pick_stream_auto_picks_best(monkeypatch):
     cfg = Config(torrentio_base="tb")
     monkeypatch.setattr(
-        stream_select.quality, "detect_caps", lambda *a, **k: stream_select.quality.Caps()
+        stream_select.quality, "detect_caps", lambda *a, **k: stream_select.quality.HwCaps()
     )
     playable = _ranked(3)
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
@@ -425,7 +426,7 @@ def test_pick_stream_cast_uses_cast_caps_and_audio(monkeypatch):
         raise AssertionError("detect_caps (GPU) must not be used when casting")
 
     monkeypatch.setattr(stream_select.quality, "detect_caps", boom)
-    sentinel = stream_select.quality.Caps()
+    sentinel = stream_select.quality.HwCaps()
     monkeypatch.setattr(stream_select.quality, "cast_caps", lambda: sentinel)
     seen = {}
     playable = _ranked(2)
@@ -445,54 +446,11 @@ def test_pick_stream_cast_uses_cast_caps_and_audio(monkeypatch):
 # --- cast stream selection (language switch) --------------------------------
 
 
-_S_ITA: Stream = {
-    "url": "http://ita",
-    "name": "[RD+] Torrentio\n1080p",
-    "title": "Film.2020.iTA.1080p.BluRay.DDP5.1.x264-GRP\n👤 20 💾 8.0 GB ⚙️ x",
-}
-_S_ENG_REMUX: Stream = {
-    "url": "http://eng-remux",
-    "name": "[RD+] Torrentio\n4k",
-    "title": "Film.2020.ENG.2160p.UHD.BluRay.REMUX.TrueHD-GRP\n👤 30 💾 60.0 GB ⚙️ x",
-}
-_S_ENG_WEBDL: Stream = {
-    "url": "http://eng-webdl",
-    "name": "[RD+] Torrentio\n1080p",
-    "title": "Film.2020.ENG.1080p.WEB-DL.DDP5.1.x264-GRP\n👤 10 💾 6.0 GB ⚙️ x",
-}
-
-
-def test_cast_languages_lists_compatible():
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
-    langs = stream_select.cast_languages(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
-    assert langs == ("ita", "eng")  # preferred order; eng present via the WEB-DL
-
-
-def test_cast_resolver_picks_compatible_release():
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
-    resolve = stream_select.cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
-    # ITA → the ITA release; missing → None. For ENG both releases carry Dolby audio the
-    # DMR can't decode (TrueHD / DDP), so both are castable via Tier-2 remux (default on).
-    # The remux resolution cap (default 1080p) then prefers the 1080p WEB-DL over the 4K
-    # TrueHD remux — a 4K remux would download tens of GB; the 1080p one is far cheaper.
-    assert resolve("ita") == "http://ita"
-    assert resolve("eng") == "http://eng-webdl"
-    assert resolve("ger") is None
-
-
-def test_cast_resolver_excludes_lossless_without_remux():
-    # With Tier-2 remux disabled, the old behaviour holds: TrueHD is dropped as unplayable,
-    # so ENG resolves to the (E-AC-3) WEB-DL instead of the 4K TrueHD remux.
-    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], cast_remux=False)
-    resolve = stream_select.cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
-    assert resolve("eng") == "http://eng-webdl"
-
-
 # --- cached-miss fallback (_ensure_playable) -------------------------------
 
 
 def test_ensure_playable_passthrough_when_reachable(monkeypatch):
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True))
+    monkeypatch.setattr(availability.net, "probe_url", _probing(all_live=True))
     chosen: Stream = {"url": "https://rd/u"}
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     assert stream_select._ensure_playable(cfg, [chosen], chosen, _gopts()) is chosen
@@ -500,7 +458,7 @@ def test_ensure_playable_passthrough_when_reachable(monkeypatch):
 
 def test_ensure_playable_local_skips_check(monkeypatch):
     monkeypatch.setattr(
-        stream_select.net,
+        availability.net,
         "probe_url",
         lambda u, **k: pytest.fail("no reachability check in local mode"),
     )
@@ -510,7 +468,7 @@ def test_ensure_playable_local_skips_check(monkeypatch):
 
 
 def test_ensure_playable_hybrid_falls_back_to_p2p(monkeypatch):
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing())
+    monkeypatch.setattr(availability.net, "probe_url", _probing())
     monkeypatch.setattr(
         stream_select.engine, "resolve", lambda cfg, s: "http://192.168.1.5:8090/stream"
     )
@@ -523,7 +481,7 @@ def test_ensure_playable_hybrid_falls_back_to_p2p(monkeypatch):
 def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
     dead: Stream = {"url": "https://rd/dead"}
     good: Stream = {"url": "https://rd/good"}
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing("https://rd/good"))
+    monkeypatch.setattr(availability.net, "probe_url", _probing("https://rd/good"))
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [dead, good])
     monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
@@ -536,9 +494,9 @@ def test_ensure_playable_next_candidate_when_no_infohash(monkeypatch):
 
 def test_probe_url_memoizes(monkeypatch):
     calls: list[str] = []
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True, seen=calls))
-    assert stream_select._probe_url("http://x") is True
-    assert stream_select._probe_url("http://x") is True
+    monkeypatch.setattr(availability.net, "probe_url", _probing(all_live=True, seen=calls))
+    assert availability.probe_url("http://x") is True
+    assert availability.probe_url("http://x") is True
     assert calls == ["http://x"]  # probed once, second call served from the memo
 
 
@@ -546,7 +504,7 @@ def test_verify_cached_demotes_dead_keeps_live(monkeypatch):
     dead: Stream = {"url": "https://rd/dead", "name": "[RD+] Torrentio\n4k"}
     live: Stream = {"url": "https://rd/live", "name": "[RD+] Torrentio\n1080p"}
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [dead, live])
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing("https://rd/live"))
+    monkeypatch.setattr(availability.net, "probe_url", _probing("https://rd/live"))
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     stream_select._verify_availability(cfg, [dead, live], cast=False, title="")
     assert "[RD+]" not in dead["name"]  # dead cached link demoted to uncached-equivalent
@@ -558,10 +516,10 @@ def test_verify_cached_bounded_to_cap(monkeypatch):
     streams: list[Stream] = [{"url": f"https://rd/{i}", "name": "[RD+] x\n1080p"} for i in range(8)]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: streams)
     probed: list[str] = []
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True, seen=probed))
+    monkeypatch.setattr(availability.net, "probe_url", _probing(all_live=True, seen=probed))
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     stream_select._verify_availability(cfg, streams, cast=False, title="")
-    assert len(probed) == stream_select._VERIFY_CACHED_CAP  # only the top-N are probed
+    assert len(probed) == availability.VERIFY_CAP  # only the top-N are probed
 
 
 def test_verify_probes_uncached_too(monkeypatch):
@@ -570,7 +528,7 @@ def test_verify_probes_uncached_too(monkeypatch):
     uncached: Stream = {"url": "https://rd/u", "name": "Torrentio\n1080p"}  # no [XX+] marker
     probed: list[str] = []
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [uncached])
-    monkeypatch.setattr(stream_select.net, "probe_url", _probing(all_live=True, seen=probed))
+    monkeypatch.setattr(availability.net, "probe_url", _probing(all_live=True, seen=probed))
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     stream_select._verify_availability(cfg, [uncached], cast=False, title="")
     assert probed == ["https://rd/u"]
@@ -579,7 +537,7 @@ def test_verify_probes_uncached_too(monkeypatch):
 def test_verify_cached_noop_local_backend(monkeypatch):
     cached: Stream = {"url": "https://rd/u", "name": "[RD+] x\n1080p"}
     monkeypatch.setattr(
-        stream_select.net, "probe_url",
+        availability.net, "probe_url",
         lambda u, **k: pytest.fail("no probe on the local backend"),
     )  # fmt: skip
     cfg = Config(torrentio_base="tb", playback_backend="local")
@@ -797,6 +755,25 @@ def _rstream(url, langs):
     return RankedStream({"url": url, "name": "S"}, StreamInfo(languages=frozenset(langs)), "")
 
 
+def test_pick_audio_verified_cap_checked_before_resolving(monkeypatch):
+    """The probe cap must be enforced BEFORE `_playable_url`: resolving an over-cap
+    candidate can cost a P2P buffering wait / a debrid add for a stream we discard."""
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream(f"u{i}", {"ita"}) for i in range(6)]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    resolved = []
+    monkeypatch.setattr(
+        stream_select, "_playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
+    )
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
+    stream, verified = stream_select.pick_audio_stream_verified(
+        cfg, [], "ita", cast=False, probe_cap=2
+    )
+    assert stream is None and verified is False  # every probed name-match mistagged
+    assert len(resolved) == 2  # over-cap candidates were never resolved
+
+
 def test_audio_languages_preferred_first(monkeypatch):
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
     playable = [_rstream("u1", {"eng"}), _rstream("u2", {"fre"}), _rstream("u3", {"ita", "eng"})]
@@ -874,488 +851,39 @@ def test_pick_audio_stream_verified_rejects_mistag(monkeypatch):
     assert stream is None and verified is False
 
 
-# --- cast audio-language enforcement (vet_cast_audio) ----------------------
-
-from nstream.tracks import Track  # noqa: E402
-
-
-def _ccfg() -> Config:
-    return Config(torrentio_base="t", primary_lang="ita", audio_langs=["ita", "eng"])
-
-
-def _plan(audio, target="ita"):
-    return stream_select._cast_plan_for({"url": "u"}, list(audio), target)
-
-
-def test_cast_plan_direct_when_first_track_is_target_decodable():
-    p = _plan([Track(1, "ita", "aac"), Track(2, "eng", "aac")])
-    assert p.mode == "direct" and p.audio_index == 0 and p.real_lang == "ita" and p.verified
-
-
-def test_cast_plan_remux_when_first_track_target_but_undecodable():
-    # Italian is the first track but AC-3 → DMR can't decode → remux track 0 to AAC.
-    p = _plan([Track(1, "ita", "ac3", 6), Track(2, "eng", "ac3", 6)])
-    assert p.mode == "remux" and p.audio_index == 0 and p.real_lang == "ita"
-
-
-def test_cast_plan_remux_selects_nondefault_target_track():
-    # Default track is English; Italian is buried at index 3 → remux selects it.
-    audio = [
-        Track(1, "eng", "dts", 6),
-        Track(2, "spa", "eac3", 6),
-        Track(3, "fra", "aac"),
-        Track(4, "ita", "eac3", 6),
-    ]
-    p = _plan(audio)
-    assert p.mode == "remux" and p.audio_index == 3 and p.real_lang == "ita"
-
-
-def test_cast_plan_remux_selects_nondefault_aac_track():
-    # Italian present as a non-default AAC track → still remux (DMR plays track 0) but copy-able.
-    p = _plan([Track(1, "eng", "aac"), Track(2, "ita", "aac")])
-    assert p.mode == "remux" and p.audio_index == 1
-
-
-def test_cast_plan_absent_when_no_target_track():
-    p = _plan([Track(1, "eng", "aac"), Track(2, "fra", "aac")])
-    assert p.mode == "absent" and p.real_lang == "eng"
-    assert p.needs_remux is False  # decodable AAC fallback → direct cast is fine
-
-
-def test_cast_plan_absent_dolby_track_still_needs_remux():
-    # Root cause of silent audio: target (ita) absent, fallback dub's first track is E-AC3.
-    # An `absent` plan must still flag a remux — a direct cast of Dolby goes out silent on the
-    # Default Media Receiver. (Regression for I.S.S.: untagged-language Blu-Ray, eng E-AC3.)
-    p = _plan([Track(1, "eng", "eac3", 6), Track(2, "fra", "ac3", 6)])
-    assert p.mode == "absent" and p.real_lang == "eng"
-    assert p.needs_remux is True
-
-
-def test_cast_plan_unprobeable_is_direct_unverified():
-    p = _plan([])
-    assert p.mode == "direct" and p.verified is False
-
-
-def test_cast_plan_no_preference_is_codec_only():
-    assert _plan([Track(1, "eng", "eac3", 6)], target="").mode == "remux"
-    assert _plan([Track(1, "eng", "aac")], target="").mode == "direct"
-
-
-def test_vet_cast_audio_returns_plan_without_reselect_when_present(monkeypatch):
-    monkeypatch.setattr(
-        stream_select, "_cast_audio_tracks", lambda cfg, s: [Track(1, "ita", "ac3", 6)]
-    )
-    called = []
-    monkeypatch.setattr(
-        stream_select, "_reselect_cast_for_lang", lambda *a, **k: called.append(1) or None
-    )
-    plan = stream_select.vet_cast_audio(_ccfg(), [], {"url": "u"}, "ita")
-    assert plan.mode == "remux" and called == []  # chosen had it → no reselect
-
-
-def test_vet_cast_audio_reselects_when_chosen_lacks_target(monkeypatch):
-    chosen: Stream = {"url": "eng-only"}
-    alt: Stream = {"url": "ita-rel"}
-
-    def tracks_of(cfg, s):
-        return [Track(1, "eng", "aac")] if s is chosen else [Track(1, "ita", "aac")]
-
-    monkeypatch.setattr(stream_select, "_cast_audio_tracks", tracks_of)
-    monkeypatch.setattr(
-        stream_select,
-        "_cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(alt, frozenset({"ita"}))],
-    )
-    plan = stream_select.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita")
-    assert plan.mode == "direct" and plan.stream is alt and plan.real_lang == "ita"
-
-
-def test_vet_cast_audio_absent_when_nobody_has_target(monkeypatch):
-    monkeypatch.setattr(
-        stream_select, "_cast_audio_tracks", lambda cfg, s: [Track(1, "eng", "aac")]
-    )
-    monkeypatch.setattr(
-        stream_select, "_cast_playable", lambda cfg, results, exact_resolution=0: []
-    )
-    plan = stream_select.vet_cast_audio(_ccfg(), [{"url": "u"}], {"url": "u"}, "ita")
-    assert plan.mode == "absent"
-
-
-class _R:
-    """Minimal RankedStream stand-in (stream + name-tag languages) for reselect tests."""
-
-    def __init__(self, stream, languages):
-        self.stream = stream
-        self.info = type("I", (), {"languages": languages})()
-
-
-def test_pick_audio_verified_cap_checked_before_resolving(monkeypatch):
-    """The probe cap must be enforced BEFORE `_playable_url`: resolving an over-cap
-    candidate can cost a P2P buffering wait / a debrid add for a stream we discard."""
-    cfg = Config(torrentio_base="tb")
-    playable = [_rstream(f"u{i}", {"ita"}) for i in range(6)]
-    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
-    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    resolved = []
-    monkeypatch.setattr(
-        stream_select, "_playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
-    )
-    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
-    stream, verified = stream_select.pick_audio_stream_verified(
-        cfg, [], "ita", cast=False, probe_cap=2
-    )
-    assert stream is None and verified is False  # every probed name-match mistagged
-    assert len(resolved) == 2  # over-cap candidates were never resolved
-
-
-def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
-    """Every track `und`: mirror the local guard (unverifiable → cast it) instead of
-    declaring the dub absent — the single mistagged track was often already right."""
-    p = _plan([Track(1, "und", "aac")])
-    assert p.mode == "direct" and p.verified is False and p.real_lang == "ita"
-    p = _plan([Track(1, "und", "ac3")])
-    assert p.mode == "remux" and p.verified is False  # codec still decides the tier
-
-
-def test_reselect_prefers_tagged_unverified_over_wrong_language(monkeypatch):
-    """The Dexter: Resurrection bug (2026-07-14): the top pick is a verified WRONG-language
-    stream (4K eng/rus) and every ita-tagged release is non-cached → unprobeable (empty
-    tracks → unverified direct). Reselect must return the name-tagged-ita release on benefit
-    of the doubt, NOT give up and let the caller cast the confirmed-Russian pick. This makes
-    the default cast consistent with the forced --audio-lang path (pick_audio_stream_verified),
-    which already accepts an unverified name tag."""
-    wrong: Stream = {"url": "rus-4k"}
-    ita_tagged: Stream = {"url": "ita-webrip"}
-
-    def tracks_of(cfg, s):
-        # the wrong pick probes fine (rus first); the ita release is unprobeable
-        return [Track(1, "rus", "eac3"), Track(2, "eng", "eac3")] if s is wrong else []
-
-    monkeypatch.setattr(stream_select, "_cast_audio_tracks", tracks_of)
-    monkeypatch.setattr(
-        stream_select, "_cast_playable",
-        lambda cfg, results, exact_resolution=0: [
-            _R(wrong, frozenset({"eng", "rus"})),
-            _R(ita_tagged, frozenset({"eng", "ita"})),  # name explicitly claims ita
-        ],
-    )  # fmt: skip
-    plan = stream_select.vet_cast_audio(_ccfg(), [wrong, ita_tagged], wrong, "ita")
-    assert plan.mode == "direct" and plan.stream is ita_tagged
-    assert plan.real_lang == "ita" and plan.verified is False  # honest: tagged, not confirmed
-
-
-def test_reselect_multi_unprobeable_not_trusted_as_target(monkeypatch):
-    """An unprobeable release tagged only `multi` (not the target language) is NOT a
-    benefit-of-the-doubt match — `multi` doesn't promise ita specifically. With no better
-    option, reselect returns None and the caller keeps the (absent) original plan."""
-    wrong: Stream = {"url": "rus-4k"}
-    multi: Stream = {"url": "multi-rel"}
-    monkeypatch.setattr(
-        stream_select, "_cast_audio_tracks",
-        lambda cfg, s: [Track(1, "rus", "eac3")] if s is wrong else [],
-    )  # fmt: skip
-    monkeypatch.setattr(
-        stream_select, "_cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(wrong, frozenset({"rus"})), _R(multi, frozenset({"multi"}))],
-    )  # fmt: skip
-    assert stream_select._reselect_cast_for_lang(_ccfg(), [], wrong, "ita") is None
-
-
-def test_reselect_verified_direct_beats_tagged_guess(monkeypatch):
-    """A verified ita release must win over an earlier unprobeable ita-tagged guess even if
-    the guess is ranked higher — confidence beats a name tag."""
-    wrong: Stream = {"url": "rus"}
-    guess: Stream = {"url": "ita-guess"}  # higher-ranked, unprobeable
-    real: Stream = {"url": "ita-real"}  # lower-ranked, verified ita
-
-    def tracks_of(cfg, s):
-        if s is wrong:
-            return [Track(1, "rus", "aac")]
-        return [] if s is guess else [Track(1, "ita", "aac")]
-
-    monkeypatch.setattr(stream_select, "_cast_audio_tracks", tracks_of)
-    monkeypatch.setattr(
-        stream_select, "_cast_playable",
-        lambda cfg, results, exact_resolution=0: [
-            _R(wrong, frozenset({"rus"})),
-            _R(guess, frozenset({"ita"})),
-            _R(real, frozenset({"ita"})),
-        ],
-    )  # fmt: skip
-    plan = stream_select._reselect_cast_for_lang(_ccfg(), [], wrong, "ita")
-    assert plan is not None and plan.stream is real and plan.verified is True
-
-
-# --- cast video-codec vetting (vet_cast_video, ADR 0017) ---------------------
-
-
-def _video_env(monkeypatch, codecs, candidates=()):
-    """Wire the probe seam: `codecs` maps url → probed video codec ("" = unprobeable);
-    `candidates` are the ranked cast-playable alternatives (as _R stand-ins)."""
-    monkeypatch.setattr(
-        stream_select.tracks, "probe_tracks",
-        lambda url: stream_select.tracks.Tracks(video_codec=codecs.get(url, "")),
-    )  # fmt: skip
-    monkeypatch.setattr(
-        stream_select, "_cast_playable", lambda cfg, results, exact_resolution=0: list(candidates)
-    )
-
-
-def test_vet_cast_video_passes_supported_and_unknown(monkeypatch):
-    good: Stream = {"url": "good"}
-    unknown: Stream = {"url": "nope"}
-    _video_env(monkeypatch, {"good": "h264"})
-    assert stream_select.vet_cast_video(_ccfg(), [], good) == (good, "")
-    # Unprobeable keeps the benefit of the doubt, mirroring the audio vetting's stance.
-    assert stream_select.vet_cast_video(_ccfg(), [], unknown) == (unknown, "")
-
-
-def test_vet_cast_video_reselects_castable_candidate(monkeypatch, capsys):
-    bad: Stream = {"url": "divx"}
-    alt: Stream = {"url": "h264-rel"}
-    _video_env(monkeypatch, {"divx": "mpeg4", "h264-rel": "h264"}, [_R(alt, frozenset())])
-    assert stream_select.vet_cast_video(_ccfg(), [bad, alt], bad) == (alt, "")
-    assert "MPEG4" in capsys.readouterr().err
-
-
-def test_vet_cast_video_reports_codec_when_no_candidate(monkeypatch):
-    """Nothing castable: the caller gets the codec verdict (mirror fallback or explicit
-    failure) — never a silent black cast."""
-    bad: Stream = {"url": "divx"}
-    worse: Stream = {"url": "vc1-rel"}
-    _video_env(monkeypatch, {"divx": "mpeg4", "vc1-rel": "vc1"}, [_R(worse, frozenset())])
-    assert stream_select.vet_cast_video(_ccfg(), [bad, worse], bad) == (bad, "mpeg4")
-
-
-def test_vet_cast_video_respects_probe_cap(monkeypatch):
-    bad: Stream = {"url": "divx"}
-    dead = [_R({"url": f"u{i}"}, frozenset()) for i in range(6)]
-    probed: list[str] = []
-    monkeypatch.setattr(
-        stream_select.tracks, "probe_tracks",
-        lambda url: probed.append(url)
-        or stream_select.tracks.Tracks(video_codec="mpeg4"),
-    )  # fmt: skip
-    monkeypatch.setattr(
-        stream_select, "_cast_playable", lambda cfg, results, exact_resolution=0: dead
-    )
-    stream, verdict = stream_select.vet_cast_video(_ccfg(), [], bad, probe_cap=2)
-    assert (stream, verdict) == (bad, "mpeg4")
-    assert len(probed) == 3  # chosen + exactly probe_cap candidates
-
-
-def test_reselect_for_lang_skips_undecodable_video(monkeypatch):
-    """Live regression (Coherence, 2026-07-16): the ITA-dub reselect picked a cached DivX
-    rip the DMR renders as a black screen. A candidate whose probed video the receiver
-    can't decode is not a candidate — silent-wrong-language must not become black-screen."""
-    chosen: Stream = {"url": "eng-only"}
-    divx: Stream = {"url": "divx-ita"}
-
-    def probe(url):
-        if url == "divx-ita":
-            return stream_select.tracks.Tracks(audio=[Track(1, "ita", "aac")], video_codec="mpeg4")
-        return stream_select.tracks.Tracks(audio=[Track(1, "eng", "aac")], video_codec="h264")
-
-    monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
-    monkeypatch.setattr(
-        stream_select, "_cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(divx, frozenset({"ita"}))],
-    )  # fmt: skip
-    plan = stream_select.vet_cast_audio(_ccfg(), [chosen, divx], chosen, "ita")
-    assert plan.stream is chosen and plan.mode == "absent"  # fallback + safety subs, not black
-
-
-# --- cast container vetting (vet_cast_container, ADR 0022) --------------------
-
-
-def _container_env(monkeypatch, probes, candidates=()):
-    """Wire the probe seam for container vetting: `probes` maps url → (ffprobe format_name,
-    video_codec[, audio_tracks]). `candidates` are the ranked cast-playable alternatives."""
-
-    def probe(url):
-        fmt, vc, *rest = probes.get(url, ("", "", []))
-        return stream_select.tracks.Tracks(
-            container=fmt, video_codec=vc, audio=list(rest[0]) if rest else []
-        )
-
-    monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
-    monkeypatch.setattr(
-        stream_select, "_cast_playable", lambda cfg, results, exact_resolution=0: list(candidates)
-    )
-
-
-def test_vet_cast_container_passes_castable(monkeypatch):
-    """mp4/webm/unknown containers cast directly (no rewrap flag)."""
-    mp4: Stream = {"url": "http://x/a.mp4"}
-    webm: Stream = {"url": "http://x/a.webm"}
-    unknown: Stream = {"url": "http://x/resolve/id"}  # no extension, probe empty
-    _container_env(monkeypatch, {"http://x/a.mp4": ("mov,mp4,m4a,3gp,3g2,mj2", "hevc")})
-    assert stream_select.vet_cast_container(_ccfg(), [], mp4, "ita") == (mp4, False)
-    assert stream_select.vet_cast_container(_ccfg(), [], webm, "ita") == (webm, False)
-    assert stream_select.vet_cast_container(_ccfg(), [], unknown, "ita") == (unknown, False)
-
-
-def test_vet_cast_container_reselects_verified_target_mp4_twin(monkeypatch, capsys):
-    """An MKV pick swaps only to an MP4 that is a VERIFIED direct cast in the target language
-    (its real first track is ita/aac) — a free direct cast, no rewrap."""
-    mkv: Stream = {"url": "http://x/a.mkv"}
-    mp4: Stream = {"url": "http://x/b.mp4"}
-    _container_env(
-        monkeypatch,
-        {
-            "http://x/a.mkv": ("matroska,webm", "hevc"),
-            "http://x/b.mp4": ("mov,mp4,m4a", "hevc", [Track(1, "ita", "aac")]),
-        },
-        [_R(mp4, frozenset({"ita"}))],
-    )
-    assert stream_select.vet_cast_container(_ccfg(), [mkv, mp4], mkv, "ita") == (mp4, False)
-    assert "MP4" in capsys.readouterr().err
-
-
-def test_vet_cast_container_keeps_mkv_over_wrong_language_multi_mp4(monkeypatch):
-    """Regression (Independence Day, ita→spa): a name-`multi` MP4 whose REAL first track is
-    Spanish must NOT preempt the Italian rewrap. Keep the mkv (→ rewrap, ita selected later)."""
-    mkv: Stream = {"url": "http://x/a.mkv"}
-    multi_mp4: Stream = {"url": "http://x/b.mp4"}
-    _container_env(
-        monkeypatch,
-        {
-            "http://x/a.mkv": ("matroska,webm", "hevc"),
-            "http://x/b.mp4": (
-                "mov,mp4,m4a",
-                "hevc",
-                [Track(1, "spa", "aac"), Track(2, "eng", "aac")],
-            ),
-        },
-        [_R(multi_mp4, frozenset({"multi", "spa"}))],
-    )
-    assert stream_select.vet_cast_container(_ccfg(), [mkv, multi_mp4], mkv, "ita") == (mkv, True)
-
-
-def test_vet_cast_container_no_twin_flags_rewrap(monkeypatch):
-    """No compatible-container candidate → keep the mkv and return True (caller rewraps)."""
-    mkv: Stream = {"url": "http://x/a.mkv"}
-    _container_env(monkeypatch, {"http://x/a.mkv": ("matroska,webm", "hevc")})
-    assert stream_select.vet_cast_container(_ccfg(), [mkv], mkv, "ita") == (mkv, True)
-
-
-def test_vet_cast_container_skips_bad_video_candidate(monkeypatch):
-    """An mp4 twin whose video the DMR can't render is not a candidate (would trade a
-    rewrap for a black screen) → fall back to the rewrap flag."""
-    mkv: Stream = {"url": "http://x/a.mkv"}
-    mp4_divx: Stream = {"url": "http://x/b.mp4"}
-    _container_env(
-        monkeypatch,
-        {"http://x/a.mkv": ("matroska,webm", "hevc"), "http://x/b.mp4": ("mov,mp4,m4a", "mpeg4")},
-        [_R(mp4_divx, frozenset({"ita"}))],
-    )
-    assert stream_select.vet_cast_container(_ccfg(), [mkv, mp4_divx], mkv, "ita") == (mkv, True)
-
-
-def test_vet_cast_container_lying_mp4_extension(monkeypatch):
-    """A .mp4 that ffprobe reveals as Matroska is treated INCOMPATIBLE (rewrap), not black cast."""
-    liar: Stream = {"url": "http://x/a.mp4"}
-    _container_env(monkeypatch, {"http://x/a.mp4": ("matroska,webm", "hevc")})
-    assert stream_select.vet_cast_container(_ccfg(), [liar], liar, "ita") == (liar, True)
-
-
-# --- per-invocation constraint parity (ADR 0021) -----------------------------
-
-
-def _r_res(url: str, langs: frozenset[str], res: int):
-    r = _R({"url": url}, langs)
-    r.info.resolution = res
-    return r
-
-
-def test_reselect_for_lang_honors_exact_resolution(monkeypatch):
-    """THE parity defect (3 field incidents in one day): the language reselect must not
-    return a release the user's --quality excluded. The filter is applied by
-    _cast_playable itself; here we pin that the exact value REACHES it."""
-    seen = {}
-
-    def fake_playable(cfg, results, exact_resolution=0):
-        seen["exact"] = exact_resolution
-        return []
-
-    monkeypatch.setattr(stream_select, "_cast_playable", fake_playable)
-    monkeypatch.setattr(stream_select, "_cast_audio_tracks", lambda cfg, s: [])
-    stream_select._reselect_cast_for_lang(_ccfg(), [], {"url": "x"}, "ita", exact_resolution=1080)
-    assert seen["exact"] == 1080
-
-
-def test_vet_cast_audio_threads_exact_to_reselect(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        stream_select, "_cast_audio_tracks", lambda cfg, s: [Track(1, "eng", "aac")]
-    )
-    monkeypatch.setattr(
-        stream_select, "_reselect_cast_for_lang",
-        lambda cfg, results, cur, lang, exact_resolution=0: seen.update(exact=exact_resolution)
-        or None,
-    )  # fmt: skip
-    stream_select.vet_cast_audio(_ccfg(), [], {"url": "u"}, "ita", exact_resolution=1080)
-    assert seen["exact"] == 1080
-
-
-def test_vet_cast_video_threads_exact(monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        stream_select.tracks, "probe_tracks",
-        lambda url: stream_select.tracks.Tracks(video_codec="mpeg4"),
-    )  # fmt: skip
-    monkeypatch.setattr(
-        stream_select, "_cast_playable",
-        lambda cfg, results, exact_resolution=0: seen.update(exact=exact_resolution) or [],
-    )  # fmt: skip
-    stream_select.vet_cast_video(_ccfg(), [], {"url": "divx"}, exact_resolution=720)
-    assert seen["exact"] == 720
-
-
-def test_cast_resolver_and_languages_thread_exact(monkeypatch):
-    seen = []
-    monkeypatch.setattr(
-        stream_select, "_playable_set",
-        lambda cfg, results, *, cast, exact_resolution=0: seen.append(exact_resolution) or [],
-    )  # fmt: skip
-    stream_select.cast_languages(_ccfg(), [], exact_resolution=1080)
-    stream_select.cast_resolver(_ccfg(), [], exact_resolution=1080)
-    assert seen == [1080, 1080]
-
-
 # --- dead-source classification & denylist (ADR 0025) ----------------------
 
 
 def test_source_key_prefers_infohash():
-    assert stream_select.source_key({"infoHash": "ABC123"}) == "abc123"
-    assert stream_select.source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
+    assert availability.source_key({"infoHash": "ABC123"}) == "abc123"
+    assert availability.source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
     assert (
-        stream_select.source_key({"name": "[RD+] Torrentio\n1080p"}) == "name:[RD+] Torrentio 1080p"
+        availability.source_key({"name": "[RD+] Torrentio\n1080p"}) == "name:[RD+] Torrentio 1080p"
     )
-    assert stream_select.source_key({}) == ""
+    assert availability.source_key({}) == ""
 
 
 def test_expected_bytes_from_announced_size():
-    assert stream_select._expected_bytes({"name": "x\n💾 7.16 GB"}) == int(7.16 * 1024**3)
-    assert stream_select._expected_bytes({"name": "x\n1080p"}) == 0
+    assert availability.expected_bytes({"name": "x\n💾 7.16 GB"}) == int(7.16 * 1024**3)
+    assert availability.expected_bytes({"name": "x\n1080p"}) == 0
 
 
 def test_probe_marks_gone_source_dead(monkeypatch, capsys):
     monkeypatch.setattr(
-        stream_select.net,
+        availability.net,
         "probe_url",
         lambda u, **k: net.Probe(net.GONE, status=404, reason="HTTP 404"),
     )
     stream: Stream = {"url": "https://rd/x", "infoHash": "DEAD01", "name": "[RD+] x\n1080p"}
-    assert stream_select._probe_stream(stream).dead is True
+    assert availability.probe_stream(stream).dead is True
     assert state.is_dead("dead01") is True  # remembered across runs
     assert "non più disponibile" in capsys.readouterr().err
 
 
 def test_probe_does_not_denylist_transient_failure(monkeypatch):
-    monkeypatch.setattr(stream_select.net, "probe_url", lambda u, **k: net.Probe(net.UNKNOWN))
+    monkeypatch.setattr(availability.net, "probe_url", lambda u, **k: net.Probe(net.UNKNOWN))
     stream: Stream = {"url": "https://rd/x", "infoHash": "FLAKY1"}
-    assert stream_select._probe_stream(stream).usable is False
+    assert availability.probe_stream(stream).usable is False
     assert state.is_dead("flaky1") is False  # a hiccup must never ban a source
 
 
@@ -1364,7 +892,7 @@ def test_prune_dead_filters_known_removed():
     alive: Stream = {"infoHash": "ZZZ", "url": "https://rd/ok"}
     dead: Stream = {"infoHash": "ABC123", "url": "https://rd/gone"}
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    kept, dropped = stream_select.prune_dead(cfg, [dead, alive])
+    kept, dropped = availability.prune_dead(cfg, [dead, alive])
     assert kept == [alive] and dropped == 1
 
 
@@ -1372,7 +900,7 @@ def test_prune_dead_noop_on_local_backend():
     state.mark_dead("abc123", "HTTP 404")
     dead: Stream = {"infoHash": "ABC123"}
     cfg = Config(torrentio_base="tb", playback_backend="local")
-    assert stream_select.prune_dead(cfg, [dead]) == ([dead], 0)
+    assert availability.prune_dead(cfg, [dead]) == ([dead], 0)
 
 
 def test_verify_drops_gone_and_denylists(monkeypatch):
@@ -1381,7 +909,7 @@ def test_verify_drops_gone_and_denylists(monkeypatch):
     results = [gone, live]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
     monkeypatch.setattr(
-        stream_select.net,
+        availability.net,
         "probe_url",
         lambda u, **k: (
             net.Probe(net.LIVE) if u == "https://rd/live" else net.Probe(net.GONE, status=404)
@@ -1398,7 +926,7 @@ def test_prepare_stream_returns_none_when_all_sources_removed(monkeypatch):
     results = [gone]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
     monkeypatch.setattr(
-        stream_select.net, "probe_url", lambda u, **k: net.Probe(net.GONE, status=410)
+        availability.net, "probe_url", lambda u, **k: net.Probe(net.GONE, status=410)
     )
     monkeypatch.setattr(
         stream_select, "_pick_stream", lambda *a, **k: pytest.fail("nothing left to pick")
@@ -1433,7 +961,7 @@ def test_incomplete_source_is_skipped_but_never_denylisted(monkeypatch):
     Real-Debrid was still fetching it. Skipping it this run is right; remembering it for 30
     days would lock out a title that is about to work."""
     monkeypatch.setattr(
-        stream_select.net,
+        availability.net,
         "probe_url",
         lambda url, **_kw: net.Probe(net.UNKNOWN, status=206, reason="file incompleto"),
     )
@@ -1442,7 +970,7 @@ def test_incomplete_source_is_skipped_but_never_denylisted(monkeypatch):
         "infoHash": "DL1",
         "name": "[RD download] Torrentio\n1080p 💾 7.16 GB",
     }
-    probe = stream_select._probe_stream(downloading)
+    probe = availability.probe_stream(downloading)
     assert not probe.usable and not probe.dead
     assert not state.is_dead("dl1")
 
@@ -1455,7 +983,7 @@ def test_verify_drops_unusable_for_this_run_without_remembering(monkeypatch):
     results = [flaky, live]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
     monkeypatch.setattr(
-        stream_select.net,
+        availability.net,
         "probe_url",
         lambda u, **k: net.Probe(net.LIVE) if u.endswith("live") else net.Probe(net.UNKNOWN),
     )

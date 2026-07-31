@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from nstream import series
-from nstream.config import Config, HistoryEntry, Meta, PlayOpts, Video
+from nstream.config import Config, PlayOpts
+from nstream.types import HistoryEntry, Meta, Video
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 

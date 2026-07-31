@@ -11,7 +11,7 @@ import shutil
 from datetime import UTC, datetime
 
 from . import quality, tracks, ui
-from .config import HistoryEntry, Meta, Stream, Video
+from .types import HistoryEntry, Meta, Stream, Video
 
 
 def meta_label(m: Meta) -> str:

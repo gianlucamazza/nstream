@@ -17,9 +17,10 @@ from dataclasses import dataclass
 from typing import cast as typecast
 
 from . import api, log, oshash, srt, subalign, tracks, ui
-from .config import Config, PlayOpts, Stream, Subtitle
+from .config import Config, PlayOpts
 from .labels import audio_summary, sub_summary, track_label
 from .picker import fzf
+from .types import Stream, Subtitle
 
 _log = log.get_logger("subs")
 

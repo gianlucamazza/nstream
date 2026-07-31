@@ -94,7 +94,7 @@ def _probe_meta(url: str):
 
 def remux_for_cast(url: str, cfg: Config, *, audio_index: int, size_gb: float = 0.0) -> str | None:
     """Remux `url` to a complete temp MP4 keeping the audio track at `audio_index` (the cast
-    decision in `stream_select.vet_cast_audio` picks it by language), and return the temp
+    decision in `cast_vet.vet_cast_audio` picks it by language), and return the temp
     path — or None on failure / a refused size guard (caller then degrades to a direct cast).
     Probes once for the channel count (bitrate), video-stream count (DV7 warning) and duration
     (progress line); `size_gb` gates the disk and big-download guards. The url is passed only

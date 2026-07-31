@@ -32,7 +32,8 @@ import urllib.request
 from pathlib import Path
 
 from . import log, ui
-from .config import Config, Stream
+from .config import Config
+from .types import Stream
 
 _log = log.get_logger("engine")
 

@@ -13,7 +13,8 @@ import threading
 import pytest
 
 from nstream import cast_flow, cli, subs
-from nstream.config import Config, HistoryEntry, Meta
+from nstream.config import Config
+from nstream.types import HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -859,7 +860,7 @@ def test_main_movies_series_mutually_exclusive(monkeypatch):
 #
 # These exercise the interactive wrapper end-to-end through the shared decision tree.
 # The tree now lives in cast_flow, so the seams are module attributes reachable from it:
-# cast_flow.remux / cast_flow.mirror / cli.stream_select (same module objects cast_flow imports) plus
+# cast_flow.remux / cast_flow.mirror / cast_flow.cast_vet plus
 # cast_flow.caster ("cast") and cast_flow.subs ("auto_subs"). Direct helper tests live in
 # tests/test_cast_flow.py; here we pin the cli wiring.
 
@@ -877,7 +878,7 @@ def _cast_opts(**kw):
 
 
 def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
-    return cli.stream_select.CastAudioPlan(mode, stream, audio_index, real_lang, verified=verified)
+    return cast_flow.cast_vet.CastAudioPlan(mode, stream, audio_index, real_lang, verified=verified)
 
 
 def _boom(msg):
@@ -891,20 +892,25 @@ def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
     """Hermetic _play_on_cast: always stub vet_cast_audio (the real one ffprobes the url)
     plus the in-cast switch helpers and auto_subs. Returns the spy dict."""
     seen = {"subs": []}
-    monkeypatch.setattr(cli.stream_select, "vet_cast_audio", lambda *a, **k: plan)
+    monkeypatch.setattr(cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: plan)
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "vet_cast_video",
+        lambda cfg, results, chosen, exact_resolution=0: (chosen, ""),
+    )
     # Container vetting (ADR 0022): treat the container as castable so these tests keep the
     # direct/mirror paths they assert (the mkv-url stream would otherwise route to a rewrap).
     monkeypatch.setattr(
-        cli.stream_select,
+        cast_flow.cast_vet,
         "vet_cast_container",
         lambda cfg, results, chosen, target, exact_resolution=0: (chosen, False),
     )
-    monkeypatch.setattr(cli.stream_select, "cast_container", lambda cfg, stream: "mp4")
+    monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, stream: "mp4")
     monkeypatch.setattr(
-        cli.stream_select, "cast_languages", lambda cfg, results, exact_resolution=0: langs
+        cast_flow.cast_vet, "cast_languages", lambda cfg, results, exact_resolution=0: langs
     )
     monkeypatch.setattr(
-        cli.stream_select,
+        cast_flow.cast_vet,
         "cast_resolver",
         lambda cfg, results, exact_resolution=0: lambda lang: "http://u2",
     )
@@ -1037,7 +1043,7 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
     _call_cast(_cast_opts(), stream)
     assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
     monkeypatch.setattr(
-        cli.stream_select, "cast_languages", lambda cfg, results, exact_resolution=0: ("ita",)
+        cast_flow.cast_vet, "cast_languages", lambda cfg, results, exact_resolution=0: ("ita",)
     )
     _call_cast(_cast_opts(), stream)
     assert seen["langs"] == () and seen["resolver"] is None

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from nstream import explain, tracks
-from nstream.config import Config, Stream
+from nstream.config import Config
+from nstream.types import Stream
 
 CFG = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
 

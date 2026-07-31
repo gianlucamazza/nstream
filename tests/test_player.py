@@ -122,7 +122,7 @@ def test_hwdec_auto_upgraded_to_detected(monkeypatch):
         player, "_mpv_conf_get", lambda opt: "auto-safe" if opt == "hwdec" else None
     )
     monkeypatch.setattr(
-        player.quality, "detect_caps", lambda *a, **k: player.quality.Caps(vaapi=True)
+        player.quality, "detect_caps", lambda *a, **k: player.quality.HwCaps(vaapi=True)
     )
     monkeypatch.setattr(player.quality, "preferred_hwdec", lambda caps: "vaapi")
     assert player._hwdec_defaults(Config(torrentio_base="tb", hwdec="auto-safe")) == [
@@ -136,7 +136,7 @@ def test_hwdec_auto_no_detection_defers_to_conf(monkeypatch):
         player, "_mpv_conf_get", lambda opt: "auto-safe" if opt == "hwdec" else None
     )
     monkeypatch.setattr(
-        player.quality, "detect_caps", lambda *a, **k: player.quality.Caps(vaapi=False)
+        player.quality, "detect_caps", lambda *a, **k: player.quality.HwCaps(vaapi=False)
     )
     monkeypatch.setattr(player.quality, "preferred_hwdec", lambda caps: None)
     assert player._hwdec_defaults(Config(torrentio_base="tb", hwdec="auto-safe")) == []

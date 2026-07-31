@@ -47,10 +47,10 @@ class Tracks:
     n_video: int = 0
     duration: float = 0.0
     # Real codec of the first video stream ("" = no video/probe failed) — the cast video
-    # vetting (`stream_select.vet_cast_video`, ADR 0017) reads it from the same probe.
+    # vetting (`cast_vet.vet_cast_video`, ADR 0017) reads it from the same probe.
     video_codec: str = ""
     # Raw ffprobe `format_name` (e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2") — the cast
-    # container vetting (`stream_select.vet_cast_container`, ADR 0022) reads it from the same
+    # container vetting (`cast_vet.vet_cast_container`, ADR 0022) reads it from the same
     # probe to confirm the filename extension (a lying .mp4 that is really Matroska).
     container: str = ""
 

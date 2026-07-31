@@ -1,0 +1,117 @@
+"""Source availability: classified probes, dead-source denylist, drop unusable.
+
+Owns ADR 0014/0025 mechanics that decide whether a resolved URL is usable *now* and
+whether a release is remembered as gone. Ranking/resolve stay in `stream_select`;
+this module is the probe+denylist leaf they call.
+
+Public: `source_key`, `prune_dead`, `probe_stream`, `probe_url`, `drop_unusable`,
+`expected_bytes`, `VERIFY_CAP`, `clear_memo`.
+"""
+
+from __future__ import annotations
+
+import sys
+from concurrent.futures import ThreadPoolExecutor
+
+from . import log, net, quality, state
+from .config import Config
+from .types import Stream
+
+_log = log.get_logger("availability")
+
+# Process-lifetime memo: a resolved url's availability does not change within a run.
+_PROBE_MEMO: dict[str, net.Probe] = {}
+VERIFY_CAP = 5  # top-N candidates to probe before committing the auto-pick
+
+
+def source_key(stream: Stream) -> str:
+    """Stable identity of a release across addons (ADR 0025): infoHash first (the same torrent
+    served by Torrentio and Comet keys identically), then the filename hint, then the display
+    name. Empty when the row carries none of them — such a stream is simply never denylisted."""
+    ih = (stream.get("infoHash") or "").strip().lower()
+    if ih:
+        return ih
+    hints = stream.get("behaviorHints") or {}
+    filename = (hints.get("filename") or "").strip() if isinstance(hints, dict) else ""
+    if filename:
+        return f"file:{filename}"
+    name = " ".join((stream.get("name") or "").split())
+    return f"name:{name}" if name else ""
+
+
+def expected_bytes(stream: Stream) -> int:
+    """Announced release size in bytes (0 when the name carries no size), used by the probe
+    to tell a real file from a placeholder served in place of a removed one."""
+    size_gb = quality.parse_stream(stream).size_gb
+    return int(size_gb * 1024**3) if size_gb > 0 else 0
+
+
+def probe_stream(stream: Stream) -> net.Probe:
+    """Memoized, classified availability probe for a resolved stream.
+    Only a `gone` verdict is persisted: it proves the source isn't there."""
+    url = stream.get("url") or ""
+    probe = _PROBE_MEMO.get(url)
+    if probe is None:
+        probe = net.probe_url(url, expected_bytes=expected_bytes(stream))
+        _PROBE_MEMO[url] = probe
+        if probe.dead:
+            remember_dead(stream, probe)
+    return probe
+
+
+def remember_dead(stream: Stream, probe: net.Probe) -> None:
+    """Persist a proven-removed source and say so once, on stderr."""
+    key = source_key(stream)
+    if not key or state.is_dead(key):
+        return
+    name_line = next(iter((stream.get("name") or "").splitlines()), "") or key
+    print(f"nstream: sorgente non più disponibile ({probe.reason}) — {name_line}", file=sys.stderr)
+    _log.info("sorgente morta: %s (%s)", key, probe.reason)
+    state.mark_dead(key, probe.reason)
+
+
+def probe_url(url: str) -> bool:
+    """Boolean façade for callers that only ask "can I play this now?"."""
+    return probe_stream({"url": url}).usable
+
+
+def prune_dead(cfg: Config, results: list[Stream]) -> tuple[list[Stream], int]:
+    """Drop sources previously proven removed (ADR 0025) before ranking.
+    No-op for the local backend and when the denylist is empty."""
+    if cfg.playback_backend == "local" or not results:
+        return results, 0
+    dead = state.dead_sources()
+    if not dead:
+        return results, 0
+    kept = [s for s in results if source_key(s) not in dead]
+    return kept, len(results) - len(kept)
+
+
+def demote_cached(stream: Stream) -> None:
+    """Strip the debrid cached marker so ranking no longer treats it as instant."""
+    name = stream.get("name") or ""
+    stripped = quality._CACHED_RE.sub("", name).strip()
+    if stripped != name:
+        stream["name"] = stripped
+
+
+def drop_unusable(results: list[Stream], targets: list[Stream]) -> list[Stream]:
+    """Probe `targets` concurrently; demote and drop any unusable from `results`."""
+    if not targets:
+        return results
+    with ThreadPoolExecutor(max_workers=min(len(targets), VERIFY_CAP)) as ex:
+        verdicts = list(ex.map(probe_stream, targets))
+    unusable = []
+    for s, probe in zip(targets, verdicts, strict=True):
+        if not probe.usable:
+            demote_cached(s)
+            unusable.append(id(s))
+    if not unusable:
+        return results
+    results[:] = [s for s in results if id(s) not in unusable]
+    return results
+
+
+def clear_memo() -> None:
+    """Test seam: the probe memo is process-lifetime."""
+    _PROBE_MEMO.clear()
