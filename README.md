@@ -371,15 +371,24 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections (Generi…, paginated browse), resume                                         |
 | `src/nstream/headless.py`      | headless `--json` subsystem: non-interactive play/cast/probe/stop/status, one JSON object on stdout (no fzf, no TTY)                           |
 | `src/nstream/series.py`        | series-only flow: season-first/episode picker, binge auto-advance, per-episode resume (injected player)                                        |
-| `src/nstream/stream_select.py` | stream pick/resolve + vetting guards (`prepare_stream`); cached-miss fallback, P2P + audio-language guards                                     |
+| `src/nstream/stream_select.py` | stream pick/resolve + auto-play guards (`prepare_stream`); quality + primary-lang guard                                                       |
+| `src/nstream/availability.py`  | classified URL probes + dead-source denylist (ADR 0014/0025)                                                                 |
+| `src/nstream/types.py`         | domain TypedDicts (`Meta`/`Stream`/`HistoryEntry`/…)                                                                         |
+| `src/nstream/cli_args.py`      | argparse construction (`build_parser`)                                                                                        |
+| `src/nstream/headless_play.py` | headless one-title play/cast body + success JSON                                                                              |
+| `src/nstream/cast_vet.py`      | cast-path stream vetting: audio plan, video codec, container (`vet_cast_*`, `CastAudioPlan`)                                                   |
 | `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles) + pre-play `choose_tracks` menu                                                                   |
+| `src/nstream/subalign.py`      | native subtitle alignment engine (ADR 0020)                                                                                                    |
+| `src/nstream/srt.py`           | SRT/WebVTT helpers                                                                                                                             |
+| `src/nstream/oshash.py`        | OpenSubtitles file hash                                                                                                                        |
+| `src/nstream/sources.py`       | curated stream-source presets + playable-shape filter (ADR 0024)                                                                               |
 | `src/nstream/labels.py`        | display-label formatting for the fzf/mpv UI                                                                                                    |
 | `src/nstream/api.py`           | addon resource dispatch with retry/backoff, gzip, concurrent per-addon fetch, short in-process metadata cache (streams/subtitles never cached) |
 | `src/nstream/addons.py`        | Stremio addon-protocol client (manifests, dispatch, cache)                                                                                     |
 | `src/nstream/net.py`           | retrying HTTP-JSON client (backoff, `Retry-After`) shared by `api`/`addons`                                                                    |
 | `src/nstream/debrid.py`        | native debrid resolver (TorBox/Premiumize API: cache check + resolve) for the `native` backend                                                 |
 | `src/nstream/engine.py`        | local P2P backend: drives an external TorrServer (spawn, add by infoHash, buffer wait)                                                         |
-| `src/nstream/quality.py`       | hardware-aware stream parsing/ranking (vainfo caps, filter)                                                                                    |
+| `src/nstream/quality.py`       | hardware-aware stream parsing/ranking (`HwCaps` via vainfo, filter)                                                                            |
 | `src/nstream/player.py`        | local mpv playback: launch, IPC position tracking, hwdec/quiet/lang defaults                                                                   |
 | `src/nstream/caster.py`        | Chromecast playback: device resolution, cast (castbridge or catt), status poll                                                                 |
 | `src/nstream/cast_flow.py`     | shared cast decision tree (`run_cast`): audio vetting → mirror gate → Tier-2 remux → direct cast                                               |
@@ -397,10 +406,11 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/explain.py`       | `--explain` diagnostic renderer (why a stream/audio was auto-picked)                                                                           |
 | `src/nstream/settings.py`      | native fzf settings menu (config + addons)                                                                                                     |
 | `src/nstream/config.py`        | config load/save (XDG, atomic 0600) + payload types                                                                                            |
-| `src/nstream/state.py`         | watch-history persistence, local watchlist and recent searches                                                                                 |
+| `src/nstream/state/`           | package: history/library, cast session, dead-source denylist (ADR 0025)                                                                        |
 | `src/nstream/log.py`           | rotating file log + debug console; redacting formatter (token never logged)                                                                    |
 | `src/nstream/util.py`          | stdlib-only low-level helpers (atomic write, JSON load, subprocess)                                                                            |
 | `src/nstream/nstream.lua`      | mpv overlay for the next-episode countdown (loaded via `--script`)                                                                             |
+| `docs/architecture.md`         | module map / domain clusters (source of truth for layout)                                                                                      |
 | `nstream-fuzzel`               | thin launcher → opens the TUI home menu in foot                                                                                                |
 | `nstream.desktop`              | app launcher entry                                                                                                                             |
 | `pyproject.toml`               | metadata, entry point, ruff/ty config                                                                                                          |

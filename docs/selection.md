@@ -96,7 +96,7 @@ exactly these terms per stream.
 The receiver plays HEVC/4K/HDR natively, so after audio the **resolution** wins; H.264-vs-HEVC
 no longer matters. Native-AAC titles are never capped (they cast direct, no download).
 
-After ranking, the cast pick passes through `stream_select.vet_cast_audio`, which **enforces the
+After ranking, the cast pick passes through `cast_vet.vet_cast_audio`, which **enforces the
 audio language**: the Default Media Receiver plays a file's first track and can't switch embedded
 audio tracks (Google Cast: only _text_ tracks are selectable without a custom receiver), so it
 ffprobes the dub and either casts directly (first track already primary + decodable), remuxes to
