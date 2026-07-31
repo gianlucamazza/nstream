@@ -50,6 +50,7 @@ class StreamInfo:
     release_name: str = ""  # title's first line (torrent filename), for dedup
     info_hash: str = ""  # pure-torrent streams only; resolved to a url by the engine
     file_idx: int | None = None  # which file in the torrent (None = largest)
+    has_url: bool = False  # a ready debrid url: playable without touching the swarm
 
 
 _RES_PATTERNS = (
@@ -148,10 +149,13 @@ def _likely_needs_remux(info: StreamInfo) -> bool:
     )
 
 
-# Torrentio marks an instantly-available (cached) debrid stream with a per-provider
-# prefix: [RD+] (RealDebrid), [AD+], [PM+], [TB+], [Putio+]… ("+" = cached, vs
-# "[RD download]"). Provider-agnostic so any debrid's cached streams are detected.
-_CACHED_RE = re.compile(r"\[[A-Za-z]{2,6}\+\]")
+# Addons mark an instantly-available (cached) debrid stream with a per-provider prefix,
+# but the glyph differs by addon dialect: Torrentio writes [RD+] / [AD+] / [PM+] / [TB+]
+# ("+" = cached, vs "[RD download]"), Comet writes [RD⚡] (vs [RD⬇️] to download, [RD🔄]
+# syncing, [TORRENT🧲] pure P2P). Both the provider code and the glyph are matched
+# generically so no addon or debrid is special-cased. The optional variation selector
+# keeps emoji-presentation variants ("⚡\ufe0f") matching too.
+_CACHED_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
 
 
 def _parse_languages(text: str) -> frozenset[str]:
@@ -251,6 +255,9 @@ def parse_stream(stream: Stream) -> StreamInfo:
         # The container comes from the filename/url, not name+title: key on it so two
         # releases differing only by container don't collide (ADR 0022).
         (hints.get("filename") if isinstance(hints, dict) else None) or stream.get("url") or "",
+        # Two rows sharing a filename but differing in ready-url presence are NOT the same
+        # StreamInfo: `has_url` decides whether the swarm-health filter applies.
+        bool(stream.get("url")),
     )
     info = _PARSE_CACHE.get(key)
     if info is None:
@@ -277,6 +284,7 @@ def _parse_stream_uncached(stream: Stream) -> StreamInfo:
         release_name=(stream.get("title") or "").split("\n", 1)[0].strip(),
         info_hash=stream.get("infoHash") or "",
         file_idx=stream.get("fileIdx"),
+        has_url=bool(stream.get("url")),
     )
 
 
@@ -536,8 +544,13 @@ def unsupported_reason(info: StreamInfo, caps: HwCaps, spec: FilterSpec) -> str 
         and not (info.languages & set(spec.audio_langs))
     ):
         return "lingua " + "/".join(sorted(info.languages))
-    # Non-cached torrent with too few seeders may never start (cached [RD+] are exempt).
-    if spec.min_seeders and not info.cached and info.seeders < spec.min_seeders:
+    # Seeder count is a swarm-health heuristic, so it may only exclude rows the swarm will
+    # actually have to serve. Two things exempt a row, and `has_url` is the stronger:
+    # a ready debrid url is a FACT (the provider streams it, the swarm is never touched),
+    # while the cached marker is a crowdsourced ESTIMATE whose glyph is addon-specific.
+    # Resting the exemption on the estimate alone meant an addon whose dialect we failed to
+    # parse had every row silently excluded as "pochi seeder" when it also omitted seeders.
+    if spec.min_seeders and not (info.has_url or info.cached) and info.seeders < spec.min_seeders:
         return "pochi seeder"
     return None
 

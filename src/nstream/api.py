@@ -35,8 +35,9 @@ _log = log.get_logger("api")
 
 __all__ = ["TIMEOUT", "UA", "NetworkError", "http_get_json", "url_playable"]
 
-# Same family as quality._CACHED_RE — kept local so api stays above quality in the graph.
-_CACHED_NAME_RE = re.compile(r"\[[A-Za-z]{2,6}\+\]")
+# Same family as quality._CACHED_RE (keep the two in sync) — kept local so api stays above
+# quality in the graph. Matches both addon dialects for a cached debrid row: [RD+] and [RD⚡].
+_CACHED_NAME_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
 
 _MAX_WORKERS = 8
 # Overall deadline (seconds) for one concurrent gather. A single stuck addon can take

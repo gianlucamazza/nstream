@@ -532,6 +532,49 @@ def test_cached_marker_provider_agnostic():
     assert quality.parse_stream({"name": "Torrentio\n1080p"}).cached is False
 
 
+def test_cached_marker_addon_dialect_agnostic():
+    # Comet uses a lightning glyph where Torrentio uses "+", for any debrid provider.
+    # Real markers captured from comet.elfhosted.com (Between the Temples, tt27722375).
+    for mark in ("[RD⚡]", "[AD⚡]", "[RD⚡️]"):
+        assert quality.parse_stream({"name": f"{mark} Comet\n1080p"}).cached is True
+    # Comet's other states are NOT cached: to download, syncing, pure torrent.
+    for mark in ("[RD⬇️]", "[RD\U0001f504]", "[TORRENT\U0001f9f2]"):
+        assert quality.parse_stream({"name": f"{mark} Comet\n1080p"}).cached is False
+
+
+def test_ready_url_exempt_from_seeder_filter():
+    """A ready debrid url plays from the provider, so swarm health is irrelevant to it.
+
+    Regression: Comet publishes neither a parsable cached marker nor a seeder count, so
+    every one of its rows parsed as (cached=False, seeders=0) and was excluded wholesale
+    as "pochi seeder" — leaving no candidate at all whenever Torrentio was down.
+    """
+    spec = FilterSpec(max_resolution=2160, min_seeders=3)
+    comet: Stream = {"name": "[RD⚡] Comet\n1080p", "title": "", "url": "https://x/f.mp4"}
+    assert quality.unsupported_reason(quality.parse_stream(comet), CAPS, spec) is None
+    # Same row with the marker mangled beyond recognition: the url alone must still exempt
+    # it — that is the property that survives an addon dialect we have never seen.
+    unknown: Stream = {"name": "[??] NewAddon\n1080p", "title": "", "url": "https://x/f.mp4"}
+    assert quality.unsupported_reason(quality.parse_stream(unknown), CAPS, spec) is None
+    # A pure-torrent row with no url keeps the swarm-health filter.
+    p2p: Stream = {
+        "name": "[TORRENT\U0001f9f2] Comet\n1080p",
+        "title": "F\n\U0001f464 1",
+        "infoHash": "a" * 40,
+    }
+    assert quality.unsupported_reason(quality.parse_stream(p2p), CAPS, spec) == "pochi seeder"
+
+
+def test_parse_cache_separates_rows_by_url_presence():
+    # Same release filename, one row with a ready url and one without: they must not
+    # collapse onto one cached StreamInfo, since has_url drives the seeder exemption.
+    hints = {"filename": "Between.the.Temples.2024.1080p.WEB.H264.mkv"}
+    base: Stream = {"name": "Comet\n1080p", "title": "F\n\U0001f464 1", "behaviorHints": hints}
+    with_url: Stream = {**base, "url": "https://x/f.mkv"}
+    assert quality.parse_stream(base).has_url is False
+    assert quality.parse_stream(with_url).has_url is True
+
+
 # --- language- and source-aware scoring ------------------------------------
 
 _CAPS_HW = HwCaps(codecs=frozenset({"h264", "hevc", "hevc10"}), max_resolution=2160, vaapi=True)
