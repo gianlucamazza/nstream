@@ -10,8 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 
-from nstream import cast_flow, headless, picker, state, subs
-from nstream.config import Config, HistoryEntry, Meta
+from nstream import cast_flow, headless, headless_play, picker, state, subs, util
+from nstream.config import Config
+from nstream.types import HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -23,9 +24,7 @@ def _cast_opts(**kw):
 
 
 def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
-    return headless.stream_select.CastAudioPlan(
-        mode, stream, audio_index, real_lang, verified=verified
-    )
+    return cast_flow.cast_vet.CastAudioPlan(mode, stream, audio_index, real_lang, verified=verified)
 
 
 def _boom(msg):
@@ -73,7 +72,7 @@ def _hopts(cast=False):
 
 
 def _VETTED(s):
-    return headless.stream_select.VettedStream(stream=s, auto=True, safety_sub_lang=None)
+    return headless_play.stream_select.VettedStream(stream=s, auto=True, safety_sub_lang=None)
 
 
 def _wire_movie(monkeypatch, *, name="Dune", stream=None):
@@ -85,18 +84,43 @@ def _wire_movie(monkeypatch, *, name="Dune", stream=None):
     monkeypatch.setattr(
         headless.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": name}]
     )
-    monkeypatch.setattr(headless.api, "streams", lambda cfg, t, v: [stream])
+    monkeypatch.setattr(headless_play.api, "streams", lambda cfg, t, v: [stream])
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     # Keep audio-language discovery hermetic (no real rank_streams/vainfo in unit tests).
     monkeypatch.setattr(
-        headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
     )
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())  # local-play path
+    monkeypatch.setattr(
+        headless_play, "auto_subs", lambda *a, **k: subs.SubsPick()
+    )  # local-play path
     monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: subs.SubsPick())  # cast path
-    monkeypatch.setattr(headless, "device_volume", lambda device: (0.4, False))
+    monkeypatch.setattr(headless_play, "device_volume", lambda device: (0.4, False))
+
+    # Cast vetting lives in cast_vet (used by cast_flow); keep hermetic for --cast tests.
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "vet_cast_video",
+        lambda cfg, results, chosen, exact_resolution=0: (chosen, ""),
+    )
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "vet_cast_container",
+        lambda cfg, results, chosen, target, exact_resolution=0: (chosen, False),
+    )
+    monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, stream: "mp4")
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "cast_languages",
+        lambda cfg, results, exact_resolution=0: ("ita", "eng"),
+    )
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "cast_resolver",
+        lambda cfg, results, exact_resolution=0: lambda lang: "http://u2",
+    )
     return stream
 
 
@@ -104,7 +128,7 @@ def test_run_auto_movie_emits_json(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     seen = {}
     monkeypatch.setattr(
-        headless, "play", lambda *a, **k: seen.update(played=True) or (0.0, 0.0, "")
+        headless_play, "play", lambda *a, **k: seen.update(played=True) or (0.0, 0.0, "")
     )
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
@@ -117,7 +141,7 @@ def test_run_auto_movie_emits_json(monkeypatch, capsys):
 
 def test_run_auto_skips_fzf(monkeypatch):
     _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
 
     def boom(*a, **k):
         raise AssertionError("fzf called")
@@ -137,11 +161,11 @@ def test_run_auto_exact_match_over_first(monkeypatch, capsys):
         headless.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
     )
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert out["imdb_id"] == "tt1" and out["selection"] == "exact"
@@ -157,11 +181,11 @@ def test_run_auto_year_disambiguates(monkeypatch, capsys):
         headless.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
     )
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["dune"], year="2021"), _hopts())
     assert json.loads(capsys.readouterr().out)["imdb_id"] == "new"
 
@@ -188,17 +212,17 @@ def test_run_auto_series_season_episode(monkeypatch, capsys):
         headless.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
     )
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
+    monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
     seen = {}
     monkeypatch.setattr(
         headless.api,
         "streams",
         lambda cfg, t, v: seen.update(vid=v) or [{"name": "x", "title": "y", "url": "u"}],
     )
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["severance"], season=1, episode=2), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert seen["vid"] == "tt2:1:2"
@@ -226,6 +250,8 @@ def test_run_auto_cast_device_not_found(monkeypatch, capsys):
     def boom(cfg, **k):
         raise headless.CastUnavailable("più dispositivi in rete")
 
+    monkeypatch.setattr(headless_play, "_resolve_device", boom)
+
     monkeypatch.setattr(headless, "_resolve_device", boom)
     monkeypatch.setattr(
         cast_flow.caster,
@@ -239,6 +265,7 @@ def test_run_auto_cast_device_not_found(monkeypatch, capsys):
 
 def test_run_auto_cast_emits_device(monkeypatch, capsys):
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     seen = {}
     monkeypatch.setattr(
@@ -255,10 +282,11 @@ def test_run_auto_cast_remux_failure_notice(monkeypatch, capsys):
     """A failed Tier-2 remux must not degrade silently: the direct-cast fallback surfaces a
     stderr warning and the JSON `notice` (first audio track may be silent/wrong-language)."""
     stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    plan = headless.stream_select.CastAudioPlan("remux", stream, 1, "ita", verified=True)
-    monkeypatch.setattr(headless.stream_select, "vet_cast_audio", lambda *a, **k: plan)
-    monkeypatch.setattr(headless.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg failed
+    plan = cast_flow.cast_vet.CastAudioPlan("remux", stream, 1, "ita", verified=True)
+    monkeypatch.setattr(cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: plan)
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg failed
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False, False)
@@ -283,7 +311,7 @@ def test_run_auto_no_debrid_url_leak(monkeypatch, capsys):
             "url": "http://rd.example/secret-token-abc123/dune.mp4",
         },
     )
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = capsys.readouterr().out
     assert "secret-token-abc123" not in out and "http" not in out
@@ -297,7 +325,7 @@ def test_run_auto_sub_menu_rejected(monkeypatch, capsys):
 
 def test_run_auto_enriched_json_audio_fields(monkeypatch, capsys):
     _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert out["available_audio"] == ["ita", "eng"]
@@ -313,13 +341,13 @@ def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
         seen["exact"] = exact_resolution
         return results[0], True  # (stream, verified) — track-accurate confirmed
 
-    monkeypatch.setattr(headless.stream_select, "pick_audio_stream_verified", pick)
+    monkeypatch.setattr(headless_play.stream_select, "pick_audio_stream_verified", pick)
     # prepare_stream must NOT be used on the forced-audio path.
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("prepare_stream used")),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
         history=False, autoplay=False, audio_lang="eng",
@@ -333,10 +361,10 @@ def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
 def test_run_auto_audio_lang_unavailable(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
     )
     monkeypatch.setattr(
-        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+        headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
@@ -356,16 +384,18 @@ def test_run_auto_probe_lists_audio_and_subs(monkeypatch, capsys):
         headless.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
     )
     monkeypatch.setattr(
-        headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
     )
     monkeypatch.setattr(
         headless, "available_subtitle_langs", lambda cfg, t, v: ["eng", "fre", "ita"]
     )
     monkeypatch.setattr(
-        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+        headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
     monkeypatch.setattr(
-        headless.stream_select, "available_resolutions", lambda cfg, results, *, cast: [1080, 720]
+        headless_play.stream_select,
+        "available_resolutions",
+        lambda cfg, results, *, cast: [1080, 720],
     )
     rc = headless.run_auto(CFG, _hns(query=["dune"], probe=True), _hopts())
     out = json.loads(capsys.readouterr().out)
@@ -377,9 +407,10 @@ def test_run_auto_probe_lists_audio_and_subs(monkeypatch, capsys):
 
 def test_run_auto_cast_reports_volume(monkeypatch, capsys):
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
-    monkeypatch.setattr(headless, "device_volume", lambda device: (0.4, False))
+    monkeypatch.setattr(headless_play, "device_volume", lambda device: (0.4, False))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
     assert out["volume"] == 0.4 and out["muted"] is False and out["notice"] is None
@@ -387,9 +418,10 @@ def test_run_auto_cast_reports_volume(monkeypatch, capsys):
 
 def test_run_auto_cast_warns_volume_zero(monkeypatch, capsys):
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
-    monkeypatch.setattr(headless, "device_volume", lambda device: (0.0, False))
+    monkeypatch.setattr(headless_play, "device_volume", lambda device: (0.0, False))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
     assert out["volume"] == 0.0 and out["notice"] and "volume" in out["notice"].lower()
@@ -399,6 +431,7 @@ def test_run_auto_cast_warns_volume_zero(monkeypatch, capsys):
 
 
 def test_run_auto_stop(monkeypatch, capsys):
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless.caster, "stop", lambda device: True)
     rc = headless.run_auto(CFG, _hns(stop=True), _hopts(cast=True))
@@ -407,6 +440,7 @@ def test_run_auto_stop(monkeypatch, capsys):
 
 
 def test_run_auto_status(monkeypatch, capsys):
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
         headless.caster, "status",
@@ -423,6 +457,8 @@ def test_run_auto_stop_device_not_found(monkeypatch, capsys):
     def boom(cfg, **k):
         raise headless.CastUnavailable("nessun Chromecast")
 
+    monkeypatch.setattr(headless_play, "_resolve_device", boom)
+
     monkeypatch.setattr(headless, "_resolve_device", boom)
     rc = headless.run_auto(CFG, _hns(stop=True), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
@@ -437,14 +473,14 @@ def test_run_auto_browse(monkeypatch, capsys):
         headless.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
     )
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(
-        headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("eng",)
+        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("eng",)
     )
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     rc = headless.run_auto(CFG, _hns(browse="popolari"), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["title"] == "Popular" and out["selection"] == "browse"
@@ -452,13 +488,14 @@ def test_run_auto_browse(monkeypatch, capsys):
 
 def test_run_auto_cast_sets_volume(monkeypatch, capsys):
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     seen = {}
     monkeypatch.setattr(
         headless.caster, "set_volume", lambda device, level: seen.update(level=level)
     )
-    monkeypatch.setattr(headless, "device_volume", lambda device: (0.35, False))
+    monkeypatch.setattr(headless_play, "device_volume", lambda device: (0.35, False))
     headless.run_auto(CFG, _hns(query=["dune"], volume=35), _hopts(cast=True))
     assert seen["level"] == 35
 
@@ -466,15 +503,15 @@ def test_run_auto_cast_sets_volume(monkeypatch, capsys):
 def test_run_auto_audio_lang_not_in_real_tracks(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
     )
     # name tags claim ita, but ffprobe verification finds no candidate → reject (no wrong dub).
     monkeypatch.setattr(
-        headless.stream_select, "pick_audio_stream_verified",
+        headless_play.stream_select, "pick_audio_stream_verified",
         lambda cfg, results, lang, *, cast, probe_cap=4, exact_resolution=0: (None, False),
     )  # fmt: skip
     monkeypatch.setattr(
-        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+        headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
@@ -530,11 +567,11 @@ def _wire_fargo(monkeypatch):
         headless.api, "streams", lambda cfg, t, v: [{"name": "x", "title": "y", "url": "u"}]
     )
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
     )  # fmt: skip
-    monkeypatch.setattr(headless, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
 
 
 def test_run_auto_series_flag_picks_series_over_same_title_movie(monkeypatch, capsys):
@@ -586,21 +623,22 @@ def test_run_auto_series_flag_no_result_reflects_filter(monkeypatch, capsys):
 def test_run_auto_mirror_action(monkeypatch, capsys):
     """Headless twin of the mirror gate: --json --cast --mirror + plan remux → action=mirror."""
     stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
-        headless.stream_select,
+        cast_flow.cast_vet,
         "vet_cast_audio",
         lambda *a, **k: _plan("remux", stream, audio_index=1),
     )
-    monkeypatch.setattr(headless.mirror, "available", lambda: True)
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     seen = {}
     monkeypatch.setattr(
-        headless.mirror, "cast_via_mirror",
+        cast_flow.mirror, "cast_via_mirror",
         lambda cfg, title, url, **k: (
             seen.update(url=url, follow=k.get("follow")) or (0.0, 0.0, False)
         ),
     )  # fmt: skip
-    monkeypatch.setattr(headless.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
     monkeypatch.setattr(
         cast_flow.caster, "cast", _boom("direct cast must not run on the mirror path")
     )
@@ -615,16 +653,17 @@ def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
     """Headless Tier-2 success: JSON says reencoded; fire-and-return uses cast_file with
     follow=False and no event callback, while --follow wires the JSONL callback in."""
     stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
-        headless.stream_select,
+        cast_flow.cast_vet,
         "vet_cast_audio",
         lambda *a, **k: _plan("remux", stream, audio_index=1),
     )
-    monkeypatch.setattr(headless.remux, "remux_for_cast", lambda *a, **k: "/tmp/out.mp4")
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: "/tmp/out.mp4")
     seen = {"detached": 0}
     monkeypatch.setattr(
-        headless.remux, "cast_file",
+        cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
             seen.update(path=path, follow=k.get("follow"), on_event=k.get("on_event"))
             or (0.0, 0.0, False, False)
@@ -659,13 +698,14 @@ def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
             calls.append(safety_sub_lang) or subs.SubsPick(("/tmp/sub.srt",), "lang")
         ),
     )  # fmt: skip
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
-        headless.stream_select,
+        cast_flow.cast_vet,
         "vet_cast_audio",
         lambda *a, **k: _plan("absent", stream, real_lang="eng"),
     )
-    monkeypatch.setattr(headless.remux, "remux_for_cast", _boom("no remux for an absent language"))
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False, True)
@@ -687,9 +727,10 @@ def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
 def test_run_auto_follow_emits_event_jsonl(monkeypatch, capsys):
     """--json --cast --follow: each castbridge event becomes one JSONL line on stdout."""
     stream = _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
-        headless.stream_select, "vet_cast_audio", lambda *a, **k: _plan("direct", stream)
+        cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: _plan("direct", stream)
     )
     seen = {}
 
@@ -763,7 +804,7 @@ def _hist_opts(cast):
 def test_local_play_saves_history(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (600.0, 6000.0, ""))
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (600.0, 6000.0, ""))
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hist_opts(cast=False))
     assert rc == 0
     e = headless.state.load_history(CFG)["tt1"]
@@ -773,6 +814,7 @@ def test_local_play_saves_history(monkeypatch, tmp_path, capsys):
 def test_follow_cast_saves_history(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (600.0, 6000.0, False, False))
     rc = headless.run_auto(CFG, _hns(query=["dune"], follow=True), _hist_opts(cast=True))
@@ -785,6 +827,7 @@ def test_fire_and_return_notes_started_and_session(monkeypatch, tmp_path, capsys
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
@@ -794,7 +837,7 @@ def test_fire_and_return_notes_started_and_session(monkeypatch, tmp_path, capsys
     e = headless.state.load_history(CFG)["tt1"]
     assert (e["position"], e["duration"], e["title"]) == (0.0, 0.0, "Dune")
     # cast session: --stop/--status can attribute the receiver position to it
-    session = headless.state.util.RunState(headless.state.CAST_SESSION).read()
+    session = util.RunState(headless.state.CAST_SESSION).read()
     assert session is not None
     assert session["video_id"] == "tt1" and session["device"] == "192.168.1.5"
 
@@ -805,21 +848,22 @@ def test_stop_persists_receiver_position_and_counts_remux(monkeypatch, tmp_path,
     headless.state.remember_cast(
         CFG, headless.state.make_entry("tt9", "Dune", "movie", 0.0, 0.0), "192.168.1.5"
     )
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(headless.mirror, "stop", lambda: False)
+    monkeypatch.setattr(cast_flow.mirror, "stop", lambda: False)
     monkeypatch.setattr(
         headless.caster, "status",
         lambda device: {"player_state": "PLAYING", "title": "Dune", "position": 1000.0,
                         "duration": 5000.0, "volume": 0.4, "muted": False},
     )  # fmt: skip
     monkeypatch.setattr(headless.caster, "stop", lambda device: False)  # TV unreachable…
-    monkeypatch.setattr(headless.remux, "stop", lambda device: True)  # …but remux reclaimed
+    monkeypatch.setattr(cast_flow.remux, "stop", lambda device: True)  # …but remux reclaimed
     rc = headless.run_auto(CFG, _hns(stop=True), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["ok"] is True  # remux.stop success counts (L5)
     e = headless.state.load_history(CFG)["tt9"]
     assert (e["position"], e["duration"]) == (1000.0, 5000.0)
-    assert headless.state.util.RunState(headless.state.CAST_SESSION).read() is None  # one-shot
+    assert util.RunState(headless.state.CAST_SESSION).read() is None  # one-shot
 
 
 def test_status_refreshes_session_entry(monkeypatch, tmp_path, capsys):
@@ -828,6 +872,7 @@ def test_status_refreshes_session_entry(monkeypatch, tmp_path, capsys):
     headless.state.remember_cast(
         CFG, headless.state.make_entry("tt9", "Dune", "movie", 0.0, 0.0), "192.168.1.5"
     )
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
         headless.caster, "status",
@@ -839,7 +884,7 @@ def test_status_refreshes_session_entry(monkeypatch, tmp_path, capsys):
     e = headless.state.load_history(CFG)["tt9"]
     assert e["position"] == 700.0
     # session kept: the next poll keeps refreshing the resume point
-    assert headless.state.util.RunState(headless.state.CAST_SESSION).read() is not None
+    assert util.RunState(headless.state.CAST_SESSION).read() is not None
 
 
 def test_subtitles_not_reported_when_delivery_drops_them(monkeypatch, capsys):
@@ -848,13 +893,14 @@ def test_subtitles_not_reported_when_delivery_drops_them(monkeypatch, capsys):
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs", lambda *a, **k: subs.SubsPick(("/tmp/sub.srt",), "lang")
     )
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
-        headless.stream_select,
+        cast_flow.cast_vet,
         "vet_cast_audio",
         lambda *a, **k: _plan("absent", stream, real_lang="eng"),
     )
-    monkeypatch.setattr(headless.remux, "remux_for_cast", _boom("no remux here"))
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux here"))
     # bridge path: subs_delivered=False
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
@@ -873,23 +919,24 @@ def test_auto_play_session_stores_resolved_ip(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda c, **k: "192.168.1.9")
     monkeypatch.setattr(headless, "_resolve_device", lambda c, **k: "192.168.1.9")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
     rc = headless.run_auto(cfg, _hns(query=["dune"]), _hist_opts(cast=True))
     assert rc == 0
-    session = headless.state.util.RunState(headless.state.CAST_SESSION).read()
+    session = util.RunState(headless.state.CAST_SESSION).read()
     assert session is not None
     assert session["device"] == "192.168.1.9"  # the IP, not "Salotto"
     # …and the loop closes: a later --stop with the resolved IP merges the position
-    monkeypatch.setattr(headless.mirror, "stop", lambda: False)
+    monkeypatch.setattr(cast_flow.mirror, "stop", lambda: False)
     monkeypatch.setattr(
         headless.caster, "status",
         lambda device: {"player_state": "PLAYING", "title": "Dune", "position": 900.0,
                         "duration": 5000.0, "volume": 0.4, "muted": False},
     )  # fmt: skip
     monkeypatch.setattr(headless.caster, "stop", lambda device: True)
-    monkeypatch.setattr(headless.remux, "stop", lambda device: False)
+    monkeypatch.setattr(cast_flow.remux, "stop", lambda device: False)
     rc = headless.run_auto(cfg, _hns(stop=True), _hopts(cast=True))
     assert rc == 0
     assert headless.state.load_history(cfg)["tt1"]["position"] == 900.0
@@ -901,6 +948,7 @@ def test_run_status_title_mismatch_no_merge(monkeypatch, tmp_path, capsys):
     headless.state.remember_cast(
         CFG, headless.state.make_entry("tt9", "Dune", "movie", 0.0, 0.0), "192.168.1.5"
     )
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(
         headless.caster, "status",
@@ -910,13 +958,14 @@ def test_run_status_title_mismatch_no_merge(monkeypatch, tmp_path, capsys):
     rc = headless.run_auto(CFG, _hns(status=True), _hopts(cast=True))
     assert rc == 0
     assert headless.state.load_history(CFG) == {}  # foreign position NOT attributed
-    assert headless.state.util.RunState(headless.state.CAST_SESSION).read() is None
+    assert util.RunState(headless.state.CAST_SESSION).read() is None
 
 
 # --- quick-win lifecycle actions (pause/resume/seek, standalone volume, episodes) ----
 
 
 def test_run_control_pause_via_bridge(monkeypatch, capsys):
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless.bridge, "bridge_available", lambda: True)
     seen = {}
@@ -931,6 +980,7 @@ def test_run_control_pause_via_bridge(monkeypatch, capsys):
 
 
 def test_run_control_seek_falls_back_to_catt(monkeypatch, capsys):
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     # conftest: bridge_available is already False → catt path
     calls = []
@@ -946,6 +996,7 @@ def test_run_control_seek_falls_back_to_catt(monkeypatch, capsys):
 
 
 def test_run_control_resume_failure_sets_error(monkeypatch, capsys):
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless.util, "run_cmd", lambda a, **k: None)  # catt missing
     rc = headless.run_auto(CFG, _hns(resume=True), _hopts(cast=True))
@@ -956,6 +1007,7 @@ def test_run_control_resume_failure_sets_error(monkeypatch, capsys):
 def test_run_volume_standalone(monkeypatch, capsys):
     """--json --volume N with no title acts on the current cast (it used to require
     re-casting a whole title)."""
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     seen = {}
     monkeypatch.setattr(
@@ -970,6 +1022,7 @@ def test_run_volume_standalone(monkeypatch, capsys):
 def test_volume_with_title_still_casts(monkeypatch, capsys):
     """--volume alongside a title keeps the historical start-volume semantics."""
     _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
@@ -1111,10 +1164,10 @@ def test_json_explain_is_read_only_and_structured(monkeypatch, capsys):
     monkeypatch.setattr(
         headless.api, "search", lambda cfg, q: [{"id": "tt1", "type": "movie", "name": "Dune"}]
     )
-    monkeypatch.setattr(headless.api, "streams", lambda cfg, t, v: [stream])
-    monkeypatch.setattr(headless, "play", _boom("explain must never play"))
+    monkeypatch.setattr(headless_play.api, "streams", lambda cfg, t, v: [stream])
+    monkeypatch.setattr(headless_play, "play", _boom("explain must never play"))
     monkeypatch.setattr(cast_flow.caster, "cast", _boom("explain must never cast"))
-    monkeypatch.setattr(headless.stream_select, "prepare_stream", _boom("no vetting either"))
+    monkeypatch.setattr(headless_play.stream_select, "prepare_stream", _boom("no vetting either"))
     rc = headless.run_auto(CFG, _hns(query=["dune"], explain=True), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["action"] == "explain" and out["profile"] == "cast"
@@ -1130,10 +1183,12 @@ def test_json_explain_is_read_only_and_structured(monkeypatch, capsys):
 def test_run_auto_quality_unavailable(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless.stream_select, "available_resolutions", lambda cfg, results, *, cast: [2160, 720]
+        headless_play.stream_select,
+        "available_resolutions",
+        lambda cfg, results, *, cast: [2160, 720],
     )
     monkeypatch.setattr(
-        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+        headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
@@ -1148,16 +1203,16 @@ def test_run_auto_quality_unavailable(monkeypatch, capsys):
 def test_run_auto_quality_echoes_on_success(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless.stream_select, "available_resolutions", lambda cfg, results, *, cast: [1080]
+        headless_play.stream_select, "available_resolutions", lambda cfg, results, *, cast: [1080]
     )
 
     def prep(cfg, results, opts, *, auto, reselect_on_wrong_audio, title=""):
-        return headless.stream_select.VettedStream(
+        return headless_play.stream_select.VettedStream(
             stream=results[0], auto=True, safety_sub_lang=None, quality=opts.quality or 0
         )
 
-    monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
-    monkeypatch.setattr(headless, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(headless_play.stream_select, "prepare_stream", prep)
+    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
         history=False, autoplay=False, quality=1080,
@@ -1175,13 +1230,14 @@ def test_cast_boundary_forwards_resolved_quality_to_run_cast(monkeypatch, capsys
     was None on entry."""
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
-            headless.stream_select.VettedStream(
+            headless_play.stream_select.VettedStream(
                 stream=results[0], auto=True, safety_sub_lang=None, quality=1080
             )
         ),
     )  # fmt: skip
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     seen = {}
 
@@ -1194,7 +1250,7 @@ def test_cast_boundary_forwards_resolved_quality_to_run_cast(monkeypatch, capsys
             subs_delivered=False,
         )  # fmt: skip
 
-    monkeypatch.setattr(headless.cast_flow, "run_cast", fake_run_cast)
+    monkeypatch.setattr(cast_flow, "run_cast", fake_run_cast)
     monkeypatch.setattr(headless.caster, "device_volume", lambda d: (0.5, False))
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
     assert rc == 0 and seen["quality"] == 1080
@@ -1210,7 +1266,7 @@ def test_run_auto_sources_removed_when_denylisted(monkeypatch, capsys, tmp_path)
     _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "DEAD9", "url": "http://rd/x"})
     state.mark_dead("dead9", "HTTP 404")
     monkeypatch.setattr(
-        headless, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
+        headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     rc = headless.run_auto(cfg, _hns(query=["dune"]), _hopts())
@@ -1230,7 +1286,7 @@ def test_run_auto_sources_removed_when_verification_proves_them_gone(monkeypatch
         results[:] = []
         return None
 
-    monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
+    monkeypatch.setattr(headless_play.stream_select, "prepare_stream", prep)
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "sources_removed"
@@ -1246,7 +1302,7 @@ def test_run_auto_empty_set_without_proof_is_not_sources_removed(monkeypatch, ca
         results[:] = []  # dropped for this run only
         return None
 
-    monkeypatch.setattr(headless.stream_select, "prepare_stream", prep)
+    monkeypatch.setattr(headless_play.stream_select, "prepare_stream", prep)
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "no_playable_stream"
@@ -1257,7 +1313,7 @@ def test_run_auto_no_playable_stream_still_reported(monkeypatch, capsys, tmp_pat
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless.stream_select, "prepare_stream",
+        headless_play.stream_select, "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": None,
     )  # fmt: skip
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
