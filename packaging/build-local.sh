@@ -33,7 +33,10 @@ if ! git -C "$root" ls-remote --tags origin "v$ver" | grep -q .; then
 fi
 
 cd "$here"
-rm -rf src pkg
+# Drop leftover makepkg trees and stale packages/sigs so the tree stays small
+# (all of these are gitignored; only PKGBUILD + helpers are tracked).
+rm -rf src pkg nstream
+rm -f ./*.pkg.tar.zst ./*.tar.gz ./*.sig
 echo "==> makepkg (clone v$ver over SSH + build + check)"
 makepkg -f --noconfirm
 echo "==> regenerating .SRCINFO"
@@ -45,3 +48,4 @@ if [[ "${1:-}" == "--install" ]]; then
 fi
 
 echo "==> done: $here/nstream-$ver-$pkgrel-any.pkg.tar.zst"
+echo "    (optional cleanup: rm -rf src pkg nstream && rm -f ./*.sig)"

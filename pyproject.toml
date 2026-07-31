@@ -33,6 +33,10 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 path = "src/nstream/__init__.py"
 
+[tool.hatch.build.targets.wheel]
+# Dev-only Phase-0 bench; invoke via source tree / editable install.
+force-exclude = ["src/nstream/_bench.py"]
+
 [dependency-groups]
 dev = ["ruff", "ty", "pytest"]
 
