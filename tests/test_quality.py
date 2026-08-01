@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from nstream import quality
+import pytest
+
+from nstream import quality, util
 from nstream.config import Config
 from nstream.quality import FilterSpec, HwCaps
 from nstream.types import Stream
@@ -904,3 +906,80 @@ def test_likely_needs_remux_counts_bad_container():
     )  # fmt: skip
     assert quality._likely_needs_remux(mkv_4k) is True
     assert quality._likely_needs_remux(mp4_1080) is False
+
+
+# --- ADR 0026: structured protocol fields before free text -------------------
+
+# Real Comet row captured from `tt27722375` (Between the Temples): the modern schema —
+# `description` instead of the deprecated `title`, size in behaviorHints.
+S_COMET: Stream = {
+    "name": "[RD⚡] Comet 1080p",
+    "description": (
+        "\U0001f4c4 Between The Temples (2024) [Bluray 1080p][Esp](wolfmax4k.com).mkv\n"
+        "⭐ BluRay\n\U0001f4be 8.7 GB \U0001f50e DMM\n\U0001f1ea\U0001f1f8"
+    ),
+    "behaviorHints": {
+        "filename": "Between The Temples (2024) [Bluray 1080p][Esp](wolfmax4k.com).mkv",
+        "videoSize": 9366675221,
+    },
+    "url": "https://x/f.mkv",
+}
+
+
+def test_description_schema_parses_like_the_deprecated_one():
+    """Field-of-record regression: a row carrying `description` (protocol-current) must parse
+    as richly as one carrying `title`. Reading only name+title left this row with no release
+    name, no size, no source and NO LANGUAGE — which is how a Spanish release passed a filter
+    configured for ita/eng."""
+    i = quality.parse_stream(S_COMET)
+    assert i.release_name.startswith("Between The Temples (2024)")
+    assert i.source == "bluray"
+    assert "spa" in i.languages
+    assert i.resolution == 1080 and i.container == "mkv"
+
+
+def test_size_prefers_structured_videosize():
+    # 9366675221 B / 1024³ = 8.72 GiB — the same scale the text form already used.
+    assert quality.parse_stream(S_COMET).size_gb == pytest.approx(8.72, abs=0.01)
+    # Absent videoSize → the text form still applies.
+    text_only: Stream = {"name": "Torrentio\n1080p", "title": "F.1080p\n\U0001f4be 4.5 GB"}
+    assert quality.parse_stream(text_only).size_gb == pytest.approx(4.5)
+    # A structured 0/absent value must not shadow a usable text size.
+    zero: Stream = {
+        "name": "X\n1080p",
+        "title": "F\n\U0001f4be 4.5 GB",
+        "behaviorHints": {"videoSize": 0},
+    }
+    assert quality.parse_stream(zero).size_gb == pytest.approx(4.5)
+
+
+def test_release_name_precedence_chain():
+    fn: Stream = {
+        "name": "n",
+        "description": "From.Description",
+        **{"behaviorHints": {"filename": "From.Filename.mkv"}},
+    }
+    assert quality.parse_stream(fn).release_name == "From.Filename.mkv"
+    desc: Stream = {
+        "name": "n",
+        "description": "From.Description\n\U0001f4be 1 GB",
+        "title": "From.Title",
+    }
+    assert quality.parse_stream(desc).release_name == "From.Description"
+    title: Stream = {"name": "n", "title": "From.Title\n\U0001f464 5"}
+    assert quality.parse_stream(title).release_name == "From.Title"
+
+
+def test_dedup_key_matches_the_api_join_key():
+    """The two dedups must agree on what "the same release" means: `quality._dedup_by_release`
+    and `api._dedup_by_release` used to key on different values (title headline vs filename),
+    so one could collapse a pair the other kept apart."""
+    from nstream import api
+
+    with_ext: Stream = {
+        "name": "a\n1080p",
+        "behaviorHints": {"filename": "The.Film.2024.1080p.mkv"},
+    }
+    headline: Stream = {"name": "b\n1080p", "title": "the.film.2024.1080p\n\U0001f464 9"}
+    assert api._filename(with_ext) == api._filename(headline)
+    assert util.release_key(quality.parse_stream(with_ext).release_name) == api._filename(headline)

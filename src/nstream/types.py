@@ -47,14 +47,16 @@ class Stream(TypedDict, total=False):
     by the P2P engine before playback. `addon` is set by `api.streams` (provenance)."""
 
     name: str
+    # `description` is the protocol's current headline field; `title` is its deprecated
+    # predecessor ("will soon be deprecated in favor of stream.description"). Both are
+    # declared and both are read: Torrentio still sends `title`, Comet only `description`.
     title: str
+    description: str
     url: str
     infoHash: str
     fileIdx: int
     sources: list[str]
-    behaviorHints: (
-        dict  # Torrentio/Comet extra (e.g. {"filename": "..."}) — hybrid/native file match
-    )
+    behaviorHints: dict  # protocol extras: {"filename", "videoSize", "videoHash", "bingeGroup", …}
     addon: str  # stream-addon display name (Torrentio, Comet, …) — set by api.streams
 
 

@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import random
+import re
 import signal
 import subprocess
 import tempfile
@@ -36,6 +37,23 @@ _RETRY_AFTER_CAP = 30.0
 def backoff(attempt: int) -> float:
     """Exponential backoff with jitter (seconds) for a 0-based retry `attempt`."""
     return _BACKOFF_BASE * (2**attempt) + random.uniform(0.0, 0.3)
+
+
+# Container extensions stripped from a release key: the same release is published with and
+# without the extension depending on which field carries it (`behaviorHints.filename` keeps
+# it, a `description`/`title` headline usually doesn't).
+_RELEASE_EXT_RE = re.compile(r"\.(mkv|mp4|m4v|mov|avi|webm|wmv|ts)$", re.I)
+
+
+def release_key(name: str) -> str:
+    """Normalized join key identifying one release across addons and query variants (ADR 0026).
+
+    Case-folded with the container extension stripped — the two differences that are pure
+    formatting. Separator style is deliberately NOT normalized: `A.Film.2024.WEBRip` and
+    `A Film 2024 WEBRip` are usually different releases, and collapsing them would merge
+    distinct rows rather than deduplicate one.
+    """
+    return _RELEASE_EXT_RE.sub("", name.strip()).casefold()
 
 
 def retry_after(exc: urllib.error.HTTPError) -> float | None:

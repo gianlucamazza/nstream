@@ -63,8 +63,29 @@ _RES_PATTERNS = (
 )
 
 
+def _release_filename(stream: Stream) -> str:
+    """`behaviorHints.filename` — the protocol's canonical identity for the release file."""
+    hints = stream.get("behaviorHints")
+    return (hints.get("filename") or "") if isinstance(hints, dict) else ""
+
+
 def _text(stream: Stream) -> str:
-    return f"{stream.get('name', '')}\n{stream.get('title', '')}"
+    """Free-text corpus for the heuristic parsers (resolution, codec, languages, source…).
+
+    The union of every field that can carry release words, not one chosen field (ADR 0026):
+    `description` is the protocol's current headline, `title` its deprecated predecessor
+    (still populated by Torrentio), and the filename often carries tags — `[Esp]`, `BluRay` —
+    that neither headline repeats. Reading only one of them made every release word invisible
+    for any addon that had migrated.
+    """
+    return "\n".join(
+        (
+            stream.get("name") or "",
+            stream.get("description") or "",
+            stream.get("title") or "",
+            _release_filename(stream),
+        )
+    )
 
 
 # Release-name language tokens → ISO code, derived from the single language registry.
@@ -233,6 +254,38 @@ def _parse_size_gb(text: str) -> float:
     return 0.0
 
 
+def _headline(value: object) -> str:
+    """First line of a headline field, stripped ("" when absent)."""
+    return str(value or "").split("\n", 1)[0].strip()
+
+
+def _release_name(stream: Stream) -> str:
+    """Release identity, structured first (ADR 0026): `behaviorHints.filename`, else the
+    `description` headline, else the deprecated `title` headline. Empty only when the row
+    carries none of the three — and an empty name silently disables both the wrong-title
+    guard (`_title_matches`) and the cross-tracker dedup, so the chain must be exhausted."""
+    return (
+        _release_filename(stream).strip()
+        or _headline(stream.get("description"))
+        or _headline(stream.get("title"))
+    )
+
+
+def _size_gb(stream: Stream, text: str) -> float:
+    """Release size, `behaviorHints.videoSize` first (ADR 0026).
+
+    The structured value is an exact byte count of the VIDEO FILE; the text form is the
+    torrent's total, which on a multi-file torrent also counts the extras. Binary scale
+    (1024³) to stay on the same footing as `_parse_size_gb`, whose "MB" branch divides by
+    1024 — so the numbers keep meaning the same thing as the ones already displayed.
+    """
+    hints = stream.get("behaviorHints")
+    size = hints.get("videoSize") if isinstance(hints, dict) else None
+    if isinstance(size, int | float) and size > 0:
+        return float(size) / 1024**3
+    return _parse_size_gb(text)
+
+
 def _parse_seeders(text: str) -> int:
     return int(m.group(1)) if (m := re.search(r"👤\s*(\d+)", text)) else 0
 
@@ -250,6 +303,10 @@ def parse_stream(stream: Stream) -> StreamInfo:
     key = (
         stream.get("name") or "",
         stream.get("title") or "",
+        # Every field the parsers now read must key the cache, or two distinct rows collapse
+        # onto one StreamInfo (ADR 0026).
+        stream.get("description") or "",
+        (hints.get("videoSize") if isinstance(hints, dict) else None),
         stream.get("infoHash") or "",
         stream.get("fileIdx"),
         # The container comes from the filename/url, not name+title: key on it so two
@@ -274,14 +331,14 @@ def _parse_stream_uncached(stream: Stream) -> StreamInfo:
         hdr=bool(re.search(r"\bhdr", text, re.I)),
         dv=bool(re.search(r"\bDV\b|dolby.?vision", text, re.I)),
         dv_profile=_parse_dv_profile(text),
-        size_gb=_parse_size_gb(text),
+        size_gb=_size_gb(stream, text),
         seeders=_parse_seeders(text),
         cached=bool(_CACHED_RE.search(stream.get("name") or "")),
         languages=_parse_languages(text),
         source=_parse_source(text),
         audio=_parse_audio(text),
         container=_parse_container(stream),
-        release_name=(stream.get("title") or "").split("\n", 1)[0].strip(),
+        release_name=_release_name(stream),
         info_hash=stream.get("infoHash") or "",
         file_idx=stream.get("fileIdx"),
         has_url=bool(stream.get("url")),
@@ -742,7 +799,7 @@ def _dedup_by_release(
     best: dict[str, tuple[Stream, StreamInfo]] = {}
     out: list[tuple[Stream, StreamInfo]] = []
     for s, info in infos:
-        key = info.release_name.lower()
+        key = util.release_key(info.release_name)
         if not key:
             out.append((s, info))
             continue

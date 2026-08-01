@@ -415,12 +415,20 @@ def _stamp_addon(streams: list, addon_name: str) -> list[Stream]:
 
 
 def _filename(s: Stream) -> str:
-    """Per-file name (behaviorHints.filename) — identical across debrid and pure-torrent
-    queries for the same release, so it's the join key for the hybrid fuse.
-    Falls back to the title's first line when absent (Torrentio / Comet / MediaFusion
-    style)."""
-    fn = (s.get("behaviorHints") or {}).get("filename")
-    return fn or (s.get("title") or "").split("\n", 1)[0].strip()
+    """Join key identifying one release across debrid/pure-torrent queries and addons.
+
+    Same precedence as `quality._release_name` (ADR 0026) — `behaviorHints.filename`, then
+    the `description` headline, then the deprecated `title` headline — and normalized through
+    `util.release_key` so a container extension or a case difference can't split one release
+    into two rows. Both dedups now key on the same value.
+    """
+    hints = s.get("behaviorHints") or {}
+    name = (
+        (hints.get("filename") or "")
+        or (s.get("description") or "").split("\n", 1)[0].strip()
+        or (s.get("title") or "").split("\n", 1)[0].strip()
+    )
+    return util.release_key(name)
 
 
 def _copy_torrent_identity(dst: Stream, src: Stream) -> None:

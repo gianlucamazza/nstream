@@ -375,10 +375,19 @@ def _bh(filename):
 
 
 def test_filename_join_key_prefers_behaviorhints():
+    # The key is NORMALIZED (ADR 0026): case-folded, container extension stripped. It is only
+    # ever a dict/set key inside the fuse and the dedup — never displayed, never written back
+    # into a stream — so normalizing it can't leak into what the user sees.
     s = {"title": "Title line\nextra", **_bh("Movie.2024.x265.mkv")}
-    assert api._filename(s) == "Movie.2024.x265.mkv"
-    # falls back to the title's first line when behaviorHints.filename is absent
-    assert api._filename({"title": "Movie.2024\n👤 5"}) == "Movie.2024"
+    assert api._filename(s) == "movie.2024.x265"
+    # description (protocol-current) outranks the deprecated title headline
+    assert api._filename({"description": "Movie.2024.WEB\n💾 2 GB", "title": "Other"}) == (
+        "movie.2024.web"
+    )
+    # falls back to the title's first line when neither of the two is present
+    assert api._filename({"title": "Movie.2024\n👤 5"}) == "movie.2024"
+    # the same release published with and without the extension joins on one key
+    assert api._filename(_bh("Movie.2024.mkv")) == api._filename({"title": "Movie.2024"})
 
 
 def test_merge_hybrid_fuses_by_filename():
@@ -390,7 +399,7 @@ def test_merge_hybrid_fuses_by_filename():
     ]
     out = api._merge_hybrid(debrid, torrents)
     # the matched release carries BOTH the debrid url and the torrent's infoHash/fileIdx/sources
-    fused = next(s for s in out if api._filename(s) == fn)
+    fused = next(s for s in out if api._filename(s) == api._filename(_bh(fn)))
     assert fused["url"] == "https://rd/u1" and fused["infoHash"] == "AAA"
     assert fused["fileIdx"] == 0 and fused["sources"] == ["tracker:x"]
     # the debrid-only release stays url-only; the torrent-only release survives as pure-torrent
