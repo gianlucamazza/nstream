@@ -165,21 +165,18 @@ def run_cast(
     # for a specific subtitle language, so honour it (still warn that the audio isn't primary).
     if plan.mode == "absent" and target_lang:
         real = f" (casto {plan.real_lang})" if plan.real_lang else ""
-        if opts.sub_lang:
-            print(f"nstream: audio {target_lang} non disponibile{real}", file=sys.stderr)
-        else:
+        if not opts.sub_lang:
             safety_sub_lang = target_lang
-            print(
-                f"nstream: audio {target_lang} non disponibile{real}"
-                f"; sottotitoli {target_lang} attivati",
-                file=sys.stderr,
-            )
+        # The audio fact is known here; the safety-net subtitle outcome is not, and is
+        # reported by `subs.report_safety_subs` below (same rule as the local path).
+        print(f"nstream: audio {target_lang} non disponibile{real}", file=sys.stderr)
     # Exactly one auto_subs call, with the effective safety language (normalization 2).
     # The resolved url/filename enable the exact-file hash match (ADR 0018).
     subs_pick = subs.auto_subs(
         cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
         video_url=chosen.get("url"), filename=subs.stream_filename(chosen),
     )  # fmt: skip
+    subs.report_safety_subs(subs_pick, safety_sub_lang)
     sub_paths = subs_pick.paths
     # Language of the fetched subtitle track (labels the side-loaded caption track on the TV).
     sub_lang = safety_sub_lang or opts.sub_lang

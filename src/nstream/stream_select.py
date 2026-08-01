@@ -696,9 +696,12 @@ def prepare_stream(
                 # primary-language subtitles as a safety net (embedded or OpenSubtitles).
                 safety_sub_lang = primary
                 have = "/".join(sorted(avail))
+                # Report only what is known HERE: the audio fact. Whether the safety-net
+                # subtitle was actually acquired is an outcome of `subs.auto_subs`, reported
+                # by `subs.report_safety_subs` once the SubsPick exists — announcing it from
+                # this decision site printed a promise the fetch could then contradict.
                 print(
-                    f"nstream: audio non disponibile in {primary} (disponibili: {have}); "
-                    f"sottotitoli {primary} attivati",
+                    f"nstream: audio non disponibile in {primary} (disponibili: {have})",
                     file=sys.stderr,
                 )
             else:

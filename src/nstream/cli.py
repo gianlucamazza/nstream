@@ -260,10 +260,12 @@ def _play_on_mpv(
     audio_id: int | None = None
     sub_id: str | int | None = None
     if auto:
-        sub_paths = auto_subs(
+        subs_pick = auto_subs(
             cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
             video_url=chosen.get("url"), filename=subs_mod.stream_filename(chosen),
-        ).paths  # fmt: skip
+        )  # fmt: skip
+        subs_mod.report_safety_subs(subs_pick, safety_sub_lang)
+        sub_paths = subs_pick.paths
     else:
         sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
         if sel is None:

@@ -41,6 +41,18 @@ class SubsPick:
     alternates: tuple[Subtitle, ...] = ()
 
 
+def report_safety_subs(pick: SubsPick, lang: str | None) -> None:
+    """Report the OUTCOME of the safety-net subtitle fetch, never the intent.
+
+    Only the caller of `auto_subs` holds the evidence that a track was really acquired, so
+    this is the single place allowed to say it was — shared by the local and cast paths so
+    the two can't drift apart. The empty outcomes are already reported by `auto_subs`
+    itself, so nothing is printed for them here.
+    """
+    if lang and pick.paths:
+        print(f"nstream: sottotitoli {lang} attivati", file=sys.stderr)
+
+
 def stream_filename(stream: Stream) -> str | None:
     """The release filename Torrentio exposes in behaviorHints — the `filename` extra of
     a subtitles hash query (improves matching per the OpenSubtitles guidance)."""

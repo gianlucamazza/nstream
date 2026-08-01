@@ -636,7 +636,12 @@ def test_prepare_stream_safety_subtitles(monkeypatch, capsys):
         cfg, [chosen], _gopts(), auto=True, reselect_on_wrong_audio=True
     )
     assert v is not None and v.stream is chosen and v.safety_sub_lang == "ita"
-    assert "sottotitoli ita attivati" in capsys.readouterr().err
+    # `prepare_stream` decides the safety language but never fetches, so it may only state
+    # the audio fact. The confirmation belongs to `subs.report_safety_subs`, which sees the
+    # SubsPick; asserting it here is what let a promise ship ahead of its outcome.
+    err = capsys.readouterr().err
+    assert "audio non disponibile in ita (disponibili: eng)" in err
+    assert "sottotitoli ita attivati" not in err
 
 
 def test_prepare_stream_quality_picker_interactive(monkeypatch):

@@ -161,7 +161,11 @@ def test_absent_safety_subs_once_with_notice(monkeypatch, capsys):
     out = _run(_opts(), stream)
     err = capsys.readouterr().err
     assert seen["subs"] == [CFG.primary]  # ONE call, safety lang set (normalization 2)
-    assert "non disponibile" in err and f"sottotitoli {CFG.primary}" in err
+    # The audio fact is stated; the subtitle line is NOT, because `auto_subs` (stubbed)
+    # delivered nothing. This assertion used to demand the opposite — it encoded the bug
+    # where the promise was printed at the decision site, before any fetch had run.
+    assert "non disponibile" in err
+    assert f"sottotitoli {CFG.primary} attivati" not in err
     assert seen["cast_url"] == stream["url"]
     assert out.safety_sub_lang == CFG.primary
     assert out.audio_lang == "eng" and out.audio_verified is True
@@ -746,3 +750,26 @@ def test_no_mirror_with_undecodable_video_raises(monkeypatch):
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     with pytest.raises(cast_flow.CastVideoUnsupported):
         _run(_opts(mirror=False), stream)
+
+
+def test_absent_safety_subs_reported_when_actually_delivered(monkeypatch, capsys):
+    """Twin of `test_absent_safety_subs_once_with_notice`: when the fetch DOES deliver a
+    track, the confirmation line appears — proving the message follows the SubsPick and is
+    not merely suppressed everywhere."""
+    stream = dict(_STREAM)
+    seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.subs, "auto_subs",
+        lambda cfg, typ, vid, wd, opts, safety_sub_lang=None, **kw: (
+            seen["subs"].append(safety_sub_lang) or subs.SubsPick(paths=("/tmp/s.srt",), match="lang")
+        ),
+    )  # fmt: skip
+    _run(_opts(), stream)
+    err = capsys.readouterr().err
+    assert "non disponibile" in err
+    assert f"sottotitoli {CFG.primary} attivati" in err

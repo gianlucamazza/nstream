@@ -372,3 +372,20 @@ def test_align_local_timeout_scales_with_file_size(monkeypatch, tmp_path):
     pick = subs.SubsPick((str(srt_path),), "lang")
     subs.align_local(CFG, pick, "/m.mp4", str(tmp_path), _opts_plain())
     assert seen["t"] >= 12_000_000_000 / 30e6  # ≥ 400 s for a 12 GB file
+
+
+def test_report_safety_subs_only_on_real_outcome(capsys):
+    """The "attivati" line must follow the evidence, never the intent.
+
+    Regression: the audio-language decision site printed "sottotitoli X attivati" before
+    the fetch ran, so a run where OpenSubtitles returned nothing emitted both that line
+    and "nessun sottotitolo nelle lingue preferite".
+    """
+    subs.report_safety_subs(subs.SubsPick(paths=("/tmp/a.srt",), match="lang"), "ita")
+    assert "sottotitoli ita attivati" in capsys.readouterr().err
+    # Nothing acquired → say nothing (auto_subs already reported the empty outcome).
+    subs.report_safety_subs(subs.SubsPick(), "ita")
+    assert capsys.readouterr().err == ""
+    # No safety language requested → nothing to report either way.
+    subs.report_safety_subs(subs.SubsPick(paths=("/tmp/a.srt",), match="hash"), None)
+    assert capsys.readouterr().err == ""

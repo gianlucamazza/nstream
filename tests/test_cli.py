@@ -990,7 +990,10 @@ def test_play_on_cast_absent_safety_subs_then_direct(monkeypatch, capsys):
     _call_cast(_cast_opts(), stream)
     err = capsys.readouterr().err
     assert seen["subs"] == [CFG.primary]  # interactive copy: ONE auto_subs call, safety lang set
-    assert "non disponibile" in err and f"sottotitoli {CFG.primary}" in err
+    # The stubbed auto_subs delivers nothing, so only the audio fact may be stated (the
+    # cast-flow twin of this assertion carries the same rationale).
+    assert "non disponibile" in err
+    assert f"sottotitoli {CFG.primary} attivati" not in err
     assert seen["cast_url"] == stream["url"]
 
 
