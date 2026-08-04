@@ -27,7 +27,20 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, replace
 
-from . import cast_vet, caster, engine, log, mirror, quality, remux, state, stream_select, subs, ui
+from . import (
+    cast_delivery,
+    cast_vet,
+    caster,
+    engine,
+    log,
+    mirror,
+    quality,
+    remux,
+    state,
+    stream_select,
+    subs,
+    ui,
+)
 from .config import Config, PlayOpts
 from .types import Stream
 
@@ -228,7 +241,7 @@ def run_cast(
                 f"remux 4K troppo pesante{size} → mirror 1080p (avvio immediato, senza download)"
             )
             print(f"nstream: {notice}", file=sys.stderr)
-        pos, dur, advance = mirror.cast_via_mirror(
+        pos, dur = mirror.cast_via_mirror(
             cfg, title, chosen["url"],
             device=device, start=start, sub_paths=sub_paths, follow=follow,
         )  # fmt: skip
@@ -255,7 +268,7 @@ def run_cast(
             # its real audio (free of network cost) before the VTT is built from it.
             subs_pick = subs.align_local(cfg, subs_pick, remux_path, work_dir, opts)
             sub_paths = subs_pick.paths
-            pos, dur, advance, subs_delivered = remux.cast_file(
+            pos, dur, subs_delivered = remux.cast_file(
                 cfg, title, remux_path,
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang, follow=follow,
                 meta=meta, on_event=on_event,
@@ -268,7 +281,7 @@ def run_cast(
             # container) instead of a silent black direct cast.
             notice = "rewrap non disponibile → mirror 1080p (il TV non carica questo container)"
             print(f"nstream: {notice}", file=sys.stderr)
-            pos, dur, advance = mirror.cast_via_mirror(
+            pos, dur = mirror.cast_via_mirror(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, follow=follow,
             )  # fmt: skip
@@ -298,10 +311,10 @@ def run_cast(
                 if len(cast_langs) > 1:
                     langs = cast_langs
                     resolver = cast_vet.cast_resolver(cfg, results, exact_resolution=exact)
-            pos, dur, advance, subs_delivered = caster.cast(
+            pos, dur, subs_delivered = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,
-                next_label=next_label, langs=langs, resolve_lang=resolver, follow=follow,
+                langs=langs, resolve_lang=resolver, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
             action = "cast"
@@ -317,6 +330,11 @@ def run_cast(
         # have spawned — keep it alive past exit so the TV keeps playing (atexit would kill
         # it mid-cast). No-op when the engine wasn't used.
         engine.detach_spawned()
+    # The advance decision is made HERE, once, for every delivery backend (ADR 0029). Deciding
+    # it inside the backends is how the Tier-2 remux and the mirror ended up hardcoding False:
+    # a binge on the TV died after one episode whenever the audio needed a remux. A backend
+    # reports what it observed (pos/dur); only this layer knows whether an episode follows.
+    advance = bool(next_label) and cast_delivery.is_finished(pos, dur)
     return CastOutcome(
         pos=pos, dur=dur, advance=advance, action=action, stream=chosen,
         reencoded=reencoded, notice=notice,

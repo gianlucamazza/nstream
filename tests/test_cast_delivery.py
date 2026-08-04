@@ -137,3 +137,21 @@ def test_interrupt_hook_decides_reraise(monkeypatch):
             "1.2.3.4", "http://u", follow=True, load_kwargs={}, on_interrupt=abort
         )
     assert asked == [False]  # the hook sees whether started had happened
+
+
+# --- the single finish predicate (ADR 0029) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("pos", "dur", "expected"),
+    [
+        (97.0, 100.0, True),  # exactly at CAST_DONE
+        (96.9, 100.0, False),  # just under
+        (100.0, 100.0, True),
+        (50.0, 100.0, False),  # manual stop mid-episode must not binge ahead
+        (0.0, 0.0, False),  # unobserved position (fire-and-return) is never a finish
+        (98.0, 0.0, False),  # position without a duration proves nothing
+    ],
+)
+def test_is_finished(pos, dur, expected):
+    assert cast_delivery.is_finished(pos, dur) is expected

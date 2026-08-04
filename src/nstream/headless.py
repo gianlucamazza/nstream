@@ -39,7 +39,7 @@ from .caster import resolve_device as _resolve_device
 from .config import Config, PlayOpts
 from .labels import display_title
 from .subs import available_subtitle_langs
-from .types import HistoryEntry, Meta, Video
+from .types import HistoryEntry, Meta
 
 
 def typ_filter(args: argparse.Namespace) -> str | None:
@@ -324,13 +324,24 @@ def _auto_play(
     )
 
 
-def _next_episode(cfg: Config, entry: HistoryEntry) -> Video | None:
-    """The episode right after `entry` in its series, or None past the finale.
-    Same ordering as the interactive binge advance (`series.binge`): episodes sorted
-    by (season, episode), next = first strictly greater tuple — season boundaries work."""
-    eps = api.episodes(cfg, entry.get("series_id") or "")
-    cur = (entry.get("season") or 0, entry.get("episode") or 0)
-    return next((e for e in eps if (e.get("season", 0), e.get("episode", 0)) > cur), None)
+def _reconcile_cast_session(cfg: Config) -> None:
+    """Fold the receiver's real position into history before deciding what to continue.
+
+    A fire-and-return cast returns as soon as the TV has the media, so nothing ever observes
+    where it got to: history holds `duration = 0`, which can never read as finished, and `-c`
+    would keep proposing the episode already watched. Ask the receiver once — the same
+    `update_from_receiver` merge `--stop`/`--status` do, at the one call site where the answer
+    changes a decision. No discovery: without a live session this costs nothing, and a TV that
+    was switched off before any poll simply leaves no position (an honest gap; the alternative
+    is inventing a duration, which ADR 0028 §6 rules out)."""
+    device = state.cast_session_device()
+    if not device:
+        return
+    info = caster.status(device)
+    state.update_from_receiver(
+        cfg, device, info.get("position") or 0.0, info.get("duration") or 0.0,
+        title=info.get("title"),
+    )  # fmt: skip
 
 
 def _run_auto_resume(
@@ -338,39 +349,38 @@ def _run_auto_resume(
 ) -> int:
     """Headless resume (`--json -c`): pick a history entry by normalized title (or the most
     recent when no query) and replay it, with no fzf. `typ` narrows to one content type.
-    A FINISHED series episode advances: `-c "show"` after the S01E04 credits casts S01E05
-    (watched episodes are kept in history exactly for this)."""
-    entries = state.recent(cfg, typ=typ)
-    finished = state.watched_series(cfg) if typ in (None, "series") else []
+    A FINISHED series episode advances: `-c "show"` after the S01E04 credits casts S01E05.
+
+    Both the candidate list (`state.resumable`) and the decision (`series.next_up`) are the
+    shared ones the interactive `-c` uses (ADR 0029). They used to be local to this function,
+    which is how the two paths drifted apart — and how a search term could surface a
+    half-watched episode from weeks ago over a binge finished minutes earlier."""
+    _reconcile_cast_session(cfg)
+    entries = state.resumable(cfg, typ=typ)
     entry: HistoryEntry | None = None
-    advance = False
     if query:
         q = _norm_title(query)
         entry = next((e for e in entries if _norm_title(e.get("title", "")) == q), None)
-        if entry is None:
-            entry = next((e for e in finished if _norm_title(e.get("title", "")) == q), None)
-            advance = entry is not None
-    elif entries and (not finished or entries[0].get("ts", 0.0) >= finished[0].get("ts", 0.0)):
+    elif entries:
         entry = entries[0]
-    elif finished:
-        entry, advance = finished[0], True
     if entry is None:
         message = f"nessuna cronologia per «{query}»" if query else "cronologia vuota"
         _emit_json({"ok": False, "error": "no_result", "message": message})
         return 1
     typ = entry.get("type", "movie")
-    if advance:
-        nxt = _next_episode(cfg, entry)
-        if nxt is None:
-            _emit_json(
-                {
-                    "ok": False,
-                    "error": "series_completed",
-                    "message": f"«{entry.get('title', '?')}» è finita: nessun episodio dopo "
-                    f"S{entry.get('season', 0):02d}E{entry.get('episode', 0):02d}",
-                }
-            )
-            return 1
+    nu = series.next_up(cfg, entry)
+    if nu.selection == "completed":
+        _emit_json(
+            {
+                "ok": False,
+                "error": "series_completed",
+                "message": f"«{entry.get('title', '?')}» è finita: nessun episodio dopo "
+                f"S{entry.get('season', 0):02d}E{entry.get('episode', 0):02d}",
+            }
+        )
+        return 1
+    if nu.selection == "next" and nu.video is not None:
+        nxt = nu.video
         series_id = entry.get("series_id") or entry["video_id"]
         return _auto_play(
             cfg, args, opts, "series", nxt["id"],

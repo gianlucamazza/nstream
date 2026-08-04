@@ -54,3 +54,15 @@ def _no_real_runtime_lookup(monkeypatch, request):
     if request.path.name == "test_api.py":
         return
     monkeypatch.setattr(api, "expected_runtime_s", lambda cfg, typ, video_id: 0.0)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_episode_lookup(monkeypatch, request):
+    """Same guard for the continuation policy (ADR 0029): `series.next_up` fetches the
+    episode list to find the next one, and an unmocked call is a real Cinemeta request.
+    Default it to empty — which the policy treats as "resume", never as a reason to block —
+    so a test that forgets to stub it fails loudly on its assertion, not silently over the
+    network. `test_api.py` owns `episodes` itself."""
+    if request.path.name == "test_api.py":
+        return
+    monkeypatch.setattr(api, "episodes", lambda cfg, series_id: [])

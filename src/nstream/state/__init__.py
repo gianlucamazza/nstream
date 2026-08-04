@@ -8,6 +8,7 @@ from __future__ import annotations
 from .cast_session import (
     CAST_SESSION,
     CAST_SESSION_TTL,
+    cast_session_device,
     clear_cast_session,
     expire_cast_session,
     remember_cast,
@@ -28,6 +29,7 @@ from .history import (
     MAX_WATCHLIST,
     STARTED_TTL,
     WATCHED_THRESHOLD,
+    is_watched,
     is_watchlisted,
     load_history,
     make_entry,
@@ -35,6 +37,7 @@ from .history import (
     recent,
     recent_searches,
     remember_search,
+    resumable,
     resume_position,
     save_entry,
     toggle_watchlist,
@@ -71,6 +74,9 @@ __all__ = [
     "save_entry",
     "toggle_watchlist",
     "update_from_receiver",
+    "cast_session_device",
+    "is_watched",
+    "resumable",
     "watched_series",
     "watchlist",
 ]

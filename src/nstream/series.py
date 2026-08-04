@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from . import api, state, ui
 from .caster import CastMeta
@@ -49,6 +49,53 @@ def entry_video(entry: HistoryEntry) -> Video | None:
     return {"season": entry.get("season", 0), "episode": entry.get("episode", 0)}
 
 
+class NextUp(NamedTuple):
+    """What should play for a history entry. `selection` doubles as the headless JSON
+    field: "resume" (same video), "next" (`video` is the following episode), "completed"
+    (the series has no episode after this one, `video` is None)."""
+
+    video: Video | None
+    selection: str
+
+
+def next_video(eps: list[Video], current: Video | None) -> Video | None:
+    """The episode right after `current` in `eps`, or None past the finale.
+
+    Order is canonical `(season, episode)` and the successor is the first tuple STRICTLY
+    greater, so a season boundary is not a special case: S01E13 → S02E01 falls out of the
+    same comparison. A `current` with no usable season/episode returns None — an unknown
+    position is not "before S01E01", and advancing from it would restart the series."""
+    cur = (current or {}).get("season") or 0, (current or {}).get("episode") or 0
+    if cur == (0, 0):
+        return None
+    return next((v for v in eps if (v.get("season") or 0, v.get("episode") or 0) > cur), None)
+
+
+def next_up(cfg: Config, entry: HistoryEntry, *, eps: list[Video] | None = None) -> NextUp:
+    """What to continue from a history entry — the single answer to the question `-c` asks,
+    interactive or headless (ADR 0029). Before this, the two paths answered differently: the
+    headless one advanced past a finished episode while the TUI simply hid it.
+
+    The order of the cases IS the policy: a film or an unfinished episode resumes; an entry
+    that doesn't know where it sits in the series resumes (it cannot advance); an unreadable
+    episode list resumes (a catalogue hiccup must not block playback); a finished episode
+    advances, or reports the series completed. `eps` is injectable because the binge already
+    holds the list — the resume path never pays an `api.episodes` it doesn't need."""
+    video = entry_video(entry)
+    if video is None:  # a movie has no continuation
+        return NextUp(None, "resume")
+    if not state.is_watched(entry):
+        return NextUp(video, "resume")
+    if (video.get("season") or 0, video.get("episode") or 0) == (0, 0):
+        return NextUp(video, "resume")  # legacy/unpositioned entry: replay, never restart
+    series_id = entry.get("series_id") or entry.get("video_id", "")
+    episodes = eps if eps is not None else (api.episodes(cfg, series_id) if series_id else [])
+    if not episodes:
+        return NextUp(video, "resume")
+    nxt = next_video(episodes, video)
+    return NextUp(nxt, "next") if nxt is not None else NextUp(None, "completed")
+
+
 def binge(
     cfg: Config,
     series_id: str,
@@ -70,7 +117,7 @@ def binge(
     while 0 <= idx < len(eps):
         video = eps[idx]
         video_id = video["id"]
-        nxt = eps[idx + 1] if idx + 1 < len(eps) else None
+        nxt = next_video(eps, video)  # shared policy: season boundaries, gaps, ordering
         next_label = display_title(name, nxt) if (opts.autoplay and nxt is not None) else None
 
         def on_save(pos: float, dur: float, vid: str = video_id, v: Video = video) -> None:
@@ -93,10 +140,14 @@ def binge(
             return notice
         if not advance or nxt is None:
             return None
-        idx += 1
+        # Follow the policy's pick, not idx+1: the two agree on a well-formed list, and when
+        # they don't (gaps, duplicates) the policy is the one that decided `next_label`.
+        idx = next((i for i, v in enumerate(eps) if v.get("id") == nxt.get("id")), -1)
+        if idx < 0:
+            return None
         auto = True
         unattended = True
-        ui.status(f"prossimo: {display_title(name, eps[idx])}", kind="play")
+        ui.status(f"prossimo: {display_title(name, nxt)}", kind="play")
     return None
 
 
@@ -163,15 +214,24 @@ def play(
 def resume(
     cfg: Config, entry: HistoryEntry, opts: PlayOpts, *, play_video: PlayVideo
 ) -> str | None:
-    """Resume a series history entry: keep bingeing the rest of the season when
-    possible, else replay just that episode. Returns a notice to show, or None."""
+    """Resume a series history entry: keep bingeing from the right episode when possible,
+    else replay just that one. Returns a notice to show, or None.
+
+    Which episode is "the right one" is `next_up`'s call, not this function's — a finished
+    episode continues with the NEXT one, exactly as the headless `-c` has always done
+    (ADR 0029); before that parity, the TUI replayed the credits it had just watched."""
     name = entry.get("title", "nstream")
     series_id = entry.get("series_id", "")
     if series_id and opts.autoplay:
         eps = api.episodes(cfg, series_id)
-        cur = next((v for v in eps if v.get("id") == entry["video_id"]), None)
-        if cur is not None:
-            return binge(cfg, series_id, name, eps, cur, opts, play_video=play_video)
+        nu = next_up(cfg, entry, eps=eps)
+        if nu.selection == "completed":
+            return f"«{name}» è finita: nessun episodio dopo questo"
+        start = nu.video if nu.selection == "next" else None
+        if start is None:
+            start = next((v for v in eps if v.get("id") == entry["video_id"]), None)
+        if start is not None:
+            return binge(cfg, series_id, name, eps, start, opts, play_video=play_video)
 
     video_id = entry["video_id"]
 

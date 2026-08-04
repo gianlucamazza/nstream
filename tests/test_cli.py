@@ -448,7 +448,7 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
         recent_typs.append(typ)
         return [entry]
 
-    monkeypatch.setattr(cli.state, "recent", fake_recent)
+    monkeypatch.setattr(cli.state, "resumable", fake_recent)
     actions = [("", (cli._BROWSE, "top")), ("", (cli._SEARCH, "")), None]
     it = iter(actions)
     prompts = []
@@ -729,7 +729,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast",
-        lambda *a, **k: seen.update(device=k.get("device")) or (0.0, 0.0, False, False),
+        lambda *a, **k: seen.update(device=k.get("device")) or (0.0, 0.0, False),
     )  # fmt: skip
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
@@ -795,7 +795,7 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
         cli,
         "cast",
         lambda *a, **k: (
-            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False, False)
+            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False)
         ),
     )
     opts = cli.PlayOpts(
@@ -945,7 +945,7 @@ def test_play_on_cast_remux_success_uses_cast_file(monkeypatch):
         cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
             seen.update(path=path, follow=k.get("follow"), start=k.get("start"))
-            or (0.0, 0.0, False, False)
+            or (0.0, 0.0, False)
         ),
     )  # fmt: skip
     monkeypatch.setattr(
@@ -969,7 +969,7 @@ def test_play_on_cast_remux_failure_degrades_to_direct(monkeypatch, capsys):
     monkeypatch.setattr(
         cast_flow.caster,
         "cast",
-        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False),
     )
     _call_cast(_cast_opts(), stream)
     assert "remux non riuscito" in capsys.readouterr().err
@@ -985,7 +985,7 @@ def test_play_on_cast_absent_safety_subs_then_direct(monkeypatch, capsys):
     monkeypatch.setattr(
         cast_flow.caster,
         "cast",
-        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False, False),
+        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False),
     )
     _call_cast(_cast_opts(), stream)
     err = capsys.readouterr().err
@@ -1006,7 +1006,7 @@ def test_play_on_cast_mirror_gates_on_remux_audio(monkeypatch):
         cast_flow.mirror, "cast_via_mirror",
         lambda cfg, title, url, **k: (
             seen.update(url=url, device=k.get("device"), start=k.get("start"))
-            or (0.0, 0.0, False)
+            or (0.0, 0.0)
         ),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
@@ -1025,7 +1025,7 @@ def test_play_on_cast_explicit_mirror_forces_mirror(monkeypatch):
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
         cast_flow.mirror, "cast_via_mirror",
-        lambda *a, **k: seen.update(mirror=True) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(mirror=True) or (0.0, 0.0),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.caster, "cast", _boom("direct cast must not run when forced"))
     _call_cast(_cast_opts(mirror=True), stream)
@@ -1040,7 +1040,7 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
     monkeypatch.setattr(
         cast_flow.caster, "cast",
         lambda *a, **k: (
-            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False, False)
+            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False)
         ),
     )  # fmt: skip
     _call_cast(_cast_opts(), stream)
@@ -1062,7 +1062,7 @@ def _VETTED(s):
 
 
 def test_run_continue_empty_history(monkeypatch, capsys):
-    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [])
+    monkeypatch.setattr(cli.state, "resumable", lambda cfg, limit=30, typ=None: [])
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
     )
@@ -1072,7 +1072,7 @@ def test_run_continue_empty_history(monkeypatch, capsys):
 
 def test_run_continue_plays_picked_entry(monkeypatch):
     entry = HistoryEntry(video_id="tt3", type="movie", title="Dune", ts=1.0)
-    monkeypatch.setattr(cli.state, "recent", lambda cfg, limit=30, typ=None: [entry])
+    monkeypatch.setattr(cli.state, "resumable", lambda cfg, limit=30, typ=None: [entry])
     fake_fzf, _ = _fzf_script([("", entry), None])  # pick the entry, then ESC out
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     seen = {}
@@ -1311,3 +1311,25 @@ def test_ensure_config_headless_never_onboards(monkeypatch, tmp_path):
     )
     with pytest.raises(cli.ConfigError, match="--settings"):
         cli._ensure_config(headless_mode=True)
+
+
+def test_run_continue_shows_finished_episodes_as_next(monkeypatch, tmp_path):
+    """Parity with the headless `-c` (ADR 0029): a finished episode stays in the list,
+    marked as continuing with the next one, instead of vanishing from the TUI."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    done = cli.state.make_entry(
+        "tt1:1:4", "Show", "series", 2990.0, 3000.0, series_id="tt1", season=1, episode=4
+    )
+    cli.state.save_entry(CFG, done)
+    labels = []
+
+    def fake_fzf(items, prompt, *, header=None, expect=("tab",), preview=None):
+        labels.extend(label for label, _ in items)
+        return None  # ESC out after one render
+
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
+    )
+    assert cli.run_continue(CFG, opts) == 0
+    assert len(labels) == 1 and "prossimo episodio" in labels[0]

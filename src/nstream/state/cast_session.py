@@ -57,6 +57,18 @@ def _session_title_matches(session_title: str, receiver_title: str) -> bool:
     return s in r or r in s
 
 
+def cast_session_device() -> str | None:
+    """The device of a live fire-and-return cast session, or None when there is none / it
+    expired. Lets `-c` ask that exact receiver for the real position before deciding what to
+    continue (ADR 0029) — no discovery, no cost when no session exists."""
+    session = util.RunState(CAST_SESSION).read()
+    if not session:
+        return None
+    if time.time() - (session.get("ts") or 0.0) > CAST_SESSION_TTL:
+        return None
+    return session.get("device") or None
+
+
 def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
     """Persist the fire-and-return cast session (entry + device) across nstream runs.
     Interactive and `--follow` casts don't need this — their poll loop saves directly."""

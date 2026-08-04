@@ -449,3 +449,71 @@ def test_dead_sources_tolerates_corrupt_file(monkeypatch, tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not json")
     assert state.dead_sources() == {}  # best-effort: state errors never block playback
+
+
+# --- one continuation query + the threshold invariant (ADR 0029) ------------
+
+
+def test_advance_threshold_is_stricter_than_watched():
+    """Advance implies watched, and the two must never invert: a cast counted as finished
+    that stayed out of `watched_series` would make `-c` replay the same episode forever."""
+    from nstream import cast_delivery
+
+    assert cast_delivery.CAST_DONE >= state.WATCHED_THRESHOLD
+    dur = 1000.0
+    pos = dur * cast_delivery.CAST_DONE
+    assert cast_delivery.is_finished(pos, dur)
+    assert state.is_watched({"position": pos, "duration": dur, "type": "series"})
+
+
+def test_is_watched_public():
+    assert state.is_watched({"position": 95.0, "duration": 100.0}) is True
+    assert state.is_watched({"position": 10.0, "duration": 100.0}) is False
+    assert state.is_watched({"position": 95.0, "duration": 0.0}) is False  # no duration, no verdict
+
+
+def test_resumable_includes_finished_episodes_and_orders_by_ts(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    half = state.make_entry("s1", "Show", "series", 10.0, 100.0, series_id="s", season=1, episode=2)
+    half["ts"] = 1.0  # a half-watched episode from weeks ago
+    done = state.make_entry("s2", "Show", "series", 99.0, 100.0, series_id="s", season=1, episode=7)
+    done["ts"] = 9.0  # a binge finished minutes ago
+    for e in (half, done):
+        state.save_entry(CFG, e)
+    ids = [e["video_id"] for e in state.resumable(CFG)]
+    assert ids == ["s2", "s1"]  # one ordering: the fresh finish wins, whatever the branch
+    assert [e["video_id"] for e in state.recent(CFG)] == ["s1"]  # recent still hides finished
+
+
+def test_resumable_excludes_finished_movies(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    done = state.make_entry("m1", "Film", "movie", 99.0, 100.0)
+    half = state.make_entry("m2", "Altro", "movie", 10.0, 100.0)
+    for e in (done, half):
+        state.save_entry(CFG, e)
+    assert [e["video_id"] for e in state.resumable(CFG)] == ["m2"]  # a finished film is done
+
+
+def test_resumable_typed_and_limited(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    for i in range(5):
+        e = state.make_entry(f"s{i}", "Show", "series", 10.0, 100.0, series_id="s", season=1,
+                             episode=i + 1)  # fmt: skip
+        e["ts"] = float(i)
+        state.save_entry(CFG, e)
+    state.save_entry(CFG, state.make_entry("m1", "Film", "movie", 10.0, 100.0))
+    assert {e["type"] for e in state.resumable(CFG, typ="series")} == {"series"}
+    assert len(state.resumable(CFG, limit=2)) == 2
+
+
+def test_cast_session_device_roundtrip_and_expiry(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    assert state.cast_session_device() is None  # no session → no cost, no device
+    entry = state.make_entry("s1", "Show", "series", 0.0, 0.0, series_id="s", season=1, episode=1)
+    state.remember_cast(CFG, entry, "192.0.2.10")
+    assert state.cast_session_device() == "192.0.2.10"
+    run_state = util.RunState(state.CAST_SESSION)
+    session = run_state.read() or {}
+    session["ts"] = 0.0  # far past the TTL
+    run_state.write(session)
+    assert state.cast_session_device() is None

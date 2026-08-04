@@ -84,7 +84,10 @@ def episode_label(v: Video) -> str:
     return f"{g.series}  {tag}  {v.get('name', '')}".rstrip()
 
 
-def history_label(e: HistoryEntry) -> str:
+def history_label(e: HistoryEntry, *, next_episode: bool = False) -> str:
+    """One continue-watching row. `next_episode` marks an entry that continues with the
+    FOLLOWING episode rather than itself — the caller decides that (it owns `state`);
+    this stays a presentation function with no policy of its own."""
     caps = ui.active_caps()
     g, pal = ui.glyphs(caps), ui.palette(caps)
     # Same type glyph as meta_label so home / continue-watching stay scannable.
@@ -92,6 +95,8 @@ def history_label(e: HistoryEntry) -> str:
     title = f"{icon}  {ui.ansi(e.get('title', '?'), pal.secondary)}"
     if e.get("type") == "series" and e.get("season"):
         title += "  " + ui.ansi(f"S{e.get('season', 0):02d}E{e.get('episode', 0):02d}", pal.dim)
+    if next_episode:
+        return title + "  " + ui.ansi("→ prossimo episodio", pal.accent)
     dur = e.get("duration") or 0.0
     pos = e.get("position", 0.0)
     if dur:

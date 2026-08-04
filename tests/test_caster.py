@@ -314,7 +314,7 @@ def test_cast_builds_command_with_seek_and_sub(monkeypatch):
     )
     caster.cast(
         CFG, "Dune", "http://u",
-        device="TV", start=125.0, sub_paths=("/tmp/x.srt",), next_label=None,
+        device="TV", start=125.0, sub_paths=("/tmp/x.srt",),
     )  # fmt: skip
     launch = calls[0]
     assert launch[:2] == ["catt", "-d"] and launch[2] == "TV"
@@ -323,7 +323,9 @@ def test_cast_builds_command_with_seek_and_sub(monkeypatch):
     assert "-s" in launch and "/tmp/x.srt" in launch
 
 
-def test_cast_tracks_position_and_advances_on_finish(monkeypatch):
+def test_cast_tracks_position_to_the_end(monkeypatch):
+    """caster reports what it observed; whether that counts as a finished episode is
+    `cast_flow`'s call (ADR 0029) — see the parity pin in tests/test_cast_flow.py."""
     _cast_run(
         monkeypatch,
         info_seq=[
@@ -332,14 +334,11 @@ def test_cast_tracks_position_and_advances_on_finish(monkeypatch):
             {"player_state": "IDLE", "duration": 100.0},
         ],
     )
-    pos, dur, advance, _subs = caster.cast(
-        CFG, "Show E1", "http://u", device="TV", next_label="Show E2"
-    )
+    pos, dur, _subs = caster.cast(CFG, "Show E1", "http://u", device="TV")
     assert (pos, dur) == (99.0, 100.0)
-    assert advance is True  # ended past _CAST_DONE with a next episode queued
 
 
-def test_cast_no_advance_on_early_stop(monkeypatch):
+def test_cast_reports_early_stop_position(monkeypatch):
     _cast_run(
         monkeypatch,
         info_seq=[
@@ -347,23 +346,20 @@ def test_cast_no_advance_on_early_stop(monkeypatch):
             {"player_state": "IDLE", "duration": 100.0},  # stopped at 20% → not finished
         ],
     )
-    pos, dur, advance, _subs = caster.cast(
-        CFG, "Show E1", "http://u", device="TV", next_label="Show E2"
-    )
+    pos, dur, _subs = caster.cast(CFG, "Show E1", "http://u", device="TV")
     assert (pos, dur) == (20.0, 100.0)
-    assert advance is False
 
 
 def test_cast_launch_failure_returns_zero(monkeypatch):
     _cast_run(monkeypatch, launch_rc=1)
-    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False, False)
+    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
 
 
 def test_cast_gives_up_if_never_starts(monkeypatch):
     # Receiver stays idle/unreachable forever → bail after _CAST_GIVEUP polls,
     # never loops indefinitely.
     calls = _cast_run(monkeypatch, info_seq=[])  # every info poll fails
-    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False, False)
+    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
     info_polls = sum(1 for c in calls if "info" in c)
     assert info_polls == caster._CAST_GIVEUP
 
@@ -379,7 +375,7 @@ def test_cast_launch_timeout_degrades(monkeypatch):
     monkeypatch.setattr(caster.subprocess, "run", hang)
     events = []
     result = caster.cast(CFG, "M", "http://u", device="TV", on_event=events.append)
-    assert result == (0.0, 0.0, False, False)
+    assert result == (0.0, 0.0, False)
     assert [e["kind"] for e in events] == ["failed"]
 
 
@@ -401,7 +397,7 @@ def test_cast_poll_timeout_counts_as_unreachable(monkeypatch):
 
     monkeypatch.setattr(caster.subprocess, "run", fake)
     monkeypatch.setattr(caster, "_poll_wait", lambda *_: None)
-    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False, False)
+    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
     assert len(polls) == caster._CAST_GIVEUP
 
 
@@ -639,17 +635,15 @@ def test_cast_prefers_bridge_with_metadata(monkeypatch):
 
     monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
     seen = []
-    pos, dur, advance, _subs = caster.cast(
+    pos, dur, _subs = caster.cast(
         CFG,
         "Dune",
         "http://x",
         device="1.2.3.4",
-        next_label="ep2",
         meta=caster.CastMeta(poster="p.jpg"),
         on_event=seen.append,
     )
     assert (pos, dur) == (98.0, 100.0)
-    assert advance is True  # ended past _CAST_DONE with a queued next episode
     assert [e["kind"] for e in seen] == ["started", "playing", "ended"]
 
 

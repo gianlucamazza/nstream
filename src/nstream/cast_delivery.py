@@ -30,6 +30,16 @@ EventCb = Callable[[dict], None]
 CAST_DONE = 0.97
 
 
+def is_finished(pos: float, dur: float) -> bool:
+    """Whether a cast that ended at `pos` of `dur` reached its natural end (ADR 0029).
+
+    The single definition in the repo: every delivery backend produces `pos`/`dur`, and
+    `cast_flow` alone turns them into an advance decision. An unknown duration (`dur == 0`
+    — a fire-and-return cast nobody polled) is never a finish: a position we did not
+    observe cannot prove the episode ended."""
+    return bool(dur) and pos >= dur * CAST_DONE
+
+
 class BridgeOutcome(NamedTuple):
     """What one bridge cast did. `finished` is the advance heuristic (ended at ≥
     CAST_DONE of the runtime); `disconnected` means the daemon socket died mid-cast
@@ -96,7 +106,7 @@ def drive_bridge(
                 pos = float(ev.get("position") or pos)
                 dur = float(ev.get("duration") or dur)
             if kind == "ended":
-                finished = bool(dur) and pos >= dur * CAST_DONE
+                finished = is_finished(pos, dur)
             if kind == "disconnected" and on_disconnect is not None:
                 on_disconnect(pos)
                 disconnected = True

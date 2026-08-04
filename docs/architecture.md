@@ -40,7 +40,7 @@ src/nstream/
 | `cli_args` | `build_parser()` — flag surface for TUI and `--json` |
 | `headless` | `--json` entry: title select, lifecycle (`--stop`/`--status`/…), delegates play |
 | `headless_play` | One-title resolve → prepare_stream → play/cast → success JSON |
-| `series` | series-only flow (ADR 0009) |
+| `series` | series-only flow (ADR 0009) + the continuation policy: `next_up` / `next_video` (ADR 0029) |
 | `settings` | fzf settings menu |
 
 ### Selection & resolve
@@ -57,10 +57,10 @@ src/nstream/
 ### Cast stack
 
 ```
-cast_flow.run_cast
+cast_flow.run_cast                       ← decides `advance` (ADR 0029), once, for all backends
   → cast_vet (audio / video / container)
-  → mirror | remux (Tier-2) | caster (Tier-1)
-       → cast_delivery.drive_bridge → bridge
+  → mirror | remux (Tier-2) | caster (Tier-1)      ← report (pos, dur); never `advance`
+       → cast_delivery.drive_bridge → bridge       ← `is_finished`: the one finish predicate
 ```
 
 ### Foundation
@@ -69,7 +69,7 @@ cast_flow.run_cast
 |--------|------|
 | `types` | `Meta`, `Video`, `Stream`, `Subtitle`, `HistoryEntry` |
 | `config` | `Config`, `PlayOpts`, load/save, path helpers |
-| `state/` | history + library, cast session, dead-sources denylist |
+| `state/` | history + library (`resumable`, `is_watched`), cast session, dead-sources denylist |
 | `log` / `util` / `languages` | logging+redaction, atomic I/O, language tokens |
 
 ## Naming notes

@@ -56,13 +56,28 @@ def load_history(cfg: Config) -> dict[str, HistoryEntry]:
 END_TAIL_SECONDS = 60.0
 
 
-def _watched(entry: HistoryEntry) -> bool:
+def is_watched(entry: HistoryEntry) -> bool:
+    """Whether `entry` is effectively finished — no useful resume point left.
+
+    Public because the continuation policy (`series.next_up`, ADR 0029) needs to answer it
+    for ONE entry, instead of inferring it from which list the entry arrived in.
+
+    Deliberately more tolerant than the cast's finish heuristic
+    (`cast_delivery.CAST_DONE`), and the two must stay in that order: **advance implies
+    watched**. They answer different questions — "is there a resume point left?" (this one,
+    tolerant: mpv parked at EOF, padded durations) versus "was that `ended` a natural end or a
+    manual stop?" (severe: advancing on a deliberate stop is worse than not advancing). If the
+    thresholds ever inverted, a cast that counted as finished would stay out of
+    `watched_series` and `-c` would replay the episode forever."""
     duration = entry.get("duration") or 0.0
     if duration <= 0:
         return False
     position = entry.get("position") or 0.0
     tail = min(END_TAIL_SECONDS, 0.05 * duration)  # relative, so short clips aren't mislabelled
     return position / duration > WATCHED_THRESHOLD or position >= duration - tail
+
+
+_watched = is_watched  # module-internal alias (the public name is the one to use)
 
 
 def resume_position(cfg: Config, video_id: str) -> float | None:
@@ -259,3 +274,24 @@ def recent(cfg: Config, limit: int = 30, typ: str | None = None) -> list[History
         entries = [e for e in entries if e.get("type", "movie") == typ]
     entries.sort(key=lambda e: e.get("ts", 0.0), reverse=True)
     return entries[:limit]
+
+
+def resumable(cfg: Config, limit: int = 30, typ: str | None = None) -> list[HistoryEntry]:
+    """Everything the user can continue, most recent first — in-progress titles AND finished
+    series episodes (which continue as the *next* episode, `series.next_up`).
+
+    The single answer to "what can I continue?" (ADR 0029). Callers used to merge `recent()`
+    and `watched_series()` by hand and rank them differently depending on the branch: with a
+    search term the in-progress list won unconditionally, so a half-watched S01E02 from weeks
+    ago beat a binge finished minutes ago. One ordering removes that class of bug."""
+    entries = [e for e in load_history(cfg).values() if not _watched(e) or _resumes_as_next(e)]
+    if typ is not None:
+        entries = [e for e in entries if e.get("type", "movie") == typ]
+    entries.sort(key=lambda e: e.get("ts", 0.0), reverse=True)
+    return entries[:limit]
+
+
+def _resumes_as_next(entry: HistoryEntry) -> bool:
+    """A finished entry that still has a continuation: only a series episode (the next one).
+    A finished film is done — it belongs in the library, not in "continue watching"."""
+    return entry.get("type") == "series"

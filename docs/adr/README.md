@@ -40,5 +40,6 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0026](0026-structured-stream-metadata-precedence.md) | Stream metadata: protocol structured fields before free text                       | Accepted           |
 | [0027](0027-per-addon-circuit-breaker.md)             | Per-addon circuit breaker on stream sources                                        | Proposed           |
 | [0028](0028-content-duration-vetting.md)              | Vet the REAL duration against the expected runtime (placeholder/sample)            | Accepted           |
+| [0029](0029-one-continuation-policy.md)               | One continuation policy; advance decided once, never in a delivery backend         | Accepted           |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.

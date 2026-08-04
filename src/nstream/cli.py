@@ -308,7 +308,7 @@ def _move_to_cast(
         print(f"nstream: {e}", file=sys.stderr)
         return (pos, dur, False)
     state.clear_cast_session()  # Alt-C bypasses run_cast, which normally does this
-    pos, dur, _, _ = cast(cfg, title, chosen["url"], device=device, start=pos)
+    pos, dur, _subs = cast(cfg, title, chosen["url"], device=device, start=pos)
     return (pos, dur, False)
 
 
@@ -607,14 +607,20 @@ def run_explain(cfg: Config, query: str, opts: PlayOpts | None = None) -> int:
 
 def run_continue(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
     """`-c`: resume from history, returning to the list after each play (ESC exits).
-    `typ` (--movies/--series) narrows the list to one content type."""
-    entries = state.recent(cfg, typ=typ)
+    `typ` (--movies/--series) narrows the list to one content type.
+
+    The list is `state.resumable` (ADR 0029), so a finished episode stays here as "→ prossimo
+    episodio" instead of vanishing: the headless `-c` has always advanced past the credits,
+    and the TUI hiding the series was the asymmetry, not a feature."""
+    entries = state.resumable(cfg, typ=typ)
     if not entries:
         print("nstream: cronologia vuota", file=sys.stderr)
         return 0
     header: str | None = None
     while True:
-        items = [(history_label(e), e) for e in entries]
+        # `is_watched` is O(1) per row; resolving the actual next episode would cost one
+        # `api.episodes` per row, so that happens only once a row is chosen.
+        items = [(history_label(e, next_episode=state.is_watched(e)), e) for e in entries]
         chosen = fzf_key(
             items, "continua> ", header=header or _pick_hint(opts), preview=_entry_preview
         )
@@ -622,7 +628,7 @@ def run_continue(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
             return 0
         key, entry = chosen
         header = play_history(cfg, entry, _apply_key(opts, key))
-        entries = state.recent(cfg, typ=typ)  # reflect updated positions, then re-show
+        entries = state.resumable(cfg, typ=typ)  # reflect updated positions, then re-show
 
 
 # Home-menu action kinds (the value half of an fzf item; history entries are dicts).
@@ -669,10 +675,12 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
     run_section (typ set: rows and catalogs pinned to one type)."""
     notice: str | None = None
     while True:
-        recent = state.recent(cfg, typ=typ) if opts.history else []
+        recent = state.resumable(cfg, typ=typ) if opts.history else []
         g = ui.glyphs(ui.active_caps())
         pal = ui.palette(ui.active_caps())
-        items: list[tuple[str, object]] = [(history_label(e), e) for e in recent]
+        items: list[tuple[str, object]] = [
+            (history_label(e, next_episode=state.is_watched(e)), e) for e in recent
+        ]
         # Dim section labels (value None) group the menu; the loop skips them if focused.
         # fzf still requires every row selectable — a None value is ignored after pick.
         _SEP = None  # sentinel: group headers, never an action

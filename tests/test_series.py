@@ -299,3 +299,109 @@ def test_entry_video_series_and_movie():
     assert series.entry_video(e) == {"season": 2, "episode": 5}
     assert series.entry_video(HistoryEntry(type="movie")) is None
     assert series.entry_video(HistoryEntry()) is None  # legacy entries default to movie
+
+
+# --- the continuation policy (ADR 0029) -------------------------------------
+
+
+def _multi_season(per_season=(2, 2)):
+    """Episodes across seasons, in the canonical (season, episode) order api.episodes uses."""
+    return [
+        Video(id=f"tt:{s}:{e}", season=s, episode=e, name=f"S{s}E{e}")
+        for s, n in enumerate(per_season, start=1)
+        for e in range(1, n + 1)
+    ]
+
+
+def _entry(season, episode, *, position=10.0, duration=100.0, vid=None):
+    return HistoryEntry(
+        video_id=vid or f"tt:{season}:{episode}", type="series", title="Show", series_id="tt",
+        season=season, episode=episode, position=position, duration=duration,
+    )  # fmt: skip
+
+
+def test_next_video_crosses_the_season_boundary():
+    eps = _multi_season((2, 2))
+    assert series.next_video(eps, {"season": 1, "episode": 2})["id"] == "tt:2:1"
+
+
+def test_next_video_none_past_the_finale():
+    assert series.next_video(_multi_season((2, 2)), {"season": 2, "episode": 2}) is None
+
+
+def test_next_video_unknown_position_never_restarts():
+    """A legacy entry with no season/episode is not "before S01E01": advancing from it
+    would silently restart the series."""
+    assert series.next_video(_multi_season(), {"season": 0, "episode": 0}) is None
+    assert series.next_video(_multi_season(), None) is None
+
+
+def test_next_video_skips_gaps():
+    eps = [Video(id="a", season=1, episode=1), Video(id="c", season=1, episode=3)]
+    assert series.next_video(eps, {"season": 1, "episode": 1})["id"] == "c"
+
+
+def test_next_up_finished_season_finale_advances_to_next_season(monkeypatch):
+    eps = _multi_season((2, 2))
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: eps)
+    nu = series.next_up(CFG, _entry(1, 2, position=99.0))  # watched finale of S01
+    assert nu.selection == "next" and nu.video["id"] == "tt:2:1"
+
+
+def test_next_up_series_finale_is_completed(monkeypatch):
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: _multi_season((2, 2)))
+    nu = series.next_up(CFG, _entry(2, 2, position=99.0))
+    assert nu.selection == "completed" and nu.video is None
+
+
+def test_next_up_unfinished_episode_resumes_without_touching_the_catalogue(monkeypatch):
+    monkeypatch.setattr(
+        series.api, "episodes", lambda cfg, sid: pytest.fail("no episode fetch on resume")
+    )
+    nu = series.next_up(CFG, _entry(1, 2, position=10.0))
+    assert nu.selection == "resume" and nu.video["episode"] == 2
+
+
+def test_next_up_movie_resumes(monkeypatch):
+    entry = HistoryEntry(video_id="tt1", type="movie", title="Film", position=99.0, duration=100.0)
+    assert series.next_up(CFG, entry) == series.NextUp(None, "resume")
+
+
+def test_next_up_empty_catalogue_resumes(monkeypatch):
+    """An unreadable episode list is a catalogue hiccup, not a reason to block playback."""
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: [])
+    nu = series.next_up(CFG, _entry(1, 2, position=99.0))
+    assert nu.selection == "resume" and nu.video["episode"] == 2
+
+
+def test_next_up_watched_entry_without_position_resumes(monkeypatch):
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: _multi_season())
+    entry = _entry(0, 0, position=99.0, vid="tt:legacy")
+    assert series.next_up(CFG, entry).selection == "resume"
+
+
+def test_binge_crosses_the_season_boundary(monkeypatch):
+    """The gap the suite never covered: every binge test used season=1 only."""
+    eps = _multi_season((2, 2))
+    play, calls = _fake_play(advance_until=99)
+    notice = series.binge(CFG, "tt", "Show", eps, eps[1], _opts(), play_video=play)
+    assert notice is None
+    assert [c["video_id"] for c in calls] == ["tt:1:2", "tt:2:1", "tt:2:2"]
+    assert calls[0]["next_label"].startswith("Show · S02E01")  # overlay names the next season
+
+
+def test_resume_watched_episode_starts_from_the_next_one(monkeypatch):
+    """Parity with the headless `-c`: a finished episode continues, it doesn't replay."""
+    eps = _multi_season((2, 2))
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: eps)
+    play, calls = _fake_play(advance_until=0)
+    series.resume(CFG, _entry(1, 2, position=99.0), _opts(), play_video=play)
+    assert [c["video_id"] for c in calls] == ["tt:2:1"]
+
+
+def test_resume_finished_series_says_so(monkeypatch):
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: _multi_season((2, 2)))
+    play, calls = _fake_play(advance_until=0)
+    notice = series.resume(CFG, _entry(2, 2, position=99.0), _opts(), play_video=play)
+    assert notice is not None and "finita" in notice
+    assert calls == []  # nothing replayed

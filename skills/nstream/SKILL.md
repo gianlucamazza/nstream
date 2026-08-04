@@ -140,6 +140,10 @@ Notes:
   entry + cast session): prefer `--json --stop` to end it so the position is persisted, and
   `-c "titolo"` will resume/propose correctly. Add `--follow` only if the user wants live
   resume/auto-advance tracking (it will hold the terminal for the whole runtime).
+  `-c` now also asks the receiver once for the real position before deciding, so a
+  fire-and-return cast usually advances even without `--stop` — but a TV switched off before
+  any `--stop`/`--status`/`-c` leaves no final position, and that episode will be proposed
+  again. `--stop` remains the reliable way to close a cast.
 - **`--follow` streams playback events as JSONL** (one JSON object per line) instead of a single
   final object:
   `{"action":"cast","event":"started|playing|paused|ended|failed|disconnected", ...}` with
