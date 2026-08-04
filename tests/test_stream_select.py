@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from nstream import availability, net, state, stream_select
+from nstream import availability, net, state, stream_select, tracks
 from nstream.config import Config, PlayOpts
 from nstream.types import Stream
 
@@ -30,8 +30,10 @@ def _clear_probe_memo():
     """The availability probe memo is process-lifetime — clear it between tests so a url's
     verdict from one test can't leak into another that stubs `probe_url` differently."""
     availability.clear_memo()
+    tracks.clear_cache()
     yield
     availability.clear_memo()
+    tracks.clear_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -854,6 +856,176 @@ def test_pick_audio_stream_verified_rejects_mistag(monkeypatch):
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
     stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
     assert stream is None and verified is False
+
+
+# --- content duration vetting (ADR 0028) -----------------------------------
+
+
+def _durations(monkeypatch, by_url: dict[str, float]):
+    """Stub the duration probe: url → real seconds (missing url = unreadable)."""
+    monkeypatch.setattr(
+        stream_select.availability.tracks,
+        "probe_tracks",
+        lambda url, **kw: tracks.Tracks(duration=by_url.get(url, 0.0)),
+    )
+
+
+def test_pick_audio_verified_skips_short_file(monkeypatch):
+    """The incident: a P2P placeholder of 30s vs a ~55 min episode must be skipped, not
+    accepted on benefit of the doubt because its single track is `und`."""
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("fake", {"eng"}), _rstream("real", {"eng"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: None)  # und tracks
+    _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
+    stream, verified = stream_select.pick_audio_stream_verified(
+        cfg, [], "eng", cast=False, expected_runtime_s=3300.0
+    )
+    assert stream["url"] == "real" and verified is False
+
+
+def test_pick_audio_verified_raises_when_all_short(monkeypatch):
+    """All name-matches truncated → ContentTooShort, never `(None, False)`: the caller
+    would map that to `audio_lang_unavailable`, a false diagnosis."""
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("f1", {"eng"}), _rstream("f2", {"eng"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
+    _durations(monkeypatch, {"f1": 30.0, "f2": 12.0})
+    with pytest.raises(stream_select.ContentTooShort) as e:
+        stream_select.pick_audio_stream_verified(
+            cfg, [], "eng", cast=False, expected_runtime_s=3300.0
+        )
+    assert e.value.count == 2 and e.value.verdict.duration == 12.0
+
+
+def test_pick_audio_verified_no_expected_keeps_current_behaviour(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    playable = [_rstream("u1", {"ita"})]
+    monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"ita"}))
+    monkeypatch.setattr(
+        stream_select.availability.tracks,
+        "probe_tracks",
+        lambda *a, **k: pytest.fail("must not probe when the runtime is unknown"),
+    )
+    stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
+    assert stream["url"] == "u1" and verified is True
+
+
+def test_vet_duration_reselects_next_candidate(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    fake: Stream = {"url": "fake"}
+    real: Stream = {"url": "real"}
+    results: list[Stream] = [fake, real]
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, real])
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
+    picked = stream_select.vet_duration(cfg, results, fake, expected_s=3300.0, cast=False)
+    assert picked is real
+    assert results == [real]  # dropped in place: no later reselect can land back on it
+
+
+def test_vet_duration_respects_probe_cap(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    streams: list[Stream] = [{"url": f"f{i}"} for i in range(6)]
+    results = list(streams)
+    resolved = []
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: streams)
+    monkeypatch.setattr(
+        stream_select, "_playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
+    )
+    _durations(monkeypatch, {s["url"]: 30.0 for s in streams})
+    with pytest.raises(stream_select.ContentTooShort):
+        stream_select.vet_duration(cfg, results, streams[0], expected_s=3300.0, cast=False)
+    assert len(resolved) == 3  # chosen + probe_cap (2) alternatives, then honest failure
+
+
+def test_vet_duration_unverifiable_candidate_accepted(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    fake: Stream = {"url": "fake"}
+    unknown: Stream = {"url": "unknown"}
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, unknown])
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    _durations(monkeypatch, {"fake": 30.0})  # "unknown" probes to 0 → benefit of the doubt
+    assert stream_select.vet_duration(
+        cfg, [fake, unknown], fake, expected_s=3300.0, cast=False
+    ) is unknown  # fmt: skip
+
+
+def test_prepare_stream_vets_duration_on_local_backend(monkeypatch):
+    """The local backend is exactly where `_verify_availability`/`_ensure_playable` are
+    no-ops — the duration guard must still act there (it's the incident's backend)."""
+    fake: Stream = {"url": "fake", "name": "x\n720p"}
+    real: Stream = {"url": "real", "name": "y\n720p"}
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: fake)
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, real])
+    monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: None)
+    _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
+    cfg = Config(torrentio_base="tb", playback_backend="local")
+    v = stream_select.prepare_stream(
+        cfg, [fake, real], _gopts(), auto=True, reselect_on_wrong_audio=False,
+        expected_runtime_s=3300.0,
+    )  # fmt: skip
+    assert v is not None and v.stream is real
+
+
+def test_prepare_stream_duration_guard_before_audio_guard(monkeypatch):
+    """The language reselect must start from a duration-vetted pick, not from the fake."""
+    fake: Stream = {"url": "fake", "name": "x\n720p"}
+    real: Stream = {"url": "real", "name": "y\n720p"}
+    seen = []
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: fake)
+    monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, real])
+    monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(
+        stream_select, "_audio_langs_of", lambda cfg, ch: seen.append(ch["url"]) or {"ita"}
+    )
+    _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
+    cfg = Config(torrentio_base="tb", audio_langs=["ita"])
+    stream_select.prepare_stream(
+        cfg, [fake, real], _gopts(), auto=True, reselect_on_wrong_audio=False,
+        expected_runtime_s=3300.0,
+    )  # fmt: skip
+    assert seen == ["real"]
+
+
+def test_prepare_stream_no_duration_check_on_manual_pick(monkeypatch):
+    """A manual pick stays the user's explicit choice, like every other auto-only guard."""
+    fake: Stream = {"url": "fake", "name": "x\n720p"}
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: fake)
+    monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
+    monkeypatch.setattr(
+        stream_select.availability.tracks,
+        "probe_tracks",
+        lambda *a, **k: pytest.fail("no probing on a manual pick"),
+    )
+    cfg = Config(torrentio_base="tb")
+    v = stream_select.prepare_stream(
+        cfg, [fake], _gopts(), auto=False, reselect_on_wrong_audio=False,
+        expected_runtime_s=3300.0,
+    )  # fmt: skip
+    assert v is not None and v.stream is fake
+
+
+def test_vet_duration_passes_plausible_chosen_through(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    good: Stream = {"url": "good"}
+    monkeypatch.setattr(
+        stream_select, "_auto_candidates", lambda *a, **k: pytest.fail("no reselect needed")
+    )
+    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    _durations(monkeypatch, {"good": 3180.0})
+    assert stream_select.vet_duration(cfg, [good], good, expected_s=3300.0, cast=False) is good
 
 
 # --- dead-source classification & denylist (ADR 0025) ----------------------

@@ -168,6 +168,8 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
   - `quality` — requested filter (null = Auto / none)
   - `available_resolutions` — tiers on offer for this title
   - `audio_lang` / `available_audio` / `audio_verified`
+  - `duration_verified` — `true` = the real duration was measured and matches the title's
+    runtime (ADR 0028); `null` = not checkable (unknown runtime, or ffprobe couldn't read it)
   - `reencoded` — Tier-2 remux used
   - `selection` — `exact` name match vs `first`-result guess (if `first`, say which title)
 - `ok: false` → handle by `error` code (below).
@@ -191,6 +193,12 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
   not-ready; `removed_sources` counts them. Do **not** retry the same command: it will fail
   identically. Say the title is unavailable, and offer `--local` (P2P, if the swarm is alive).
   If the user believes a source is back, `nstream --json --forget-dead` clears the denylist.
+- `sources_truncated` — the sources contain a file far shorter than the title's runtime: a
+  "removed for copyright" placeholder or a sample, not the video. `duration_s` and
+  `expected_runtime_s` carry both measures. Do **not** retry the same command — the file is what
+  the source contains. Offer another quality (`--quality 1080`), the other backend
+  (`--local` ↔ debrid), or another stream source. If `expected_runtime_s` looks wrong for the
+  title (anthology series, variable-length episodes), say so: the guard may be misfiring.
 - `video_codec_unsupported` — the REAL (ffprobe-verified) video codec of every candidate is one
   the Chromecast can't render (e.g. a DivX/MPEG-4 ASP rip) and the mirror fallback isn't
   available — casting would show a black screen. `video_codec` carries the codec; offer

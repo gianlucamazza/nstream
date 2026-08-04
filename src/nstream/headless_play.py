@@ -20,6 +20,7 @@ from . import (
     quality,
     state,
     stream_select,
+    tracks,
     ui,
 )
 from .caster import CastUnavailable, device_volume
@@ -35,6 +36,24 @@ def emit_json(obj: dict) -> None:
     """One machine-readable JSON object on stdout (no url/token)."""
     sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def emit_truncated(e: stream_select.ContentTooShort, title: str) -> None:
+    """Report a proven placeholder/sample (ADR 0028). A distinct code from
+    `no_playable_stream` on purpose: that one is documented as worth retrying later, while a
+    truncated file is what the source *contains* — the same command will fail identically.
+    Both measures go out in clear so an implausible expected runtime is visible at a glance."""
+    emit_json(
+        {
+            "ok": False,
+            "error": "sources_truncated",
+            "message": f"le sorgenti per «{title}» contengono un file troppo corto "
+            f"({e.verdict.reason}): placeholder o sample, non il video",
+            "duration_s": round(e.verdict.duration, 1) or None,
+            "expected_runtime_s": round(e.verdict.expected, 1) or None,
+            "truncated_sources": e.count,
+        }
+    )
 
 
 def describe_stream(cfg: Config, chosen: Stream) -> dict:
@@ -103,6 +122,10 @@ def auto_play(
         )
         return 1
 
+    # Expected playtime of THIS video (0 = unknown → the truncation guard stays off, ADR
+    # 0028). Disk-cached and token-free: usually a hit warmed by the preview pane.
+    expected_s = api.expected_runtime_s(cfg, typ, video_id)
+
     available_audio = stream_select.audio_languages(cfg, results, cast=opts.cast)
     available_resolutions = stream_select.available_resolutions(cfg, results, cast=opts.cast)
     exact = stream_select.exact_resolution(opts.quality)
@@ -135,9 +158,14 @@ def auto_play(
             return 1
         # Track-accurate: ffprobe-confirm the real tracks carry the dub (the name tag can
         # lie). None back = every name-match's real tracks lack the language.
-        chosen, audio_verified = stream_select.pick_audio_stream_verified(
-            cfg, results, opts.audio_lang, cast=opts.cast, exact_resolution=exact
-        )
+        try:
+            chosen, audio_verified = stream_select.pick_audio_stream_verified(
+                cfg, results, opts.audio_lang, cast=opts.cast, exact_resolution=exact,
+                expected_runtime_s=expected_s,
+            )  # fmt: skip
+        except stream_select.ContentTooShort as e:
+            emit_truncated(e, title)
+            return 1
         if chosen is None:
             emit_json(
                 {
@@ -156,9 +184,14 @@ def auto_play(
         # what was actually proven gone (ADR 0025), never on "the list came back empty" — a
         # source merely unusable right now is a different answer for the caller.
         keys_before = [stream_select.source_key(s) for s in results]
-        vetted = stream_select.prepare_stream(
-            cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title
-        )
+        try:
+            vetted = stream_select.prepare_stream(
+                cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title,
+                expected_runtime_s=expected_s,
+            )  # fmt: skip
+        except stream_select.ContentTooShort as e:
+            emit_truncated(e, title)
+            return 1
     if vetted is None:
         # The pre-commit verification may have just proven the remaining sources gone
         # (ADR 0025): report that only when the denylist says so, so the caller learns
@@ -259,7 +292,11 @@ def auto_play(
                     meta=cast_meta or caster.CastMeta(),
                     on_event=on_cast_event if args.follow else None,
                     safety_sub_lang=vetted.safety_sub_lang,
+                    expected_runtime_s=expected_s,
                 )  # fmt: skip
+            except stream_select.ContentTooShort as e:
+                emit_truncated(e, title)
+                return 1
             except cast_flow.CastVideoUnsupported as e:
                 emit_json(
                     {
@@ -348,6 +385,13 @@ def auto_play(
             "muted": muted,
             "audio_lang": cast_audio_lang,
             "audio_verified": cast_audio_verified,
+            # Honest twin of audio_verified (ADR 0028): true = the real duration was measured
+            # and is compatible with the title's runtime; null = it could not be checked (no
+            # known runtime, or ffprobe couldn't read the file). Cache-only read — reporting
+            # never pays a probe of its own.
+            "duration_verified": (
+                True if expected_s and tracks.cached_duration(chosen.get("url") or "") > 0 else None
+            ),
             "available_audio": list(available_audio),
             # Only claim subtitles the delivery actually attached (`subs_delivered`): both the
             # castbridge (side-loaded WebVTT track) and catt (`-s`) paths carry them now, but a

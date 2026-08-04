@@ -197,6 +197,55 @@ def test_meta_cached_disk_empty_not_cached(monkeypatch, tmp_path):
     assert calls == ["tt9", "tt9"]  # empty result isn't persisted → re-fetched
 
 
+# --- expected runtime (ADR 0028) -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "seconds"),
+    [
+        ("136 min", 8160.0),
+        ("55 min", 3300.0),
+        ("1h 30min", 5400.0),
+        ("2 h", 7200.0),
+        ("", 0.0),
+        ("n/a", 0.0),
+    ],
+)
+def test_parse_runtime_s_formats(raw, seconds):
+    assert api.parse_runtime_s(raw) == seconds
+
+
+def test_expected_runtime_series_reads_series_meta(monkeypatch):
+    # Cinemeta puts `runtime` on the SERIES meta (typical episode length); the episode
+    # entries carry none, so the series id must be derived from the episode id.
+    seen = []
+    monkeypatch.setattr(
+        api,
+        "meta_cached_disk",
+        lambda cfg, typ, vid: seen.append((typ, vid)) or {"runtime": "55 min"},
+    )
+    assert api.expected_runtime_s(CFG, "series", "tt5675620:1:1") == 3300.0
+    assert seen == [("series", "tt5675620")]
+
+
+def test_expected_runtime_movie_reads_own_meta(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        api,
+        "meta_cached_disk",
+        lambda cfg, typ, vid: seen.append((typ, vid)) or {"runtime": "136 min"},
+    )
+    assert api.expected_runtime_s(CFG, "movie", "tt0330793") == 8160.0
+    assert seen == [("movie", "tt0330793")]
+
+
+def test_expected_runtime_zero_when_meta_missing(monkeypatch):
+    monkeypatch.setattr(api, "meta_cached_disk", lambda cfg, typ, vid: {})
+    assert api.expected_runtime_s(CFG, "series", "tt1:1:1") == 0.0
+    monkeypatch.setattr(api, "meta_cached_disk", lambda cfg, typ, vid: {"runtime": None})
+    assert api.expected_runtime_s(CFG, "movie", "tt1") == 0.0
+
+
 def test_cat_map_browse_keywords():
     # --browse keyword → Cinemeta catalog id (consumed by api.catalog/browse).
     assert api.CAT_MAP == {"popolari": "top", "nuovi": "year", "top": "imdbRating"}

@@ -328,6 +328,39 @@ def _prune_meta_cache(cache_dir: Path) -> None:
                     p.unlink()
 
 
+# Cinemeta `runtime` is free text: "136 min", "55 min", "1h 30min", "2 h", "1:30".
+_RUNTIME_H_RE = re.compile(r"(\d+)\s*h", re.I)
+_RUNTIME_M_RE = re.compile(r"(\d+)\s*m", re.I)
+
+
+def parse_runtime_s(raw: str) -> float:
+    """Cinemeta's free-text `runtime` in seconds; 0.0 when absent or unparseable.
+    Pure text, no I/O — the unit-testable half of `expected_runtime_s`."""
+    text = raw or ""
+    hours = _RUNTIME_H_RE.search(text)
+    minutes = _RUNTIME_M_RE.search(text)
+    if not hours and not minutes:
+        return 0.0
+    h = int(hours.group(1)) if hours else 0
+    m = int(minutes.group(1)) if minutes else 0
+    return float(h * 3600 + m * 60)
+
+
+def expected_runtime_s(cfg: Config, typ: str, video_id: str) -> float:
+    """Expected playtime of ONE video in seconds; 0.0 when unknown (callers then skip the
+    duration vetting, ADR 0028 — an unknown runtime is never replaced by a default).
+
+    For a series the runtime lives on the SERIES meta and is the length of the typical
+    EPISODE: Cinemeta's `videos` entries carry none (see `episodes`), so the series id is
+    taken from the episode id (`tt5675620:1:1` → `tt5675620`). Reads the disk-cached meta
+    (token-free, TTL 600 s, usually already warm from the preview pane)."""
+    meta_id = video_id.split(":", 1)[0] if typ == "series" else video_id
+    if not meta_id:
+        return 0.0
+    obj = meta_cached_disk(cfg, typ, meta_id)
+    return parse_runtime_s(str(obj.get("runtime") or ""))
+
+
 def episodes(cfg: Config, series_id: str) -> list[Video]:
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "meta", "series", series_id):

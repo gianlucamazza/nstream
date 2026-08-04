@@ -142,14 +142,25 @@ def _play_video(
         notice = stream_select.no_streams_message(cfg, typ, video_id, title)
         ui.status(notice, kind="fail")
         return (notice, False, opts.quality if opts.quality is not None else 0)
-    vetted = stream_select.prepare_stream(
-        cfg,
-        results,
-        opts,
-        auto=auto,
-        reselect_on_wrong_audio=reselect_on_wrong_audio,
-        title=title,
-    )
+    # Expected playtime of this video (0 = unknown → the truncation guard stays off, ADR
+    # 0028); shared by the selection guard and every cast reselect below.
+    expected_s = api.expected_runtime_s(cfg, typ, video_id)
+    try:
+        vetted = stream_select.prepare_stream(
+            cfg,
+            results,
+            opts,
+            auto=auto,
+            reselect_on_wrong_audio=reselect_on_wrong_audio,
+            title=title,
+            expected_runtime_s=expected_s,
+        )
+    except stream_select.ContentTooShort as e:
+        # Every probed source is a placeholder, not the video: say so instead of playing
+        # 30 seconds of "removed for copyright". Retrying wouldn't change the file.
+        notice = f"sorgenti troncate per «{title}» ({e.verdict.reason}) — prova un'altra qualità"
+        ui.status(notice, kind="fail")
+        return (notice, False, opts.quality if opts.quality is not None else 0)
     if vetted is None:
         # No playable stream, or backed out of a (re)selection / quality picker.
         return (None, False, opts.quality if opts.quality is not None else 0)
@@ -170,7 +181,7 @@ def _play_video(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
                 start=start, next_label=next_label, safety_sub_lang=safety_sub_lang,
-                cast_meta=cast_meta,
+                cast_meta=cast_meta, expected_runtime_s=expected_s,
             )  # fmt: skip
         else:
             res = _play_on_mpv(
@@ -218,6 +229,7 @@ def _play_on_cast(
     next_label: str | None,
     safety_sub_lang: str | None = None,
     cast_meta: caster.CastMeta | None = None,
+    expected_runtime_s: float = 0.0,
 ) -> tuple[float, float, bool]:
     """Interactive cast: thin wrapper over the shared decision tree (`cast_flow.run_cast`),
     with the interactive knobs on — blocking follow, next-episode label, and the in-cast
@@ -228,6 +240,7 @@ def _play_on_cast(
             device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
             opts=opts, start=start, follow=True, next_label=next_label,
             allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
+            expected_runtime_s=expected_runtime_s,
         )  # fmt: skip
     except cast_flow.CastVideoUnsupported as e:
         # Casting anyway would show a black screen (ADR 0017): back out to the list with

@@ -688,7 +688,7 @@ def test_play_video_interactive_calls_track_menu(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: (
             cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
@@ -715,7 +715,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: (
             cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
@@ -748,7 +748,7 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: (
             cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
@@ -782,7 +782,7 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": (
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: (
             cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
         ),
     )
@@ -896,23 +896,23 @@ def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (chosen, ""),
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (chosen, ""),
     )
     # Container vetting (ADR 0022): treat the container as castable so these tests keep the
     # direct/mirror paths they assert (the mkv-url stream would otherwise route to a rewrap).
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_container",
-        lambda cfg, results, chosen, target, exact_resolution=0: (chosen, False),
+        lambda cfg, results, chosen, target, exact_resolution=0, **_kw: (chosen, False),
     )
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, stream: "mp4")
     monkeypatch.setattr(
-        cast_flow.cast_vet, "cast_languages", lambda cfg, results, exact_resolution=0: langs
+        cast_flow.cast_vet, "cast_languages", lambda cfg, results, exact_resolution=0, **_kw: langs
     )
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "cast_resolver",
-        lambda cfg, results, exact_resolution=0: lambda lang: "http://u2",
+        lambda cfg, results, exact_resolution=0, **_kw: lambda lang: "http://u2",
     )
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs",
@@ -1046,7 +1046,9 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
     _call_cast(_cast_opts(), stream)
     assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
     monkeypatch.setattr(
-        cast_flow.cast_vet, "cast_languages", lambda cfg, results, exact_resolution=0: ("ita",)
+        cast_flow.cast_vet,
+        "cast_languages",
+        lambda cfg, results, exact_resolution=0, **_kw: ("ita",),
     )
     _call_cast(_cast_opts(), stream)
     assert seen["langs"] == () and seen["resolver"] is None
@@ -1090,7 +1092,7 @@ def test_play_history_on_save_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(
         cli.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: subs.SubsPick())
     monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 100.0, ""))
@@ -1116,7 +1118,7 @@ def test_play_history_resume_start_threaded(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(
         cli.stream_select, "prepare_stream",
-        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="": _VETTED(results[0]),
+        lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: subs.SubsPick())
     seen = {}

@@ -48,7 +48,7 @@ def _wire(monkeypatch, plan, *, langs=("ita",)):
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (chosen, ""),
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (chosen, ""),
     )
     # Container vetting (ADR 0022): default to a castable container so the existing tests take
     # the direct/remux paths they assert. The reselect returns (chosen, False) and the settled
@@ -56,18 +56,18 @@ def _wire(monkeypatch, plan, *, langs=("ita",)):
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_container",
-        lambda cfg, results, chosen, target, exact_resolution=0: (chosen, False),
+        lambda cfg, results, chosen, target, exact_resolution=0, **_kw: (chosen, False),
     )
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, stream: "mp4")
     monkeypatch.setattr(cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: plan)
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages",
-        lambda cfg, results, exact_resolution=0: langs,
+        lambda cfg, results, exact_resolution=0, **_kw: langs,
     )  # fmt: skip
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "cast_resolver",
-        lambda cfg, results, exact_resolution=0: lambda lang: "http://u2",
+        lambda cfg, results, exact_resolution=0, **_kw: lambda lang: "http://u2",
     )
     monkeypatch.setattr(
         cast_flow.subs, "auto_subs",
@@ -475,7 +475,7 @@ def test_lang_switch_wired_only_when_allowed(monkeypatch):
     assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages",
-        lambda cfg, results, exact_resolution=0: ("ita",),
+        lambda cfg, results, exact_resolution=0, **_kw: ("ita",),
     )  # fmt: skip
     _run(_opts(), stream, allow_lang_switch=True)
     assert seen["langs"] == () and seen["resolver"] is None
@@ -555,7 +555,7 @@ def test_run_cast_raises_when_video_unsupported_and_no_mirror(monkeypatch):
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (chosen, "mpeg4"),
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (chosen, "mpeg4"),
     )
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
     monkeypatch.setattr(cast_flow.caster, "cast", _boom("must not cast undecodable video"))
@@ -575,7 +575,7 @@ def test_run_cast_mirrors_when_video_unsupported(monkeypatch):
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (chosen, "mpeg4"),
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (chosen, "mpeg4"),
     )
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
@@ -600,7 +600,7 @@ def test_run_cast_video_verdict_cleared_by_audio_reselect(monkeypatch):
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (chosen, "mpeg4"),
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (chosen, "mpeg4"),
     )
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
@@ -669,32 +669,32 @@ def test_run_cast_threads_resolved_quality_to_all_reselects(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (
             seen.update(video=exact_resolution) or (chosen, "")
         ),
     )  # fmt: skip
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_container",
-        lambda cfg, results, chosen, target, exact_resolution=0: (
+        lambda cfg, results, chosen, target, exact_resolution=0, **_kw: (
             seen.update(container=exact_resolution) or (chosen, False)
         ),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, s: "mp4")
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_audio",
-        lambda cfg, results, chosen, lang, exact_resolution=0: (
+        lambda cfg, results, chosen, lang, exact_resolution=0, **_kw: (
             seen.update(audio=exact_resolution) or _plan("direct", stream)
         ),
     )  # fmt: skip
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages",
-        lambda cfg, results, exact_resolution=0: (
+        lambda cfg, results, exact_resolution=0, **_kw: (
             seen.update(langs=exact_resolution) or ("ita", "eng")
         ),
     )  # fmt: skip
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_resolver",
-        lambda cfg, results, exact_resolution=0: (
+        lambda cfg, results, exact_resolution=0, **_kw: (
             seen.update(resolver=exact_resolution) or (lambda lang: None)
         ),
     )  # fmt: skip
@@ -745,7 +745,7 @@ def test_no_mirror_with_undecodable_video_raises(monkeypatch):
     _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_video",
-        lambda cfg, results, chosen, exact_resolution=0: (chosen, "mpeg4"),
+        lambda cfg, results, chosen, exact_resolution=0, **_kw: (chosen, "mpeg4"),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     with pytest.raises(cast_flow.CastVideoUnsupported):
@@ -773,3 +773,39 @@ def test_absent_safety_subs_reported_when_actually_delivered(monkeypatch, capsys
     err = capsys.readouterr().err
     assert "non disponibile" in err
     assert f"sottotitoli {CFG.primary} attivati" in err
+
+
+def test_run_cast_threads_expected_runtime_to_all_vets(monkeypatch):
+    """ADR 0028: every cast reselect must know the expected runtime, or a placeholder can
+    win the swap even though `prepare_stream` just rejected one."""
+    stream = dict(_STREAM)
+    seen = {}
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "vet_cast_video",
+        lambda cfg, results, chosen, exact_resolution=0, expected_s=0.0, **_kw: (
+            seen.update(video=expected_s) or (chosen, "")
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "vet_cast_container",
+        lambda cfg, results, chosen, target, exact_resolution=0, expected_s=0.0, **_kw: (
+            seen.update(container=expected_s) or (chosen, False)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, s: "mp4")
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "vet_cast_audio",
+        lambda cfg, results, chosen, lang, exact_resolution=0, expected_s=0.0, **_kw: (
+            seen.update(audio=expected_s) or _plan("direct", stream)
+        ),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.subs, "auto_subs", lambda *a, **k: subs.SubsPick())
+    monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False, False))
+    cast_flow.run_cast(
+        CFG, [stream], stream,
+        device="192.168.1.5", title="T", typ="movie", video_id="tt1",
+        work_dir="/tmp", opts=_opts(quality=1080), start=None,
+        expected_runtime_s=3300.0,
+    )  # fmt: skip
+    assert seen == {"video": 3300.0, "container": 3300.0, "audio": 3300.0}

@@ -36,6 +36,17 @@ from .types import Stream
 _log = log.get_logger("stream_select")
 
 
+class ContentTooShort(Exception):
+    """Every probed source is a placeholder/sample, not the video (ADR 0028). Mirrors
+    `cast_flow.CastVideoUnsupported`: the callers surface it (headless: `sources_truncated`)
+    instead of playing 30 seconds of "removed for copyright" and reporting success."""
+
+    def __init__(self, verdict: availability.DurationVerdict, count: int = 1) -> None:
+        super().__init__(verdict.reason or "sorgente troncata")
+        self.verdict = verdict
+        self.count = count
+
+
 def _future_release(iso: str | None) -> datetime | None:
     """Parse a Cinemeta `released` ISO date; return it only if it's in the future."""
     if not iso:
@@ -260,14 +271,23 @@ def pick_audio_stream_verified(
     cast: bool,
     probe_cap: int = 4,
     exact_resolution: int = 0,
+    expected_runtime_s: float = 0.0,
 ) -> tuple[Stream | None, bool]:
     """Track-accurate variant: among the playable streams whose NAME tags `lang`, ffprobe up
     to `probe_cap` candidates and return the first whose REAL audio tracks carry `lang`
     (verified=True). When a candidate's real tracks are unverifiable (und/no ffprobe), accept
     it on benefit of the doubt (verified=False). Returns (None, False) only when every
-    name-match's real tracks are known AND lack `lang` — i.e. the name lied for all of them."""
+    name-match's real tracks are known AND lack `lang` — i.e. the name lied for all of them.
+
+    A candidate whose real duration is a fraction of `expected_runtime_s` is dropped before
+    the audio check (ADR 0028) — it is a placeholder, and its (often `und`) track would
+    otherwise be accepted on benefit of the doubt. Costs no extra ffprobe: `probe_tracks`
+    runs on the same url a line later. Raises `ContentTooShort` when every name-match is
+    truncated, so the caller never reports it as `audio_lang_unavailable`."""
     name_pick: Stream | None = None
     probed = 0
+    short: list[Stream] = []
+    last_short: availability.DurationVerdict | None = None
     for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution):
         if lang not in r.info.languages:
             continue
@@ -275,16 +295,28 @@ def pick_audio_stream_verified(
             # Cap checked BEFORE resolving: `_playable_url` on an over-cap candidate can
             # cost a P2P buffering wait (or a debrid add) for a stream we'd discard anyway.
             break
-        if not _playable_url(cfg, r.stream):
+        url = _playable_url(cfg, r.stream)
+        if not url:
+            continue
+        probed += 1
+        verdict = availability.vet_duration(url, expected_runtime_s)
+        if not verdict.ok:
+            _log.info("scarto sorgente troncata: %s", verdict.reason)
+            short.append(r.stream)
+            last_short = verdict
             continue
         if name_pick is None:
             name_pick = r.stream
-        probed += 1
         real = stream_audio_langs(cfg, r.stream)
         if real is None:
             return r.stream, False  # unverifiable → benefit of the doubt
         if lang in real:
             return r.stream, True  # confirmed by the actual tracks
+    if short:
+        # Bind the verdict to the run: no later reselect can land back on a proven placeholder.
+        availability.drop_streams(results, short)
+        if name_pick is None and last_short is not None:
+            raise ContentTooShort(last_short, len(short))
     # Every probed name-match had real tracks WITHOUT `lang` (name mistagged) → no match.
     return (None, False) if name_pick is not None and probed else (name_pick, False)
 
@@ -545,6 +577,60 @@ def _ensure_playable(
     return chosen
 
 
+def _duration_ok(cfg: Config, stream: Stream, expected_s: float) -> availability.DurationVerdict:
+    """Resolve `stream`'s url (debrid/P2P) and vet its real duration. Never raises: an
+    unresolvable candidate is somebody else's problem (it simply passes here)."""
+    if expected_s <= 0:
+        return availability.DurationVerdict(True)
+    url = _playable_url(cfg, stream)
+    if not url:
+        return availability.DurationVerdict(True, expected=expected_s)
+    return availability.vet_duration(url, expected_s)
+
+
+def vet_duration(
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    *,
+    expected_s: float,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
+    probe_cap: int = 2,
+) -> Stream:
+    """Ensure `chosen` really is the video and not a 30-second "removed for copyright" clip
+    (ADR 0028). Passes straight through when the duration is plausible or unverifiable.
+
+    On a proven shortfall the candidate is dropped from `results` **in place** — so no later
+    reselect (language, cast) can land back on it — and at most `probe_cap` ranked
+    alternatives are resolved and probed. Raises `ContentTooShort` when none is plausible.
+    `probe_cap` is deliberately smaller than the cast reselects': on P2P every extra
+    candidate is another `engine.resolve` buffering wait for a title already proven fake."""
+    verdict = _duration_ok(cfg, chosen, expected_s)
+    if verdict.ok:
+        return chosen
+    print(f"nstream: sorgente troncata ({verdict.reason}), ne cerco un'altra…", file=sys.stderr)
+    short = [chosen]
+    last = verdict
+    tried = 0
+    for s in _auto_candidates(cfg, results, cast=cast, title=title,
+                              exact_resolution=exact_resolution):  # fmt: skip
+        if tried >= probe_cap:
+            break
+        if any(s is bad for bad in short):
+            continue
+        tried += 1
+        alt = _duration_ok(cfg, s, expected_s)
+        if alt.ok:
+            availability.drop_streams(results, short)
+            return s
+        short.append(s)
+        last = alt
+    availability.drop_streams(results, short)
+    raise ContentTooShort(last, len(short))
+
+
 def _p2p_guard(cfg: Config) -> bool:
     """Privacy gate before serving a P2P stream. Returns False — blocking playback — only when
     `p2p_require_vpn` is set and no VPN interface is detected; otherwise warns (when no VPN) and
@@ -623,14 +709,19 @@ class VettedStream:
 def prepare_stream(
     cfg: Config, results: list[Stream], opts: PlayOpts, *,
     auto: bool, reselect_on_wrong_audio: bool, title: str = "",
+    expected_runtime_s: float = 0.0,
 ) -> VettedStream | None:  # fmt: skip
     """Pick one stream from `results`, resolve it, and vet it for playback. Returns the
     vetted result, or None when the user backed out (ESC) of a (re)selection.
+    Raises `ContentTooShort` when every probed source is a placeholder (ADR 0028).
 
     `auto` overrides `opts.auto` for this single video (the binge loop forces it True from
     the second episode on). Steps: quality resolve → pick+resolve → cached-miss fallback
-    (auto only) → primary-language audio guard (local mpv only). Cast keeps its own language
-    UX, so the guard is skipped there.
+    (auto only) → duration vetting (auto only) → primary-language audio guard (local mpv
+    only). Cast keeps its own language UX, so the guard is skipped there.
+
+    `expected_runtime_s` (0 = unknown → vetting off) is the title's expected playtime,
+    from `api.expected_runtime_s`.
 
     Quality: when `opts.quality` is set (CLI / binge sticky) it hard-filters; when None and
     interactive (`reselect_on_wrong_audio`), an in-flow fzf picker offers Auto + available
@@ -674,6 +765,17 @@ def prepare_stream(
     # committing to it. Only in auto mode (manual picks are the user's explicit choice).
     if auto:
         chosen = _ensure_playable(cfg, results, chosen, opts, title=title, exact_resolution=exact)
+
+    # Truncation guard (ADR 0028): a source can be perfectly reachable and still not be the
+    # video — a "removed for copyright" placeholder, or a sample inside a pack. The two
+    # guards above speak for the HTTP transport only, so this is the one that covers P2P and
+    # the local backend. Placed before the audio guard on purpose: it reuses the ffprobe the
+    # guard is about to pay anyway, and the language reselect then starts from a vetted pick.
+    if auto and expected_runtime_s:
+        chosen = vet_duration(
+            cfg, results, chosen, expected_s=expected_runtime_s,
+            cast=opts.cast, title=title, exact_resolution=exact,
+        )  # fmt: skip
 
     # Auto-play language guard (local mpv only): the auto-pick can be a file whose audio
     # isn't in the primary language — an untagged/mistagged foreign leak, or a "Dual"

@@ -276,6 +276,15 @@ provider is still transferring it (`[RD download]`) — is skipped for that run 
 remembered: only proof of absence earns memory. `nstream --forget-dead` clears the list (see
 [ADR 0025](docs/adr/0025-dead-source-classification.md)).
 
+That probe speaks for the HTTP transport, so a second check covers what it cannot: a source can
+be perfectly reachable and still not be the video — a "removed for copyright" placeholder of a
+few seconds, or a sample inside a pack. nstream compares the file's **real duration** (from the
+ffprobe it already runs for audio/codec vetting, so it costs nothing) against the title's
+expected runtime, and skips anything grotesquely short — on any backend, P2P included. Unknown
+runtime or unreadable duration means the check stands aside; when every source is truncated,
+headless answers `error: sources_truncated` with both numbers in clear (see
+[ADR 0028](docs/adr/0028-content-duration-vetting.md)).
+
 A spawned TorrServer keeps its own output in `~/.local/state/nstream/torrserver.log` (truncated at
 each launch), and nstream quotes the failing line when the server dies during startup. If the
 configured `engine_port` is already held by another service, that is reported up front — with the
@@ -371,11 +380,11 @@ is shaped the way it is — are recorded as ADRs under [docs/adr/](docs/adr/).
 | `src/nstream/cli.py`           | argparse entry point, fzf/mpv orchestration, home + typed sections (Generi…, paginated browse), resume                                         |
 | `src/nstream/headless.py`      | headless `--json` subsystem: non-interactive play/cast/probe/stop/status, one JSON object on stdout (no fzf, no TTY)                           |
 | `src/nstream/series.py`        | series-only flow: season-first/episode picker, binge auto-advance, per-episode resume (injected player)                                        |
-| `src/nstream/stream_select.py` | stream pick/resolve + auto-play guards (`prepare_stream`); quality + primary-lang guard                                                       |
-| `src/nstream/availability.py`  | classified URL probes + dead-source denylist (ADR 0014/0025)                                                                 |
-| `src/nstream/types.py`         | domain TypedDicts (`Meta`/`Stream`/`HistoryEntry`/…)                                                                         |
-| `src/nstream/cli_args.py`      | argparse construction (`build_parser`)                                                                                        |
-| `src/nstream/headless_play.py` | headless one-title play/cast body + success JSON                                                                              |
+| `src/nstream/stream_select.py` | stream pick/resolve + auto-play guards (`prepare_stream`); quality + primary-lang guard                                                        |
+| `src/nstream/availability.py`  | classified URL probes + dead-source denylist (ADR 0014/0025)                                                                                   |
+| `src/nstream/types.py`         | domain TypedDicts (`Meta`/`Stream`/`HistoryEntry`/…)                                                                                           |
+| `src/nstream/cli_args.py`      | argparse construction (`build_parser`)                                                                                                         |
+| `src/nstream/headless_play.py` | headless one-title play/cast body + success JSON                                                                                               |
 | `src/nstream/cast_vet.py`      | cast-path stream vetting: audio plan, video codec, container (`vet_cast_*`, `CastAudioPlan`)                                                   |
 | `src/nstream/subs.py`          | subtitle fetch/rank/download (OpenSubtitles) + pre-play `choose_tracks` menu                                                                   |
 | `src/nstream/subalign.py`      | native subtitle alignment engine (ADR 0020)                                                                                                    |

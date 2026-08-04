@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import languages, quality, remux, stream_select, tracks
+from . import availability, languages, quality, remux, stream_select, tracks
 from .config import Config
 from .types import Stream
 
@@ -84,6 +84,16 @@ def _video_castable(cfg: Config, stream: Stream) -> bool:
     return not codec or codec in quality.CAST_VIDEO_DECODABLE
 
 
+def _duration_castable(cfg: Config, stream: Stream, expected_s: float) -> bool:
+    """Whether `stream` really is the video and not a placeholder/sample (ADR 0028). Same
+    stance as `_video_castable`: unknown keeps the benefit of the doubt. Reads the memoized
+    probe the audio/video checks around it already pay — no extra network read."""
+    if expected_s <= 0:
+        return True
+    url = stream_select._playable_url(cfg, stream)
+    return availability.vet_duration(url or "", expected_s).ok
+
+
 def vet_cast_video(
     cfg: Config,
     results: list[Stream],
@@ -91,6 +101,7 @@ def vet_cast_video(
     *,
     probe_cap: int = 4,
     exact_resolution: int = 0,
+    expected_s: float = 0.0,
 ) -> tuple[Stream, str]:
     """Verify the DMR can render `chosen`'s REAL video before casting (ADR 0017). The name
     parse gives an untagged release the benefit of the doubt, but an MPEG-4 ASP/DivX rip
@@ -112,7 +123,7 @@ def vet_cast_video(
         if probed >= probe_cap:
             break
         probed += 1
-        if _video_castable(cfg, s):
+        if _video_castable(cfg, s) and _duration_castable(cfg, s, expected_s):
             print(
                 f"nstream: video {bad.upper()} non decodificabile dal TV → altra release",
                 file=sys.stderr,
@@ -149,6 +160,7 @@ def vet_cast_container(
     *,
     probe_cap: int = 4,
     exact_resolution: int = 0,
+    expected_s: float = 0.0,
 ) -> tuple[Stream, bool]:
     """Ensure the DMR can LOAD `chosen`'s container before a direct cast (ADR 0022). The
     Default Media Receiver refuses Matroska (.mkv) — player UNKNOWN + receiver ERROR,
@@ -173,7 +185,11 @@ def vet_cast_container(
         if probed >= probe_cap:
             break
         probed += 1
-        if not (_container_castable(cfg, s) and _video_castable(cfg, s)):
+        if not (
+            _container_castable(cfg, s)
+            and _video_castable(cfg, s)
+            and _duration_castable(cfg, s, expected_s)
+        ):
             continue
         # Language-safe swap: only a probed, verified direct cast in the target language beats
         # the target-language rewrap of `chosen`. Same memoized probe as the checks above.
@@ -230,6 +246,7 @@ def _reselect_cast_for_lang(
     *,
     probe_cap: int = 6,
     exact_resolution: int = 0,
+    expected_s: float = 0.0,
 ) -> CastAudioPlan | None:
     """Find another cast candidate (best-first) carrying `target_lang`, preferring one castable
     directly (target is the first decodable track) over one needing a remux. Probes up to
@@ -263,6 +280,10 @@ def _reselect_cast_for_lang(
         # a cached ITA DivX rip won this loop). Same probe as the audio read below (memoized).
         if not _video_castable(cfg, s):
             continue
+        # A placeholder/sample with the right language tag is not a dub (ADR 0028): its lone
+        # `und` track would sail through as an unverified "tagged guess" below.
+        if not _duration_castable(cfg, s, expected_s):
+            continue
         plan = _cast_plan_for(s, _cast_audio_tracks(cfg, s), target_lang)
         if plan.mode == "direct" and plan.verified:
             # A direct dub in an MKV would fail the DMR LOAD (ADR 0022): keep chasing a
@@ -293,6 +314,7 @@ def vet_cast_audio(
     target_lang: str,
     *,
     exact_resolution: int = 0,
+    expected_s: float = 0.0,
 ) -> CastAudioPlan:
     """Decide how to cast `chosen` so the audio plays in `target_lang` (default `cfg.primary`;
     "" = no preference). Probes the real tracks — the DMR plays the first one and can't switch —
@@ -308,7 +330,12 @@ def vet_cast_audio(
         return plan
     return (
         _reselect_cast_for_lang(
-            cfg, results, chosen, target_lang, exact_resolution=exact_resolution
-        )
+            cfg,
+            results,
+            chosen,
+            target_lang,
+            exact_resolution=exact_resolution,
+            expected_s=expected_s,
+        )  # fmt: skip
         or plan
     )

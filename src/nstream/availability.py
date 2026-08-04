@@ -1,19 +1,21 @@
 """Source availability: classified probes, dead-source denylist, drop unusable.
 
-Owns ADR 0014/0025 mechanics that decide whether a resolved URL is usable *now* and
+Owns ADR 0014/0025/0028 mechanics that decide whether a resolved URL is usable *now* and
 whether a release is remembered as gone. Ranking/resolve stay in `stream_select`;
 this module is the probe+denylist leaf they call.
 
 Public: `source_key`, `prune_dead`, `probe_stream`, `probe_url`, `drop_unusable`,
-`expected_bytes`, `VERIFY_CAP`, `clear_memo`.
+`drop_streams`, `expected_bytes`, `vet_duration`, `DurationVerdict`, `VERIFY_CAP`,
+`clear_memo`.
 """
 
 from __future__ import annotations
 
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
-from . import log, net, quality, state
+from . import log, net, quality, state, tracks
 from .config import Config
 from .types import Stream
 
@@ -95,6 +97,16 @@ def demote_cached(stream: Stream) -> None:
         stream["name"] = stripped
 
 
+def drop_streams(results: list[Stream], bad: list[Stream]) -> list[Stream]:
+    """Remove `bad` from `results` **in place**, by identity: two rows can compare equal
+    (same release from two addons) while only one is the one just proven unusable."""
+    if not bad:
+        return results
+    dropped = {id(s) for s in bad}
+    results[:] = [s for s in results if id(s) not in dropped]
+    return results
+
+
 def drop_unusable(results: list[Stream], targets: list[Stream]) -> list[Stream]:
     """Probe `targets` concurrently; demote and drop any unusable from `results`."""
     if not targets:
@@ -105,11 +117,52 @@ def drop_unusable(results: list[Stream], targets: list[Stream]) -> list[Stream]:
     for s, probe in zip(targets, verdicts, strict=True):
         if not probe.usable:
             demote_cached(s)
-            unusable.append(id(s))
-    if not unusable:
-        return results
-    results[:] = [s for s in results if id(s) not in unusable]
-    return results
+            unusable.append(s)
+    return drop_streams(results, unusable)
+
+
+# --- content duration vetting (ADR 0028) ------------------------------------
+
+MIN_RUNTIME_RATIO = 0.35  # below this fraction of the expected runtime it isn't the video
+MIN_EXPECTED_S = 600.0  # never judge shorts/clips: too little room between real and fake
+
+
+@dataclass(frozen=True)
+class DurationVerdict:
+    """Outcome of the truncation guard. `ok=False` **only** on a measured, grotesque
+    shortfall — every unknown (no expected runtime, unreadable duration) passes."""
+
+    ok: bool
+    duration: float = 0.0  # measured seconds (0 = unreadable)
+    expected: float = 0.0  # expected seconds (0 = unknown)
+    reason: str = ""
+
+
+def _fmt_s(seconds: float) -> str:
+    total = int(seconds)
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def vet_duration(url: str, expected_s: float) -> DurationVerdict:
+    """Truncation guard (ADR 0028): a placeholder served in place of a removed release
+    (or a sample inside a pack) lasts a small fraction of the title's runtime.
+
+    Reads the SAME memoized ffprobe the audio/cast vetting already runs
+    (`tracks.probe_tracks`), so every call site that vets audio pays nothing extra. This
+    is the backend-agnostic twin of the ADR 0025 size check, which can only speak for
+    HTTP sources: the duration comes from the file, not from the transport.
+
+    One-way by design — only *too short* is a verdict. An extended cut, a double episode
+    or a season pack with the wrong `fileIdx` are all *longer* than expected."""
+    if expected_s < MIN_EXPECTED_S or not url:
+        return DurationVerdict(True, expected=expected_s)
+    duration = tracks.probe_tracks(url).duration
+    if duration <= 0:
+        return DurationVerdict(True, expected=expected_s)  # unreadable → benefit of the doubt
+    if duration >= expected_s * MIN_RUNTIME_RATIO:
+        return DurationVerdict(True, duration=duration, expected=expected_s)
+    reason = f"durata {_fmt_s(duration)} contro ~{int(expected_s // 60)} min attesi"
+    return DurationVerdict(False, duration=duration, expected=expected_s, reason=reason)
 
 
 def clear_memo() -> None:

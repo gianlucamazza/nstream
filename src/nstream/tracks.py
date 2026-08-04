@@ -104,6 +104,14 @@ def clear_cache() -> None:
     _cache.clear()
 
 
+def cached_duration(url: str) -> float:
+    """Duration already measured for `url`, or 0.0 — **cache-only, never probes**. Lets the
+    reporting layer say whether the duration vetting (ADR 0028) actually measured this file
+    without paying a network ffprobe just to fill a JSON field."""
+    tr = _cache.get(url)
+    return tr.duration if tr else 0.0
+
+
 def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
     """Probe `url` for embedded audio/subtitle tracks (+ video count / duration). Returns
     empty lists if ffprobe is unavailable or the probe fails (caller falls back to mpv

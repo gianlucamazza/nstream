@@ -164,6 +164,32 @@ the picker. `nstream --forget-dead` clears the list. Headless answers `error: so
 (with `removed_sources`) only when the denylist accounts for every candidate — an empty set of
 merely-not-ready sources is `no_playable_stream`, which is the truth.
 
+## Content: reachable is not the same as being the video (ADR 0028)
+
+The two guards above speak for the **transport**, and only for HTTP: a P2P pick has no
+`Content-Range` to compare against the announced size, and on the `local` backend both are
+no-ops. A source can be perfectly reachable and still not contain the video — a "removed for
+copyright" placeholder, or a sample inside a pack. The signal that survives every backend is
+the file's **real duration**, read from the ffprobe the audio/cast vetting already pays for
+(`tracks.Tracks.duration` — memoized per url, so the check is free).
+
+| Measured                           | Expected runtime         | Effect                                      |
+| ---------------------------------- | ------------------------ | ------------------------------------------- |
+| `duration ≥ 0.35 × expected`       | known (≥ 10 min)         | keep — including anything **longer**        |
+| `duration < 0.35 × expected`       | known (≥ 10 min)         | drop for this run, reselect, never denylist |
+| 0 (ffprobe missing/failed/timeout) | any                      | keep (benefit of the doubt)                 |
+| any                                | unknown, or under 10 min | keep — the guard never runs                 |
+
+The expected runtime comes from `api.expected_runtime_s`; for a series it is the **series**
+meta's `runtime`, i.e. the typical episode length (Cinemeta's per-episode entries carry none).
+An unknown runtime turns the guard off rather than inventing a default. The check is one-way —
+extended cuts, double episodes and mis-indexed packs are all _longer_ — and auto-pick only.
+A proven-short candidate is dropped from the working set in place, so no later reselect
+(language, cast) can land back on it. Nothing is persisted: a ratio between an ffprobe estimate
+and a crowdsourced average is not the kind of proof that earns a 30-day ban (ADR 0028 §6).
+Headless reports `error: sources_truncated` with both measures in clear, and stamps
+`duration_verified` on success.
+
 ## Config knobs
 
 `hw_filter` (master switch), `max_resolution`, `allow_software`, `allow_dv5`, `lang_filter`,

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nstream import bridge
+from nstream import api, bridge
 
 # Keep subprocess smoke tests on the checkout too. Some developer machines have an
 # older globally installed nstream, which otherwise makes `python -m nstream` test the
@@ -42,3 +42,15 @@ def _no_real_castbridge(monkeypatch):
     """
     monkeypatch.setattr(bridge, "bridge_available", lambda: False)
     monkeypatch.setattr(bridge, "ensure_daemon", lambda *a, **k: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_runtime_lookup(monkeypatch, request):
+    """The duration vetting (ADR 0028) asks Cinemeta for the title's runtime on every play
+    path. Unmocked, that is a REAL HTTP request from a unit test — slow, flaky offline, and
+    dependent on someone else's data. Default it to "unknown" (which turns the guard off,
+    exactly as in production when the meta has no runtime); tests that exercise the guard
+    set a value themselves. `test_api.py` owns the function under test, so it opts out."""
+    if request.path.name == "test_api.py":
+        return
+    monkeypatch.setattr(api, "expected_runtime_s", lambda cfg, typ, video_id: 0.0)

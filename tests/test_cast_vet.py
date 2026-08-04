@@ -402,7 +402,7 @@ def test_vet_cast_audio_threads_exact_to_reselect(monkeypatch):
     monkeypatch.setattr(cast_vet, "_cast_audio_tracks", lambda cfg, s: [Track(1, "eng", "aac")])
     monkeypatch.setattr(
         cast_vet, "_reselect_cast_for_lang",
-        lambda cfg, results, cur, lang, exact_resolution=0: seen.update(exact=exact_resolution)
+        lambda cfg, results, cur, lang, exact_resolution=0, **_kw: seen.update(exact=exact_resolution)
         or None,
     )  # fmt: skip
     cast_vet.vet_cast_audio(_ccfg(), [], {"url": "u"}, "ita", exact_resolution=1080)
@@ -477,3 +477,76 @@ def test_cast_resolver_excludes_lossless_without_remux():
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"], cast_remux=False)
     resolve = cast_vet.cast_resolver(cfg, [_S_ITA, _S_ENG_REMUX, _S_ENG_WEBDL])
     assert resolve("eng") == "http://eng-webdl"
+
+
+# --- content duration vetting on the cast reselects (ADR 0028) ---------------
+
+
+def test_reselect_cast_skips_short_candidate(monkeypatch):
+    """Twin of the DivX regression above: a placeholder tagged with the right language is
+    not a dub. Its lone `und`/tagged track would otherwise win as a 'tagged guess'."""
+    chosen: Stream = {"url": "eng-only"}
+    fake: Stream = {"url": "fake-ita"}
+
+    def probe(url, **kw):
+        if url == "fake-ita":
+            return stream_select.tracks.Tracks(
+                audio=[Track(1, "ita", "aac")], video_codec="h264", duration=30.0
+            )
+        return stream_select.tracks.Tracks(
+            audio=[Track(1, "eng", "aac")], video_codec="h264", duration=3180.0
+        )
+
+    monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
+    monkeypatch.setattr(cast_vet.availability.tracks, "probe_tracks", probe)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [_R(fake, frozenset({"ita"}))],
+    )  # fmt: skip
+    plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, fake], chosen, "ita", expected_s=3300.0)
+    assert plan.stream is chosen and plan.mode == "absent"  # fallback + subs, not 30 seconds
+
+
+def test_reselect_cast_no_extra_probe_for_duration(monkeypatch):
+    """The guard must read the memoized probe the audio/video checks already pay for, so
+    it costs zero extra ffprobe. Goes through the real `tracks.probe_tracks` (stubbing the
+    subprocess, not the memo) — stubbing `probe_tracks` itself would bypass the cache and
+    measure nothing."""
+    import json as _json
+
+    chosen: Stream = {"url": "eng-only"}
+    alt: Stream = {"url": "ita-real"}
+    calls: list[str] = []
+
+    class _Proc:
+        def __init__(self, url):
+            lang = "ita" if url == "ita-real" else "eng"
+            self.stdout = _json.dumps(
+                {
+                    "format": {"duration": "3180.0", "format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+                    "streams": [
+                        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+                        {
+                            "index": 1, "codec_type": "audio", "codec_name": "aac",
+                            "tags": {"language": lang},
+                        },
+                    ],
+                }
+            )  # fmt: skip
+
+    def run_cmd(cmd, **kw):
+        calls.append(cmd[-1])
+        return _Proc(cmd[-1])
+
+    monkeypatch.setattr(stream_select.tracks.util, "run_cmd", run_cmd)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [_R(alt, frozenset({"ita"}))],
+    )  # fmt: skip
+    stream_select.tracks.clear_cache()
+    cast_vet.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita")
+    without = len(calls)
+    calls.clear()
+    stream_select.tracks.clear_cache()
+    cast_vet.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita", expected_s=3300.0)
+    assert len(calls) == without  # same ffprobe count with the guard on

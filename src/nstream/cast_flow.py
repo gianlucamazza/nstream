@@ -109,6 +109,7 @@ def run_cast(
     meta: caster.CastMeta | None = None,
     on_event: caster.EventCb | None = None,
     safety_sub_lang: str | None = None,
+    expected_runtime_s: float = 0.0,
 ) -> CastOutcome:
     """Cast `chosen` to `device` in the target audio language. The Default Media Receiver
     plays a file's first audio track and can't switch tracks, so the language is enforced
@@ -119,14 +120,19 @@ def run_cast(
     `allow_lang_switch` wires the interactive in-cast audio switch ('a': langs + resolver,
     an extra rank pass) — leave it False on headless paths. `follow=False` (headless
     fire-and-return) also detaches a TorrServer the engine may have spawned, so the TV
-    keeps streaming past process exit."""
+    keeps streaming past process exit.
+
+    `expected_runtime_s` (0 = unknown) keeps every reselect below off placeholder/sample
+    files (ADR 0028) — the same guard `prepare_stream` already applied to `chosen`."""
     # Video first (ADR 0017): a video codec the DMR can't render casts as PLAYING + black
     # screen with no receiver error, so the REAL codec is verified before any side effect.
     # No castable candidate and no mirror to decode locally → explicit failure, not a black cast.
     # ADR 0021: the resolved per-invocation quality (opts.quality, always an int here —
     # the callers replace() it with VettedStream.quality) constrains EVERY reselect below.
     exact = stream_select.exact_resolution(opts.quality or 0)
-    chosen, bad_video = cast_vet.vet_cast_video(cfg, results, chosen, exact_resolution=exact)
+    chosen, bad_video = cast_vet.vet_cast_video(
+        cfg, results, chosen, exact_resolution=exact, expected_s=expected_runtime_s
+    )
     # --no-mirror is an explicit user intent: with undecodable video and the mirror
     # suppressed, fail explicitly rather than override the user (ADR 0021).
     if bad_video and (not mirror.available() or opts.mirror is False):
@@ -140,11 +146,13 @@ def run_cast(
     # this is the optimization, the settled-stream check below is the guarantee.
     pre_container = chosen
     chosen, _bad_container = cast_vet.vet_cast_container(
-        cfg, results, chosen, target_lang, exact_resolution=exact
+        cfg, results, chosen, target_lang, exact_resolution=exact, expected_s=expected_runtime_s
     )
     if chosen is not pre_container:
         bad_video = ""  # a vetted MP4 candidate supersedes the original's video verdict
-    plan = cast_vet.vet_cast_audio(cfg, results, chosen, target_lang, exact_resolution=exact)
+    plan = cast_vet.vet_cast_audio(
+        cfg, results, chosen, target_lang, exact_resolution=exact, expected_s=expected_runtime_s
+    )
     if plan.stream is not chosen:
         # The language reselect only offers video-castable candidates (its guard shares
         # this vetting), so a swap clears the bad-video verdict along with the stream.
