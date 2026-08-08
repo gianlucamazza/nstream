@@ -293,10 +293,10 @@ def cast(
     follow: bool = True,
     meta: CastMeta | None = None,
     on_event: EventCb | None = None,
-) -> tuple[float, float, bool]:
+) -> cast_delivery.CastResult:
     """Cast `url` to a Chromecast and track playback so resume and series auto-advance work like
-    the mpv path. Returns (position, duration, subs_delivered) — the advance decision belongs to
-    `cast_flow`, not to a delivery backend (ADR 0029). Prefers the **castbridge**
+    the mpv path. Returns a `CastResult` — read it by attribute (ADR 0031). The advance decision
+    belongs to `cast_flow`, not to a delivery backend (ADR 0029). Prefers the **castbridge**
     native sender (metadata-rich LOAD + a real event stream) when its binary is available; falls
     back to **catt** (no metadata) otherwise, when castbridge can't start, or for the interactive
     in-cast audio switch ('a'), which remains a catt-path capability (see docs/adr/0007).
@@ -332,7 +332,9 @@ def cast(
         follow=follow,
         on_event=on_event,
     )
-    return (*catt_result, bool(sub_paths))
+    # Explicit construction, never `(*catt_result, …)`: splatting a NamedTuple flattens it
+    # into a wider plain tuple, losing both the type and the arity with no error here (ADR 0031).
+    return catt_result._replace(subs_delivered=bool(sub_paths))
 
 
 def _cast_via_bridge(
@@ -346,9 +348,9 @@ def _cast_via_bridge(
     on_event: EventCb | None,
     sub_paths: tuple[str, ...] = (),
     sub_lang: str | None = None,
-) -> tuple[float, float, bool] | None:
+) -> cast_delivery.CastResult | None:
     """Cast via castbridge with metadata, forwarding normalized events to `on_event`. Returns
-    (position, duration, subs_delivered), or **None** when the cast never started
+    a `CastResult`, or **None** when the cast never started
     (transport/daemon failure) so the caller falls back to catt. A media error the receiver
     reports (bad url/device) ends as a `failed` event without a fallback (catt wouldn't fare
     better).
@@ -391,7 +393,11 @@ def _cast_via_bridge(
             sub_shutdown()
     if out is None:
         return None
-    return (out.pos, out.dur, sub_delivered)
+    # The bridge reached the receiver: `out.started` is an observation, not an assumption.
+    return cast_delivery.CastResult(
+        out.pos, out.dur, sub_delivered,
+        started=out.started, error=None if out.started else "cast_never_started",
+    )  # fmt: skip
 
 
 def _serve_subtitle(
@@ -445,10 +451,11 @@ def _cast_via_catt(
     resolve_lang: Callable[[str], str | None] | None = None,
     follow: bool = True,
     on_event: EventCb | None = None,
-) -> tuple[float, float]:
+) -> cast_delivery.CastResult:
     """Cast `url` to a Chromecast via `catt`, then poll its status so resume and
-    series auto-advance work just like the mpv path. Returns (position, duration) —
-    `cast_flow` turns those into the advance decision (ADR 0029).
+    series auto-advance work just like the mpv path. Returns a `CastResult` whose `started`
+    separates a real handoff from a failure — both used to be `(0.0, 0.0)` (ADR 0031).
+    `cast_flow` turns pos/dur into the advance decision (ADR 0029).
 
     `follow=False` (headless fire-and-return): once `catt cast` has handed the media to
     the receiver, return immediately without the resume poll loop — so an agent isn't
@@ -473,19 +480,19 @@ def _cast_via_catt(
     except FileNotFoundError:
         print("nstream: catt non trovato", file=sys.stderr)
         _emit(on_event, "failed", error="catt_missing", message="catt non trovato")
-        return (0.0, 0.0)
+        return cast_delivery.CastResult(0.0, 0.0, error="catt_missing")
     except subprocess.TimeoutExpired:
         # A catt hung on a half-dead device must not block the caller forever.
         _log.warning("catt cast bloccato oltre %.0fs → annullato", util.CATT_CAST_TIMEOUT)
         print("nstream: cast non riuscito (timeout)", file=sys.stderr)
         _emit(on_event, "failed", error="cast_timeout", message="cast non riuscito (timeout)")
-        return (0.0, 0.0)
+        return cast_delivery.CastResult(0.0, 0.0, error="cast_timeout")
     if proc.returncode != 0:
         # catt prints the cause (e.g. device unreachable); never echo the URL/token.
         _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
         print("nstream: cast non riuscito", file=sys.stderr)
         _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
-        return (0.0, 0.0)
+        return cast_delivery.CastResult(0.0, 0.0, error="cast_failed")
 
     can_switch = bool(langs) and resolve_lang is not None
     if can_switch and follow:
@@ -496,7 +503,9 @@ def _cast_via_catt(
     if not follow:
         # Fire-and-return: the receiver has the media; don't poll for the whole runtime.
         _emit(on_event, "started", title=title)
-        return (0.0, 0.0)
+        # `catt cast` returned rc 0: the receiver ACCEPTED the handoff. That is the strongest
+        # evidence available without a poll loop, so it counts as started (ADR 0031).
+        return cast_delivery.CastResult(0.0, 0.0, started=True)
 
     holder = {"position": 0.0, "duration": 0.0}
     started = False
@@ -565,7 +574,10 @@ def _cast_via_catt(
             position=round(holder["position"], 1),
             duration=round(holder["duration"], 1),
         )
-    return (holder["position"], holder["duration"])
+    return cast_delivery.CastResult(
+        holder["position"], holder["duration"],
+        started=started, error=None if started else "cast_never_started",
+    )  # fmt: skip
 
 
 def _raw_info(device: str | None) -> dict:

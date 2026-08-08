@@ -40,6 +40,28 @@ def is_finished(pos: float, dur: float) -> bool:
     return bool(dur) and pos >= dur * CAST_DONE
 
 
+class CastResult(NamedTuple):
+    """What one delivery backend (`caster`, `remux`, `mirror`) observed (ADR 0031).
+
+    `started` is the field that exists: "the cast never began" and "fire-and-return handed
+    off fine" both produce `pos == dur == 0.0`, so without it no caller can tell a failure
+    from a success, and `headless_play` reported a dead cast as `ok: true`. On fire-and-return
+    `started` means the handoff was ACCEPTED (catt rc 0), not that playback was observed —
+    the strongest evidence available without a poll loop.
+
+    **Read this by attribute, never by unpacking.** A NamedTuple's defaults govern
+    construction arity, not unpacking arity: `pos, dur = CastResult(...)` raises ValueError,
+    and splatting one into a wider tuple silently destroys both the type and the arity. A new
+    delivery backend returns a CastResult and sets `started`; positional consumption of one
+    is a review defect."""
+
+    pos: float
+    dur: float
+    subs_delivered: bool = False
+    started: bool = False
+    error: str | None = None  # "catt_missing" | "cast_timeout" | "cast_failed" | …
+
+
 class BridgeOutcome(NamedTuple):
     """What one bridge cast did. `finished` is the advance heuristic (ended at ≥
     CAST_DONE of the runtime); `disconnected` means the daemon socket died mid-cast

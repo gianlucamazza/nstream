@@ -51,6 +51,16 @@ _log = log.get_logger("cast_flow")
 MIRROR_UNAVAILABLE = "nstream: mirror non disponibile → cast diretto"
 
 
+class CastStreamUnresolved(Exception):
+    """The settled cast stream has no url: nothing could resolve it (dead swarm, or a debrid
+    still transferring the file). Raised once at the settle point instead of letting the four
+    delivery branches dereference a missing key (ADR 0031 appendix). Callers surface it as
+    the retry-worthy `no_playable_stream`, never as an internal crash."""
+
+    def __init__(self) -> None:
+        super().__init__("nessuna sorgente castabile risolvibile ora")
+
+
 class CastVideoUnsupported(Exception):
     """No cast candidate carries video the DMR can render, and the mirror fallback is not
     available (ADR 0017). Casting anyway would play black with state PLAYING and no receiver
@@ -102,6 +112,8 @@ class CastOutcome:
     sub_match: str | None  # "hash" | "audio" (local-media aligned) | "lang" | None
     sub_offset: float | None  # measured+applied correction when sub_match == "audio"
     subs_delivered: bool  # False when the delivery couldn't attach them (castbridge LOAD)
+    started: bool  # the backend observed the handoff (ADR 0031) — `ok: true` requires it
+    cast_error: str | None  # backend failure code when not started ("cast_failed", …)
 
 
 def run_cast(
@@ -171,6 +183,11 @@ def run_cast(
         # this vetting), so a swap clears the bad-video verdict along with the stream.
         bad_video = ""
     chosen = plan.stream
+    # The stream has settled: from here every branch dereferences `chosen["url"]`. Assert it
+    # once, honestly, instead of four `.get()`s that would each cast a url-less stream a
+    # different wrong way (ADR 0031 appendix — this is the KeyError: 'url' crash site).
+    if not chosen.get("url"):
+        raise CastStreamUnresolved()
     # Remux is a codec decision, orthogonal to language availability: `remux` mode selects a
     # target-language track, but an `absent` fallback whose default track is Dolby/DTS must be
     # remuxed too, or it casts silent (the DMR can't decode it). `plan.needs_remux` carries that.
@@ -195,7 +212,7 @@ def run_cast(
     # The resolved url/filename enable the exact-file hash match (ADR 0018).
     subs_pick = subs.auto_subs(
         cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
-        video_url=chosen.get("url"), filename=subs.stream_filename(chosen),
+        video_url=chosen["url"], filename=subs.stream_filename(chosen),
     )  # fmt: skip
     subs.report_safety_subs(subs_pick, safety_sub_lang)
     sub_paths = subs_pick.paths
@@ -241,10 +258,11 @@ def run_cast(
                 f"remux 4K troppo pesante{size} → mirror 1080p (avvio immediato, senza download)"
             )
             print(f"nstream: {notice}", file=sys.stderr)
-        pos, dur = mirror.cast_via_mirror(
+        delivery = mirror.cast_via_mirror(
             cfg, title, chosen["url"],
             device=device, start=start, sub_paths=sub_paths, follow=follow,
         )  # fmt: skip
+        pos, dur = delivery.pos, delivery.dur
         subs_delivered = bool(sub_paths)  # mpv renders them into the mirrored frame
         action = "mirror"
     else:
@@ -268,11 +286,12 @@ def run_cast(
             # its real audio (free of network cost) before the VTT is built from it.
             subs_pick = subs.align_local(cfg, subs_pick, remux_path, work_dir, opts)
             sub_paths = subs_pick.paths
-            pos, dur, subs_delivered = remux.cast_file(
+            delivery = remux.cast_file(
                 cfg, title, remux_path,
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
+            pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             reencoded = True
             action = "cast"
         elif needs_rewrap and mirror.available():
@@ -281,10 +300,11 @@ def run_cast(
             # container) instead of a silent black direct cast.
             notice = "rewrap non disponibile → mirror 1080p (il TV non carica questo container)"
             print(f"nstream: {notice}", file=sys.stderr)
-            pos, dur = mirror.cast_via_mirror(
+            delivery = mirror.cast_via_mirror(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, follow=follow,
             )  # fmt: skip
+            pos, dur = delivery.pos, delivery.dur
             subs_delivered = bool(sub_paths)
             action = "mirror"
         else:
@@ -311,12 +331,13 @@ def run_cast(
                 if len(cast_langs) > 1:
                     langs = cast_langs
                     resolver = cast_vet.cast_resolver(cfg, results, exact_resolution=exact)
-            pos, dur, subs_delivered = caster.cast(
+            delivery = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,
                 langs=langs, resolve_lang=resolver, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
+            pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             action = "cast"
     if sub_paths and not subs_delivered:
         # Honesty over silence: the subtitles were fetched but not attached to the cast
@@ -337,6 +358,7 @@ def run_cast(
     advance = bool(next_label) and cast_delivery.is_finished(pos, dur)
     return CastOutcome(
         pos=pos, dur=dur, advance=advance, action=action, stream=chosen,
+        started=delivery.started, cast_error=delivery.error,
         reencoded=reencoded, notice=notice,
         audio_lang=plan.real_lang, audio_verified=plan.verified,
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,

@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from nstream import cast_flow, cli, subs
+from nstream import cast_delivery, cast_flow, cli, subs
 from nstream.config import Config
 from nstream.types import HistoryEntry, Meta
 
@@ -729,7 +729,7 @@ def test_play_video_cast_branch_no_track_menu(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast",
-        lambda *a, **k: seen.update(device=k.get("device")) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(device=k.get("device")) or _ok(),
     )  # fmt: skip
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
@@ -795,7 +795,7 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
         cli,
         "cast",
         lambda *a, **k: (
-            seen.update(start=k.get("start"), device=k.get("device")) or (55.0, 100.0, False)
+            seen.update(start=k.get("start"), device=k.get("device")) or _ok(55.0, 100.0)
         ),
     )
     opts = cli.PlayOpts(
@@ -881,6 +881,12 @@ def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
     return cast_flow.cast_vet.CastAudioPlan(mode, stream, audio_index, real_lang, verified=verified)
 
 
+def _ok(pos: float = 0.0, dur: float = 0.0, subs: bool = False):
+    """A cast-backend stub that really delivered (ADR 0031). `cli.play` (the mpv path) is a
+    different contract and keeps its own tuple."""
+    return cast_delivery.CastResult(pos, dur, subs, started=True)
+
+
 def _boom(msg):
     def fail(*a, **k):
         raise AssertionError(msg)
@@ -945,7 +951,7 @@ def test_play_on_cast_remux_success_uses_cast_file(monkeypatch):
         cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
             seen.update(path=path, follow=k.get("follow"), start=k.get("start"))
-            or (0.0, 0.0, False)
+            or _ok()
         ),
     )  # fmt: skip
     monkeypatch.setattr(
@@ -969,7 +975,7 @@ def test_play_on_cast_remux_failure_degrades_to_direct(monkeypatch, capsys):
     monkeypatch.setattr(
         cast_flow.caster,
         "cast",
-        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(cast_url=a[2]) or _ok(),
     )
     _call_cast(_cast_opts(), stream)
     assert "remux non riuscito" in capsys.readouterr().err
@@ -985,7 +991,7 @@ def test_play_on_cast_absent_safety_subs_then_direct(monkeypatch, capsys):
     monkeypatch.setattr(
         cast_flow.caster,
         "cast",
-        lambda *a, **k: seen.update(cast_url=a[2]) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(cast_url=a[2]) or _ok(),
     )
     _call_cast(_cast_opts(), stream)
     err = capsys.readouterr().err
@@ -1006,7 +1012,7 @@ def test_play_on_cast_mirror_gates_on_remux_audio(monkeypatch):
         cast_flow.mirror, "cast_via_mirror",
         lambda cfg, title, url, **k: (
             seen.update(url=url, device=k.get("device"), start=k.get("start"))
-            or (0.0, 0.0)
+            or _ok()
         ),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
@@ -1025,7 +1031,7 @@ def test_play_on_cast_explicit_mirror_forces_mirror(monkeypatch):
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
         cast_flow.mirror, "cast_via_mirror",
-        lambda *a, **k: seen.update(mirror=True) or (0.0, 0.0),
+        lambda *a, **k: seen.update(mirror=True) or _ok(),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.caster, "cast", _boom("direct cast must not run when forced"))
     _call_cast(_cast_opts(mirror=True), stream)
@@ -1040,7 +1046,7 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
     monkeypatch.setattr(
         cast_flow.caster, "cast",
         lambda *a, **k: (
-            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or (0.0, 0.0, False)
+            seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or _ok()
         ),
     )  # fmt: skip
     _call_cast(_cast_opts(), stream)

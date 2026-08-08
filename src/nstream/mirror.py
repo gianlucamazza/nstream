@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import log, player, ui, util
+from . import cast_delivery, log, player, ui, util
 from .config import Config
 
 _log = log.get_logger(__name__)
@@ -295,9 +295,10 @@ def cast_via_mirror(
     audio_id: int | None = None,
     sub_id: int | str | None = None,
     follow: bool = True,
-) -> tuple[float, float]:
-    """Cast `url` to `device` (a TV IP) by mirroring a headless mpv. Returns
-    (position, duration) like `caster.cast` — `cast_flow` derives the advance (ADR 0029).
+) -> cast_delivery.CastResult:
+    """Cast `url` to `device` (a TV IP) by mirroring a headless mpv. Returns a `CastResult`
+    like `caster.cast` — `cast_flow` derives the advance (ADR 0029) and reads `started` to
+    decide whether the cast happened at all (ADR 0031).
 
     `follow=True` (interactive): block until mpv exits, tracking position over IPC, then
     tear everything down. `follow=False` (headless): leave mpv + sender detached and return;
@@ -307,7 +308,7 @@ def cast_via_mirror(
             "nstream: sender mirror non disponibile (build openscreen / $CAST_MIRROR_BIN)",
             file=sys.stderr,
         )
-        return (0.0, 0.0)
+        return cast_delivery.CastResult(0.0, 0.0, error="mirror_unavailable")
 
     # A previous mirror left running? Clear it first (single active mirror).
     old = _read_state()
@@ -327,7 +328,7 @@ def cast_via_mirror(
         if not headless:
             print("nstream: impossibile creare l'output headless", file=sys.stderr)
             _teardown(state)
-            return (0.0, 0.0)
+            return cast_delivery.CastResult(0.0, 0.0, error="headless_output_failed")
         state["headless"] = headless
 
         args = _mpv_args(
@@ -342,7 +343,7 @@ def cast_via_mirror(
             # must also unwind the already-mounted sink + headless output.
             print("nstream: mpv non trovato", file=sys.stderr)
             _teardown(state)
-            return (0.0, 0.0)
+            return cast_delivery.CastResult(0.0, 0.0, error="mpv_missing")
         state["mpv_pid"] = proc.pid
 
         addr = _await_window(proc.pid)
@@ -350,7 +351,7 @@ def cast_via_mirror(
             print("nstream: la finestra mpv non è comparsa", file=sys.stderr)
             _kill(proc.pid)
             _teardown(state)
-            return (0.0, 0.0)
+            return cast_delivery.CastResult(0.0, 0.0, error="mpv_window_missing")
 
         # Move mpv onto the headless output (off the user's monitors). mpv is already
         # fullscreen (`--fullscreen`), and that state follows the window across the silent
@@ -367,13 +368,14 @@ def cast_via_mirror(
             print("nstream: avvio sender mirror fallito", file=sys.stderr)
             _kill(proc.pid)
             _teardown(state)
-            return (0.0, 0.0)
+            return cast_delivery.CastResult(0.0, 0.0, error="sender_launch_failed")
         state["sender_pid"] = sender_pid
         _write_state(state)
 
         print(f"{ui.g().tv} {title} → {device} (mirror 1080p)", file=sys.stderr)
         if not follow:
-            return (0.0, 0.0)
+            # Detached mirror: mpv is up and the sender is streaming to the TV — started.
+            return cast_delivery.CastResult(0.0, 0.0, started=True)
 
         # Interactive: track position over IPC and block until mpv exits.
         holder = {"position": 0.0, "duration": 0.0}
@@ -386,7 +388,7 @@ def cast_via_mirror(
         except KeyboardInterrupt:
             _kill(proc.pid)
         tracker.join(timeout=player._TRACKER_JOIN_TIMEOUT)
-        return (holder["position"], holder["duration"])
+        return cast_delivery.CastResult(holder["position"], holder["duration"], started=True)
     finally:
         if follow:
             _teardown(_read_state() or state)

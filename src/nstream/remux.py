@@ -387,10 +387,11 @@ def cast_file(
     follow: bool = True,
     meta: caster.CastMeta | None = None,
     on_event: caster.EventCb | None = None,
-) -> tuple[float, float, bool]:
+) -> cast_delivery.CastResult:
     """Cast the complete local `file_path` (a Tier-2 remux) to the DMR — the only delivery it
-    accepts is a complete, Range-served file. Returns (position, duration, subs_delivered);
-    the advance decision belongs to `cast_flow` (ADR 0029), which reads the position back.
+    accepts is a complete, Range-served file. Returns a `CastResult`; the advance decision
+    belongs to `cast_flow` (ADR 0029), which reads the position back, and `started` tells it
+    whether the cast happened at all (ADR 0031).
 
     Prefers the **native path** (ADR 0007): nstream's own Range HTTP server (`serve.py`) serves
     the file and **castbridge** LOADs its URL with metadata (so the TV card + HUD widget light
@@ -450,7 +451,7 @@ def cast_file(
         _rm(file_path)
         _rm(f"{file_path}.srt")
         _rm(err_path)
-        return (0.0, 0.0, False)
+        return cast_delivery.CastResult(0.0, 0.0, error="catt_missing")
     finally:
         os.close(err_fd)
     _write_state(proc.pid, file_path, device)
@@ -465,14 +466,15 @@ def cast_file(
             print(serve.firewall_hint(serve.lan_ip(device)), file=sys.stderr)
         _teardown(proc.pid, file_path)
         _rm(err_path)
-        return (0.0, 0.0, False)
+        return cast_delivery.CastResult(0.0, 0.0, error="cast_never_started")
     _rm(err_path)  # startup confirmed: the capture served its (diagnosis-only) purpose
 
     # Title already shown as the play banner; live line is device-only.
     ui.cast_live(dest, follow=follow)
     if not follow:
-        # Leave the detached catt serving; --stop / next-run GC tears it down.
-        return (0.0, 0.0, bool(sub_paths))
+        # Leave the detached catt serving; --stop / next-run GC tears it down. Startup was
+        # confirmed just above, so this handoff really did begin (ADR 0031).
+        return cast_delivery.CastResult(0.0, 0.0, bool(sub_paths), started=True)
 
     pos = dur = 0.0
     try:
@@ -489,7 +491,7 @@ def cast_file(
             subprocess.run([*base, "stop"], capture_output=True, text=True)
     finally:
         _teardown(proc.pid, file_path)
-    return (pos, dur, bool(sub_paths))
+    return cast_delivery.CastResult(pos, dur, bool(sub_paths), started=True)
 
 
 def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) -> dict:
@@ -517,9 +519,9 @@ def _cast_file_via_bridge(
     on_event: caster.EventCb | None,
     sub_paths: tuple[str, ...] = (),
     sub_lang: str | None = None,
-) -> tuple[float, float, bool] | None:
+) -> cast_delivery.CastResult | None:
     """Serve the remux via the stdlib Range server and cast its URL with metadata via castbridge.
-    Returns (pos, dur, subs_delivered), or **None** when the cast never started, so `cast_file`
+    Returns a `CastResult`, or **None** when the cast never started, so `cast_file`
     falls back to catt (temp kept). A detached (fire-and-return) cast reports (0, 0): nobody
     polled it, and an unobserved position must never read as a finished episode (ADR 0029).
 
@@ -578,7 +580,7 @@ def _cast_file_via_bridge(
             return None
         _write_state(pid, file_path, device, mode="serve")
         ui.cast_live(device, follow=False)
-        return (0.0, 0.0, bool(sub_url))
+        return cast_delivery.CastResult(0.0, 0.0, bool(sub_url), started=True)
 
     # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
     # The vtt lives in the caller's per-play temp dir, held open for the whole follow, so the
@@ -637,7 +639,9 @@ def _cast_file_via_bridge(
             _rm(file_path)
     if out is None:
         return None  # failed before started → keep the temp file for the catt fallback
-    return (out.pos, out.dur, bool(sub_url)) if out.started else None
+    if not out.started:
+        return None  # never started → let the caller fall back to catt
+    return cast_delivery.CastResult(out.pos, out.dur, bool(sub_url), started=True)
 
 
 def _log_catt_stderr(path: str) -> None:

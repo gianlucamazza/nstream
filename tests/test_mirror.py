@@ -166,8 +166,12 @@ def test_stop_tears_down_persisted_state(monkeypatch, tmp_path):
 
 
 def test_cast_via_mirror_degrades_when_unavailable(monkeypatch):
+    """No sender binary: (0.0, 0.0) alone is indistinguishable from a detached mirror that
+    started fine, so `started` is what makes this reportable as a failure (ADR 0031)."""
     monkeypatch.setattr(mirror, "available", lambda: False)
-    assert mirror.cast_via_mirror(_cfg(), "Film", "http://u", device="1.2.3.4") == (0.0, 0.0)
+    out = mirror.cast_via_mirror(_cfg(), "Film", "http://u", device="1.2.3.4")
+    assert (out.pos, out.dur) == (0.0, 0.0)
+    assert out.started is False and out.error == "mirror_unavailable"
 
 
 # --- cast_via_mirror orchestration -----------------------------------------
@@ -228,7 +232,8 @@ def test_cast_via_mirror_headless_failure_unwinds_sink(monkeypatch, tmp_path):
     rec, _ = _wire(monkeypatch, tmp_path)
     monkeypatch.setattr(mirror, "_create_headless", lambda: None)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
+    assert out.started is False and out.error == "headless_output_failed"
     st = rec["teardowns"][-1]
     assert st["sink_module"] == 99
     assert "headless" not in st and "mpv_pid" not in st and "sender_pid" not in st
@@ -244,7 +249,8 @@ def test_cast_via_mirror_mpv_missing_unwinds_sink_and_headless(monkeypatch, tmp_
 
     monkeypatch.setattr(mirror.subprocess, "Popen", boom)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
+    assert out.started is False and out.error == "mpv_missing"
     st = rec["teardowns"][-1]
     assert st["sink_module"] == 99 and st["headless"] == "HEADLESS-9"
     assert "mpv_pid" not in st and "sender_pid" not in st
@@ -261,7 +267,8 @@ def test_cast_via_mirror_mpv_oserror_unwinds_sink_and_headless(monkeypatch, tmp_
 
     monkeypatch.setattr(mirror.subprocess, "Popen", boom)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
+    assert out.started is False and out.error == "mpv_missing"
     st = rec["teardowns"][-1]
     assert st["sink_module"] == 99 and st["headless"] == "HEADLESS-9"
     assert "mpv_pid" not in st and "sender_pid" not in st
@@ -272,7 +279,8 @@ def test_cast_via_mirror_window_timeout_kills_mpv_and_unwinds(monkeypatch, tmp_p
     rec, _ = _wire(monkeypatch, tmp_path)
     monkeypatch.setattr(mirror, "_await_window", lambda pid: None)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
+    assert out.started is False and out.error == "mpv_window_missing"
     assert 4242 in rec["killed"]
     st = rec["teardowns"][-1]
     assert st["mpv_pid"] == 4242 and st["headless"] == "HEADLESS-9" and st["sink_module"] == 99
@@ -284,7 +292,8 @@ def test_cast_via_mirror_sender_failure_unwinds_everything(monkeypatch, tmp_path
     rec, _ = _wire(monkeypatch, tmp_path)
     monkeypatch.setattr(mirror, "_launch_sender", lambda cfg, dev, addr: None)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
+    assert out.started is False and out.error == "sender_launch_failed"
     assert 4242 in rec["killed"]
     st = rec["teardowns"][-1]
     assert st["mpv_pid"] == 4242 and st["headless"] == "HEADLESS-9" and st["sink_module"] == 99
@@ -297,7 +306,7 @@ def test_cast_via_mirror_headless_success_detaches_and_keeps_state(monkeypatch, 
     for --stop, mpv moved to the headless workspace, nothing torn down."""
     rec, proc = _wire(monkeypatch, tmp_path)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=False)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
     assert rec["teardowns"] == []  # the cast keeps running
     _args, kw = rec["popen"][0]
     assert kw["start_new_session"] is True  # detached session
@@ -326,7 +335,7 @@ def test_cast_via_mirror_follow_tracks_position_and_tears_down(monkeypatch, tmp_
 
     monkeypatch.setattr(mirror.player, "_track_position", fake_track)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=True)
-    assert out == (12.0, 99.0)
+    assert (out.pos, out.dur) == (12.0, 99.0)
     assert proc.wait_calls == 1
     _args, kw = rec["popen"][0]
     assert kw["start_new_session"] is False  # follow: mpv dies with us
@@ -340,7 +349,7 @@ def test_cast_via_mirror_follow_ctrl_c_kills_mpv_and_tears_down(monkeypatch, tmp
     rec, _proc = _wire(monkeypatch, tmp_path, proc=_MpvProc(wait_exc=KeyboardInterrupt()))
     monkeypatch.setattr(mirror.player, "_track_position", lambda *a: None)
     out = mirror.cast_via_mirror(_cfg(), "F", "http://u", device="1.2.3.4", follow=True)
-    assert out == (0.0, 0.0)
+    assert (out.pos, out.dur) == (0.0, 0.0)
     assert 4242 in rec["killed"]
     assert rec["teardowns"] != []
 

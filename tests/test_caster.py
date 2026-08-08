@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from nstream import caster
+from nstream import cast_delivery, caster
 from nstream.config import Config
 
 CFG = Config(torrentio_base="tb")
@@ -334,8 +334,9 @@ def test_cast_tracks_position_to_the_end(monkeypatch):
             {"player_state": "IDLE", "duration": 100.0},
         ],
     )
-    pos, dur, _subs = caster.cast(CFG, "Show E1", "http://u", device="TV")
-    assert (pos, dur) == (99.0, 100.0)
+    r = caster.cast(CFG, "Show E1", "http://u", device="TV")
+    assert (r.pos, r.dur) == (99.0, 100.0)
+    assert r.started is True and r.error is None
 
 
 def test_cast_reports_early_stop_position(monkeypatch):
@@ -346,20 +347,26 @@ def test_cast_reports_early_stop_position(monkeypatch):
             {"player_state": "IDLE", "duration": 100.0},  # stopped at 20% → not finished
         ],
     )
-    pos, dur, _subs = caster.cast(CFG, "Show E1", "http://u", device="TV")
-    assert (pos, dur) == (20.0, 100.0)
+    r = caster.cast(CFG, "Show E1", "http://u", device="TV")
+    assert (r.pos, r.dur) == (20.0, 100.0)
+    assert r.started is True
 
 
-def test_cast_launch_failure_returns_zero(monkeypatch):
+def test_cast_launch_failure_reports_not_started(monkeypatch):
+    """`catt cast` exiting non-zero used to return the same (0.0, 0.0) a legitimate
+    fire-and-return returns, so headless reported the dead cast as `ok: true` (ADR 0031)."""
     _cast_run(monkeypatch, launch_rc=1)
-    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
+    r = caster.cast(CFG, "M", "http://u", device="TV")
+    assert (r.pos, r.dur) == (0.0, 0.0)
+    assert r.started is False and r.error == "cast_failed"
 
 
 def test_cast_gives_up_if_never_starts(monkeypatch):
     # Receiver stays idle/unreachable forever → bail after _CAST_GIVEUP polls,
     # never loops indefinitely.
     calls = _cast_run(monkeypatch, info_seq=[])  # every info poll fails
-    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
+    r = caster.cast(CFG, "M", "http://u", device="TV")
+    assert r.started is False and r.error == "cast_never_started"
     info_polls = sum(1 for c in calls if "info" in c)
     assert info_polls == caster._CAST_GIVEUP
 
@@ -375,7 +382,8 @@ def test_cast_launch_timeout_degrades(monkeypatch):
     monkeypatch.setattr(caster.subprocess, "run", hang)
     events = []
     result = caster.cast(CFG, "M", "http://u", device="TV", on_event=events.append)
-    assert result == (0.0, 0.0, False)
+    assert (result.pos, result.dur) == (0.0, 0.0)
+    assert result.started is False and result.error == "cast_timeout"
     assert [e["kind"] for e in events] == ["failed"]
 
 
@@ -397,7 +405,8 @@ def test_cast_poll_timeout_counts_as_unreachable(monkeypatch):
 
     monkeypatch.setattr(caster.subprocess, "run", fake)
     monkeypatch.setattr(caster, "_poll_wait", lambda *_: None)
-    assert caster.cast(CFG, "M", "http://u", device="TV") == (0.0, 0.0, False)
+    r = caster.cast(CFG, "M", "http://u", device="TV")
+    assert r.started is False and r.error == "cast_never_started"
     assert len(polls) == caster._CAST_GIVEUP
 
 
@@ -635,7 +644,7 @@ def test_cast_prefers_bridge_with_metadata(monkeypatch):
 
     monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
     seen = []
-    pos, dur, _subs = caster.cast(
+    r = caster.cast(
         CFG,
         "Dune",
         "http://x",
@@ -643,7 +652,8 @@ def test_cast_prefers_bridge_with_metadata(monkeypatch):
         meta=caster.CastMeta(poster="p.jpg"),
         on_event=seen.append,
     )
-    assert (pos, dur) == (98.0, 100.0)
+    assert (r.pos, r.dur) == (98.0, 100.0)
+    assert r.started is True and r.error is None
     assert [e["kind"] for e in seen] == ["started", "playing", "ended"]
 
 
@@ -658,10 +668,14 @@ def test_cast_falls_back_to_catt_when_bridge_never_starts(monkeypatch):
 
     def fake_catt(*a, **k):
         called["catt"] = True
-        return (1.0, 2.0, False)
+        # Mirrors the real `_cast_via_catt` contract. The old stub returned a 3-tuple the
+        # real one never produced, and the assertion below pinned the resulting 4-tuple —
+        # stub drift that a bare-tuple contract cannot catch (ADR 0031).
+        return cast_delivery.CastResult(1.0, 2.0, started=True)
 
     monkeypatch.setattr(caster, "_cast_via_catt", fake_catt)
-    assert caster.cast(CFG, "Dune", "http://x", device="1.2.3.4") == (1.0, 2.0, False, False)
+    r = caster.cast(CFG, "Dune", "http://x", device="1.2.3.4")
+    assert (r.pos, r.dur, r.started) == (1.0, 2.0, True)
     assert called.get("catt") is True
 
 
@@ -671,8 +685,18 @@ def test_cast_uses_catt_when_bridge_absent(monkeypatch):
 
     def fake_catt(*a, **k):
         called["catt"] = True
-        return (0.0, 0.0, False)
+        return cast_delivery.CastResult(0.0, 0.0, started=True)
 
     monkeypatch.setattr(caster, "_cast_via_catt", fake_catt)
     caster.cast(CFG, "Dune", "http://x", device="1.2.3.4")
     assert called.get("catt") is True
+
+
+def test_fire_and_return_reports_started(monkeypatch):
+    """The mirror image of the failure pins: a handoff catt accepted (rc 0) counts as
+    started even though no position was ever observed — otherwise every headless
+    fire-and-return cast would report itself failed (ADR 0031)."""
+    _cast_run(monkeypatch)
+    r = caster.cast(CFG, "M", "http://u", device="TV", follow=False)
+    assert (r.pos, r.dur) == (0.0, 0.0)
+    assert r.started is True and r.error is None

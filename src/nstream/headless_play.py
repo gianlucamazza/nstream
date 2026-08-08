@@ -297,6 +297,19 @@ def auto_play(
             except stream_select.ContentTooShort as e:
                 emit_truncated(e, title)
                 return 1
+            except cast_flow.CastStreamUnresolved:
+                # Retry-worthy, unlike the "proven gone" codes: a `[RD download]` release
+                # becomes playable once the provider finishes fetching it (ADR 0031 appendix).
+                emit_json(
+                    {
+                        "ok": False,
+                        "error": "no_playable_stream",
+                        "message": "nessuna sorgente castabile risolvibile ora (swarm senza "
+                        "peer, o file non ancora trasferito dal debrid); riprova più tardi, "
+                        "o prova --local / un'altra qualità (--quality)",
+                    }
+                )
+                return 1
             except cast_flow.CastVideoUnsupported as e:
                 emit_json(
                     {
@@ -306,6 +319,22 @@ def auto_play(
                         "nessuna release alternativa castabile; riprova con --local "
                         "o con un'altra qualità (--quality)",
                         "video_codec": e.codec,
+                    }
+                )
+                return 1
+            if not outcome.started:
+                # ADR 0031: a cast that never began used to reach the terminal `ok: true`
+                # emit, because a failed backend returned the same (0.0, 0.0) a legitimate
+                # fire-and-return does. Reported BEFORE note_started/remember_cast, so no
+                # phantom session is recorded for a cast that never played.
+                emit_json(
+                    {
+                        "ok": False,
+                        "error": "cast_failed",
+                        "cast_error": outcome.cast_error,
+                        "action": outcome.action,
+                        "device": device_name,
+                        "message": "il cast non è partito (vedi stderr per la causa)",
                     }
                 )
                 return 1

@@ -242,6 +242,15 @@ def _play_on_cast(
             allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
             expected_runtime_s=expected_runtime_s,
         )  # fmt: skip
+    except cast_flow.CastStreamUnresolved:
+        # Same class as the black-screen guard below: back out to the list rather than
+        # crashing on a url-less stream (ADR 0031 appendix).
+        print(
+            f"nstream: {ui.g().warn} nessuna sorgente castabile risolvibile ora — "
+            "riprova più tardi o scegli un'altra release",
+            file=sys.stderr,
+        )
+        return (0.0, 0.0, False)
     except cast_flow.CastVideoUnsupported as e:
         # Casting anyway would show a black screen (ADR 0017): back out to the list with
         # an honest message instead. Local mpv decodes anything → suggest it.
@@ -308,8 +317,8 @@ def _move_to_cast(
         print(f"nstream: {e}", file=sys.stderr)
         return (pos, dur, False)
     state.clear_cast_session()  # Alt-C bypasses run_cast, which normally does this
-    pos, dur, _subs = cast(cfg, title, chosen["url"], device=device, start=pos)
-    return (pos, dur, False)
+    result = cast(cfg, title, chosen["url"], device=device, start=pos)
+    return (result.pos, result.dur, False)
 
 
 def _series_player(cfg: Config) -> series.PlayVideo:
