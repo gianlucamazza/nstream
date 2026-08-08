@@ -41,5 +41,7 @@ A new ADR supersedes it instead, and the old one is marked `Superseded by NNNN`.
 | [0027](0027-per-addon-circuit-breaker.md)             | Per-addon circuit breaker on stream sources                                        | Proposed           |
 | [0028](0028-content-duration-vetting.md)              | Vet the REAL duration against the expected runtime (placeholder/sample)            | Accepted           |
 | [0029](0029-one-continuation-policy.md)               | One continuation policy; advance decided once, never in a delivery backend         | Accepted           |
+| [0030](0030-explicit-year-hard-constraint.md)         | An explicit `--year` is a hard constraint on headless title selection              | Accepted           |
+| [0031](0031-delivery-backend-reports-started.md)      | A delivery backend reports whether the cast started; `ok: true` requires it        | Accepted           |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above.
