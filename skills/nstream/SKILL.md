@@ -175,13 +175,18 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
   - `duration_verified` — `true` = the real duration was measured and matches the title's
     runtime (ADR 0028); `null` = not checkable (unknown runtime, or ffprobe couldn't read it)
   - `reencoded` — Tier-2 remux used
-  - `selection` — `exact` name match vs `first`-result guess (if `first`, say which title)
+  - `selection` — how the title was picked: `exact` (the name matched), `year` (only `--year`
+    disambiguated — the catalog name is English, so this is the normal outcome for a localized
+    title) or `first` (a guess: say which title you played)
 - `ok: false` → handle by `error` code (below).
 
 ### Error codes
 
 - `no_result` — nothing matched the title (or empty history for `-c`). Offer to retry with a
-  different spelling or add a year / `--movies`/`--series`.
+  different spelling or add a year / `--movies`/`--series`. With an explicit `--year` this also
+  means **every** candidate provably has another year (ADR 0030): a `years` array lists what was
+  on offer — show it and ask, rather than re-running without the year. A title whose
+  `releaseInfo` the catalog doesn't carry is never refused this way.
 - `no_stream_sources` — no stream addon is configured (`torrentio_enabled: false` and empty
   `addons`). Tell the user to enable Torrentio or add a stream addon
   (`nstream --settings` → Fonti stream / plugin: preset Comet/MediaFusion/AIOStreams or a
@@ -192,7 +197,13 @@ stdout is always a single JSON object (except `--follow` JSONL). Read `ok`:
   ones that had a ready url weren't usable at that moment (unreachable, or a file the debrid is
   still transferring — a brand-new title often has only uncached releases). This one **is** worth
   retrying after a while: a `[RD download]` release becomes playable once the provider finishes
-  fetching it. Meanwhile offer a lower tier (`--quality 1080` / `720`) or `--local`.
+  fetching it. Meanwhile offer a lower tier (`--quality 1080` / `720`) or `--local`. On a cast
+  it also covers a settled stream that could not be resolved at all (dead swarm, no peers).
+- `cast_failed` — the pick was fine but the **delivery never started**: catt/castbridge/mirror
+  could not hand the media to the receiver. `cast_error` says which (`catt_missing`,
+  `cast_timeout`, `cast_failed`, `cast_never_started`, `mirror_unavailable`, …) and stderr
+  carries the cause. Check the TV is on and reachable; nothing was recorded in the history, so
+  a later `-c` is unaffected. Do not report the cast as started (ADR 0031).
 - `sources_removed` — every source for the title answered 404/410: **proven gone**, not merely
   not-ready; `removed_sources` counts them. Do **not** retry the same command: it will fail
   identically. Say the title is unavailable, and offer `--local` (P2P, if the swarm is alive).
