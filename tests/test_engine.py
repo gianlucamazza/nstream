@@ -330,3 +330,64 @@ def test_spawn_failure_carries_the_server_reason(monkeypatch, tmp_path):
     monkeypatch.setattr(engine.atexit, "register", lambda fn: None)
     with pytest.raises(engine.EngineUnavailable, match="Cannot bind HTTP port"):
         engine.ensure_running(_cfg())
+
+
+# --- P2P privacy gate (ADR 0032) -------------------------------------------
+
+
+def _ungated(monkeypatch):
+    """Reset the once-per-process latch so each test observes the gate's own output."""
+    monkeypatch.setattr(engine, "_p2p_gate_said", False)
+    monkeypatch.setattr(engine, "_p2p_notice_once", lambda cfg: None)
+
+
+def test_p2p_gate_blocks_without_vpn_when_required(monkeypatch, capsys):
+    _ungated(monkeypatch)
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    with pytest.raises(engine.P2PBlocked):
+        engine._p2p_gate(Config(torrentio_base="tb", p2p_require_vpn=True))
+    assert "bloccato" in capsys.readouterr().err
+
+
+def test_p2p_gate_warns_without_vpn_but_proceeds(monkeypatch, capsys):
+    _ungated(monkeypatch)
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    engine._p2p_gate(Config(torrentio_base="tb", p2p_require_vpn=False))
+    assert "nessuna VPN" in capsys.readouterr().err
+
+
+def test_p2p_gate_silent_with_vpn(monkeypatch, capsys):
+    _ungated(monkeypatch)
+    monkeypatch.setattr(engine, "vpn_active", lambda: True)
+    engine._p2p_gate(Config(torrentio_base="tb"))
+    assert "VPN" not in capsys.readouterr().err
+
+
+def test_p2p_gate_speaks_once_per_process(monkeypatch, capsys):
+    """The cast vetting resolves many candidates; a per-candidate message would bury itself."""
+    _ungated(monkeypatch)
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    for _ in range(4):
+        with pytest.raises(engine.P2PBlocked):
+            engine._p2p_gate(cfg)
+    assert capsys.readouterr().err.count("bloccato") == 1
+
+
+def test_resolve_refuses_before_touching_the_swarm(monkeypatch):
+    """The live 2026-08-08 exposure: with p2p_require_vpn set and no VPN, the cast path
+    resolved P2P streams anyway because the gate sat at one call site instead of here.
+    Nothing may reach the server (`ensure_running`) once the gate refuses."""
+    _ungated(monkeypatch)
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    monkeypatch.setattr(
+        engine, "ensure_running", lambda cfg: pytest.fail("joined the swarm despite the gate")
+    )
+    with pytest.raises(engine.P2PBlocked):
+        engine.resolve(Config(torrentio_base="tb", p2p_require_vpn=True), {"infoHash": "aaaa"})
+
+
+def test_p2p_blocked_is_an_engine_unavailable():
+    """A subclass, so every existing `except EngineUnavailable` degrades correctly without
+    knowing the gate exists — including `_playable_url`, which memoises it as unresolvable."""
+    assert issubclass(engine.P2PBlocked, engine.EngineUnavailable)

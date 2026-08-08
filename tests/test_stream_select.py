@@ -165,7 +165,6 @@ def test_resolve_stream_native_first(monkeypatch):
 
 def test_resolve_stream_falls_back_to_p2p(monkeypatch):
     monkeypatch.setattr(stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(fail=True))
-    monkeypatch.setattr(stream_select, "_p2p_guard", lambda cfg: True)
     monkeypatch.setattr(stream_select.engine, "resolve", lambda cfg, s: "http://127.0.0.1:8090/s")
     out = stream_select._resolve_stream(_native_cfg(), {"infoHash": "aaaa"})
     assert out is not None and out["url"] == "http://127.0.0.1:8090/s"
@@ -544,31 +543,6 @@ def test_verify_cached_noop_local_backend(monkeypatch):
     )  # fmt: skip
     cfg = Config(torrentio_base="tb", playback_backend="local")
     stream_select._verify_availability(cfg, [cached], cast=False, title="")
-
-
-# --- P2P privacy guard -----------------------------------------------------
-
-
-def test_p2p_guard_blocks_without_vpn_when_required(monkeypatch, capsys):
-    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
-    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
-    assert stream_select._p2p_guard(cfg) is False
-    assert "bloccato" in capsys.readouterr().err
-
-
-def test_p2p_guard_warns_without_vpn_but_proceeds(monkeypatch, capsys):
-    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
-    monkeypatch.setattr(stream_select, "_p2p_notice_once", lambda cfg: None)
-    cfg = Config(torrentio_base="tb", p2p_require_vpn=False)
-    assert stream_select._p2p_guard(cfg) is True
-    assert "nessuna VPN" in capsys.readouterr().err
-
-
-def test_p2p_guard_silent_with_vpn(monkeypatch, capsys):
-    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: True)
-    monkeypatch.setattr(stream_select, "_p2p_notice_once", lambda cfg: None)
-    assert stream_select._p2p_guard(Config(torrentio_base="tb")) is True
-    assert "VPN" not in capsys.readouterr().err
 
 
 # --- prepare_stream: the auto-play language guard --------------------------
@@ -1191,3 +1165,35 @@ def test_playable_url_memoizes_the_failure(monkeypatch):
 
 def _raise_unavailable():
     raise stream_select.engine.EngineUnavailable("nessun peer")
+
+
+def test_playable_url_is_covered_by_the_privacy_gate(monkeypatch, capsys):
+    """The live 2026-08-08 exposure. `_playable_url` is the resolver the WHOLE cast vetting
+    runs on, and it was the one path `_p2p_guard` never protected: with p2p_require_vpn set
+    and no VPN up, casting joined the swarm and exposed the real IP (ADR 0032)."""
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True, p2p_ack=True)
+    monkeypatch.setattr(stream_select.engine, "_p2p_gate_said", False)
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+    monkeypatch.setattr(stream_select, "_native_resolve", lambda cfg, s: None)
+    monkeypatch.setattr(
+        stream_select.engine, "ensure_running",
+        lambda cfg: pytest.fail("cast path joined the swarm despite p2p_require_vpn"),
+    )  # fmt: skip
+    stream: Stream = {"infoHash": "deadbeef"}
+    assert stream_select._playable_url(cfg, stream) is None
+    assert "bloccato" in capsys.readouterr().err
+    # Memoised like any other failed resolve: the vetting probes many candidates and must not
+    # re-enter the gate (nor reprint) for each one.
+    assert stream["unresolvable"] is True
+
+
+def test_native_debrid_resolve_is_not_gated(monkeypatch):
+    """A debrid fetch is an HTTP GET from a provider: it joins no swarm and exposes nothing,
+    so the gate must not degrade the one backend that is private by construction."""
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+    monkeypatch.setattr(stream_select, "_native_resolve", lambda cfg, s: "http://rd/x.mkv")
+    monkeypatch.setattr(
+        stream_select.engine, "resolve", lambda cfg, s: pytest.fail("engine used for a debrid url")
+    )
+    assert stream_select._playable_url(cfg, {"infoHash": "aaaa"}) == "http://rd/x.mkv"

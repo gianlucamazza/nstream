@@ -31,6 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from . import config as config_mod
 from . import log, ui
 from .config import Config
 from .types import Stream
@@ -55,6 +56,12 @@ _spawned: subprocess.Popen | None = None
 
 class EngineUnavailable(Exception):
     """The local engine can't serve this stream (binary missing, server down, add failed)."""
+
+
+class P2PBlocked(EngineUnavailable):
+    """Refused by policy, not by capability: `p2p_require_vpn` is set and no VPN interface is
+    up (ADR 0032). A subclass so every existing `except EngineUnavailable` degrades correctly
+    without knowing the gate exists — which is the point of putting the gate in `resolve`."""
 
 
 # --- low-level HTTP to the local server ----------------------------------
@@ -310,10 +317,65 @@ def _largest_index(files: list[dict]) -> int:
     return int(best.get("id", 1))
 
 
+# Printed at most once per process: the cast vetting resolves many candidates, and a gate that
+# repeated itself per candidate would bury the reason it fired.
+_p2p_gate_said = False
+
+
+def _p2p_gate(cfg: Config) -> None:
+    """Privacy gate for joining a torrent swarm (ADR 0032). Raises `P2PBlocked` when
+    `p2p_require_vpn` is set and no VPN interface is up; otherwise warns (when no VPN) and
+    returns. P2P joins the swarm, so without a VPN the real IP is visible to peers.
+
+    Lives here, at the operation it governs, because a gate the callers must remember to
+    invoke is one a new resolve path silently opts out of — which is how the cast path came
+    to resolve P2P streams with the setting on and no VPN up."""
+    global _p2p_gate_said
+    if not vpn_active():
+        if cfg.p2p_require_vpn:
+            # Say it here rather than leaving it to the caller: two of the three resolve paths
+            # discard EngineUnavailable silently, and an invisible refusal reads as "no sources".
+            if not _p2p_gate_said:
+                _p2p_gate_said = True
+                print(
+                    "nstream: nessuna VPN rilevata e p2p_require_vpn=true — streaming P2P "
+                    "bloccato.\n         Attiva la VPN, oppure usa un provider debrid.",
+                    file=sys.stderr,
+                )
+            raise P2PBlocked("streaming P2P bloccato: nessuna VPN e p2p_require_vpn=true")
+        if not _p2p_gate_said:
+            _p2p_gate_said = True
+            print(
+                f"nstream: {ui.g().warn} nessuna VPN rilevata — "
+                "in P2P il tuo IP è visibile ai peer del torrent.",
+                file=sys.stderr,
+            )
+    _p2p_notice_once(cfg)
+
+
+def _p2p_notice_once(cfg: Config) -> None:
+    """One-time privacy notice the first time a P2P stream is served: torrent peers see the
+    client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback."""
+    if cfg.p2p_ack:
+        return
+    print(
+        "nstream: streaming P2P locale attivo — il tuo IP è visibile ai peer del torrent.\n"
+        "         Valuta una VPN se è una preoccupazione. (avviso mostrato una sola volta)",
+        file=sys.stderr,
+    )
+    with contextlib.suppress(config_mod.ConfigError, OSError):
+        config_mod.save({"p2p_ack": True})
+
+
 def resolve(cfg: Config, stream: Stream) -> str:
     """Add the torrent to the running server and return the HTTP stream url for the chosen
     file. The host is the machine's LAN IP — reachable both by local mpv and by a Chromecast,
-    so one url serves both playback paths (loopback would be invisible to the TV)."""
+    so one url serves both playback paths (loopback would be invisible to the TV).
+
+    The single door to the swarm: the privacy gate runs here so no caller can bypass it
+    (ADR 0032). `_native_resolve` (debrid) is deliberately NOT gated — an HTTP GET from a
+    provider joins no swarm and exposes nothing to peers."""
+    _p2p_gate(cfg)
     base = ensure_running(cfg)
     link = magnet_from_stream(stream)
     try:

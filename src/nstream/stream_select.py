@@ -27,8 +27,7 @@ from . import (
     tracks,
     ui,
 )
-from . import config as config_mod
-from .config import Config, ConfigError, PlayOpts
+from .config import Config, PlayOpts
 from .labels import stream_label
 from .picker import fzf
 from .types import Stream
@@ -418,9 +417,9 @@ def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
         return chosen
     if cfg.playback_backend == "native":  # native asked but unavailable → say we degrade
         print("nstream: risoluzione debrid nativa non riuscita, ripiego su P2P…", file=sys.stderr)
-    if not _p2p_guard(cfg):
-        return None
     try:
+        # The privacy gate runs inside engine.resolve (ADR 0032), so every resolve path —
+        # including `_playable_url`, which the whole cast vetting runs on — is covered.
         chosen["url"] = engine.resolve(cfg, chosen)
         return chosen
     except engine.EngineUnavailable as e:
@@ -634,41 +633,6 @@ def vet_duration(
         last = alt
     availability.drop_streams(results, short)
     raise ContentTooShort(last, len(short))
-
-
-def _p2p_guard(cfg: Config) -> bool:
-    """Privacy gate before serving a P2P stream. Returns False — blocking playback — only when
-    `p2p_require_vpn` is set and no VPN interface is detected; otherwise warns (when no VPN) and
-    proceeds. BP: P2P joins the swarm, so without a VPN the real IP is visible to peers."""
-    if not engine.vpn_active():
-        if cfg.p2p_require_vpn:
-            print(
-                "nstream: nessuna VPN rilevata e p2p_require_vpn=true — streaming P2P bloccato.\n"
-                "         Attiva la VPN, oppure usa un provider debrid.",
-                file=sys.stderr,
-            )
-            return False
-        print(
-            f"nstream: {ui.g().warn} nessuna VPN rilevata — "
-            "in P2P il tuo IP è visibile ai peer del torrent.",
-            file=sys.stderr,
-        )
-    _p2p_notice_once(cfg)
-    return True
-
-
-def _p2p_notice_once(cfg: Config) -> None:
-    """One-time privacy notice the first time a P2P stream is served: torrent peers see the
-    client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback."""
-    if cfg.p2p_ack:
-        return
-    print(
-        "nstream: streaming P2P locale attivo — il tuo IP è visibile ai peer del torrent.\n"
-        "         Valuta una VPN se è una preoccupazione. (avviso mostrato una sola volta)",
-        file=sys.stderr,
-    )
-    with contextlib.suppress(ConfigError, OSError):
-        config_mod.save({"p2p_ack": True})
 
 
 def _mark_native_cached(cfg: Config, results: list[Stream]) -> None:
