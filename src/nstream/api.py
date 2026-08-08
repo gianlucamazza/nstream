@@ -66,8 +66,11 @@ def _dedup(items: list, key) -> list:
     return out
 
 
-def _norm_text(value: object) -> str:
-    """Accent/punctuation-insensitive text used only for local result ranking."""
+def norm_text(value: object) -> str:
+    """Accent/punctuation-insensitive text for local title matching and ranking.
+
+    The single normalizer: `headless._select_meta` compares catalog names against the
+    query with it too, so "Amélie" and "amelie" match on every path (ADR 0030)."""
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     # Keep separators between words: ``Spider-Man`` and ``Spider Man`` must
     # normalize to the same value. Combining marks are dropped after NFKD so
@@ -82,9 +85,9 @@ def _norm_text(value: object) -> str:
 
 
 def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, str]:
-    wanted = _norm_text(query)
-    name = _norm_text(meta.get("name"))
-    info = _norm_text(meta.get("releaseInfo"))
+    wanted = norm_text(query)
+    name = norm_text(meta.get("name"))
+    info = norm_text(meta.get("releaseInfo"))
     exact = int(name == wanted)
     prefix = int(name.startswith(wanted) and bool(wanted))
     words = int(bool(wanted) and wanted in name)

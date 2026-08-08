@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from . import (
@@ -58,35 +59,80 @@ def _emit_json(obj: dict) -> None:
     sys.stdout.flush()
 
 
-def _norm_title(s: str) -> str:
-    """Casefold + strip punctuation for tolerant title matching."""
-    return " ".join("".join(c if c.isalnum() else " " for c in s.casefold()).split())
+class YearMismatch(Exception):
+    """Every candidate provably carries a release year other than the one requested
+    with an explicit --year (ADR 0030). `years` lists what was on offer."""
+
+    def __init__(self, years: tuple[str, ...]) -> None:
+        super().__init__(", ".join(years))
+        self.years = years
+
+
+def _release_span(meta: Meta) -> tuple[int, int] | None:
+    """(first, last) release years of a meta, or None when `releaseInfo` is absent or
+    unreadable. Cinemeta emits "2006", the closed range "2006-2010", the open-ended
+    "2006-" for a running series, and an en-dash variant of both."""
+    info = str(meta.get("releaseInfo", "")).strip()
+    if not info:
+        return None
+    parts = [p.strip() for p in re.split(r"[-–—]", info)]
+    nums = [int(p) for p in parts if len(p) == 4 and p.isdigit()]
+    if not nums:
+        return None
+    open_ended = len(parts) > 1 and not parts[-1].isdigit()
+    return (nums[0], 9999 if open_ended else max(nums))
+
+
+def _year_matches(meta: Meta, year: str) -> bool | None:
+    """Tri-state (ADR 0030): True when the meta's release span contains `year`, False
+    when it provably does not, None when the span is unknown. None never refuses — a
+    missing `releaseInfo` is absence of evidence, not evidence of the wrong year."""
+    span = _release_span(meta)
+    if span is None or not year.isdigit():
+        return None
+    return span[0] <= int(year) <= span[1]
 
 
 def _select_meta(
     metas: list[Meta], query: str, year: str | None, *, want_series: bool = False
 ) -> tuple[Meta, str]:
-    """Pick a title without fzf: an exact normalized-name match (optionally pinned by
-    release year) wins, else the first result. Returns (meta, "exact"|"first").
+    """Pick a title without fzf. The year filters the WHOLE candidate set first, then an
+    exact normalized-name match wins inside that pool. The returned tier says which
+    evidence decided: "exact" (the name matched), "year" (only the year disambiguated —
+    the localized-title case, where the catalog name is English) or "first" (a guess).
+
+    An explicit --year is a hard constraint: when every candidate provably has another
+    year, this raises YearMismatch instead of playing the wrong film (ADR 0030). A year
+    merely inferred from a trailing token in the query stays soft — it may reorder, never
+    refuse, or "blade runner 2049" and "1917" become unplayable.
 
     `want_series` (an explicit --season/--episode) prefers series results — a same-named
     movie must not shadow the series the caller is clearly asking an episode of."""
     if want_series:
         series = [m for m in metas if m.get("type") == "series"]
         metas = series or metas
-    q = _norm_title(query)
-    # A trailing 4-digit year ("dune 2021") is a disambiguator, not part of the title: split it
-    # off so the name match works, and let it pin the year when --year wasn't given.
+    explicit = year is not None
+    q = whole = api.norm_text(query)
     head, _, tail = q.rpartition(" ")
     if head and len(tail) == 4 and tail.isdigit():
         q, year = head, year or tail
-    exact = [m for m in metas if _norm_title(m.get("name", "")) == q]
+    pool, hits = metas, []
     if year:
-        by_year = [m for m in exact if str(m.get("releaseInfo", "")).startswith(year)]
-        exact = by_year or exact
+        verdicts = [(m, _year_matches(m, year)) for m in metas]
+        hits = [m for m, v in verdicts if v is True]
+        unknown = [m for m, v in verdicts if v is None]
+        if explicit and not hits and not unknown:
+            offered = dict.fromkeys(str(m.get("releaseInfo", "")) for m in metas)
+            raise YearMismatch(tuple(offered))
+        pool = hits or unknown or metas
+    # Match on the split query AND on the whole one: the trailing token is only *probably*
+    # a year, and "Blade Runner 2049" is a name that ends in one.
+    exact = [m for m in pool if api.norm_text(m.get("name", "")) in (q, whole)]
     if exact:
         return exact[0], "exact"
-    return metas[0], "first"
+    if hits:
+        return hits[0], "year"
+    return pool[0], "first"
 
 
 def run(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
@@ -162,11 +208,21 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             _emit_json({"ok": False, "error": "no_result", "message": f"{what} per «{query}»"})
             return 1
         # The --season/--episode series inference stays only when no explicit flag is given.
-        meta, selection = _select_meta(
-            metas, query, args.year,
-            want_series=tfilter is None
-            and (args.season is not None or args.episode is not None),
-        )  # fmt: skip
+        try:
+            meta, selection = _select_meta(
+                metas, query, args.year,
+                want_series=tfilter is None
+                and (args.season is not None or args.episode is not None),
+            )  # fmt: skip
+        except YearMismatch as e:
+            # ADR 0030: an explicit --year contradicted by every candidate refuses rather
+            # than guessing — a wrong film cast to the TV is worse than no result.
+            _emit_json({
+                "ok": False, "error": "no_result",
+                "message": f"nessun risultato del {args.year} per «{query}»",
+                "years": list(e.years),
+            })  # fmt: skip
+            return 1
     typ = meta.get("type", "movie")
     name = meta.get("name", "?")
     imdb_id = meta.get("id", "")
@@ -359,8 +415,8 @@ def _run_auto_resume(
     entries = state.resumable(cfg, typ=typ)
     entry: HistoryEntry | None = None
     if query:
-        q = _norm_title(query)
-        entry = next((e for e in entries if _norm_title(e.get("title", "")) == q), None)
+        q = api.norm_text(query)
+        entry = next((e for e in entries if api.norm_text(e.get("title", "")) == q), None)
     elif entries:
         entry = entries[0]
     if entry is None:

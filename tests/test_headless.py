@@ -14,6 +14,7 @@ import pytest
 
 from nstream import (
     availability,
+    cast_delivery,
     cast_flow,
     headless,
     headless_play,
@@ -82,6 +83,12 @@ def _hopts(cast=False, audio_lang=None):
         auto=True, cast=cast, sub_mode=None, sub_lang=None, history=False, autoplay=False,
         audio_lang=audio_lang,
     )  # fmt: skip
+
+
+def _ok(pos: float = 0.0, dur: float = 0.0, subs: bool = False):
+    """A delivery stub that really delivered (ADR 0031): backends return a CastResult, and
+    `headless_play` now refuses to emit `ok: true` without `started`."""
+    return cast_delivery.CastResult(pos, dur, subs, started=True)
 
 
 def _VETTED(s):
@@ -283,7 +290,7 @@ def test_run_auto_cast_emits_device(monkeypatch, capsys):
     seen = {}
     monkeypatch.setattr(
         cast_flow.caster, "cast",
-        lambda *a, **k: seen.update(follow=k.get("follow")) or (0.0, 0.0, False),
+        lambda *a, **k: seen.update(follow=k.get("follow")) or _ok(),
     )  # fmt: skip
     headless.run_auto(CFG, _hns(query=["dune"], device="Salotto"), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
@@ -301,9 +308,7 @@ def test_run_auto_cast_remux_failure_notice(monkeypatch, capsys):
     monkeypatch.setattr(cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: plan)
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg failed
     seen = {}
-    monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, False)
-    )
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or _ok())
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: seen.update(detached=True))
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
     cap = capsys.readouterr()
@@ -422,7 +427,7 @@ def test_run_auto_cast_reports_volume(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     monkeypatch.setattr(headless_play, "device_volume", lambda device: (0.4, False))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
@@ -433,7 +438,7 @@ def test_run_auto_cast_warns_volume_zero(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     monkeypatch.setattr(headless_play, "device_volume", lambda device: (0.0, False))
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
@@ -503,7 +508,7 @@ def test_run_auto_cast_sets_volume(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     seen = {}
     monkeypatch.setattr(
         headless.caster, "set_volume", lambda device, level: seen.update(level=level)
@@ -560,6 +565,74 @@ def test_select_meta_default_keeps_first_exact():
     series = Meta(id="tt1", type="series", name="Mr. Robot")
     meta, _ = headless._select_meta([movie, series], "mr robot", None)
     assert meta["id"] == "tt2"  # no season/episode hint → existing behaviour unchanged
+
+
+# --- ADR 0030: the year filters the whole pool, and an explicit one is hard ---
+
+
+# The live 2026-08-08 regression: an Italian query matches no English catalog name, so the
+# year is the only usable evidence. It used to be discarded and "Cash Truck" (2004) was cast.
+_CASH = Meta(id="tt_cash", type="movie", name="Cash Truck", releaseInfo="2004")
+_LIVES = Meta(id="tt_lives", type="movie", name="The Lives of Others", releaseInfo="2006")
+
+
+def test_select_meta_year_selects_across_localized_title():
+    meta, how = headless._select_meta([_CASH, _LIVES], "le vite degli altri", "2006")
+    assert meta["id"] == "tt_lives"
+    assert how == "year"  # the year disambiguated, the name never matched
+
+
+def test_select_meta_explicit_year_refuses_wrong_film():
+    # Every candidate has a KNOWN, different year → refuse rather than guess.
+    with pytest.raises(headless.YearMismatch) as e:
+        headless._select_meta([_CASH, _LIVES], "le vite degli altri", "1999")
+    assert e.value.years == ("2004", "2006")
+
+
+def test_select_meta_missing_release_info_never_refuses():
+    # Absence of evidence is not evidence of the wrong year: unknown spans stay eligible.
+    a = Meta(id="tt1", type="movie", name="Senza Anno")
+    b = Meta(id="tt2", type="movie", name="Altro", releaseInfo="")
+    meta, how = headless._select_meta([a, b], "qualcosa", "2006")
+    assert meta["id"] == "tt1" and how == "first"
+
+
+def test_select_meta_partial_unknown_pool_is_not_a_refusal():
+    # One candidate provably wrong, one unknown → fall through on the unknown, no raise.
+    unknown = Meta(id="tt_u", type="movie", name="Ignoto")
+    meta, how = headless._select_meta([_CASH, unknown], "ignoto", "2006")
+    assert meta["id"] == "tt_u" and how == "exact"
+
+
+@pytest.mark.parametrize("info", ["2006-2010", "2006–2010", "2006-"])
+def test_select_meta_year_range_matches_series(info):
+    # Cinemeta emits closed, en-dash and open-ended ranges for a running series.
+    show = Meta(id="tt_s", type="series", name="Show", releaseInfo=info)
+    other = Meta(id="tt_o", type="series", name="Other", releaseInfo="1999")
+    meta, _ = headless._select_meta([other, show], "show", "2008")
+    assert meta["id"] == "tt_s"
+
+
+def test_select_meta_inferred_year_is_soft():
+    # "2049" is part of the title, not a filter: it must never refuse or empty the pool.
+    br = Meta(id="tt_br", type="movie", name="Blade Runner 2049", releaseInfo="2017")
+    meta, how = headless._select_meta([br], "blade runner 2049", None)
+    assert meta["id"] == "tt_br" and how == "exact"
+
+
+def test_select_meta_accent_folded_match():
+    # api.norm_text is now the single normalizer: NFKD folding on every path.
+    amelie = Meta(id="tt_a", type="movie", name="Amélie", releaseInfo="2001")
+    meta, how = headless._select_meta([amelie], "amelie", None)
+    assert meta["id"] == "tt_a" and how == "exact"
+
+
+def test_run_auto_year_mismatch_emits_no_result(monkeypatch, capsys):
+    monkeypatch.setattr(headless.api, "search", lambda cfg, q: [dict(_CASH), dict(_LIVES)])
+    rc = headless.run_auto(CFG, _hns(query=["le", "vite", "degli", "altri"], year="1999"), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False and out["error"] == "no_result"
+    assert out["years"] == ["2004", "2006"]
 
 
 # --- explicit --movies/--series type flags ----------------------------------
@@ -648,7 +721,7 @@ def test_run_auto_mirror_action(monkeypatch, capsys):
     monkeypatch.setattr(
         cast_flow.mirror, "cast_via_mirror",
         lambda cfg, title, url, **k: (
-            seen.update(url=url, follow=k.get("follow")) or (0.0, 0.0)
+            seen.update(url=url, follow=k.get("follow")) or _ok()
         ),
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("mirror must preempt the remux"))
@@ -679,7 +752,7 @@ def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
         cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
             seen.update(path=path, follow=k.get("follow"), on_event=k.get("on_event"))
-            or (0.0, 0.0, False)
+            or _ok()
         ),
     )  # fmt: skip
     monkeypatch.setattr(
@@ -721,7 +794,7 @@ def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
     seen = {}
     monkeypatch.setattr(
-        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or (0.0, 0.0, True)
+        cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or _ok(subs=True)
     )
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
@@ -750,7 +823,7 @@ def test_run_auto_follow_emits_event_jsonl(monkeypatch, capsys):
     def fake_cast(cfg, title, url, **k):
         seen["follow"] = k.get("follow")
         k["on_event"]({"kind": "playing", "position": 3.0})  # the callback IS the JSONL writer
-        return (0.0, 0.0, False)
+        return _ok()
 
     monkeypatch.setattr(cast_flow.caster, "cast", fake_cast)
     rc = headless.run_auto(CFG, _hns(query=["dune"], follow=True), _cast_opts())
@@ -829,7 +902,7 @@ def test_follow_cast_saves_history(monkeypatch, tmp_path, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (600.0, 6000.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok(600.0, 6000.0))
     rc = headless.run_auto(CFG, _hns(query=["dune"], follow=True), _hist_opts(cast=True))
     assert rc == 0
     e = headless.state.load_history(CFG)["tt1"]
@@ -842,7 +915,7 @@ def test_fire_and_return_notes_started_and_session(monkeypatch, tmp_path, capsys
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hist_opts(cast=True))
     assert rc == 0
@@ -915,7 +988,7 @@ def test_subtitles_not_reported_when_delivery_drops_them(monkeypatch, capsys):
     )
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux here"))
     # bridge path: subs_delivered=False
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _cast_opts())
     cap = capsys.readouterr()
@@ -934,7 +1007,7 @@ def test_auto_play_session_stores_resolved_ip(monkeypatch, tmp_path, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda c, **k: "192.168.1.9")
     monkeypatch.setattr(headless, "_resolve_device", lambda c, **k: "192.168.1.9")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
     rc = headless.run_auto(cfg, _hns(query=["dune"]), _hist_opts(cast=True))
     assert rc == 0
@@ -1037,7 +1110,7 @@ def test_volume_with_title_still_casts(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
-    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
     seen = {}
     monkeypatch.setattr(headless.caster, "set_volume", lambda device, n: seen.update(n=n) or True)
@@ -1260,7 +1333,7 @@ def test_cast_boundary_forwards_resolved_quality_to_run_cast(monkeypatch, capsys
             pos=0.0, dur=0.0, advance=False, action="cast", stream=chosen,
             reencoded=False, notice=None, audio_lang="ita", audio_verified=True,
             safety_sub_lang=None, sub_paths=(), sub_match=None, sub_offset=None,
-            subs_delivered=False,
+            subs_delivered=False, started=True, cast_error=None,
         )  # fmt: skip
 
     monkeypatch.setattr(cast_flow, "run_cast", fake_run_cast)
@@ -1332,6 +1405,50 @@ def test_run_auto_no_playable_stream_still_reported(monkeypatch, capsys, tmp_pat
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "no_playable_stream"
+
+
+def _raise(exc):
+    def boom(*a, **k):
+        raise exc
+
+    return boom
+
+
+def test_run_auto_cast_unresolved_reports_no_playable_stream(monkeypatch, capsys, tmp_path):
+    """A settled cast stream with no url is a retry-worthy source problem, not an internal
+    crash: the field run surfaced it as `{"error": "internal"}` (ADR 0031 appendix)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        headless_play.cast_flow, "run_cast", _raise(cast_flow.CastStreamUnresolved())
+    )
+    rc = headless.run_auto(CFG, _hns(query=["dune"], device="Salotto"), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False and out["error"] == "no_playable_stream"
+
+
+def test_run_auto_cast_failure_emits_cast_failed(monkeypatch, capsys, tmp_path):
+    """The live 2026-08-08 contract violation: catt printed "cast non riuscito" on stderr
+    and the JSON still said `ok: true`, exit 0. The backend now reports `started=False`,
+    and no phantom cast session is recorded for a cast that never played (ADR 0031)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, error="cast_failed"),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        headless_play.state, "remember_cast", _raise(AssertionError("phantom cast session"))
+    )
+    rc = headless.run_auto(CFG, _hns(query=["dune"], device="Salotto"), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False
+    assert out["error"] == "cast_failed" and out["cast_error"] == "cast_failed"
+    assert out["device"] == "Salotto"
 
 
 # --- content duration vetting (ADR 0028) -----------------------------------

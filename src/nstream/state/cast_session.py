@@ -37,7 +37,7 @@ def expire_cast_session() -> None:
 
 def _norm_title(s: str) -> str:
     """Casefold + alnum-only for tolerant title comparison. Deliberate small duplicate
-    of `headless._norm_title`: state must not import headless (layering)."""
+    of `api.norm_text`: state must not import api (layering)."""
     return "".join(c for c in s.casefold() if c.isalnum())
 
 
