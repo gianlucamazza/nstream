@@ -1168,3 +1168,26 @@ def test_verify_drops_unusable_for_this_run_without_remembering(monkeypatch):
     out = stream_select._verify_availability(cfg, results, cast=False, title="")
     assert out == [live]
     assert not state.is_dead("f1")  # dropped for this run only — nothing proven
+
+
+def test_playable_url_memoizes_the_failure(monkeypatch):
+    """A dead swarm costs `engine._wait_buffer`'s full timeout. Without a negative memo the
+    cast vetting pays it again on every gate that probes the same candidate — the positive
+    half (caching `url`) has always been there (ADR 0031 appendix)."""
+    cfg = Config(torrentio_base="tb")
+    stream: Stream = {"infoHash": "deadbeef"}
+    calls = []
+    monkeypatch.setattr(stream_select, "_native_resolve", lambda c, s: None)
+    monkeypatch.setattr(
+        stream_select.engine, "resolve",
+        lambda c, s: calls.append(s["infoHash"]) or _raise_unavailable(),
+    )  # fmt: skip
+    assert stream_select._playable_url(cfg, stream) is None
+    assert stream_select._playable_url(cfg, stream) is None
+    assert stream_select._playable_url(cfg, stream) is None
+    assert calls == ["deadbeef"]
+    assert stream["unresolvable"] is True
+
+
+def _raise_unavailable():
+    raise stream_select.engine.EngineUnavailable("nessun peer")

@@ -550,3 +550,111 @@ def test_reselect_cast_no_extra_probe_for_duration(monkeypatch):
     stream_select.tracks.clear_cache()
     cast_vet.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita", expected_s=3300.0)
     assert len(calls) == without  # same ffprobe count with the guard on
+
+
+# --- ADR 0031 appendix: unresolvable ≠ unprobeable --------------------------
+
+
+def _dead_swarm(monkeypatch) -> list[str]:
+    """Make every infoHash-only stream unresolvable, and record each resolve attempt.
+
+    This is the fixture the suite was missing: before it, every Stream literal in these
+    tests carried a `url`, so no test ever exercised the path that crashed in the field."""
+    attempts: list[str] = []
+    monkeypatch.setattr(stream_select, "_native_resolve", lambda cfg, s: None)
+
+    def boom(cfg, s):
+        attempts.append(s["infoHash"])
+        raise stream_select.engine.EngineUnavailable("nessun peer")
+
+    monkeypatch.setattr(stream_select.engine, "resolve", boom)
+    return attempts
+
+
+def test_unresolvable_candidate_is_not_a_tagged_guess(monkeypatch):
+    """The live crash: an ITA-tagged dead-swarm release probes as `[]` tracks, reads as
+    "unprobeable → benefit of the doubt", wins the tagged_guess tier and reaches the
+    backends with no url. It must be ineligible instead."""
+    _dead_swarm(monkeypatch)
+    wrong: Stream = {"url": "rus"}
+    dead: Stream = {"infoHash": "deadbeef", "title": "Film.2006.iTA.1080p-GRP"}
+    monkeypatch.setattr(
+        cast_vet, "_cast_audio_tracks",
+        lambda cfg, s: [Track(1, "rus", "aac")] if s is wrong else [],
+    )  # fmt: skip
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [_R(dead, frozenset({"ita"}))],
+    )  # fmt: skip
+    assert cast_vet._reselect_cast_for_lang(_ccfg(), [], wrong, "ita") is None
+
+
+def test_unresolvable_never_wins_video_reselect(monkeypatch):
+    """`_cast_video_codec` returns "" for an unresolvable stream exactly as it does for an
+    unprobeable one, so the video gate would wave it through."""
+    _dead_swarm(monkeypatch)
+    bad: Stream = {"url": "divx"}
+    dead: Stream = {"infoHash": "deadbeef", "title": "Film.2006.1080p-GRP"}
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks",
+        lambda url: stream_select.tracks.Tracks(video_codec="mpeg4" if url else ""),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [_R(dead, frozenset())],
+    )  # fmt: skip
+    # Keeps the honest bad-codec verdict → the caller mirrors or fails, never casts a url-less
+    # stream. Without the gate this returned `(dead, "")`.
+    assert cast_vet.vet_cast_video(_ccfg(), [bad, dead], bad) == (bad, "mpeg4")
+
+
+def test_unresolvable_never_wins_container_reselect(monkeypatch):
+    """With no target language `vet_cast_container`'s `if not target_lang` short-circuits
+    past the `plan.verified` guard that protects the language path — so the unresolvable
+    candidate could be returned there even though every other gate is language-blind."""
+    _dead_swarm(monkeypatch)
+    mkv: Stream = {"url": "http://x/film.mkv", "title": "Film.2006.1080p.mkv"}
+    dead: Stream = {"infoHash": "deadbeef", "title": "Film.2006.1080p.mp4"}
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks", lambda url: stream_select.tracks.Tracks()
+    )
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [_R(dead, frozenset())],
+    )  # fmt: skip
+    # True = "keep `chosen` and rewrap it to MP4", the honest outcome. Without the gate this
+    # returned `(dead, False)` — a direct cast of a stream with no url.
+    assert cast_vet.vet_cast_container(_ccfg(), [mkv, dead], mkv, "") == (mkv, True)
+
+
+def test_unresolvable_consumes_probe_budget(monkeypatch):
+    """A dead candidate spends budget like any other probe, so a dead swarm stops early
+    instead of walking the whole ranking (ADR 0031 appendix)."""
+    _dead_swarm(monkeypatch)
+    bad: Stream = {"url": "divx"}
+    live: Stream = {"url": "good"}
+    dead = [_R({"infoHash": f"h{i}", "title": "F.2006-G"}, frozenset()) for i in range(3)]
+    monkeypatch.setattr(
+        stream_select.tracks, "probe_tracks",
+        lambda url: stream_select.tracks.Tracks(video_codec="mpeg4" if url == "divx" else "h264"),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [*dead, _R(live, frozenset())],
+    )  # fmt: skip
+    # probe_cap=2 is exhausted by the two dead candidates: the live one is never reached.
+    assert cast_vet.vet_cast_video(_ccfg(), [], bad, probe_cap=2) == (bad, "mpeg4")
+
+
+def test_cast_resolver_walks_past_unresolvable(monkeypatch):
+    """An unresolvable best match is not an answer for the language — the resolver used to
+    hand back its None and report the dub missing."""
+    attempts = _dead_swarm(monkeypatch)
+    dead: Stream = {"infoHash": "deadbeef", "title": "Film.2020.iTA.1080p.WEB-DL.AAC-GRP"}
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda c, results, exact_resolution=0: [_R(dead, frozenset({"ita"})), _R(_S_ITA, frozenset({"ita"}))],
+    )  # fmt: skip
+    assert cast_vet.cast_resolver(cfg, [])("ita") == "http://ita"
+    assert attempts == ["deadbeef"]  # the dead one WAS tried, then walked past

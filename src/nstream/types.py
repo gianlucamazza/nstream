@@ -58,6 +58,10 @@ class Stream(TypedDict, total=False):
     sources: list[str]
     behaviorHints: dict  # protocol extras: {"filename", "videoSize", "videoHash", "bingeGroup", …}
     addon: str  # stream-addon display name (Torrentio, Comet, …) — set by api.streams
+    # Run-scoped negative memo: this row could not be resolved to a url (dead swarm / debrid
+    # can't serve it). Stamped by `stream_select._playable_url`, the mirror of the positive
+    # memo it already writes into `url`. Never serialized — it dies with the invocation.
+    unresolvable: bool
 
 
 class Subtitle(TypedDict, total=False):

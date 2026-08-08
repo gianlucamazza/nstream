@@ -3,6 +3,13 @@
 Owns cast-stack policy (cast_flow → cast_vet → backends). `stream_select` keeps
 prepare_stream / ranking / URL resolution and exposes helpers this module uses
 (`_playable_url`, `_cast_playable`, `audio_languages`).
+
+Invariant every candidate loop here upholds: **a candidate that cannot be resolved to a url
+is ineligible, not unprobeable.** Each loop resolves once (after the probe-cap break, so an
+over-cap candidate never costs a P2P buffering wait) and skips on failure, so the `""` codec,
+`[]` tracks and unknown duration the gates below grant the benefit of the doubt to can only
+ever mean *resolved but unprobeable* — the case ADR 0017/0022/0028 actually meant. Without it
+a dead-swarm candidate sails through every gate and reaches the backends with no `url`.
 """
 
 from __future__ import annotations
@@ -33,7 +40,11 @@ def cast_resolver(
     def resolve(lang: str) -> str | None:
         for r in playable:  # already ranked best-first
             if lang in r.info.languages:
-                return stream_select._playable_url(cfg, r.stream)
+                # An unresolvable best match is not an answer for the language: keep walking
+                # instead of reporting the dub missing (ADR 0031 appendix).
+                url = stream_select._playable_url(cfg, r.stream)
+                if url:
+                    return url
         return None
 
     return resolve
@@ -65,7 +76,8 @@ class CastAudioPlan:
 
 
 def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
-    """Probed audio tracks of `stream` (url resolved first), or [] when unprobeable."""
+    """Probed audio tracks of `stream` (url resolved first), or [] when resolved but
+    unprobeable — the loops above gate out unresolvable candidates first."""
     url = stream_select._playable_url(cfg, stream)
     return list(tracks.probe_tracks(url).audio) if url else []
 
@@ -78,8 +90,9 @@ def _cast_video_codec(cfg: Config, stream: Stream) -> str:
 
 
 def _video_castable(cfg: Config, stream: Stream) -> bool:
-    """Whether the DMR can render `stream`'s probed video. Unknown ("" — no ffprobe, probe
-    failed) keeps the benefit of the doubt, mirroring the audio vetting's stance."""
+    """Whether the DMR can render `stream`'s probed video. Unknown ("" — resolved but no
+    ffprobe / probe failed) keeps the benefit of the doubt, mirroring the audio vetting's
+    stance. An UNRESOLVABLE stream is not "unknown": callers gate it out beforehand."""
     codec = _cast_video_codec(cfg, stream)
     return not codec or codec in quality.CAST_VIDEO_DECODABLE
 
@@ -113,8 +126,12 @@ def vet_cast_video(
     (mpv decodes locally) or fails explicitly instead of casting black. Reselection walks
     the ranked cast-playable candidates, probing at most `probe_cap`."""
     bad = _cast_video_codec(cfg, chosen)
-    if not bad or bad in quality.CAST_VIDEO_DECODABLE:
+    # The probe above resolves as a side effect, so a still-missing url means `chosen` is
+    # UNRESOLVABLE — not the "unprobeable → benefit of the doubt" case (ADR 0031 appendix).
+    # Reselect rather than declaring it castable, or a live alternative never gets its turn.
+    if chosen.get("url") and (not bad or bad in quality.CAST_VIDEO_DECODABLE):
         return chosen, ""
+    why = f"video {bad.upper()} non decodificabile dal TV" if bad else "sorgente non risolvibile"
     probed = 0
     for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
@@ -123,11 +140,13 @@ def vet_cast_video(
         if probed >= probe_cap:
             break
         probed += 1
+        # Resolved AFTER the cap break and the budget spend: resolving an over-cap candidate
+        # would cost a P2P buffering wait for a stream we'd discard (stream_select doctrine),
+        # and an unresolvable one must consume budget like any other probe.
+        if not stream_select._playable_url(cfg, s):
+            continue
         if _video_castable(cfg, s) and _duration_castable(cfg, s, expected_s):
-            print(
-                f"nstream: video {bad.upper()} non decodificabile dal TV → altra release",
-                file=sys.stderr,
-            )
+            print(f"nstream: {why} → altra release", file=sys.stderr)
             return s, ""
     return chosen, bad
 
@@ -185,6 +204,10 @@ def vet_cast_container(
         if probed >= probe_cap:
             break
         probed += 1
+        # Eligibility, not castability: an unresolvable candidate can't be probed and can't be
+        # cast, and every gate below would wave it through on the benefit of the doubt.
+        if not stream_select._playable_url(cfg, s):
+            continue
         if not (
             _container_castable(cfg, s)
             and _video_castable(cfg, s)
@@ -275,6 +298,11 @@ def _reselect_cast_for_lang(
         if probed >= probe_cap:
             break
         probed += 1
+        # Unresolvable → ineligible, before any gate. Otherwise its `[]` tracks read as
+        # "unprobeable", `_cast_plan_for` returns an unverified direct plan, and it wins the
+        # `tagged_guess` tier below — the candidate behind the KeyError: 'url' crash.
+        if not stream_select._playable_url(cfg, s):
+            continue
         # A dub with video the DMR can't render is not a candidate: reselecting it trades
         # silent-wrong-language for a black screen (the live failure behind ADR 0017 —
         # a cached ITA DivX rip won this loop). Same probe as the audio read below (memoized).

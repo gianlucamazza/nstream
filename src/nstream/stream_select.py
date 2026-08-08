@@ -340,10 +340,14 @@ def _native_resolve(cfg: Config, stream: Stream) -> str | None:
 def _playable_url(cfg: Config, stream: Stream) -> str | None:
     """Ready url for a stream, resolving a pure-torrent (infoHash) one through the native
     debrid API (native backend) or the P2P engine on demand. Best-effort and silent: returns
-    None if neither can serve it (the caller already has a user-facing fallback)."""
+    None if neither can serve it (the caller already has a user-facing fallback).
+
+    Memoized both ways on the stream dict: a success caches the `url`, a failure stamps
+    `unresolvable`. Without the negative half a dead swarm pays `engine._wait_buffer`'s full
+    timeout again on every gate that probes the same candidate (ADR 0031 appendix)."""
     if stream.get("url"):
         return stream["url"]
-    if not stream.get("infoHash"):
+    if stream.get("unresolvable") or not stream.get("infoHash"):
         return None
     native = _native_resolve(cfg, stream)
     if native:
@@ -353,6 +357,7 @@ def _playable_url(cfg: Config, stream: Stream) -> str | None:
         stream["url"] = engine.resolve(cfg, stream)
         return stream["url"]
     except engine.EngineUnavailable:
+        stream["unresolvable"] = True
         return None
 
 
