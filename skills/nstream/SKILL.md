@@ -46,6 +46,7 @@ Always pass `--json`. Quote the title.
 | Browse | `nstream --json --cast --browse popolari\|nuovi\|top` |
 | Lifecycle | `--stop` / `--status` / `--pause` / `--resume` / `--seek SEC` / `--volume N` |
 | Clear dead denylist | `nstream --json --forget-dead` |
+| Clear addon circuit breakers | `nstream --json --forget-breakers` (ADR 0027; Open addons skipped without network) |
 
 ### Rules of engagement
 

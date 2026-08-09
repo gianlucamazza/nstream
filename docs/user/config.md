@@ -1,8 +1,10 @@
 # Configuration reference
 
 Path: `$XDG_CONFIG_HOME/nstream/config.json` (default `~/.config/nstream/config.json`).
-Created `chmod 600`. Template: [`config.example.json`](../../config.example.json) (defaults
-match `Config` in `src/nstream/config.py` — enforced by `tests/test_config_docs.py`).
+Written `chmod 600` (`config.save` / `atomic_write`); `load()` also tightens a
+world-readable file so a hand-copied config is not left 0644. Template:
+[`config.example.json`](../../config.example.json) (defaults match `Config` in
+`src/nstream/config.py` — enforced by `tests/test_config_docs.py`).
 
 Edit via `nstream --settings` (fzf menu) or by hand. On first run without a config, nstream
 offers a debrid-provider wizard and writes a file.

@@ -91,7 +91,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `cast_flow` | Decision tree: vet → mirror gate → remux → direct |
 | `cast_vet` | Audio plan, video codec, container |
 | `cast_delivery` | Shared castbridge event loop (ADR 0011) |
-| `cast_control` | TUI lifecycle: stop/status/volume + runtime health |
+| `cast_control` | TUI lifecycle: stop/status/pause/seek/volume + runtime health |
 | `caster` | Device resolve; castbridge or catt LOAD |
 | `remux` / `serve` | Tier-2 file + Range server |
 | `mirror` | Realtime 1080p path |
@@ -123,7 +123,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 
 | Module | Role |
 |--------|------|
-| `api` | Resource dispatch, gather budget, fuse/dedup streams |
+| `api` | Resource dispatch, gather budget, per-addon breaker (ADR 0027), fuse/dedup streams |
 | `addons` | Manifest client + cache |
 | `net` | Retrying HTTP JSON + URL probe classification |
 
@@ -133,11 +133,12 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 |--------|------|
 | `types` | `Meta`, `Video`, `Stream`, `Subtitle`, `HistoryEntry` |
 | `config` | `Config`, `PlayOpts`, load/save, path helpers |
-| `state/` | history + library (`resumable`, `is_watched`, watchlist/recent), cast session, dead-sources |
+| `state/` | history + library (`resumable`, `is_watched`, watchlist/recent), cast session, dead-sources, breaker |
 | `log` / `util` / `languages` | logging+redaction, atomic I/O, language tokens |
 
 **State files:** `history.json` (progress), `library.json` (recent queries + metadata-only
-watchlist — no stream URLs), `dead-sources.json` (ADR 0025). Paths via `config.*_path()`.
+watchlist — no stream URLs), `dead-sources.json` (ADR 0025), `addon-breakers.json` (ADR 0027).
+Paths via `config.*_path()` / `state.breaker`.
 
 ## Naming notes
 

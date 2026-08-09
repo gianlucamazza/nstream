@@ -67,7 +67,7 @@ Common fields:
 
 | Field | Meaning |
 | ----- | ------- |
-| `action` | `cast` \| `play` \| `probe` \| `episodes` \| `explain` \| lifecycle actions |
+| `action` | `cast` \| `play` \| `probe` \| `episodes` \| `explain` \| lifecycle (`stop`/`status`/`pause`/`resume`/`seek`/`volume`) \| `forget_dead` \| `forget_breakers` |
 | `title` | Display title |
 | `device` | Cast device (when casting) |
 | `stream` | Descriptive pick (`resolution`, `codec`, `size_gb`, …) — **no URL** |
@@ -103,6 +103,7 @@ Manual `--sub-offset` / `--sub-fps` always win (engine steps aside). Toggle engi
 | `no_playable_stream` | Filters or not-ready urls (e.g. debrid still fetching) | Retry later; lower quality; `--local` |
 | `cast_failed` | Delivery never started | Check TV/network; read `cast_error` / stderr; history untouched |
 | `sources_removed` | All candidates proven 404/410 | Do not retry; `--local` or `--forget-dead` if believed back |
+| (slow / missing addon) | Not an error code — Open circuit breaker (ADR 0027) | `--explain` lists Open addons; `--forget-breakers` to reset |
 | `sources_truncated` | Duration ≪ expected runtime | Other quality/backend; check `expected_runtime_s` |
 | `video_codec_unsupported` | Real codec not castable | `--local` or other quality |
 | `audio_lang_unavailable` | Requested dub missing | Show `available_audio` |

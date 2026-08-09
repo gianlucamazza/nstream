@@ -99,10 +99,13 @@ nstream --sub-fps 25:23.976 …     # framerate drift correction
 nstream --browse [popolari|nuovi|top]
 nstream --movies | --series …
 nstream -c / --continue           # resume from history
+nstream --no-history              # do not read/write watch history this run
+nstream --no-autoplay             # skip next-episode overlay
 nstream --settings
 nstream --explain "dune"          # ranking dump, no play
 nstream --quality 1080 "matrix"   # hard resolution filter (aliases: 4k, 720, auto)
-nstream --forget-dead             # clear proven-gone denylist
+nstream --forget-dead             # clear proven-gone denylist (ADR 0025)
+nstream --forget-breakers         # clear per-addon circuit breakers (ADR 0027)
 nstream --debrid-test INFOHASH    # native debrid diagnostics
 nstream --debug / --version
 

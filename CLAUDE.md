@@ -56,9 +56,10 @@ Update architecture when adding/moving modules — **not** the README module lis
 - Everything below `cli` **never** imports `cli` (including `headless`, `cast_flow`,
   `stream_select`, `cast_vet`, `player`, `caster`, …)
 - Cast policy lives in `cast_vet`; cast decision tree in `cast_flow`; backends in
-  `caster` / `remux` / `mirror`. Selection facade: `stream_select.prepare_stream`.
-  Availability probes/denylist: `availability`. Domain TypedDicts: `types` (not `config`).
-  Headless play body: `headless_play`; argparse: `cli_args`. State package: `state/`
+  `caster` / `remux` / `mirror`; TUI cast lifecycle in `cast_control`. Selection facade:
+  `stream_select.prepare_stream`. Availability probes/denylist: `availability`. Domain
+  TypedDicts: `types` (not `config`). Headless play body: `headless_play`; argparse:
+  `cli_args`. State package: `state/` (history, cast_session, dead, breaker)
 
 ### Hard constraints when editing
 
