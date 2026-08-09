@@ -1,14 +1,31 @@
-"""Persistent client state: history, library, cast session, dead sources.
+"""Persistent client state: history, library, cast session, dead sources, breakers.
 
 Public API is re-exported here so `from nstream import state` keeps a stable surface.
 """
 
 from __future__ import annotations
 
+from .breaker import (
+    FAIL_THRESHOLD,
+    OPEN_COOLDOWN_S,
+    forget_breakers,
+    open_breakers,
+)
+from .breaker import (
+    allow as breaker_allow,
+)
+from .breaker import (
+    record_failure as breaker_record_failure,
+)
+from .breaker import (
+    record_success as breaker_record_success,
+)
 from .cast_session import (
     CAST_SESSION,
     CAST_SESSION_TTL,
     cast_session_device,
+    cast_session_info,
+    cast_session_label,
     clear_cast_session,
     expire_cast_session,
     remember_cast,
@@ -56,9 +73,15 @@ __all__ = [
     "DEAD_TTL",
     "MAX_DEAD_SOURCES",
     "WATCHED_THRESHOLD",
+    "FAIL_THRESHOLD",
+    "OPEN_COOLDOWN_S",
+    "breaker_allow",
+    "breaker_record_failure",
+    "breaker_record_success",
     "clear_cast_session",
     "dead_sources",
     "expire_cast_session",
+    "forget_breakers",
     "forget_dead",
     "is_dead",
     "is_watchlisted",
@@ -66,6 +89,7 @@ __all__ = [
     "make_entry",
     "mark_dead",
     "note_started",
+    "open_breakers",
     "recent",
     "recent_searches",
     "remember_cast",
@@ -75,6 +99,8 @@ __all__ = [
     "toggle_watchlist",
     "update_from_receiver",
     "cast_session_device",
+    "cast_session_info",
+    "cast_session_label",
     "is_watched",
     "resumable",
     "watched_series",

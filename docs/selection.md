@@ -11,54 +11,74 @@ infoHash); each row carries `addon` provenance for labels/`--explain` (ADR 0024)
 nstream then parses, filters and ranks the list to auto-pick the best playable one. This
 document is the reference for _why_ a given file/audio is chosen.
 
-To see the decision for a real title live:
-
 ```
 nstream "<title>" --explain
+nstream --json --explain --cast "<title>"
 ```
 
-It prints the detected capabilities, the active filters, every stream with its score terms
-and playable/excluded status, the auto-pick, and the actual audio tracks (via ffprobe) with
-the one mpv would select — without playing anything.
+## End-to-end pipeline
 
-## Pipeline
+```mermaid
+flowchart LR
+  A[api.streams fuse/dedup] --> B[quality.parse_stream]
+  B --> C[unsupported_reason filter]
+  C --> D[score rank]
+  D --> E[pick]
+  E --> F[availability verify]
+  F --> G[duration vet ADR 0028]
+  G --> H{cast?}
+  H -->|yes| I[cast_vet audio/video/container]
+  H -->|no| J[primary-lang guard]
+  I --> K[play / cast delivery]
+  J --> K
+```
 
-`quality.parse_stream` → `unsupported_reason` (filter) → `_score` (rank) → cap → pick
-(`stream_select._pick_stream`). For a movie the auto-pick is `playable[0]`; manual mode shows an fzf
-menu (top `max_streams` playable + a "show all" entry that reveals the rest and the
-excluded ones, each marked with its reason).
+Orchestrator: `stream_select.prepare_stream` (quality filter → rank/pick → resolve → guards).
+Per-invocation `--quality` / `--audio-lang` hold across **every** reselect path (ADR 0021).
 
 ## Title discovery
 
-Catalog and search results are deduplicated across configured addons. Search then applies a local,
-token-free presentation ranking: exact normalized title matches first, then title prefixes,
-substring matches, and finally the remaining addon results. Case, accents and punctuation do not
-change the comparison, while the original addon result remains the playback source of truth.
+Catalog and search results are deduplicated across configured addons. Search then applies a
+local, token-free presentation ranking: exact normalized title matches first, then title
+prefixes, substring matches, and finally the remaining addon results. Case, accents and
+punctuation do not change the comparison; the original addon result remains the playback
+source of truth.
+
+**Headless year (ADR 0030):** an explicit `--year` is a hard constraint on title selection —
+candidates whose catalog year is known and different are refused (`error: no_result` +
+`years`). Titles without `releaseInfo` year are not refused this way.
+
 The TUI stores recent queries and a metadata-only local watchlist in
 `XDG_STATE_HOME/nstream/library.json`; no stream URL or provider token is persisted there.
 
 ### 1. Parse (`quality.parse_stream` → `StreamInfo`)
 
-Regex over `name`+`title`: `resolution`, `codec` (av1/hevc/h264), `hdr`, `dv`/`dv_profile`,
-`size_gb`, `seeders`, `cached` (`[RD+]`/`[AD+]`/… provider-agnostic marker), `languages`
-(ISO tokens + flag emoji; empty = **untagged**), `source`
-(remux/bluray/webdl/webrip/hdtv/dvd/cam/ts/tc/scr), `audio` (headline codec, lossless first).
+**Structured fields first, free text second (ADR 0026):**
+
+| Field | Primary source | Fallback |
+| ----- | -------------- | -------- |
+| `release_name` | `behaviorHints.filename` | first line of `description`, then `title` |
+| `size_gb` | `behaviorHints.videoSize` | regex on text corpus |
+| `container` | filename extension | URL path |
+
+Heuristic parsers (resolution, codec, HDR/DV, languages, source, audio, seeders, cached
+marker) read a **union** text corpus: `name` + `description` + `title` + filename
+(`quality._text`). `title` remains for Torrentio (deprecated in the protocol but still
+populated). Cached markers (`[RD+]` / `[AD+]` / …) are provider-agnostic.
 
 ### 2. Filter (`unsupported_reason`, first match excludes)
 
-Order: **hardware** (resolution cap → codec not HW-decodable → Dolby Vision P5) → **cast
-audio** → **camrip** → **language** → **low seeders**. Hardware checks always apply; the rest
-are opt-in config knobs (and `allow_software`/`allow_dv5` can flip a hardware exclusion back to
-playable).
+Order: **hardware** (resolution cap → codec not HW-decodable → Dolby Vision P5) → **exact
+quality** (`PlayOpts.quality`) → **cast audio** → **camrip** → **language** → **low seeders**.
+Hardware checks always apply; the rest are opt-in config knobs (`allow_software` /
+`allow_dv5` can flip a hardware exclusion back to playable).
 
 The **cast audio** exclusion (TrueHD/DTS/DTS-HD, and remux, when casting) only applies when
-Tier-2 remux is **off** (`cfg.cast_remux = false`). With remux on (the default), those titles
-are no longer excluded — the host remuxes their audio to AAC (`remux.py`) — so they're only
-_ranked_ below native-AAC releases, not dropped (see the cast score below and `docs/adr/0005`).
+Tier-2 remux is **off** (`cfg.cast_remux = false`). With remux on (default), those titles are
+only *ranked* below native-AAC releases, not dropped (ADR 0005).
 
 Language filter only excludes a stream **tagged exclusively with non-preferred languages**.
-**Untagged streams are never excluded** (they usually carry the common audio, and most good
-web releases are untagged) — see the trade-off below.
+**Untagged streams are never excluded**.
 
 ### 3. Score (`quality.score_components` / `_score`, highest precedence first)
 
@@ -66,19 +86,17 @@ web releases are untagged) — see the trade-off below.
 (cached, resolution, lang, source, hevc, seeders_bucketed, -size)
 ```
 
-| term         | meaning                                                                                                                                                                                |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cached`     | instant debrid stream (`[RD+]`) ranks first — zero wait beats raw quality                                                                                                              |
-| `resolution` | higher wins                                                                                                                                                                            |
-| `lang`       | 2 = tagged with a preferred language (or `multi`), 1 = untagged, 0 = non-preferred only. Neutral (1) with no `audio_langs`. Makes the picked file likely to _contain_ the wanted track |
-| `source`     | remux(6) > bluray(5) > webdl(4) > _unknown_(3) > webrip(2) > hdtv/dvd(1) > camrip(0)                                                                                                   |
-| `hevc`       | HEVC over H.264 at equal source                                                                                                                                                        |
-| `seeders`    | capped at 40 (`_SEED_BUCKET`) so popularity doesn't force a huge file                                                                                                                  |
-| `-size`      | smaller file = faster streaming start, among equals                                                                                                                                    |
+| term | meaning |
+| ---- | ------- |
+| `cached` | instant debrid stream ranks first |
+| `resolution` | higher wins |
+| `lang` | 2 = preferred (or multi), 1 = untagged, 0 = non-preferred only |
+| `source` | remux(6) > bluray(5) > webdl(4) > unknown(3) > webrip(2) > hdtv/dvd(1) > camrip(0) |
+| `hevc` | HEVC over H.264 at equal source |
+| `seeders` | capped at 40 (`_SEED_BUCKET`) |
+| `-size` | smaller among equals |
 
-`cached` and `resolution` stay dominant, so language/source only break ties **below** them
-(no surprising resolution downgrade). See `quality.score_components` — `--explain` renders
-exactly these terms per stream.
+`cached` and `resolution` stay dominant (no surprising resolution downgrade for language).
 
 **Cast score** (`cast=True`, models the Default Media Receiver, not the GPU):
 
@@ -86,162 +104,149 @@ exactly these terms per stream.
 (cached, remux_within_size, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
 ```
 
-| term                | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `remux_within_size` | demotes a **likely-remux** release bigger than `cast_remux_max_size_gb` (default 20) below any feasible alternative — size is the real download cost. A _likely-remux_ is Dolby/DTS audio **or** an unlabelled REMUX (its name omits the codec but it carries the lossless disc track, so it reads as decodable/unknown yet really needs a huge remux — the resolution cap can't see it). Ranked right after `cached`: avoiding a pick the cast-time size guard would reject matters more than codec/resolution. AAC releases never trip it (no remux, streamed directly even at 4K). A preference, not an exclusion |
-| `cast_audio`        | 2 = receiver decodes it natively (AAC/Opus/FLAC…), 1 = untagged, 0 = Dolby/DTS (needs a Tier-2 remux). Prefers AAC so the **direct, instant** cast wins and a remux (a prepare wait) only triggers when no AAC release exists                                                                                                                                                                                                                                                                                                                                                                                        |
-| `remux_within_cap`  | among releases that need a remux, prefers those ≤ `cast_remux_max_resolution` (default 1080p) — a remux downloads the whole file, so a 4K Dolby release is a 30-60 GB fetch while a direct 4K cast is free. A preference, not an exclusion                                                                                                                                                                                                                                                                                                                                                                           |
-| `cast_h264`         | tie-breaker only (the receiver decodes HEVC natively too)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| term | meaning |
+| ---- | ------- |
+| `remux_within_size` | demote likely-remux releases above `cast_remux_max_size_gb` |
+| `cast_audio` | 2 = DMR-native audio, 1 = untagged, 0 = Dolby/DTS (needs Tier-2) |
+| `remux_within_cap` | prefer remux candidates ≤ `cast_remux_max_resolution` |
+| `cast_h264` | weak tie-breaker (receiver also plays HEVC) |
 
-The receiver plays HEVC/4K/HDR natively, so after audio the **resolution** wins; H.264-vs-HEVC
-no longer matters. Native-AAC titles are never capped (they cast direct, no download).
-
-After ranking, the cast pick passes through `cast_vet.vet_cast_audio`, which **enforces the
-audio language**: the Default Media Receiver plays a file's first track and can't switch embedded
-audio tracks (Google Cast: only _text_ tracks are selectable without a custom receiver), so it
-ffprobes the dub and either casts directly (first track already primary + decodable), remuxes to
-keep only the primary-language track (ffmpeg `0:a:N`), reselects another dub, or casts with
-primary-language safety subtitles. This is why a high-ranked but wrong-language pick still ends up
-in the right language.
+After ranking, cast picks pass `cast_vet` (next section). **Mirror-over-remux (ADR 0015):**
+when a remux would exceed `cast_mirror_over_remux_gb` (default 10) and the mirror sender is
+available, `cast_flow` may switch to realtime mirror instead of downloading. `--mirror`
+forces mirror; `--no-mirror` suppresses forced and auto paths for that run (ADR 0023).
 
 ### 4. Quality choice (before pick)
 
 Per-session **exact resolution** filter (`PlayOpts.quality` / `--quality`):
 
-| Value                       | Meaning                                                                                       |
-| --------------------------- | --------------------------------------------------------------------------------------------- |
-| `None`                      | Undecided: TUI shows an in-flow fzf picker (Auto + resolutions present); headless = no filter |
-| `0`                         | Auto (no exact filter; binge sticky so the picker is not re-shown)                            |
-| `720` / `1080` / `2160` / … | Hard-filter: only streams with `StreamInfo.resolution == N`                                   |
+| Value | Meaning |
+| ----- | ------- |
+| `None` | TUI shows picker; headless = no filter |
+| `0` | Auto (no exact filter; binge sticky) |
+| `720` / `1080` / `2160` / … | Hard-filter: only that `StreamInfo.resolution` |
 
-Applied in `unsupported_reason` **after** the hardware `max_resolution` cap and **before**
-cast-audio/camrip/lang. Unknown resolution (`0`) is excluded when the filter is active.
-Distinct from `max_resolution` (GPU safety ceiling): quality is a session preference, not a
-hardware limit. Ranking inside the filtered set is unchanged (`cached` still dominates).
+Applied in `unsupported_reason` after the hardware `max_resolution` cap. Unknown resolution
+(`0`) is excluded when the filter is active. Distinct from `max_resolution` (GPU ceiling).
 
-CLI: `nstream --quality 1080 "…"`, `nstream --json --quality 4k --cast "…"`. Aliases:
-`auto`, `4k`/`uhd`/`2160`, `fhd`/`1080`, `hd`/`720`, `sd`/`480`. Headless failure:
-`error: quality_unavailable` with `available_resolutions`. Series binge sticky-propagates
-the first episode's choice via `VettedStream.quality`.
+Aliases: `auto`, `4k`/`uhd`/`2160`, `fhd`/`1080`, `hd`/`720`, `sd`/`480`. Headless failure:
+`error: quality_unavailable` + `available_resolutions`. Binge sticky via `VettedStream.quality`.
 
 ### 5. Cap & pick (`stream_select._pick_stream`)
 
-`auto` → `playable[0]`. Manual → fzf menu capped at `max_streams` with a "show all". With
-`hw_filter` off, ranking is skipped entirely (Torrentio order), but an exact quality filter
-still subsets the list first.
+`auto` → `playable[0]`. Manual → fzf menu capped at `max_streams` with “show all”. With
+`hw_filter` off, ranking is skipped (addon order), but an exact quality filter still subsets.
+
+## Cast vetting (after pick)
+
+`cast_vet` enforces what the Default Media Receiver can actually present. Ranking is a
+preference; vetting is a **gate** (and may reselect).
+
+| Gate | Function | ADR | Behaviour |
+| ---- | -------- | --- | --------- |
+| Audio plan | `vet_cast_audio` | 0005 | Prefer primary lang as first track; remux `0:a:N`; reselect dub; safety subs |
+| Real video codec | `vet_cast_video` | 0017 | ffprobe codec; drop DivX/etc.; may yield `video_codec_unsupported` |
+| Container | `vet_cast_container` | 0022 | mkv → MP4 rewrap when DMR needs it |
+
+DMR plays the file’s **default** audio track and cannot switch embedded tracks. In-cast `a`
+re-casts a different release. Details: [user/cast.md](user/cast.md).
 
 ## Availability: the cached marker is a guess (ADR 0014 + 0025)
 
 `[RD+]`/`[TB+]` come from a crowdsourced database, not from the provider (Real-Debrid removed
-its cache endpoint in 2024 — ADR 0002), so a "cached" release can be evicted, expired, or
-**removed** (DMCA) while still advertised. Two guards, both auto-pick only:
+its cache endpoint in 2024 — ADR 0002). Two guards, auto-pick only:
 
-1. **Pre-commit verification** (`_verify_availability`): the top 5 url-ready candidates are
-   probed concurrently before anything is committed — _all_ of them, cached or not, since the
-   seeder count that gates uncached rows describes swarm health, not debrid availability.
-2. **Last-resort fallback** (`_ensure_playable`): the committed pick is re-checked (memoized,
-   so no double probe) and falls back to local P2P (hybrid stream) or the next candidate.
+1. **Pre-commit verification** (`_verify_availability`): top 5 url-ready candidates probed
+   concurrently (all of them, cached or not).
+2. **Last-resort fallback** (`_ensure_playable`): re-check committed pick; P2P hybrid or next
+   candidate.
 
-The probe (`net.probe_url`) is **classified, not boolean**, because an HTTP 200 proves the url
-resolves, not that the content is playable — the server may be serving a file that is still
-arriving, or a placeholder left where the content used to be. Each signal decides only what it
-can actually prove:
+Probe (`net.probe_url`) is **classified, not boolean**:
 
-| Verdict   | Signal                                                                                       | Effect                                   |
-| --------- | -------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `live`    | 2xx with a plausible total size                                                              | keep                                     |
-| `gone`    | 404/410/4xx — the resource isn't there                                                       | drop **and** denylist                    |
-| `unknown` | served total << announced (incomplete/in flight), 403/405/416, 5xx, timeout, transport error | drop for this run — **never** denylisted |
+| Verdict | Signal | Effect |
+| ------- | ------ | ------ |
+| `live` | 2xx with plausible total size | keep |
+| `gone` | 404/410/4xx | drop **and** denylist |
+| `unknown` | incomplete size, 403/405/416, 5xx, timeout, transport | drop this run — **never** denylist |
 
-The size check never escalates to `gone`: it cannot tell a transfer still in flight (Torrentio's
-`[RD download]`) from an emptied file, and that distinction is the whole of the "removed"
-inference. It stays exactly as useful for what it does prove — this file is not playable now.
+Size mismatch never escalates to `gone` (in-flight `[RD download]` vs emptied file).
 
-A `gone` verdict is persisted to `XDG_STATE_HOME/nstream/dead-sources.json` (key: infoHash →
-filename → name; TTL 30 days, 500 entries max) and applied as a **pre-ranking filter**
-(`prune_dead`), so a removed release stops costing a probe on every search and never reaches
-the picker. `nstream --forget-dead` clears the list. Headless answers `error: sources_removed`
-(with `removed_sources`) only when the denylist accounts for every candidate — an empty set of
-merely-not-ready sources is `no_playable_stream`, which is the truth.
+`gone` → `XDG_STATE_HOME/nstream/dead-sources.json` (TTL 30 days, 500 max) → `prune_dead`
+pre-ranking. `nstream --forget-dead` clears. Headless `sources_removed` only when the denylist
+accounts for **every** candidate; empty merely-not-ready set is `no_playable_stream`.
 
-## Content: reachable is not the same as being the video (ADR 0028)
+## Per-addon circuit breaker (ADR 0027)
 
-The two guards above speak for the **transport**, and only for HTTP: a P2P pick has no
-`Content-Range` to compare against the announced size, and on the `local` backend both are
-no-ops. A source can be perfectly reachable and still not contain the video — a "removed for
-copyright" placeholder, or a sample inside a pack. The signal that survives every backend is
-the file's **real duration**, read from the ffprobe the audio/cast vetting already pays for
-(`tracks.Tracks.duration` — memoized per url, so the check is free).
+Orthogonal to dead **sources**: Open addons are skipped in `api._gather` without paying
+network (timeouts/retryable failures trip after 3 consecutive fails; 5 min cooldown then
+Half-Open probe). State: `addon-breakers.json`. `nstream --forget-breakers` / `--explain`
+lists Open addons.
 
-| Measured                           | Expected runtime         | Effect                                      |
-| ---------------------------------- | ------------------------ | ------------------------------------------- |
-| `duration ≥ 0.35 × expected`       | known (≥ 10 min)         | keep — including anything **longer**        |
-| `duration < 0.35 × expected`       | known (≥ 10 min)         | drop for this run, reselect, never denylist |
-| 0 (ffprobe missing/failed/timeout) | any                      | keep (benefit of the doubt)                 |
-| any                                | unknown, or under 10 min | keep — the guard never runs                 |
+## Content: reachable ≠ the video (ADR 0028)
 
-The expected runtime comes from `api.expected_runtime_s`; for a series it is the **series**
-meta's `runtime`, i.e. the typical episode length (Cinemeta's per-episode entries carry none).
-An unknown runtime turns the guard off rather than inventing a default. The check is one-way —
-extended cuts, double episodes and mis-indexed packs are all _longer_ — and auto-pick only.
-A proven-short candidate is dropped from the working set in place, so no later reselect
-(language, cast) can land back on it. Nothing is persisted: a ratio between an ffprobe estimate
-and a crowdsourced average is not the kind of proof that earns a 30-day ban (ADR 0028 §6).
-Headless reports `error: sources_truncated` with both measures in clear, and stamps
-`duration_verified` on success.
+Duration from ffprobe (`tracks.Tracks.duration`, memoized) vs expected runtime
+(`api.expected_runtime_s`):
+
+| Measured | Expected | Effect |
+| -------- | -------- | ------ |
+| `duration ≥ 0.35 × expected` | known (≥ 10 min) | keep (including longer) |
+| `duration < 0.35 × expected` | known (≥ 10 min) | drop this run, never denylist |
+| 0 (probe failed) | any | keep |
+| any | unknown / &lt; 10 min | guard off |
+
+Series expected runtime is the **series** meta typical episode length. Proven-short candidates
+are removed from the working set so later reselects cannot land back on them. Headless:
+`sources_truncated` + `duration_verified` on success.
+
+## Subtitles (evidence tiers, ADR 0020)
+
+Not a stream rank term, but part of “what you hear/see”:
+
+| Tier | `subtitles_match` | When |
+| ---- | ----------------- | ---- |
+| Protocol hash | `hash` | OpenSubtitles moviehash of the exact file |
+| Audio-anchored align | `audio` | Native engine on local/remux media; confidence-gated |
+| Language guess | `lang` | Otherwise |
+
+Config: `sub_align`, `sub_align_budget_s`. Manual `--sub-offset` / `--sub-fps` always win.
+Cast path delivers WebVTT text tracks (ADR 0012).
 
 ## Config knobs
 
-`hw_filter` (master switch), `max_resolution`, `allow_software`, `allow_dv5`, `lang_filter`,
-`audio_langs` (preference order — drives the `lang` score term and `--alang`),
-`exclude_camrip`, `min_seeders`, `dedup`, `max_streams`. Editable via `nstream --settings`.
-Per-invocation quality is **not** a config default (v1): use `--quality` or the TUI picker.
+`hw_filter`, `max_resolution`, `allow_software`, `allow_dv5`, `lang_filter`, `audio_langs`,
+`exclude_camrip`, `min_seeders`, `dedup`, `max_streams`, cast remux/mirror keys — full tables
+in [user/config.md](user/config.md). Editable via `nstream --settings`.
+
+Per-invocation quality is **not** a config default: use `--quality` or the TUI picker.
 
 ## Languages: one registry, one allow-list
 
-All language knowledge — release-name tokens, flag emoji, display names — lives in one place,
-`languages.py` (`LANGUAGES`). `quality` derives its token/flag maps from it and `caster` its
-names, so adding a language is a one-line change (no drift across modules).
-
-The selected languages are a **single ordered allow-list**: `audio_langs` / `subtitle_langs`
-in config. They drive `--alang`/`--slang`, the `lang` score term, and the soft `lang_filter`
-demotion — there is deliberately **no separate "hard view filter"** concept (it would risk
-hiding untagged/multi releases that usually carry the wanted audio). Edit them in
-`nstream --settings` → _Lingue audio/sottotitoli_, a multi-select (TAB to toggle, Enter to
-confirm) built from the registry; order is preserved (selected-first) so `--alang` priority
-is kept. `lang_filter` remains the one knob that governs whether non-preferred tagged streams
-are demoted.
+All language knowledge lives in `languages.py` (`LANGUAGES`). `quality` and cast labels
+derive maps from it. Selected languages = ordered allow-list `audio_langs` /
+`subtitle_langs` — drives `--alang`/`--slang`, score `lang`, and soft `lang_filter`. No
+separate hard view filter (would hide untagged releases that often carry wanted audio).
 
 ## Audio: stream language vs track language
 
-A stream is a whole file with embedded audio tracks. `StreamInfo.languages` is a **heuristic
-guess** from the release name. The **ground truth** is the ISO tags ffprobe reads from the
-container. They can disagree (a release tagged `ITA.ENG` may actually hold ita/eng/fra).
+`StreamInfo.languages` is a **heuristic** from the release name. Ground truth is ffprobe
+ISO tags (and track titles when `und`).
 
-- **Local (mpv):** nstream injects `--alang=<audio_langs>` (unless you set `alang` in
-  `mpv.conf`/`mpv_args`). mpv picks the first track in the first preferred language present.
-  Manual mode (`subs.choose_tracks`) lets you pick an exact track by `--aid` from the ffprobe list.
-  **Auto-play guard** (`stream_select.prepare_stream`): before playing, if the auto-pick isn't
-  tagged with a preferred language, nstream ffprobes it; when no track matches `audio_langs` it
-  warns and (interactively) reopens the stream menu instead of letting mpv silently fall back to
-  the wrong dub. When only a fallback language is present it plays it with primary-language safety
-  subtitles. Tags are matched
-  through `languages.normalize` so a 2-letter container tag (`it`) matches a 3-letter pref
-  (`ita`). Best-effort: a missing/failed probe never blocks playback; binge advances warn and
-  continue. Well-tagged preferred releases skip the probe.
-- **Cast (Chromecast):** the receiver plays the file's **default** track and cannot switch
-  embedded tracks. The in-cast `a` hotkey re-casts a _different_ release tagged in the chosen
-  language; it can only pick a file whose tag matches, not force a track, so a file whose
-  default track isn't that language may still play the wrong audio (best-effort).
+- **Local (mpv):** inject `--alang=<audio_langs>` unless user set `alang`. Manual mode:
+  `subs.choose_tracks` → `--aid`. Auto-play guard in `prepare_stream`: if no preferred track,
+  warn / reopen menu (interactive) or play fallback with primary-language safety subs.
+  Tags via `languages.normalize` (`it` ↔ `ita`). Missing probe never blocks; binge warns and
+  continues.
+- **Cast:** default track only; `a` re-casts another tagged release.
 
-This stream-language/track-language split is the usual cause of "wrong audio": if an untagged
-English-only release wins on quality and has no Italian track, `--alang=ita,eng` falls back.
-The `lang` score term mitigates this by preferring a file tagged with your language.
+## Resolve & P2P privacy (ADR 0032)
+
+Any path that joins a torrent swarm (primary resolve, cast `_playable_url` reselects, cached
+fallback) must pass the P2P privacy gate when `p2p_require_vpn` is set — not a single call
+site. Debrid-only URLs do not join the swarm.
 
 ## Deliberate trade-offs
 
-- **`cached` dominates** language and resolution: a cached 1080p outranks a non-cached 4K /
-  a non-cached preferred-language file. Instant playback is intentionally the top priority.
-- **Untagged streams pass the language filter** (benefit of the doubt) but rank below tagged
-  preferred-language ones via the `lang` score term.
+- **`cached` dominates** language and resolution: instant playback is the top priority.
+- **Untagged streams pass the language filter** but rank below tagged preferred-language ones.
 - **Cast can't select tracks** → language switching is per-file, not per-track.
+- **Structured metadata over prose** when the protocol provides it (ADR 0026).

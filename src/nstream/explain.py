@@ -104,6 +104,22 @@ def _row(
     return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {src}{name}"
 
 
+def _breaker_section() -> list[str]:
+    """Open / half-open addons (ADR 0027) — why a source may be absent from results."""
+    from . import state
+
+    open_rows = state.open_breakers()
+    if not open_rows:
+        return []
+    lines = ["", "BREAKER (addon saltati senza rete):"]
+    for r in open_rows:
+        age = int(r.get("age_s") or 0)
+        reason = r.get("reason") or "?"
+        lines.append(f"  {r.get('state', '?')}: {r.get('key', '?')} · {age}s fa · {reason}")
+    lines.append("  (nstream --forget-breakers per azzerare)")
+    return lines
+
+
 def explain_streams(
     cfg: Config,
     results: list[Stream],
@@ -114,7 +130,9 @@ def explain_streams(
 ) -> str:
     """Render the full ranking decision for one profile (local GPU or Chromecast)."""
     if not results:
-        return "nessuno stream restituito dalle fonti configurate."
+        empty = "nessuno stream restituito dalle fonti configurate."
+        br = _breaker_section()
+        return empty + ("\n" + "\n".join(br) if br else "")
     playable, excluded, caps, spec = _rank(
         cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
     )
@@ -142,6 +160,7 @@ def explain_streams(
         for i, r in enumerate(excluded):
             lines.append(_row(i + 1, r, spec.audio_langs, ui.g().warn, cast=cast, title=spec.title))
             lines[-1] = lines[-1].replace("[", f"[escluso: {r.reason}] [", 1)
+    lines.extend(_breaker_section())
     return "\n".join(lines)
 
 
@@ -184,6 +203,8 @@ def explain_data(
     """Machine-readable counterpart of `explain_streams`, for `--json --explain`: the same
     ranking reconstruction as a dict — caps, filters, counts, playable rows best-first
     with their score components, excluded rows with the reason. Parsed metadata only."""
+    from . import state
+
     playable, excluded, caps, spec = _rank(
         cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
     )
@@ -224,6 +245,7 @@ def explain_data(
             _row_data(r, spec.audio_langs, cast=cast, reason=r.reason, title=spec.title)
             for r in excluded
         ],
+        "breakers": state.open_breakers(),
     }
 
 

@@ -128,6 +128,10 @@ def auto_play(
 
     available_audio = stream_select.audio_languages(cfg, results, cast=opts.cast)
     available_resolutions = stream_select.available_resolutions(cfg, results, cast=opts.cast)
+    # Fold config default quality into opts before prepare_stream so headless and TUI
+    # honour `default_quality` the same way (ADR 0021). CLI `--quality` already set.
+    if opts.quality is None and cfg.default_quality is not None:
+        opts = replace(opts, quality=cfg.default_quality)
     exact = stream_select.exact_resolution(opts.quality)
 
     # Hard quality filter: fail fast with the available tiers (like audio_lang_unavailable).
@@ -143,55 +147,49 @@ def auto_play(
         return 1
 
     audio_verified: bool | None = None
-    keys_before: list[str] = []  # set on the prepare_stream path (see `sources_removed` below)
-    if opts.audio_lang:
-        # Forced dub: explicit error if no stream carries it (no silent fallback).
-        if opts.audio_lang not in available_audio:
-            emit_json(
-                {
-                    "ok": False,
-                    "error": "audio_lang_unavailable",
-                    "message": f"audio «{opts.audio_lang}» non disponibile per «{title}»",
-                    "available_audio": list(available_audio),
-                }
-            )
-            return 1
-        # Track-accurate: ffprobe-confirm the real tracks carry the dub (the name tag can
-        # lie). None back = every name-match's real tracks lack the language.
-        try:
-            chosen, audio_verified = stream_select.pick_audio_stream_verified(
-                cfg, results, opts.audio_lang, cast=opts.cast, exact_resolution=exact,
-                expected_runtime_s=expected_s,
-            )  # fmt: skip
-        except stream_select.ContentTooShort as e:
-            emit_truncated(e, title)
-            return 1
-        if chosen is None:
-            emit_json(
-                {
-                    "ok": False,
-                    "error": "audio_lang_unavailable",
-                    "message": f"audio «{opts.audio_lang}» assente dalle tracce reali di «{title}»",
-                    "available_audio": list(available_audio),
-                }
-            )
-            return 1
-        vetted = stream_select.VettedStream(
-            stream=chosen, auto=True, safety_sub_lang=None, quality=opts.quality or 0
+    # Keys, not just a count: after the verification runs, `sources_removed` must rest on
+    # what was actually proven gone (ADR 0025), never on "the list came back empty" — a
+    # source merely unusable right now is a different answer for the caller.
+    keys_before = [stream_select.source_key(s) for s in results]
+    try:
+        # Forced `--audio-lang` is handled inside prepare_stream (same path as TUI): raises
+        # AudioLangUnavailable instead of silently picking another dub.
+        vetted = stream_select.prepare_stream(
+            cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title,
+            expected_runtime_s=expected_s,
+        )  # fmt: skip
+    except stream_select.QualityUnavailable as e:
+        emit_json(
+            {
+                "ok": False,
+                "error": "quality_unavailable",
+                "message": f"nessuno stream {e.quality}p riproducibile per «{title}»",
+                "available_resolutions": e.available or available_resolutions,
+            }
         )
-    else:
-        # Keys, not just a count: after the verification runs, `sources_removed` must rest on
-        # what was actually proven gone (ADR 0025), never on "the list came back empty" — a
-        # source merely unusable right now is a different answer for the caller.
-        keys_before = [stream_select.source_key(s) for s in results]
-        try:
-            vetted = stream_select.prepare_stream(
-                cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title,
-                expected_runtime_s=expected_s,
-            )  # fmt: skip
-        except stream_select.ContentTooShort as e:
-            emit_truncated(e, title)
-            return 1
+        return 1
+    except stream_select.AudioLangUnavailable as e:
+        emit_json(
+            {
+                "ok": False,
+                "error": "audio_lang_unavailable",
+                "message": (
+                    f"audio «{e.lang}» assente dalle tracce reali di «{title}»"
+                    if e.real_tracks
+                    else f"audio «{e.lang}» non disponibile per «{title}»"
+                ),
+                "available_audio": list(e.available) if e.available else list(available_audio),
+            }
+        )
+        return 1
+    except stream_select.ContentTooShort as e:
+        emit_truncated(e, title)
+        return 1
+    if opts.audio_lang and vetted is not None:
+        # prepare_stream's forced path already verified (or accepted und); report confirmed
+        # when we can still see the tag on the chosen stream after resolve.
+        real = stream_select.stream_audio_langs(cfg, vetted.stream)
+        audio_verified = opts.audio_lang in real if real is not None else False
     if vetted is None:
         # The pre-commit verification may have just proven the remaining sources gone
         # (ADR 0025): report that only when the denylist says so, so the caller learns

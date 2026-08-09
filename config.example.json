@@ -1,15 +1,9 @@
 {
-  "torrentio_base": "sort=qualitysize|realdebrid=YOUR_REALDEBRID_API_TOKEN",
+  "torrentio_base": "sort=qualitysize",
   "cinemeta": "https://v3-cinemeta.strem.io",
   "opensubtitles": "https://opensubtitles-v3.strem.io",
-  "subtitle_langs": [
-    "ita",
-    "eng"
-  ],
-  "audio_langs": [
-    "ita",
-    "eng"
-  ],
+  "subtitle_langs": ["ita", "eng"],
+  "audio_langs": ["ita", "eng"],
   "primary_lang": "",
   "torrentio_enabled": true,
   "addons": [],
@@ -23,6 +17,7 @@
   "cast_remux_max_resolution": 1080,
   "cast_remux_max_size_gb": 20,
   "cast_mode": "dmr",
+  "cast_mirror_over_remux_gb": 10,
   "mirror_bitrate": 0,
   "mirror_playout_ms": 0,
   "autoplay": true,
@@ -37,11 +32,13 @@
   "min_seeders": 3,
   "dedup": true,
   "max_streams": 20,
+  "default_quality": null,
+  "home_continue_max": 12,
   "mpv_args": [],
   "nerd_font": "auto",
   "posters": true,
   "image_mode": "auto",
-  "playback_backend": "debrid",
+  "playback_backend": "local",
   "engine_port": 8090,
   "engine_cache_mb": 256,
   "engine_download_dir": "",

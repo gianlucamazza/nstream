@@ -352,19 +352,11 @@ def test_run_auto_enriched_json_audio_fields(monkeypatch, capsys):
 
 def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
     _wire_movie(monkeypatch)
-    seen = {}
-
-    def pick(cfg, results, lang, *, cast, probe_cap=4, exact_resolution=0, **_kw):
-        seen["lang"] = lang
-        seen["exact"] = exact_resolution
-        return results[0], True  # (stream, verified) — track-accurate confirmed
-
-    monkeypatch.setattr(headless_play.stream_select, "pick_audio_stream_verified", pick)
-    # prepare_stream must NOT be used on the forced-audio path.
+    # prepare_stream (stubbed by _wire_movie) returns the stream; stream_audio_langs
+    # reports the forced dub so audio_verified is honest.
     monkeypatch.setattr(
-        headless_play.stream_select, "prepare_stream",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("prepare_stream used")),
-    )  # fmt: skip
+        headless_play.stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"})
+    )
     monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
@@ -372,14 +364,19 @@ def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
     )  # fmt: skip
     rc = headless.run_auto(CFG, _hns(query=["dune"], audio_lang="eng"), opts)
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and seen["lang"] == "eng"
+    assert rc == 0
     assert out["audio_lang"] == "eng"
+    assert out["audio_verified"] is True
 
 
 def test_run_auto_audio_lang_unavailable(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+        headless_play.stream_select,
+        "prepare_stream",
+        lambda *a, **k: (_ for _ in ()).throw(
+            headless_play.stream_select.AudioLangUnavailable("jpn", ("ita", "eng"))
+        ),
     )
     monkeypatch.setattr(
         headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
@@ -520,14 +517,16 @@ def test_run_auto_cast_sets_volume(monkeypatch, capsys):
 
 def test_run_auto_audio_lang_not_in_real_tracks(monkeypatch, capsys):
     _wire_movie(monkeypatch)
+    # Name tags claim ita, but real-track verification rejects every candidate.
     monkeypatch.setattr(
-        headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("ita", "eng")
+        headless_play.stream_select,
+        "prepare_stream",
+        lambda *a, **k: (_ for _ in ()).throw(
+            headless_play.stream_select.AudioLangUnavailable(
+                "ita", ("ita", "eng"), real_tracks=True
+            )
+        ),
     )
-    # name tags claim ita, but ffprobe verification finds no candidate → reject (no wrong dub).
-    monkeypatch.setattr(
-        headless_play.stream_select, "pick_audio_stream_verified",
-        lambda cfg, results, lang, *, cast, probe_cap=4, exact_resolution=0, **_kw: (None, False),
-    )  # fmt: skip
     monkeypatch.setattr(
         headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
@@ -538,6 +537,7 @@ def test_run_auto_audio_lang_not_in_real_tracks(monkeypatch, capsys):
     rc = headless.run_auto(CFG, _hns(query=["dune"], audio_lang="ita"), opts)
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "audio_lang_unavailable"
+    assert "tracce reali" in out["message"]
 
 
 # --- headless title resolution (_select_meta) --------------------------------
@@ -1484,7 +1484,8 @@ def test_audio_lang_short_file_is_not_reported_as_lang_unavailable(monkeypatch, 
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch)
     monkeypatch.setattr(
-        headless_play.stream_select, "pick_audio_stream_verified",
+        headless_play.stream_select,
+        "prepare_stream",
         lambda *a, **k: (_ for _ in ()).throw(_too_short(count=1)),
     )  # fmt: skip
     monkeypatch.setattr(

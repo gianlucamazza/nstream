@@ -653,6 +653,129 @@ def test_prepare_stream_quality_picker_interactive(monkeypatch):
     assert seen["exact"] == 1080
 
 
+def test_prepare_stream_forced_audio_lang_raises_when_missing(monkeypatch):
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    eng: Stream = {"url": "http://e", "name": "X 1080p ENG", "title": "eng only"}
+    monkeypatch.setattr(stream_select, "prune_dead", lambda cfg, r: (r, 0))
+    monkeypatch.setattr(stream_select, "_mark_native_cached", lambda *a, **k: None)
+    monkeypatch.setattr(stream_select, "resolve_quality", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        stream_select, "audio_languages", lambda *a, **k: ("eng",)
+    )
+    opts = PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False,
+        audio_lang="ita", quality=0,
+    )
+    with pytest.raises(stream_select.AudioLangUnavailable) as ei:
+        stream_select.prepare_stream(
+            cfg, [eng], opts, auto=True, reselect_on_wrong_audio=False, title="X"
+        )
+    assert ei.value.lang == "ita"
+    assert "eng" in ei.value.available
+
+
+def test_prepare_stream_forced_audio_lang_picks_stream(monkeypatch):
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    ita: Stream = {"url": "http://i", "name": "X 1080p ITA", "title": "ita"}
+    eng: Stream = {"url": "http://e", "name": "X 1080p ENG", "title": "eng"}
+    monkeypatch.setattr(stream_select, "prune_dead", lambda cfg, r: (r, 0))
+    monkeypatch.setattr(stream_select, "_mark_native_cached", lambda *a, **k: None)
+    monkeypatch.setattr(stream_select, "resolve_quality", lambda *a, **k: 0)
+    monkeypatch.setattr(stream_select, "audio_languages", lambda *a, **k: ("ita", "eng"))
+    monkeypatch.setattr(
+        stream_select,
+        "pick_audio_stream_verified",
+        lambda *a, **k: (ita, True),
+    )
+    opts = PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False,
+        audio_lang="ita", quality=0,
+    )
+    v = stream_select.prepare_stream(
+        cfg, [eng, ita], opts, auto=True, reselect_on_wrong_audio=False, title="X"
+    )
+    assert v is not None and v.stream is ita
+
+
+def test_resolve_quality_uses_config_default_without_picker(monkeypatch):
+    """cfg.default_quality skips the fzf picker when interactive."""
+    monkeypatch.setattr(
+        stream_select,
+        "pick_quality",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("picker must not run")),
+    )
+    cfg = Config(torrentio_base="tb", default_quality=1080)
+    opts = _gopts(quality=None)
+    assert (
+        stream_select.resolve_quality(
+            cfg, [], opts, cast=False, title="X", offer_picker=True
+        )
+        == 1080
+    )
+    cfg2 = Config(torrentio_base="tb", default_quality=0)
+    assert (
+        stream_select.resolve_quality(
+            cfg2, [], opts, cast=False, title="X", offer_picker=True
+        )
+        == 0
+    )
+
+
+def test_resolve_quality_default_applies_when_offer_picker_false(monkeypatch):
+    """Headless / binge unattended honour cfg.default_quality (ADR 0021)."""
+    monkeypatch.setattr(
+        stream_select,
+        "pick_quality",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no picker headless")),
+    )
+    cfg = Config(torrentio_base="tb", default_quality=1080)
+    assert (
+        stream_select.resolve_quality(
+            cfg, [], _gopts(quality=None), cast=False, offer_picker=False
+        )
+        == 1080
+    )
+
+
+def test_resolve_quality_cli_beats_config_default(monkeypatch):
+    monkeypatch.setattr(
+        stream_select,
+        "pick_quality",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no picker")),
+    )
+    cfg = Config(torrentio_base="tb", default_quality=1080)
+    opts = _gopts(quality=720)
+    assert (
+        stream_select.resolve_quality(
+            cfg, [], opts, cast=False, offer_picker=True
+        )
+        == 720
+    )
+
+
+def test_prepare_stream_raises_quality_unavailable(monkeypatch):
+    """Auto pick with hard tier and no matching stream raises QualityUnavailable."""
+    s720: Stream = {
+        "url": "u720",
+        "name": "Torrentio\n720p",
+        "title": "F.2025.720p.WEB-DL\n👤 9 💾 3 GB",
+    }
+    monkeypatch.setattr(stream_select, "prune_dead", lambda cfg, r: (r, 0))
+    monkeypatch.setattr(stream_select, "_mark_native_cached", lambda *a, **k: None)
+    monkeypatch.setattr(stream_select, "resolve_quality", lambda *a, **k: 1080)
+    monkeypatch.setattr(stream_select, "pick_and_resolve", lambda *a, **k: None)
+    monkeypatch.setattr(
+        stream_select, "available_resolutions", lambda *a, **k: [720]
+    )
+    cfg = Config(torrentio_base="tb", audio_langs=["ita"])
+    with pytest.raises(stream_select.QualityUnavailable) as ei:
+        stream_select.prepare_stream(
+            cfg, [s720], _gopts(quality=1080), auto=True, reselect_on_wrong_audio=False
+        )
+    assert ei.value.quality == 1080
+    assert 720 in ei.value.available
+
+
 def test_prepare_stream_quality_cli_skips_picker(monkeypatch):
     """CLI --quality 720: no picker, exact filter applied."""
     s720: Stream = {

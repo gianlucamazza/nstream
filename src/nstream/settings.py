@@ -24,6 +24,7 @@ MAXRES_CHOICES = [
 CHOICE_VALUES: dict[str, list[str]] = {
     "nerd_font": ["auto", "on", "off"],
     "image_mode": ["auto", "off"],
+    "cast_mode": ["dmr", "mirror"],
 }
 
 
@@ -80,6 +81,8 @@ def _token_status(cfg: Config) -> str:
 def _backend_status(cfg: Config) -> str:
     if cfg.playback_backend == "debrid":
         return "debrid (premium, via Torrentio)"
+    if cfg.playback_backend == "auto":
+        return "auto (debrid + P2P ibrido)"
     if cfg.playback_backend == "native":
         creds = config.debrid_credentials(cfg.torrentio_base)
         provider = creds[0] if creds else "?"
@@ -92,6 +95,23 @@ def _backend_status(cfg: Config) -> str:
         else f"TorrServer {ui.g().fail} (installalo)"
     )
     return f"P2P locale · {health}"
+
+
+def _quality_default_label(cfg: Config) -> str:
+    if cfg.default_quality is None:
+        return "chiedi ogni volta"
+    if cfg.default_quality == 0:
+        return "Auto (senza chiedere)"
+    from . import quality as quality_mod
+
+    return quality_mod.quality_label(cfg.default_quality)
+
+
+def _primary_lang_label(cfg: Config) -> str:
+    code = cfg.primary_lang or ""
+    if not code:
+        return f"auto ({languages.name(cfg.primary) if cfg.primary else '—'})"
+    return f"{languages.name(code)} ({code})"
 
 
 def _with_token(base: str, token: str, provider: str = "realdebrid") -> str:
@@ -107,6 +127,8 @@ def _with_token(base: str, token: str, provider: str = "realdebrid") -> str:
 
 def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
     """(key, label, kind, current_value, help) for each setting row."""
+    from . import cast_control
+
     return [
         (
             "audio_langs",
@@ -123,11 +145,25 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Lingue sottotitoli preferite (--slang e --subs). TAB per (de)selezionare, in ordine.",
         ),
         (
+            "primary_lang",
+            "Lingua primaria",
+            "primary",
+            _primary_lang_label(cfg),
+            "Lingua nativa (guardie audio e sub di sicurezza). Vuota = prima di audio_langs.",
+        ),
+        (
             "auto_play",
             "Riproduzione automatica",
             "bool",
             "on" if cfg.auto_play else "off",
             "Invio sul titolo avvia subito il migliore; Tab apre la scelta manuale. Off = inverte.",
+        ),
+        (
+            "default_quality",
+            "Qualità predefinita",
+            "defquality",
+            _quality_default_label(cfg),
+            "Salta il picker qualità: chiedi ogni volta, Auto, o una risoluzione fissa.",
         ),
         (
             "prefer_cast",
@@ -144,6 +180,55 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             cfg.cast_device or "auto (scoperta)",
             "Chromecast preferito (nome). Scoperta via catt scan in background + cache; "
             "cast per IP. 'auto' = per-LAN.",
+        ),
+        (
+            "cast_mode",
+            "Modalità cast",
+            "choice",
+            cfg.cast_mode,
+            "dmr = file al Default Media Receiver; mirror = realtime 1080p SDR.",
+        ),
+        (
+            "cast_remux",
+            "Remux audio cast (Tier-2)",
+            "bool",
+            "on" if cfg.cast_remux else "off",
+            "Se on, Dolby/DTS vengono remuxati in AAC sul host (video copy).",
+        ),
+        (
+            "cast_remux_max_resolution",
+            "Remux: max risoluzione",
+            "maxres",
+            f"{cfg.cast_remux_max_resolution}p" if cfg.cast_remux_max_resolution else "illimitata",
+            "Preferenza tra release che richiedono remux (download). 0 = nessun limite.",
+        ),
+        (
+            "cast_remux_max_size_gb",
+            "Remux: max size GB",
+            "int",
+            str(cfg.cast_remux_max_size_gb),
+            "Demote / conferma remux oltre questa dimensione. 0 = solo check disco.",
+        ),
+        (
+            "cast_mirror_over_remux_gb",
+            "Mirror se remux > GB",
+            "int",
+            str(cfg.cast_mirror_over_remux_gb),
+            "Sopra questa soglia preferisci mirror (avvio istantaneo). 0 = mai auto-switch.",
+        ),
+        (
+            "sub_align",
+            "Allinea sottotitoli",
+            "bool",
+            "on" if cfg.sub_align else "off",
+            "Allineamento nativo audio-anchored (ADR 0020) sul remux locale.",
+        ),
+        (
+            "sub_align_budget_s",
+            "Allinea: budget sec",
+            "int",
+            str(cfg.sub_align_budget_s),
+            "Secondi massimi per l'allineamento sottotitoli (60-600).",
         ),
         (
             "autoplay",
@@ -172,6 +257,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "bool",
             "on" if cfg.history_enabled else "off",
             "Salva la posizione per resume e continua-a-guardare.",
+        ),
+        (
+            "home_continue_max",
+            "Home: max continua",
+            "int",
+            str(cfg.home_continue_max) if cfg.home_continue_max else "tutti",
+            "Quante voci 'continua' in home prima del taglio. 0 = tutte.",
         ),
         (
             "mpv_quiet",
@@ -269,8 +361,28 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Backend riproduzione",
             "backend",
             _backend_status(cfg),
-            "P2P locale (gratis, TorrServer) · debrid via Torrentio · debrid nativo "
-            "(API diretta TorBox/Premiumize, indipendente da Torrentio).",
+            "P2P · debrid · auto (ibrido) · nativo TorBox/Premiumize.",
+        ),
+        (
+            "p2p_require_vpn",
+            "P2P richiede VPN",
+            "bool",
+            "on" if cfg.p2p_require_vpn else "off",
+            "Con on, lo streaming P2P è bloccato se non c'è un'interfaccia VPN.",
+        ),
+        (
+            "engine_port",
+            "TorrServer porta",
+            "int",
+            str(cfg.engine_port),
+            "Porta HTTP di TorrServer (spawn o istanza già in ascolto).",
+        ),
+        (
+            "engine_cache_mb",
+            "TorrServer cache MB",
+            "int",
+            str(cfg.engine_cache_mb),
+            "Read-ahead in memoria di TorrServer.",
         ),
         (
             "torrentio_base",
@@ -284,8 +396,14 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Fonti stream / plugin",
             "submenu",
             _sources_status(cfg),
-            "Torrentio on/off · preset Comet/MediaFusion/AIOStreams/… · addon custom "
-            "(stream, sottotitoli, cataloghi).",
+            "Torrentio on/off · preset Comet/MediaFusion/AIOStreams/… · addon custom.",
+        ),
+        (
+            "__health__",
+            "Diagnostica dipendenze",
+            "health",
+            cast_control.health_summary(),
+            "TorrServer, catt, castbridge, mirror, ffprobe — ok o mancanti.",
         ),
     ]
 
@@ -369,6 +487,7 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
         choices = [
             "P2P locale (gratis)",
             "debrid via Torrentio (premium)",
+            "auto — debrid + P2P ibrido",
             "debrid nativo — API diretta (TorBox/Premiumize)",
         ]
         i = _fzf_select(
@@ -388,6 +507,18 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
             config.save({"playback_backend": "debrid"})
             if _token_status(cfg).startswith(ui.g().fail):
                 print("nstream: imposta un token debrid qui sotto per usarlo", file=sys.stderr)
+        elif i == 2:
+            config.save({"playback_backend": "auto"})
+            if _token_status(cfg).startswith(ui.g().fail):
+                print(
+                    "nstream: senza token debrid l'ibrido userà solo P2P — imposta un token sotto",
+                    file=sys.stderr,
+                )
+            if not engine.installed():
+                print(
+                    f"nstream: {engine.BINARY} non installato — serve per il fallback P2P",
+                    file=sys.stderr,
+                )
         else:
             config.save({"playback_backend": "native"})
             creds = config.debrid_credentials(cfg.torrentio_base)
@@ -398,6 +529,34 @@ def _edit(cfg: Config, key: str, kind: str, label: str) -> None:
                     "imposta uno di questi token qui sotto",
                     file=sys.stderr,
                 )
+    elif kind == "primary":
+        codes = [""] + [lang.code for lang in languages.selectable()]
+        labels = ["auto (prima di audio_langs)"] + [f"{languages.name(c)} ({c})" for c in codes[1:]]
+        i = _fzf_select(labels, prompt="primaria> ")
+        if i is not None:
+            config.save({"primary_lang": codes[i]})
+    elif kind == "defquality":
+        from . import quality as quality_mod
+
+        choices: list[tuple[str, int | None]] = [
+            ("chiedi ogni volta (picker)", None),
+            (quality_mod.quality_label(0), 0),
+            (quality_mod.quality_label(2160), 2160),
+            (quality_mod.quality_label(1080), 1080),
+            (quality_mod.quality_label(720), 720),
+        ]
+        i = _fzf_select([c[0] for c in choices], prompt="qualità default> ")
+        if i is not None:
+            # JSON null clears the key; save None as explicit null via raw merge.
+            config.save({"default_quality": choices[i][1]})
+    elif kind == "health":
+        from . import cast_control
+
+        rows = [
+            f"{ui.g().cached if ok else ui.g().fail}  {name:16s}  {detail}"
+            for name, ok, detail in cast_control.runtime_health()
+        ]
+        _fzf_select(rows, prompt="diagnostica> ", header="ESC: indietro")
     elif kind == "token":
         i = _fzf_select([name for _, name in _PROVIDERS], prompt="provider> ")
         if i is None:

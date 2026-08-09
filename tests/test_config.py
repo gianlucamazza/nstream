@@ -34,11 +34,35 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.min_seeders == 3
     assert cfg.dedup is True
     assert cfg.max_streams == 20
+    assert cfg.default_quality is None
+    assert cfg.home_continue_max == 12
     assert cfg.mpv_args == []
     assert cfg.nerd_font == "auto"
     assert cfg.posters is True
     assert cfg.image_mode == "auto"
     assert cfg.torrentio_enabled is True
+
+
+def test_load_tightens_world_readable_config(tmp_path, monkeypatch):
+    import stat
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "realdebrid=SECRET"})
+    path = tmp_path / "nstream" / "config.json"
+    path.chmod(0o644)
+    config.load()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert config.load().torrentio_base == "realdebrid=SECRET"
+
+
+def test_default_quality_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    write_config(tmp_path, {"torrentio_base": "tb", "default_quality": 1080})
+    assert config.load().default_quality == 1080
+    write_config(tmp_path, {"torrentio_base": "tb", "default_quality": 0})
+    assert config.load().default_quality == 0
+    write_config(tmp_path, {"torrentio_base": "tb", "default_quality": None})
+    assert config.load().default_quality is None
 
 
 def test_ui_fields_override_and_validate(tmp_path, monkeypatch):

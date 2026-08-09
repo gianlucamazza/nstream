@@ -4,7 +4,9 @@
 - **Date:** 2026-06-06
 - **Deciders:** project maintainer
 - **Relates to:** ADR 0007 (castbridge sender); the interim transient-unit spawn in
-  `src/nstream/bridge.py:ensure_daemon` (this ADR's stepping stone).
+  `bridge.ensure_daemon` (this ADR's stepping stone).
+- **Blocked on:** castbridge packaging graduating from WIP — until then the interim
+  `systemd-run --user` path remains the production behaviour. See [docs/roadmap.md](../roadmap.md).
 
 ## Context
 

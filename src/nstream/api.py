@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import threading
 import time
 import unicodedata
@@ -95,48 +96,148 @@ def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, str]:
     return (exact, prefix, words, year, name)
 
 
-def _gather(tasks: list[Callable[[], list]]) -> list:
+def _gather(
+    tasks: list[Callable[[], list]],
+    *,
+    labels: list[str] | None = None,
+    keys: list[str] | None = None,
+) -> list:
     """Run per-addon/per-type fetch tasks concurrently, flattening results in task
     order (so the built-in providers keep priority for dedup). A task raising
     NetworkError contributes nothing (best-effort aggregation), and the whole gather
     shares one `_GATHER_BUDGET` deadline: a future still pending past it is dropped
     (cancelled best-effort, empty result) so a stuck addon can't block the TUI. One
-    task → run inline (no thread overhead)."""
+    task → run inline (no thread overhead).
+
+    `keys` (addon base URLs) feed the per-addon circuit breaker (ADR 0027): Open
+    sources are skipped without network; failures/timeouts count toward Open; any
+    completed HTTP (even empty streams) counts as success.
+
+    On a TTY, multi-task gathers update progress as futures *complete* (not submit order)."""
+    from concurrent.futures import as_completed
+
+    from . import ui  # local: progress only; api stays free of hard ui import at load
+    from .state import breaker as brk
+
     if not tasks:
         return []
-    if len(tasks) == 1:
-        results = [_safe(tasks[0])]
-    else:
-        deadline = time.monotonic() + _GATHER_BUDGET
-        ex = ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(tasks)))
-        try:
-            futures = [ex.submit(_safe, t) for t in tasks]
-            results = []
-            for f in futures:  # in submit order
-                try:
-                    results.append(f.result(timeout=max(0.0, deadline - time.monotonic())))
-                except TimeoutError:
-                    f.cancel()  # best-effort: a task already running can't be cancelled
-                    _log.warning("addon oltre il budget di %.0fs → scartato", _GATHER_BUDGET)
-                    results.append([])
-        finally:
-            # Never wait for stragglers: their threads end on their own (http_get_json
-            # has a per-request timeout) and still-queued futures are cancelled.
-            ex.shutdown(wait=False, cancel_futures=True)
-    out: list = []
-    for r in results:
-        out.extend(r)
-    return out
+    n = len(tasks)
+    names = labels if labels and len(labels) == n else [f"#{i + 1}" for i in range(n)]
+    bases = keys if keys and len(keys) == n else [""] * n
 
+    # Skip Open breakers before paying network (ADR 0027).
+    active: list[tuple[int, Callable[[], list], str, str]] = []
+    skipped = 0
+    for i, t in enumerate(tasks):
+        if bases[i] and not brk.allow(bases[i]):
+            skipped += 1
+            _log.info("breaker skip: %s (%s)", names[i], bases[i])
+            continue
+        active.append((i, t, names[i], bases[i]))
 
-def _safe(task: Callable[[], list]) -> list:
-    try:
-        return task()
-    except NetworkError as e:
-        # The message carries the addon's `what=` label (no clear URL → redaction-safe),
-        # so a silently-skipped addon is still traceable with --debug.
-        _log.debug("addon saltato: %s", e)
+    if not active:
+        if skipped and sys.stderr.isatty():
+            ui.status(
+                f"tutte le fonti in breaker open ({skipped}) — --forget-breakers",
+                kind="warn",
+            )
         return []
+
+    results_by_i: dict[int, list] = {}
+    timed_out = 0
+    failed = 0
+
+    def _run(i: int, task: Callable[[], list], label: str, key: str) -> tuple[int, list, str]:
+        try:
+            rows = task()
+            if key:
+                brk.record_success(key)
+            return i, rows, "ok"
+        except NetworkError as e:
+            _log.debug("addon saltato%s: %s", f" ({label})" if label else "", e)
+            if key:
+                brk.record_failure(key, reason="network")
+            return i, [], "fail"
+
+    if len(active) == 1:
+        i, t, lab, key = active[0]
+        i, rows, status = _run(i, t, lab, key)
+        results_by_i[i] = rows
+        if status == "fail":
+            failed = 1
+    else:
+        if sys.stderr.isatty():
+            msg = f"interrogo {len(active)} fonti…"
+            if skipped:
+                msg += f" · {skipped} in breaker"
+            ui.status(msg, kind="search")
+        deadline = time.monotonic() + _GATHER_BUDGET
+        ex = ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(active)))
+        try:
+            fut_map = {ex.submit(_run, i, t, lab, key): (i, lab, key) for i, t, lab, key in active}
+            done = 0
+            pending = set(fut_map)
+            while pending:
+                remaining = max(0.0, deadline - time.monotonic())
+                if remaining <= 0:
+                    break
+                finished = set()
+                try:
+                    for f in as_completed(pending, timeout=remaining):
+                        finished.add(f)
+                        try:
+                            i, rows, status = f.result()
+                        except Exception:  # noqa: BLE001 — worker should not raise
+                            i, lab, key = fut_map[f]
+                            rows, status = [], "fail"
+                            if key:
+                                brk.record_failure(key, reason="error")
+                        results_by_i[i] = rows
+                        if status == "fail":
+                            failed += 1
+                        done += 1
+                        if sys.stderr.isatty():
+                            lab = fut_map[f][1]
+                            ui.progress(f"fonti {done}/{len(active)} · {lab}")
+                        if done >= len(active):
+                            break
+                except TimeoutError:
+                    pass
+                pending -= finished
+                if remaining <= 0 or not pending:
+                    break
+            # Timed-out stragglers: empty + breaker failure
+            for f in list(pending):
+                f.cancel()
+                i, lab, key = fut_map[f]
+                if i not in results_by_i:
+                    results_by_i[i] = []
+                    timed_out += 1
+                    if key:
+                        brk.record_failure(key, reason="timeout")
+                    _log.warning(
+                        "addon oltre il budget di %.0fs → scartato (%s)",
+                        _GATHER_BUDGET,
+                        lab,
+                    )
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        if sys.stderr.isatty():
+            got = sum(1 for r in results_by_i.values() if r)
+            msg = f"fonti: {got}/{len(active)} con risultati"
+            if timed_out:
+                msg += f" · {timed_out} timeout"
+            if failed:
+                msg += f" · {failed} errori"
+            if skipped:
+                msg += f" · {skipped} breaker"
+            ui.progress_done(msg)
+
+    # Preserve original task order for dedup priority
+    out: list = []
+    for i in range(n):
+        out.extend(results_by_i.get(i, []))
+    return out
 
 
 def clear_cache() -> None:
@@ -162,9 +263,15 @@ def _cached_json(url: str, *, what: str) -> dict:
     return data
 
 
-def _catalog_tasks(cfg: Config, typ: str, path: str, what: str) -> list[Callable[[], list]]:
-    """Build one cached fetch task per addon serving `catalog` for this type."""
+def _catalog_tasks(
+    cfg: Config, typ: str, path: str, what: str
+) -> tuple[list[Callable[[], list]], list[str], list[str]]:
+    """Build one cached fetch task per addon serving `catalog` for this type.
+
+    Returns (tasks, labels, keys) for breaker-aware gather (ADR 0027)."""
     tasks: list[Callable[[], list]] = []
+    labels: list[str] = []
+    keys: list[str] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "catalog", typ):
             continue
@@ -174,15 +281,22 @@ def _catalog_tasks(cfg: Config, typ: str, path: str, what: str) -> list[Callable
                 "metas", []
             )
         )
-    return tasks
+        labels.append(addon.name)
+        keys.append(addon.base)
+    return tasks, labels, keys
 
 
 def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     q = urllib.parse.quote(query)
     tasks: list[Callable[[], list]] = []
+    labels: list[str] = []
+    keys: list[str] = []
     for t in (typ,) if typ else ("movie", "series"):
-        tasks += _catalog_tasks(cfg, t, f"top/search={q}", f"ricerca {t}")
-    results = _dedup(_gather(tasks), lambda m: m.get("id") or id(m))
+        t_tasks, t_labels, t_keys = _catalog_tasks(cfg, t, f"top/search={q}", f"ricerca {t}")
+        tasks += t_tasks
+        labels += t_labels
+        keys += t_keys
+    results = _dedup(_gather(tasks, labels=labels, keys=keys), lambda m: m.get("id") or id(m))
     # Rank flags descending while keeping equal-score titles alphabetic and
     # deterministic, independent of addon response order.
     return sorted(
@@ -197,8 +311,12 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     )
 
 
-def _catalog_addon_tasks(cfg: Config, typ: str, cat: str, extras: str) -> list[Callable[[], list]]:
+def _catalog_addon_tasks(
+    cfg: Config, typ: str, cat: str, extras: str
+) -> tuple[list[Callable[[], list]], list[str], list[str]]:
     tasks: list[Callable[[], list]] = []
+    labels: list[str] = []
+    keys: list[str] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "catalog", typ):
             continue
@@ -211,7 +329,9 @@ def _catalog_addon_tasks(cfg: Config, typ: str, cat: str, extras: str) -> list[C
                 "metas", []
             )
         )
-    return tasks
+        labels.append(addon.name)
+        keys.append(addon.base)
+    return tasks, labels, keys
 
 
 def _extras(genre: str | None, skip: int) -> str:
@@ -259,17 +379,19 @@ CATALOG_PAGE = 100
 def catalog(
     cfg: Config, typ: str, cat: str = "top", *, genre: str | None = None, skip: int = 0
 ) -> list[Meta]:
-    tasks = _catalog_addon_tasks(cfg, typ, cat, _extras(genre, skip))
-    return _dedup(_gather(tasks), lambda m: m.get("id") or id(m))
+    tasks, labels, keys = _catalog_addon_tasks(cfg, typ, cat, _extras(genre, skip))
+    return _dedup(_gather(tasks, labels=labels, keys=keys), lambda m: m.get("id") or id(m))
 
 
 def browse(cfg: Config, cat: str = "top", *, genre: str | None = None, skip: int = 0) -> list[Meta]:
     """Movies + series for a catalog, fetched concurrently (used by the browse menu)."""
     extras = _extras(genre, skip)
-    tasks = _catalog_addon_tasks(cfg, "movie", cat, extras) + _catalog_addon_tasks(
-        cfg, "series", cat, extras
+    m_tasks, m_labels, m_keys = _catalog_addon_tasks(cfg, "movie", cat, extras)
+    s_tasks, s_labels, s_keys = _catalog_addon_tasks(cfg, "series", cat, extras)
+    return _dedup(
+        _gather(m_tasks + s_tasks, labels=m_labels + s_labels, keys=m_keys + s_keys),
+        lambda m: m.get("id") or id(m),
     )
-    return _dedup(_gather(tasks), lambda m: m.get("id") or id(m))
 
 
 def meta(cfg: Config, typ: str, video_id: str) -> dict:
@@ -391,6 +513,8 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
     # filename so a debrid hit can fall back to local P2P (any source, not only
     # Torrentio).
     tasks: list[Callable[[], list]] = []
+    labels: list[str] = []
+    keys: list[str] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "stream", typ, video_id):
             continue
@@ -401,12 +525,15 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
                 name,
             )
         )
+        labels.append(addon.name)
+        keys.append(addon.base)
     # Hybrid "auto" backend: the main Torrentio query carries the debrid token
     # (cached urls); also fetch the token-less variant (pure-torrent infoHash) so
     # a release can play via debrid AND fall back to local P2P. Only when Torrentio
     # is enabled — otherwise multi-addon fuse below still pairs url↔infoHash.
     if cfg.playback_backend == "auto" and cfg.torrentio_enabled:
         tl = f"{addons.torrentio_token_less(cfg)}/stream/{typ}/{video_id}.json"
+        tb = addons.torrentio_token_less(cfg)
         tasks.append(
             lambda tl=tl: _tagged(
                 _stamp_addon(
@@ -415,9 +542,11 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
                 )
             )
         )
+        labels.append("Torrentio P2P")
+        keys.append(tb)
     if not tasks:
         return []  # no stream source configured (Torrentio off + empty addons)
-    gathered = _gather(tasks)
+    gathered = _gather(tasks, labels=labels, keys=keys)
     playable = [s for s in gathered if sources.is_playable_stream(s)]
     fused = _fuse_url_and_torrent(playable)
     # Collapse the same release seen on multiple addons (filename join), keeping the
@@ -619,16 +748,25 @@ def subtitles(
         # literal plus for a spec-correct parser — spaces must be %20.
         extra = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
     tasks: list[Callable[[], list]] = []
+    labels: list[str] = []
+    keys: list[str] = []
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "subtitles", typ, video_id):
             continue
         if extra:
             hash_url = f"{addon.base}/subtitles/{typ}/{video_id}/{extra}.json"
             tasks.append(lambda url=hash_url, name=addon.name: _hash_subtitles(url, name))
+            labels.append(f"{addon.name} hash")
+            keys.append(addon.base)
         url = f"{addon.base}/subtitles/{typ}/{video_id}.json"
         tasks.append(
             lambda url=url, name=addon.name: http_get_json(url, what=f"sottotitoli ({name})").get(
                 "subtitles", []
             )
         )
-    return _dedup(_gather(tasks), lambda s: s.get("url") or s.get("id") or id(s))
+        labels.append(addon.name)
+        keys.append(addon.base)
+    return _dedup(
+        _gather(tasks, labels=labels, keys=keys),
+        lambda s: s.get("url") or s.get("id") or id(s),
+    )

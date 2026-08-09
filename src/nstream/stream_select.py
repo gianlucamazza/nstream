@@ -46,6 +46,31 @@ class ContentTooShort(Exception):
         self.count = count
 
 
+class AudioLangUnavailable(Exception):
+    """Forced `--audio-lang` is not present on any (remaining) playable stream.
+
+    Shared by TUI and headless so both paths fail the same way — never silently play
+    another dub when the user named a language."""
+
+    def __init__(self, lang: str, available: tuple[str, ...], *, real_tracks: bool = False) -> None:
+        where = "tracce reali" if real_tracks else "sorgenti"
+        super().__init__(f"audio «{lang}» non disponibile nelle {where}")
+        self.lang = lang
+        self.available = available
+        self.real_tracks = real_tracks
+
+
+class QualityUnavailable(Exception):
+    """Hard quality filter (CLI `--quality` or `cfg.default_quality`) left no playable stream.
+
+    Shared by TUI and headless: never silently fail with an empty pick."""
+
+    def __init__(self, quality: int, available: list[int]) -> None:
+        super().__init__(f"nessuno stream {quality}p riproducibile")
+        self.quality = quality
+        self.available = list(available)
+
+
 def _future_release(iso: str | None) -> datetime | None:
     """Parse a Cinemeta `released` ISO date; return it only if it's in the future."""
     if not iso:
@@ -108,12 +133,18 @@ def resolve_quality(
     title: str = "",
     offer_picker: bool,
 ) -> int | None:
-    """Decide the session quality: CLI/opts win; else interactive picker; else Auto (0).
-    Returns None only when the user ESC'd the picker."""
+    """Decide the session quality: CLI/opts win; else config default; else picker; else Auto.
+
+    Returns None only when the user ESC'd the picker. `cfg.default_quality` is None (ask
+    when interactive), 0 (Auto without asking), or N (exact tier). Applied on **every**
+    path — TUI, headless, binge unattended — so a settings default is not silently dropped
+    when `offer_picker` is False (ADR 0021)."""
     if opts.quality is not None:
         return opts.quality
+    if cfg.default_quality is not None:
+        return cfg.default_quality
     if not offer_picker:
-        return 0  # headless / binge-unattended without a sticky choice → no filter
+        return 0  # headless / binge without sticky/default → Auto
     return pick_quality(cfg, results, cast=cast, title=title)
 
 
@@ -715,6 +746,26 @@ def prepare_stream(
         return None  # ESC from the quality picker
     exact = exact_resolution(quality_choice)
 
+    # Forced dub (`--audio-lang`): hard constraint on every path (TUI + headless, ADR 0021).
+    # Fail with AudioLangUnavailable rather than falling back to another language. Skips the
+    # soft primary-language guard below — the user already named the language.
+    if opts.audio_lang:
+        lang = opts.audio_lang
+        available = tuple(audio_languages(cfg, results, cast=opts.cast, exact_resolution=exact))
+        if lang not in available:
+            raise AudioLangUnavailable(lang, available)
+        chosen, _verified = pick_audio_stream_verified(
+            cfg,
+            results,
+            lang,
+            cast=opts.cast,
+            exact_resolution=exact,
+            expected_runtime_s=expected_runtime_s,
+        )
+        if chosen is None:
+            raise AudioLangUnavailable(lang, available, real_tracks=True)
+        return VettedStream(stream=chosen, auto=auto, safety_sub_lang=None, quality=quality_choice)
+
     # Verify the top cached candidates actually respond before committing (ADR 0014): a dead
     # `[RD+]` marker is demoted so the auto-pick re-ranks around what's live, keeping the pick
     # off a stale link (and out of an accidental Tier-2 remux). Auto only — a manual pick is
@@ -727,6 +778,12 @@ def prepare_stream(
         cfg, results, auto=auto, cast=opts.cast, title=title, exact_resolution=exact
     )
     if not chosen:
+        # Auto + hard quality tier with nothing playable: fail loudly (TUI notice /
+        # headless quality_unavailable). Manual ESC on the stream menu stays None.
+        if auto and exact:
+            raise QualityUnavailable(
+                exact, available_resolutions(cfg, results, cast=opts.cast)
+            )
         return None
 
     # Cached-miss fallback (debrid/auto): a "[RD+]" marker is a guess, so verify the ready url

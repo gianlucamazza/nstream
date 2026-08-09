@@ -17,6 +17,7 @@ from . import (
     __version__,
     addons,
     api,
+    cast_control,
     cast_flow,
     caster,
     cli_args,
@@ -37,7 +38,7 @@ from . import (
 )
 from . import subs as subs_mod
 from .api import CAT_MAP, CATALOG_PAGE, GENRES
-from .caster import CastUnavailable, cast
+from .caster import CastUnavailable
 from .caster import resolve_device as _resolve_device
 from .config import (
     Config,
@@ -155,6 +156,18 @@ def _play_video(
             title=title,
             expected_runtime_s=expected_s,
         )
+    except stream_select.AudioLangUnavailable as e:
+        have = ", ".join(e.available) or "—"
+        notice = f"audio «{e.lang}» non disponibile (disponibili: {have})"
+        ui.status(notice, kind="fail")
+        print(f"nstream: {notice}", file=sys.stderr)
+        return (notice, False, opts.quality if opts.quality is not None else 0)
+    except stream_select.QualityUnavailable as e:
+        have = ", ".join(f"{r}p" for r in e.available) or "—"
+        notice = f"nessuno stream {e.quality}p (disponibili: {have})"
+        ui.status(notice, kind="fail")
+        print(f"nstream: {notice}", file=sys.stderr)
+        return (notice, False, e.quality)
     except stream_select.ContentTooShort as e:
         # Every probed source is a placeholder, not the video: say so instead of playing
         # 30 seconds of "removed for copyright". Retrying wouldn't change the file.
@@ -162,7 +175,7 @@ def _play_video(
         ui.status(notice, kind="fail")
         return (notice, False, opts.quality if opts.quality is not None else 0)
     if vetted is None:
-        # No playable stream, or backed out of a (re)selection / quality picker.
+        # Backed out of a (re)selection / quality picker, or no playable without a hard tier.
         return (None, False, opts.quality if opts.quality is not None else 0)
     chosen, auto, safety_sub_lang = vetted.stream, vetted.auto, vetted.safety_sub_lang
     quality_choice = vetted.quality
@@ -185,9 +198,10 @@ def _play_video(
             )  # fmt: skip
         else:
             res = _play_on_mpv(
-                cfg, chosen, work_dir,
+                cfg, results, chosen, work_dir,
                 typ=typ, video_id=video_id, title=title, opts=opts,
                 start=start, next_label=next_label, auto=auto, safety_sub_lang=safety_sub_lang,
+                cast_meta=cast_meta, expected_runtime_s=expected_s,
             )  # fmt: skip
             if res is None:
                 # Backed out of the track menu → return to the list; keep quality sticky.
@@ -265,6 +279,7 @@ def _play_on_cast(
 
 def _play_on_mpv(
     cfg: Config,
+    results: list[Stream],
     chosen: Stream,
     work_dir: str,
     *,
@@ -276,6 +291,8 @@ def _play_on_mpv(
     next_label: str | None,
     auto: bool,
     safety_sub_lang: str | None = None,
+    cast_meta: caster.CastMeta | None = None,
+    expected_runtime_s: float = 0.0,
 ) -> tuple[float, float, bool] | None:
     """Play locally in mpv. Returns (pos, dur, advance), or None if the user backed
     out of the pre-play track menu (so the caller returns to the list)."""
@@ -300,25 +317,67 @@ def _play_on_mpv(
         cfg, title, chosen["url"],
         start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
         next_label=next_label, cast_enabled=cast_ok, work_dir=work_dir,
+        audio_lang=opts.audio_lang,
     )  # fmt: skip
     if signal == "cast":  # Alt-C in mpv: move this playback to the TV from `pos`
-        return _move_to_cast(cfg, title, chosen, pos, dur)
+        return _move_to_cast(
+            cfg, results, chosen, work_dir, title, pos, dur,
+            typ=typ, video_id=video_id, opts=opts, safety_sub_lang=safety_sub_lang,
+            cast_meta=cast_meta, expected_runtime_s=expected_runtime_s,
+        )  # fmt: skip
     return (pos, dur, signal == "next")
 
 
 def _move_to_cast(
-    cfg: Config, title: str, chosen: Stream, pos: float, dur: float
+    cfg: Config,
+    results: list[Stream],
+    chosen: Stream,
+    work_dir: str,
+    title: str,
+    pos: float,
+    dur: float,
+    *,
+    typ: str,
+    video_id: str,
+    opts: PlayOpts,
+    safety_sub_lang: str | None = None,
+    cast_meta: caster.CastMeta | None = None,
+    expected_runtime_s: float = 0.0,
 ) -> tuple[float, float, bool]:
-    """Hand the running mpv position over to a Chromecast (in-player Alt-C). Keeps the
-    local pos/dur if no device resolves. Never auto-advances (the user is switching)."""
+    """Hand the running mpv position over to a Chromecast (in-player Alt-C).
+
+    Goes through `cast_flow.run_cast` so cast_vet (video/container/audio) and Tier-2
+    remux/mirror apply — the local pick was ranked for the GPU, not the DMR. Never
+    auto-advances (the user is switching destination mid-play)."""
     try:
         device = _resolve_device(cfg, choose=True)
     except CastUnavailable as e:
         print(f"nstream: {e}", file=sys.stderr)
         return (pos, dur, False)
-    state.clear_cast_session()  # Alt-C bypasses run_cast, which normally does this
-    result = cast(cfg, title, chosen["url"], device=device, start=pos)
-    return (result.pos, result.dur, False)
+    # Full cast decision tree from the current position (not a raw catt cast of the URL).
+    cast_opts = replace(opts, cast=True, cast_choose=True)
+    try:
+        outcome = cast_flow.run_cast(
+            cfg, results, chosen,
+            device=device, title=title, typ=typ, video_id=video_id, work_dir=work_dir,
+            opts=cast_opts, start=pos, follow=True, next_label=None,
+            allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
+            expected_runtime_s=expected_runtime_s,
+        )  # fmt: skip
+    except cast_flow.CastStreamUnresolved:
+        print(
+            f"nstream: {ui.g().warn} nessuna sorgente castabile risolvibile ora — resto in locale",
+            file=sys.stderr,
+        )
+        return (pos, dur, False)
+    except cast_flow.CastVideoUnsupported as e:
+        print(
+            f"nstream: {ui.g().warn} video {e.codec.upper()} non decodificabile dal TV — "
+            "resto in locale",
+            file=sys.stderr,
+        )
+        return (pos, dur, False)
+    return (outcome.pos, outcome.dur, False)
 
 
 def _series_player(cfg: Config) -> series.PlayVideo:
@@ -446,14 +505,24 @@ def _pick_meta(items: list[tuple[str, Meta]], cfg: Config, opts: PlayOpts) -> in
         header = play_meta(cfg, meta, sel)
 
 
+def _meta_rows(cfg: Config, metas: list[Meta]) -> list[tuple[str, Meta]]:
+    """Label catalog rows with a watchlist star when the title is already saved."""
+    return [
+        (meta_label(m, watchlisted=state.is_watchlisted(cfg, m.get("id") or "")), m) for m in metas
+    ]
+
+
 def run_search(cfg: Config, query: str, opts: PlayOpts, typ: str | None = None) -> int:
     if opts.history:
         state.remember_search(cfg, query)
     metas = api.search(cfg, query, typ)
     if not metas:
-        print("nstream: nessun risultato", file=sys.stderr)
+        print(
+            "nstream: nessun risultato — prova un'altra query o Impostazioni → Fonti",
+            file=sys.stderr,
+        )
         return 1
-    return _pick_meta([(meta_label(m), m) for m in metas], cfg, opts)
+    return _pick_meta(_meta_rows(cfg, metas), cfg, opts)
 
 
 def run_watchlist(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
@@ -467,7 +536,7 @@ def run_watchlist(cfg: Config, opts: PlayOpts, typ: str | None = None) -> int:
     header: str | None = "Alt-W: aggiungi/rimuovi dalla watchlist"
     while True:
         chosen = fzf_key(
-            [(meta_label(m), m) for m in metas],
+            _meta_rows(cfg, metas),
             "watchlist> ",
             header=header,
             expect=("tab", "alt-c", "alt-w"),
@@ -519,12 +588,15 @@ def run_browse(
             metas = api.browse(cfg, cat, genre=genre, skip=skip)
         if not metas:
             if skip == 0:
-                print("nstream: catalogo vuoto", file=sys.stderr)
+                print(
+                    "nstream: catalogo vuoto — controlla rete o Impostazioni → Fonti",
+                    file=sys.stderr,
+                )
                 return 1
             # Past the last page after «altri…»: stay put isn't possible — leave.
             return 0
 
-        items: list[tuple[str, Meta | object]] = [(meta_label(m), m) for m in metas]
+        items: list[tuple[str, Meta | object]] = list(_meta_rows(cfg, metas))
         if len(metas) >= CATALOG_PAGE:
             items.append((f"{g.down}  altri…", _MORE))
 
@@ -583,7 +655,7 @@ def run_explain(cfg: Config, query: str, opts: PlayOpts | None = None) -> int:
     if not metas:
         print("nstream: nessun risultato", file=sys.stderr)
         return 1
-    meta = fzf([(meta_label(m), m) for m in metas], "titolo> ", preview=_meta_preview)
+    meta = fzf(_meta_rows(cfg, metas), "titolo> ", preview=_meta_preview)
     if meta is None:
         return 0
     typ = meta.get("type", "movie")
@@ -648,6 +720,9 @@ _BROWSE = "browse"
 _GENRE = "genre"
 _SECTION = "section"
 _SETTINGS = "settings"
+_CAST_LIVE = "cast_live"
+_MORE_CONTINUE = "more_continue"
+_HELP = "help"
 
 # Section type → fzf prompt (home itself uses "nstream> ").
 _SECTION_PROMPT = {"movie": "film> ", "series": "serie> "}
@@ -679,21 +754,108 @@ def run_section(cfg: Config, typ: str, opts: PlayOpts) -> int:
     return _home_menu(cfg, opts, typ=typ)
 
 
+def _cast_live_menu(cfg: Config) -> str | None:
+    """Submenu for the active cast session: status / pause / seek / volume / stop."""
+    session = state.cast_session_info()
+    if not session:
+        return "nessun cast attivo"
+    g = ui.glyphs(ui.active_caps())
+    device = session.get("device") or ""
+    items = [
+        (f"{g.tv}  Stato ricevitore", "status"),
+        (f"{g.tv}  Aggiorna posizione", "refresh"),
+        (f"{g.play}  Pausa", "pause"),
+        (f"{g.play}  Riprendi", "play"),
+        (f"{g.down}  Seek −30s", "seek-30"),
+        (f"{g.down}  Seek +30s", "seek+30"),
+        (f"{g.down}  Seek +5 min", "seek+300"),
+        (f"{g.audio}  Volume 35%", "vol35"),
+        (f"{g.audio}  Volume 50%", "vol50"),
+        (f"{g.audio}  Volume 70%", "vol70"),
+        (f"{g.fail}  Ferma cast", "stop"),
+    ]
+    header = state.cast_session_label(session) or "cast"
+    pick = fzf(items, "cast> ", header=header)
+    if pick is None:
+        return None
+    if pick == "status":
+        cast_control.refresh_session_from_status(cfg, device=device or None)
+        ok, msg = cast_control.cast_status(device=device or None)
+        ui.status(msg, kind="tv" if ok else "fail")
+        return msg
+    if pick == "refresh":
+        cast_control.refresh_session_from_status(cfg, device=device or None)
+        ok, msg = cast_control.cast_status(device=device or None)
+        ui.status(msg or "posizione aggiornata", kind="tv" if ok else "fail")
+        return msg
+    if pick in ("pause", "play"):
+        ok, msg = cast_control.media_control(pick, device=device or None)
+        ui.status(msg, kind="tv" if ok else "fail")
+        return msg
+    if pick.startswith("seek"):
+        # Relative seek: read current position then apply delta (bridge seek is absolute).
+        delta = int(pick.removeprefix("seek"))
+        st = caster.status(device) if device else {}
+        pos = float(st.get("position") or 0.0)
+        target = max(0.0, pos + delta)
+        ok, msg = cast_control.media_control("seek", value=target, device=device or None)
+        ui.status(msg, kind="tv" if ok else "fail")
+        return msg
+    if pick.startswith("vol"):
+        level = int(pick.removeprefix("vol"))
+        ok, msg = cast_control.set_cast_volume(level, device=device or None)
+        ui.status(msg, kind="audio" if ok else "fail")
+        return msg
+    if pick == "stop":
+        ok, msg = cast_control.stop_cast(cfg, device=device or None)
+        ui.status(msg, kind="tv" if ok else "fail")
+        return msg
+    return None
+
+
+def _home_help() -> str:
+    """Static keybinding help for the home menu header."""
+    return ui.key_hint(
+        "Tab: manuale",
+        "Alt-C: cast",
+        "Alt-W: watchlist",
+        "Ctrl-/: anteprima",
+        "ESC: indietro",
+    )
+
+
 def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
     """Shared loop behind run_home (typ None: mixed rows + sections + settings) and
     run_section (typ set: rows and catalogs pinned to one type)."""
     notice: str | None = None
+    show_all_continue = False
     while True:
+        state.expire_cast_session()
         recent = state.resumable(cfg, typ=typ) if opts.history else []
+        cap = cfg.home_continue_max
+        truncated = False
+        if not show_all_continue and cap > 0 and len(recent) > cap:
+            recent_view = recent[:cap]
+            truncated = True
+        else:
+            recent_view = recent
         g = ui.glyphs(ui.active_caps())
         pal = ui.palette(ui.active_caps())
-        items: list[tuple[str, object]] = [
-            (history_label(e, next_episode=state.is_watched(e)), e) for e in recent
-        ]
+        items: list[tuple[str, object]] = []
+        # Live cast session first — discoverable stop/status without --json.
+        # Shown on home and typed sections (cast is global, not type-scoped).
+        sess = state.cast_session_info()
+        label = state.cast_session_label(sess)
+        if label:
+            items.append((f"{g.tv}  {label}", (_CAST_LIVE, "")))
+        items += [(history_label(e, next_episode=state.is_watched(e)), e) for e in recent_view]
+        if truncated:
+            n_more = len(recent) - len(recent_view)
+            items.append((f"{g.down}  …altri {n_more} in continua", (_MORE_CONTINUE, "")))
         # Dim section labels (value None) group the menu; the loop skips them if focused.
         # fzf still requires every row selectable — a None value is ignored after pick.
         _SEP = None  # sentinel: group headers, never an action
-        if recent:
+        if items:
             items.append((ui.ansi("── azioni ──", pal.dim), _SEP))
         items.append((f"{g.search}  Cerca…", (_SEARCH, "")))
         if state.recent_searches(cfg):
@@ -706,6 +868,7 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
                 (f"{g.series}  Serie TV", (_SECTION, "series")),
                 (ui.ansi("── sistema ──", pal.dim), _SEP),
                 (f"{g.gear}  Impostazioni", (_SETTINGS, "")),
+                (f"{g.play}  Aiuto tasti", (_HELP, "")),
             ]
         else:  # section: Cinemeta catalogs + genre + any user-addon catalogs
             # _BROWSE values are catalog *ids* (top/year/imdbRating/…), not --browse keywords.
@@ -720,8 +883,8 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
                 items.append((ui.ansi("── cataloghi addon ──", pal.dim), _SEP))
                 items += [(f"{g.folder}  {label}", (_BROWSE, cat_id)) for cat_id, label in extras]
 
-        # The Tab hint only applies to the continue-watching rows.
-        header = notice or (_pick_hint(opts) if recent else None)
+        # Prefer an explicit notice; else key hints (always useful on home).
+        header = notice or _home_help()
         prompt = _SECTION_PROMPT.get(typ or "", "nstream> ")
         chosen = fzf_key(items, prompt, header=header, preview=_home_preview)
         notice = None
@@ -734,7 +897,13 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
             notice = play_history(cfg, typecast("HistoryEntry", value), _apply_key(opts, key))
             continue
         kind, value = value
-        if kind == _SEARCH:
+        if kind == _CAST_LIVE:
+            notice = _cast_live_menu(cfg)
+        elif kind == _MORE_CONTINUE:
+            show_all_continue = True
+        elif kind == _HELP:
+            notice = _home_help()
+        elif kind == _SEARCH:
             query = _ask_query()
             if query is None:
                 continue  # ESC on search → stay in home (not exit the whole TUI)
@@ -821,6 +990,18 @@ def _emit_forget_dead(dropped: int, message: str) -> None:
     sys.stdout.flush()
 
 
+def _emit_forget_breakers(dropped: int, message: str) -> None:
+    """`--json --forget-breakers`: clear per-addon circuit breakers (ADR 0027)."""
+    payload = {
+        "ok": True,
+        "action": "forget_breakers",
+        "removed_breakers": dropped,
+        "message": message,
+    }
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
 def _ensure_config(*, headless_mode: bool = False) -> Config:
     """Load config, running first-run onboarding if it's missing. Headless (`--json`)
     never onboards: the wizard is an interactive fzf/getpass flow, which would hang an
@@ -864,7 +1045,19 @@ def main() -> int:
 
     _init_theme(cfg)
 
+    # Headless-only flags without --json used to be silent no-ops (home / wrong play).
+    misuse = cli_args.headless_only_misuse(args)
+    if misuse:
+        if args.json:  # unreachable today; keep the JSON contract if that changes
+            _json_error("usage", misuse)
+        print(f"nstream: {misuse}", file=sys.stderr)
+        return 2
+
     if args.settings:
+        if args.json:
+            # Settings is an interactive fzf flow — never hang an agent on a TTY prompt.
+            _json_error("usage", "--settings è interattivo e incompatibile con --json")
+            return 2
         settings.run_settings(cfg)
         return 0
 
@@ -877,6 +1070,15 @@ def main() -> int:
         msg = f"elenco sorgenti rimosse svuotato ({dropped} voci)"
         if args.json:
             _emit_forget_dead(dropped, msg)
+        else:
+            print(f"nstream: {msg}")
+        return 0
+
+    if getattr(args, "forget_breakers", False):
+        dropped = state.forget_breakers()
+        msg = f"circuit breaker addon azzerati ({dropped} voci)"
+        if args.json:
+            _emit_forget_breakers(dropped, msg)
         else:
             print(f"nstream: {msg}")
         return 0

@@ -25,7 +25,7 @@ class PlayOpts:
     history: bool  # record/resume watch history
     autoplay: bool  # offer the next-episode overlay for series
     cast_choose: bool = False  # force the device picker (explicit "cast this" action)
-    audio_lang: str | None = None  # force this audio/dub language (headless --audio-lang)
+    audio_lang: str | None = None  # force this audio/dub language (--audio-lang; TUI + headless)
     # Mirror backend, tri-state (ADR 0021): None = the config decides (cli folds
     # cast_mode + the ADR-0015 auto-switch applies); True = forced (--mirror);
     # False = suppressed for this invocation (--no-mirror: no auto-switch, and an
@@ -151,6 +151,14 @@ class Config:
     min_seeders: int = 3  # non-cached torrents below this are near-dead (0 = off)
     dedup: bool = True  # collapse the same release across trackers
     max_streams: int = 20  # cap the manual menu (0 = no cap)
+    # Per-title quality preference for the interactive picker (not a hard HW cap —
+    # that remains max_resolution). None = ask every title (fzf); 0 = Auto without
+    # asking; N = hard exact resolution (same meaning as --quality N). Headless still
+    # only filters when --quality is passed.
+    default_quality: int | None = None
+    # Cap continue-watching rows on the home menu before a "…altri" expand is needed.
+    # 0 = no cap (show all resumable entries).
+    home_continue_max: int = 12
     mpv_args: list[str] = field(default_factory=list)
     # TUI appearance. nerd_font: "auto" (env opt-in) | "on" | "off"; posters: render
     # poster thumbnails in the fzf preview pane (needs chafa); image_mode: "auto" |
@@ -243,6 +251,7 @@ INT_BOUNDS: dict[str, tuple[int, int]] = {
     "max_streams": (0, 500),
     "engine_port": (1024, 65535),
     "engine_cache_mb": (32, 4096),
+    "home_continue_max": (0, 200),
 }
 
 
@@ -282,6 +291,36 @@ def _bounded_int(raw: dict, key: str, default: int) -> int:
         return default
 
 
+def _optional_quality(raw: dict) -> int | None:
+    """Tri-state quality default: missing/null → None (ask each title); 0 → Auto;
+    positive N → exact resolution. Invalid values fall back to None."""
+    if "default_quality" not in raw or raw["default_quality"] is None:
+        return None
+    try:
+        val = int(raw["default_quality"])
+    except (TypeError, ValueError):
+        return None
+    if val < 0:
+        return None
+    # 0 = Auto; upper bound matches max_resolution (8K).
+    return max(0, min(val, 4320))
+
+
+def _ensure_private(path: Path) -> None:
+    """Tighten config/state files that hold secrets to 0600 (best-effort).
+
+    `save()` always writes 0600 via atomic_write, but a hand-edited or copied
+    config may land as 0644 — tighten on load so the debrid token is not
+    world-readable after the first successful nstream start.
+    """
+    try:
+        mode = path.stat().st_mode & 0o777
+        if mode & 0o077:
+            path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def load() -> Config:
     path = config_path()
     try:
@@ -292,6 +331,7 @@ def load() -> Config:
         raise ConfigError(f"config non valido ({path}): {e}") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"config non valido ({path}): atteso un oggetto JSON")
+    _ensure_private(path)
 
     # Token-less default so a fresh config still streams locally; a debrid segment is
     # added to torrentio_base only when the user opts into a paid provider.
@@ -339,6 +379,8 @@ def load() -> Config:
         min_seeders=_bounded_int(raw, "min_seeders", Config.min_seeders),
         dedup=bool(raw.get("dedup", Config.dedup)),
         max_streams=_bounded_int(raw, "max_streams", Config.max_streams),
+        default_quality=_optional_quality(raw),
+        home_continue_max=_bounded_int(raw, "home_continue_max", Config.home_continue_max),
         mpv_args=list(raw.get("mpv_args", [])),
         nerd_font=_enum_str(raw, "nerd_font", Config.nerd_font),
         posters=bool(raw.get("posters", Config.posters)),

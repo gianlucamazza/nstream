@@ -3,6 +3,8 @@
 - **Status:** Proposed
 - **Date:** 2026-07-14
 - **Deciders:** project maintainer
+- **Blocked on:** external CAF receiver build and registration — large dependency outside
+  nstream. Remains design-only until that exists. See [docs/roadmap.md](../roadmap.md).
 
 ## Context
 

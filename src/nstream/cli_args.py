@@ -7,6 +7,42 @@ import argparse
 from . import __version__
 from .api import CAT_MAP
 
+# Flags that only the headless path implements. Using any without `--json` is a usage
+# error (no silent no-op into the TUI home). `--audio-lang` is intentionally *not*
+# here: it holds on TUI and headless alike.
+_HEADLESS_ONLY: tuple[tuple[str, str], ...] = (
+    ("year", "--year"),
+    ("season", "--season"),
+    ("episode", "--episode"),
+    ("device", "--device"),
+    ("probe", "--probe"),
+    ("stop", "--stop"),
+    ("status", "--status"),
+    ("pause", "--pause"),
+    ("resume", "--resume"),
+    ("seek", "--seek"),
+    ("volume", "--volume"),
+    ("follow", "--follow/--no-follow"),
+)
+
+
+def headless_only_misuse(args: argparse.Namespace) -> str | None:
+    """If headless-only flags appear without `--json`, return a usage message; else None."""
+    if getattr(args, "json", False):
+        return None
+    used: list[str] = []
+    for attr, label in _HEADLESS_ONLY:
+        val = getattr(args, attr, None)
+        if attr in ("season", "episode", "seek", "volume", "follow"):
+            if val is not None:
+                used.append(label)
+        elif val:
+            used.append(label)
+    if not used:
+        return None
+    flags = ", ".join(used)
+    return f"{flags} richiede --json"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -95,22 +131,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="svuota l'elenco delle sorgenti marcate come rimosse (non riproduce)",
     )
     parser.add_argument(
+        "--forget-breakers",
+        action="store_true",
+        help="svuota i circuit breaker per-addon (ADR 0027; non riproduce)",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="modalità headless non-interattiva: niente fzf, un oggetto JSON su stdout",
     )
-    parser.add_argument("--year", metavar="YYYY", help="disambigua il titolo per anno (--json)")
     parser.add_argument(
-        "--season", type=int, metavar="N", help="stagione serie (--json, default 1)"
+        "--year",
+        metavar="YYYY",
+        help="disambigua il titolo per anno (richiede --json)",
     )
     parser.add_argument(
-        "--episode", type=int, metavar="M", help="episodio serie (--json, default 1)"
+        "--season",
+        type=int,
+        metavar="N",
+        help="stagione serie (richiede --json, default 1)",
     )
     parser.add_argument(
-        "--device", metavar="NAME", help="Chromecast di destinazione (--json, evita il picker)"
+        "--episode",
+        type=int,
+        metavar="M",
+        help="episodio serie (richiede --json, default 1)",
     )
     parser.add_argument(
-        "--audio-lang", metavar="CODE", help="forza la lingua audio/dub (es. eng, ita) (--json)"
+        "--device",
+        metavar="NAME",
+        help="Chromecast di destinazione (richiede --json, evita il picker)",
+    )
+    parser.add_argument(
+        "--audio-lang",
+        metavar="CODE",
+        help="forza la lingua audio/dub (es. eng, ita); fallisce se assente",
     )
     parser.add_argument(
         "--quality",
@@ -123,36 +178,46 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--probe",
         action="store_true",
-        help="--json: elenca audio/sottotitoli disponibili per il titolo, non riproduce",
+        help="elenca audio/sottotitoli disponibili (richiede --json; non riproduce)",
     )
     parser.add_argument(
-        "--stop", action="store_true", help="--json: ferma il cast in corso, non riproduce"
+        "--stop",
+        action="store_true",
+        help="ferma il cast in corso (richiede --json)",
     )
     parser.add_argument(
-        "--status", action="store_true", help="--json: stato del cast (player_state, titolo…)"
+        "--status",
+        action="store_true",
+        help="stato del cast (player_state, titolo…; richiede --json)",
     )
     parser.add_argument(
         "--volume",
         type=int,
         metavar="N",
-        help="--json: volume del Chromecast (0-100); senza titolo agisce sul cast in corso",
+        help="volume Chromecast 0-100 (richiede --json; senza titolo = cast in corso)",
     )
     parser.add_argument(
-        "--pause", action="store_true", help="--json: mette in pausa il cast in corso"
+        "--pause",
+        action="store_true",
+        help="mette in pausa il cast in corso (richiede --json)",
     )
-    parser.add_argument("--resume", action="store_true", help="--json: riprende il cast in pausa")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="riprende il cast in pausa (richiede --json)",
+    )
     parser.add_argument(
         "--seek",
         type=float,
         metavar="SEC",
-        help="--json: salta alla posizione SEC (secondi) del cast in corso",
+        help="salta alla posizione SEC del cast in corso (richiede --json)",
     )
     parser.add_argument(
         "--follow",
         dest="follow",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="--json+cast: segui fino a fine (resume) o ritorna subito (--no-follow, default)",
+        help="con --json+cast: segui fino a fine o ritorna subito (--no-follow, default)",
     )
     parser.add_argument(
         "--debug", action="store_true", help="log verboso su stderr (oltre al file di log)"

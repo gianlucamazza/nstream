@@ -1,132 +1,106 @@
-# ADR 0027 — Circuit breaker per addon sulle fonti stream
+# 0027. Per-addon circuit breaker on stream sources
 
-- Stato: proposed
-- Data: 2026-08-01
-- Contesto: ADR 0024 (scoperta multi-sorgente), ADR 0025 (classificazione sorgenti morte),
-  [[ws-anti-theater]], [[ws-measure-before-optimizing]]
+- **Status:** Accepted
+- **Date:** 2026-08-01
+- **Deciders:** project maintainer
 
-## Contesto
+## Context
 
-ADR 0025 ricorda le **sorgenti** morte (una release che risponde 404/410) in una negative
-cache persistente. Non esiste l'equivalente un livello sopra: un **addon** irraggiungibile
-viene interrogato di nuovo a ogni gather di ogni esecuzione.
+ADR 0025 remembers **dead sources** (a release that answers 404/410) in a persistent negative
+cache. There is no equivalent one level up: an **unreachable addon** is queried again on every
+gather of every run.
 
-Il 2026-08-01 l'origine di Torrentio è caduta (Cloudflare `HTTP 522`, "connection timed out"
-verso l'origine). Misura con il client di nstream, non con curl:
+Field measure, 2026-08-01 (nstream’s own HTTP client, not curl), Torrentio origin down
+(Cloudflare HTTP 522):
 
-| fonte                               | latenza   | esito                           |
-| ----------------------------------- | --------- | ------------------------------- |
-| comet.elfhosted.com                 | 0.1s      | ok                              |
-| torrentsdb.com                      | 0.1s      | ok                              |
-| tmdb-addon / anime-kitsu / catalogs | 0.0s      | ok                              |
-| **torrentio.strem.fun (built-in)**  | **84.1s** | `NetworkError` dopo 4 tentativi |
+| source | latency | outcome |
+| ------ | ------- | ------- |
+| comet.elfhosted.com | 0.1s | ok |
+| torrentsdb.com | 0.1s | ok |
+| other catalogs | ~0s | ok |
+| **torrentio.strem.fun (built-in)** | **84.1s** | `NetworkError` after 4 attempts |
 
-Costo end-to-end di una singola `nstream --json --explain`: **1m49s**, con la risposta
-completa già disponibile da Comet in meno di due secondi. `_GATHER_BUDGET = 25.0`
-(`src/nstream/api.py:46`) limita quanto si _attende_ una fonte bloccata, ma non evita di
-ripagare quell'attesa a ogni gather e a ogni invocazione — e i gather per run sono più d'uno
-(ricerca, catalogo, stream).
+End-to-end `nstream --json --explain`: **~1m49s**, while Comet already had a complete answer
+in under two seconds. `api` gather budget (`_GATHER_BUDGET`) caps how long a blocked source
+is waited on, but does not prevent repaying that wait on every gather and every process
+(search, catalog, streams — multiple gathers per run).
 
-### Cosa NON è il problema
+### What this is not
 
-La politica di retry è già corretta e non va toccata: `net.http_get_json`
-(`src/nstream/net.py:154`) fa backoff esponenziale **con jitter** (`util.backoff`), onora
-`Retry-After` sui `429` e non ritenta i `4xx`. Il difetto è un altro, ed è di memoria: **ogni
-esecuzione riparte convinta che la fonte sia sana**, perché ogni run CLI è un processo nuovo.
+Retry policy is already correct and must not be weakened: `net.http_get_json` uses exponential
+backoff with jitter (`util.backoff`), honours `Retry-After` on 429, and does not retry most
+4xx. The defect is **memory**: every CLI process starts assuming every addon is healthy.
 
-### Il vincolo che decide la forma della soluzione
+### Constraint that shapes the solution
 
-`TIMEOUT = 20.0` con `retries=3`. Cloudflare impiega ~60s a emettere il `522` (misurato:
-59.5s). **nstream quel codice non lo riceve mai**: il client scade prima, quattro volte di
-seguito. L'aritmetica della misura lo conferma — 84.1s ÷ 4 ≈ 21s per tentativo (timeout +
-backoff); quattro `522` effettivamente ricevuti sarebbero costati ~240s.
+Client `TIMEOUT` with retries means Cloudflare’s ~60s 522 is often **never observed** —
+timeouts win first. Measured 84.1s ÷ 4 ≈ 21s per attempt. A breaker driven only by HTTP status
+codes would be dead code on the incident that motivated this ADR. The available signal is
+**repeated timeout / retryable failure**, not a clean status.
 
-Conseguenza: un'apertura del breaker guidata dal **codice di stato** sarebbe codice morto
-proprio sul caso che ha motivato questo ADR. Il segnale disponibile è il **timeout ripetuto**,
-non la risposta.
+## Decision
 
-## Decisione
+### 1. One breaker per addon, not global
 
-### 1. Un breaker per addon, non uno globale
+State keyed by addon base URL (built-in Torrentio included), persisted under `state/`. A
+shared global breaker would block live Comet when Torrentio is dead (resource
+differentiation).
 
-Stato per base-URL dell'addon (Torrentio built-in incluso), persistito in `state/`. Un solo
-breaker condiviso violerebbe la "resource differentiation" del pattern: Torrentio morto
-sbarrerebbe Comet vivo.
+### 2. Three-state machine
 
-### 2. Macchina a tre stati
+| state | behaviour |
+| ----- | --------- |
+| **Closed** | normal requests; failure counter with time window, self-resets |
+| **Open** | source skipped **without network**; wait timer active |
+| **Half-Open** | single probe request: success → Closed; failure → Open |
 
-| stato         | comportamento                                                                          |
-| ------------- | -------------------------------------------------------------------------------------- |
-| **Closed**    | richieste normali; contatore fallimenti a finestra temporale, si azzera da solo        |
-| **Open**      | la fonte è saltata **senza chiamata di rete**; timer di attesa attivo                  |
-| **Half-Open** | una sola richiesta di prova: successo → Closed e contatore azzerato; fallimento → Open |
+### 3. Trigger is repeated failure, not status alone
 
-### 3. Il trigger è il fallimento ripetuto, non il codice di stato
+Open after a threshold of consecutive **retryable** failures, timeouts included. Accelerated
+open on status remains only where status arrives inside the timeout (`503` / long
+`Retry-After`), as a secondary path.
 
-Apre il breaker una soglia di fallimenti consecutivi **di qualunque classe ritentabile**,
-timeout compresi — che è l'unico segnale che questa caduta produce davvero. L'apertura
-accelerata su codice resta prevista solo dove il codice arriva davvero entro il timeout
-(`503`/`429` con `Retry-After` che eccede la finestra), come caso aggiuntivo e non come
-meccanismo principale.
+### 4. Half-Open probe is a real stream query
 
-Un timeout pieno vale più di un errore veloce: un tentativo che consuma l'intero `TIMEOUT`
-conta come fallimento **e** come costo, quindi la soglia si esprime in tentativi consecutivi
-falliti, non in tempo trascorso.
+Not a `manifest.json` fetch (CDN cache can look healthy while origin is dead). Cost of a
+wrong probe: one `TIMEOUT` per window, not per gather per run.
 
-### 4. La prova di Half-Open è l'operazione reale
+### 5. Timeouts from stream-query latency percentiles
 
-La prova è una vera query stream verso quell'addon, non un `manifest.json`. Un manifest può
-essere servito dalla cache di un CDN mentre l'origine è a terra: riammetterebbe la fonte su
-un'evidenza che non riguarda l'operazione che ci serve. Il pattern è esplicito — in Half-Open
-si lascia passare un numero limitato di **richieste dell'applicazione**, non un surrogato.
+Derive per-request timeout from observed **stream** query latency, not manifest latency
+(healthy manifests ~0.1s; Comet streams ~1.3–2.2s). Too long blocks the thread before the
+breaker can trip; too short marks a slow live source dead.
 
-Il costo della prova sbagliata è un `TIMEOUT` singolo, pagato una volta per finestra invece
-che a ogni gather di ogni run.
+### 6. Visibility and manual override
 
-### 5. Timeout dai percentili della stessa operazione
+Log every transition; `--explain` lists Open addons and since when. Silent skips would hide
+why a title is missing. Manual reset flag (addon-level analogue of `--forget-dead`) returns
+all breakers to Closed.
 
-Il timeout per richiesta va derivato dalla latenza osservata **delle query stream**, non dei
-manifest: i manifest sani stanno a 0.1s, ma una query stream a Comet misura 1.3–2.2s. Il
-valore va scelto su quest'ultima distribuzione — con un margine, non sul massimo osservato.
-Un timeout troppo lungo blocca il thread _prima_ che il breaker possa dichiarare il
-fallimento; troppo corto trasforma una fonte lenta ma viva in una fonte "morta".
+## Rationale
 
-### 6. Lo stato è visibile, e l'override è manuale
+Retry expects eventual success; a circuit breaker **prevents** an operation that will likely
+fail. Half-Open is what distinguishes this from a pure TTL skip: without a real re-admission
+probe, reopen is either too early (repay the wait) or too late (blind to recovery).
 
-Ogni transizione emette un evento a log; `--explain` riporta gli addon in Open e da quando.
-Una fonte saltata in silenzio mentirebbe all'utente sul perché un titolo non compare —
-[[ws-anti-theater]]. Un flag di reset manuale (l'analogo per addon di `--forget-dead`)
-riporta tutti i breaker a Closed.
+## Consequences
 
-## Razionale
+- With a source Open, per-run latency returns to seconds; worst case no longer scales with
+  the number of dead addons.
+- Accepted risk: a slow but live source may open the breaker — mitigated by consecutive
+  failure threshold, visibility, and manual override.
+- New persisted state under `state/`; atomic write + best-effort (like ADR 0025) — a race
+  loses at most a counter, never blocks playback.
+- First access after timer expiry pays one full timeout if the source is still down.
+- ADR 0025 remains valid and orthogonal (per-source vs per-addon).
 
-Il pattern documentato distingue nettamente i due meccanismi: il Retry riprova _aspettandosi_
-di riuscire, il Circuit Breaker **impedisce** un'operazione che probabilmente fallirà. Qui
-serve il secondo: nessun numero di tentativi risolve un'origine spenta.
+**Implementation:** `state/breaker.py` (Closed / Open / Half-Open), wired through
+`api._gather` with per-addon `keys`; streams / catalog / search / subtitles pass bases.
+`--forget-breakers` clears state; `--explain` lists Open addons.
 
-Lo stato Half-Open è ciò che distingue questa decisione dallo "skip a TTL" scartato: senza
-prova di riammissione, o si riapre troppo presto (e si ripaga l'attesa) o troppo tardi (e si
-resta ciechi su una fonte tornata viva).
-
-## Conseguenze
-
-- Con una fonte in Open, la latenza per run torna nell'ordine dei secondi; il caso peggiore
-  smette di essere proporzionale al numero di fonti morte.
-- Rischio accettato: una fonte lenta ma funzionante può finire in Open e sparire dai
-  risultati. Mitigazioni: soglia a fallimenti consecutivi, stato visibile, override manuale.
-- Lo stato persistito è una nuova voce in `state/`. Più processi `nstream` possono girare in
-  parallelo: la scrittura deve essere atomica (write+rename) e best-effort come ADR 0025 —
-  una corsa perde al più un conteggio, non blocca mai la riproduzione.
-- Il primo accesso dopo la scadenza del timer paga un `TIMEOUT` se la fonte è ancora giù: è
-  il prezzo della prova reale scelto al punto 4, e va documentato nell'output.
-- ADR 0025 resta valido e ortogonale: sorgenti morte e addon morti sono due livelli diversi.
-
-## Riferimenti
+## References
 
 - Azure Architecture Center — Circuit Breaker pattern:
-  `https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker`
-  (stati Closed/Open/Half-Open; "resource differentiation"; "inappropriate time-outs on
-  external services"; Half-Open come richieste reali dell'applicazione)
-- `src/nstream/net.py:26` (`TIMEOUT`), `:154` (`http_get_json`), `src/nstream/util.py:36`
-  (`backoff` con jitter), `src/nstream/api.py:46` (`_GATHER_BUDGET`), `:94` (`_gather`)
+  <https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker>
+- `net.http_get_json`, `util.backoff`, `api` gather budget / `_gather`
 - ADR 0024, ADR 0025

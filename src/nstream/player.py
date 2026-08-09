@@ -203,13 +203,20 @@ def _stream_cache_defaults(cfg: Config) -> list[str]:
     return flags
 
 
-def _lang_defaults(cfg: Config) -> list[str]:
+def _lang_defaults(cfg: Config, *, audio_lang: str | None = None) -> list[str]:
     """Prefer the user's languages for audio/subtitle track selection, without
     overriding any alang/slang the user already set. `--subs-with-matching-audio=no`
-    means: don't force subtitles on when the audio is already in your language."""
+    means: don't force subtitles on when the audio is already in your language.
+
+    `audio_lang` (per-invocation `--audio-lang`) is put first in `--alang` so mpv picks
+    that dub when the container has multiple tracks."""
     flags = []
-    if cfg.audio_langs and not _user_overrides(cfg, "alang"):
-        flags.append("--alang=" + ",".join(cfg.audio_langs))
+    if not _user_overrides(cfg, "alang"):
+        if audio_lang:
+            rest = [c for c in cfg.audio_langs if c != audio_lang]
+            flags.append("--alang=" + ",".join([audio_lang, *rest]))
+        elif cfg.audio_langs:
+            flags.append("--alang=" + ",".join(cfg.audio_langs))
     if cfg.subtitle_langs and not _user_overrides(cfg, "slang"):
         flags.append("--slang=" + ",".join(cfg.subtitle_langs))
         if not _user_overrides(cfg, "subs-with-matching-audio"):
@@ -229,6 +236,7 @@ def play(
     next_label: str | None = None,
     cast_enabled: bool = False,
     work_dir: str | None = None,
+    audio_lang: str | None = None,
 ) -> tuple[float, float, str]:
     """Play `url` in mpv. Returns (position, duration, signal) where `signal` is
     "next" when the next-episode overlay asked to continue, "cast" when the user hit
@@ -258,7 +266,7 @@ def play(
             *_quiet_defaults(cfg),
             *_display_tags_defaults(cfg),
             *_hwdec_defaults(cfg),
-            *_lang_defaults(cfg),
+            *_lang_defaults(cfg, audio_lang=audio_lang),
             *_stream_cache_defaults(cfg),
             *cfg.mpv_args,
         ]

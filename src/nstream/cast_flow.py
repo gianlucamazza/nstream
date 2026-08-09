@@ -255,9 +255,11 @@ def run_cast(
         elif auto_mirror:
             size = f" (~{info.size_gb:.0f} GB)" if info.size_gb else ""
             notice = (
-                f"remux 4K troppo pesante{size} → mirror 1080p (avvio immediato, senza download)"
+                f"remux troppo pesante{size} → mirror 1080p SDR "
+                f"(soglia {cfg.cast_mirror_over_remux_gb} GB; avvio immediato)"
             )
             print(f"nstream: {notice}", file=sys.stderr)
+            ui.status(notice, kind="tv")
         delivery = mirror.cast_via_mirror(
             cfg, title, chosen["url"],
             device=device, start=start, sub_paths=sub_paths, follow=follow,

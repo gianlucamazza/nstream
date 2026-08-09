@@ -165,6 +165,13 @@ def test_lang_defaults_injected(monkeypatch):
     assert "--subs-with-matching-audio=no" in flags
 
 
+def test_lang_defaults_forced_audio_lang_first(monkeypatch):
+    monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
+    cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
+    flags = player._lang_defaults(cfg, audio_lang="eng")
+    assert "--alang=eng,ita" in flags
+
+
 def test_lang_defaults_not_when_user_set_in_mpv_args(monkeypatch):
     monkeypatch.setattr(player, "_mpv_conf_has", lambda opt: False)
     cfg = Config(torrentio_base="tb", mpv_args=["--alang=fre"])

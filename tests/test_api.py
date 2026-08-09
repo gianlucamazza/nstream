@@ -80,6 +80,92 @@ def test_streams_stuck_addon_dropped_at_deadline(monkeypatch):
         release.set()  # unblock the abandoned worker so the suite exits promptly
 
 
+def test_gather_progress_on_tty(monkeypatch):
+    """Multi-source gather on a TTY surfaces progressive fonti lines (not one frozen wait)."""
+    from nstream import ui as ui_mod
+
+    calls: list[str] = []
+
+    class _Stderr:
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(api.sys, "stderr", _Stderr())
+    # _gather imports ui lazily; patch the real ui module it binds.
+    monkeypatch.setattr(ui_mod, "status", lambda msg, *, kind="info": calls.append(f"status:{msg}"))
+    monkeypatch.setattr(ui_mod, "progress", lambda msg: calls.append(f"progress:{msg}"))
+    monkeypatch.setattr(ui_mod, "progress_done", lambda msg="": calls.append(f"done:{msg}"))
+
+    tasks = [lambda: [{"x": 1}], lambda: [{"y": 2}]]
+    out = api._gather(tasks, labels=["Alpha", "Beta"])
+    assert len(out) == 2
+    assert any(c.startswith("status:interrogo 2") for c in calls)
+    assert any("fonti 1/2" in c and "Alpha" in c for c in calls)
+    assert any("fonti 2/2" in c and "Beta" in c for c in calls)
+    assert any(c.startswith("done:fonti:") for c in calls)
+
+
+def test_streams_pass_addon_labels_to_gather(monkeypatch):
+    """streams() wires addon names + bases into _gather (progress + breaker keys)."""
+    a = _addon("Comet", "http://c", "stream")
+    b = _addon("MediaFusion", "http://m", "stream")
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a, b])
+    monkeypatch.setattr(api, "http_get_json", lambda url, **k: {"streams": [{"url": url[-8:]}]})
+    seen = {}
+
+    def capture(tasks, *, labels=None, keys=None):
+        seen["labels"] = list(labels or [])
+        seen["keys"] = list(keys or [])
+        return [{"url": "u1"}]
+
+    monkeypatch.setattr(api, "_gather", capture)
+    api.streams(CFG, "movie", "tt1")
+    assert seen["labels"] == ["Comet", "MediaFusion"]
+    assert seen["keys"] == ["http://c", "http://m"]
+
+
+def test_gather_skips_open_breaker(monkeypatch, tmp_path):
+    """Open breaker → no network for that key; healthy sources still return."""
+    from nstream.state import breaker as brk
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    brk.record_failure("http://dead")
+    brk.record_failure("http://dead")
+    brk.record_failure("http://dead")  # → Open
+    assert brk.allow("http://dead") is False
+
+    called: list[str] = []
+
+    def dead():
+        called.append("dead")
+        return [{"url": "nope"}]
+
+    def live():
+        called.append("live")
+        return [{"url": "ok"}]
+
+    out = api._gather(
+        [dead, live],
+        labels=["Dead", "Live"],
+        keys=["http://dead", "http://live"],
+    )
+    assert called == ["live"]
+    assert [s["url"] for s in out] == ["ok"]
+
+
+def test_gather_records_network_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    from nstream.state import breaker as brk
+
+    def boom():
+        raise api.NetworkError("timeout")
+
+    out = api._gather([boom], labels=["X"], keys=["http://x"])
+    assert out == []
+    rec = brk._read().get("http://x")
+    assert rec and rec.get("fails") == 1
+
+
 def test_streams_skips_addon_not_serving_type(monkeypatch):
     a = _addon("A", "http://a", "stream", types=("series",))  # only series
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [a])

@@ -1,113 +1,89 @@
-# ADR 0026 — Metadati stream: i campi strutturati del protocollo prima del testo libero
+# 0026. Stream metadata: protocol structured fields before free text
 
-- Stato: accepted
-- Data: 2026-08-01
-- Contesto: ADR 0024 (scoperta multi-sorgente), `bp-provider-neutral-adapter-design`,
-  [[ws-anti-theater]]
+- **Status:** Accepted
+- **Date:** 2026-08-01
+- **Deciders:** project maintainer
 
-## Contesto
+## Context
 
-`quality._text()` (`src/nstream/quality.py:66`) costruisce l'unica stringa da cui si estrae
-quasi tutto — risoluzione, codec, HDR/DV, dimensione, lingue, sorgente, audio, seeder — come
-`name + "\n" + title`. Ogni parser di `_parse_stream_uncached` legge da lì.
+`quality._text` builds the free-text corpus from which almost every heuristic is extracted —
+resolution, codec, HDR/DV, size, languages, source, audio, seeders. Historically that corpus
+was effectively `name + title`.
 
-Il protocollo Stremio dichiara `title` **deprecato**:
+The Stremio protocol marks `title` **deprecated** in favour of `stream.description`
+(“previously `stream.title`”). Comet completed the migration: measured on 35 rows for
+`tt27722375`, `description` was present 35/35 and `title` 0/35. nstream therefore read the
+deprecated field and ignored the current one. On a real `[RD⚡] Comet 1080p` row:
 
-> `title` — "warning: this will soon be deprecated in favor of `stream.description`"
-> `description` — "previously `stream.title`"
+| domain field | value in payload | parsed before this ADR |
+| ------------ | ---------------- | ---------------------- |
+| `release_name` | `Between The Temples (2024) [Bluray 1080p][Esp]…mkv` | `''` |
+| `size_gb` | `videoSize: 9366675221` | `0.0` |
+| `source` | BluRay markers in description/filename | `''` |
+| `languages` | Spanish flag / `[Esp]` | empty |
+| `audio` / `codec` | from filename | empty |
 
-Comet ha già completato la migrazione: su 35 righe di `tt27722375`, `description` è presente
-35/35 e `title` 0/35. nstream legge quindi il campo deprecato e ignora quello corrente.
-Misurato sulla riga reale `[RD⚡] Comet 1080p`:
+Field observation, not hypothesis: with `audio_langs=['ita','eng']`, selection picked a
+Spanish Blu-ray because the language filter could not see the language — a silent failure.
+Additionally `_title_matches` with empty `release_name` grants benefit of the doubt, so the
+wrong-title guard was off.
 
-| campo dominio  | valore nel payload                                   | parsato oggi  |
-| -------------- | ---------------------------------------------------- | ------------- |
-| `release_name` | `Between The Temples (2024) [Bluray 1080p][Esp]…mkv` | `''`          |
-| `size_gb`      | `videoSize: 9366675221`                              | `0.0`         |
-| `source`       | `⭐ BluRay`                                          | `''`          |
-| `languages`    | `🇪🇸` nella description, `[Esp]` nel filename         | `frozenset()` |
-| `audio/codec`  | dal filename                                         | `''` / `''`   |
+Pre-existing inconsistency: `api._dedup_by_release` collapses on `behaviorHints.filename`,
+while `quality` dedup used `release_name` from free text — two keys for one notion.
 
-Conseguenza osservata in campo, non ipotetica: con `audio_langs=['ita','eng']` configurato, la
-selezione ha scelto un Blu-ray spagnolo perché il filtro lingua non poteva vederne la lingua.
-Un filtro che non può fallire rumorosamente ha fallito in silenzio — [[ws-anti-theater]].
-In più `_title_matches('', …)` concede il beneficio del dubbio (`quality.py:612`), quindi con
-`release_name` vuoto la guardia contro la release del film sbagliato è disattivata.
+## Decision
 
-C'è anche un'incoerenza interna preesistente, indipendente da Comet: **i due dedup usano due
-chiavi diverse per la stessa nozione**. `api._dedup_by_release` collassa per
-`behaviorHints.filename`, `quality._dedup_by_release` per `release_name.lower()`
-(`quality.py:745`), cioè la prima riga di `title`. Sulla stessa release i due possono non
-concordare.
+### 1. Per-field precedence: structured → text
 
-## Decisione
+| field | 1st source (structured) | degrade |
+| ----- | ----------------------- | ------- |
+| `release_name` | `behaviorHints.filename` | first line of `description`, then `title` |
+| `size_gb` | `behaviorHints.videoSize` | size regex on the text corpus |
+| `container` | filename extension | URL path tail (unchanged) |
 
-### 1. Catena di precedenza per campo: strutturato → testo
+Other fields (resolution, codec, HDR/DV, audio, languages, source, seeders) remain
+heuristic: the protocol does not model them.
 
-Ogni campo dichiara una sola catena, uguale per tutti gli addon:
+### 2. Text corpus is a union
 
-| campo          | 1ª fonte (strutturata)    | degrado                                  |
-| -------------- | ------------------------- | ---------------------------------------- |
-| `release_name` | `behaviorHints.filename`  | 1ª riga di `description`, poi di `title` |
-| `size_gb`      | `behaviorHints.videoSize` | regex `💾` sul corpus testuale           |
-| `container`    | estensione del `filename` | coda del path di `url` (invariato)       |
+`quality._text` is `name + description + title + filename`. `title` stays for Torrentio
+(protocol says “soon”, not “removed”). Union, not per-addon branching.
 
-Gli altri campi — risoluzione, codec, HDR/DV, audio, lingue, sorgente, seeder — restano
-euristici: il protocollo non li modella, e la prosa è la loro unica fonte legittima.
+### 3. Provider-neutral degrade chain
 
-### 2. Il corpus testuale è l'unione, non un campo solo
+One chain for all addons. Every link degrades when the previous is missing (`behaviorHints`
+absent on some rows).
 
-`_text()` diventa `name + description + title + filename`. `title` resta letto benché
-deprecato: Torrentio lo popola ancora e il protocollo dice "soon", non "removed". È
-un'unione, non una sostituzione — nessun ramo per addon.
+### 4. Out of scope
 
-### 3. Nessun caso speciale per addon, ma degrado obbligatorio
+`behaviorHints.videoHash`, `bingeGroup`, `sources` (trackers/DHT) are real opportunities but
+touch other ADRs; not decided here.
 
-La catena è una sola per tutte le fonti (`bp-provider-neutral-adapter-design` §1). Poiché lo
-stesso principio impone di non assumere che ogni endpoint regga il modello (§2 — e qui è
-concreto: `behaviorHints` manca su 1 riga Comet su 35), ogni anello degrada al successivo e
-nessuno può presumere il precedente.
+## Rationale
 
-### 4. Fuori perimetro (decisioni separate)
+- **`videoSize` is exact**; the emoji/size regex is approximate — remux/cast size guards need
+  the integer when present.
+- **`filename` is the canonical release identity** (SDK guidance); free-text headlines are
+  addon-composed prose.
+- **Explicit degrade** prevents half-empty, half-plausible `StreamInfo`.
 
-La spec espone altri campi oggi inutilizzati — `behaviorHints.videoHash` (hash OpenSubtitles),
-`bingeGroup` (selezione automatica dell'episodio), `sources` (tracker e nodi DHT). Sono
-opportunità reali ma toccano ADR 0018, l'auto-advance e il fallback P2P: **non sono decisi
-qui**. Questo ADR decide solo da dove si leggono i metadati di una release.
+## Consequences
 
-## Razionale
+- Behaviour changes on **Torrentio too**, not only Comet: `release_name` prefers filename;
+  where it diverges from the old title headline, dedup and `_title_matches` change (intended
+  — aligns quality dedup with `api._dedup_by_release`).
+- `videoSize` is the **video file** byte count; text size may describe the whole torrent
+  (multi-file extras).
+- Parse cache keys must include `description` and the structured hints read, or distinct rows
+  collapse.
+- Filename in the language corpus widens false-positive surface; word-boundary `_LANG_RE`
+  remains the mitigation.
+- Non-empty `release_name` on Comet re-enables title match and cross-tracker dedup.
 
-- **`videoSize` è esatto, la regex è un'approssimazione.** Il guadagno non riguarda solo gli
-  addon `description`: anche su Torrentio si passa da una stringa arrotondata a un intero in
-  byte, che è ciò che serve alle guardie di dimensione su remux e cast.
-- **`filename` è l'identità canonica della release** — la spec lo raccomanda esplicitamente
-  come chiave per identificare il contenuto — mentre la prima riga di `title` è prosa che
-  l'addon compone come crede.
-- **Il degrado esplicito** impedisce il `StreamInfo` per metà vuoto e per metà plausibile.
-
-## Conseguenze
-
-- **Cambia anche il comportamento su Torrentio**, non solo su Comet: `release_name` passa
-  dalla prima riga di `title` al `filename`. Dove i due divergono cambiano le chiavi di dedup
-  e l'esito di `_title_matches`. È l'effetto voluto — allinea `quality._dedup_by_release` a
-  `api._dedup_by_release`, chiudendo l'incoerenza descritta sopra — ma va verificato con un
-  test che confronti le due chiavi sulla stessa release.
-- **`videoSize` e la size testuale non misurano la stessa cosa**: il primo è il byte-count del
-  **file video**, la seconda la dimensione del torrent, che su un multi-file include gli
-  extra. La precedenza rende le guardie più corrette e i numeri diversi da prima.
-- `_PARSE_CACHE` (`quality.py:244`) deve includere `description` e i `behaviorHints` letti
-  nella chiave, o due righe distinte collassano sullo stesso `StreamInfo`.
-- Includere `filename` nel corpus linguistico amplia la superficie di falsi positivi sulle
-  lingue; `_LANG_RE` è già match a confine di parola, il rischio resta sui nomi di gruppo.
-- `release_name` non più vuoto **riattiva** su Comet la guardia sul titolo e il dedup
-  cross-tracker, finora inerti: i conteggi di `--explain` cambiano a parità di catalogo.
-- Sopravvive alla deprecazione di `title` senza altri interventi.
-
-## Riferimenti
+## References
 
 - Stremio Addon SDK — Stream object:
-  `https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/stream.md`
-- `src/nstream/quality.py:66` (`_text`), `:244` (`parse_stream`), `:262`
-  (`_parse_stream_uncached`), `:612` (`_title_matches`), `:745` (dedup per release)
-- `src/nstream/api.py:488` (`_release_rank`), `:496` (`_dedup_by_release`)
-- ADR 0024 (scoperta multi-sorgente)
+  <https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/stream.md>
+- `quality._text`, `quality._release_name`, `quality.parse_stream`, `quality._title_matches`,
+  `api._dedup_by_release`
+- ADR 0024 (multi-source discovery)

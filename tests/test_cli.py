@@ -413,6 +413,55 @@ def test_run_home_dispatches_actions(monkeypatch):
     assert called["settings"] == 1
 
 
+def test_run_home_surfaces_active_cast_session(monkeypatch):
+    """Live cast session becomes a selectable home row with cast-live action."""
+    seen: dict = {}
+
+    def fake(items, prompt, *, header=None, expect=("tab",), preview=None):
+        seen["items"] = list(items)
+        return None  # ESC
+
+    monkeypatch.setattr(cli, "fzf_key", fake)
+    monkeypatch.setattr(
+        cli.state,
+        "cast_session_info",
+        lambda: {"title": "Dune", "device": "192.168.1.5", "ts": 9e12, "video_id": "tt1"},
+    )
+    monkeypatch.setattr(
+        cli.state, "cast_session_label", lambda s=None: "In onda · Dune · 192.168.1.5"
+    )
+    monkeypatch.setattr(cli.state, "expire_cast_session", lambda: None)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_home(CFG, opts) == 0
+    kinds = [v[0] for _, v in seen["items"] if isinstance(v, tuple)]
+    assert cli._CAST_LIVE in kinds
+    labels = [lab for lab, _ in seen["items"]]
+    assert any("In onda" in lab and "Dune" in lab for lab in labels)
+
+
+def test_cast_live_menu_stop_uses_cast_control(monkeypatch):
+    """Home cast submenu stop path calls the real cast_control.stop_cast entry."""
+    monkeypatch.setattr(
+        cli.state,
+        "cast_session_info",
+        lambda: {"title": "Dune", "device": "10.0.0.2", "ts": 9e12},
+    )
+    monkeypatch.setattr(cli.state, "cast_session_label", lambda s=None: "In onda · Dune")
+    monkeypatch.setattr(cli, "fzf", lambda items, *a, **k: "stop")
+    seen = {}
+
+    def stop(cfg, *, device=None):
+        seen["device"] = device
+        return True, f"cast fermato su {device}"
+
+    monkeypatch.setattr(cli.cast_control, "stop_cast", stop)
+    notice = cli._cast_live_menu(CFG)
+    assert seen["device"] == "10.0.0.2"
+    assert notice and "fermato" in notice
+
+
 def test_run_home_shows_typed_sections_not_mixed_browse(monkeypatch):
     """The home offers the Film / Serie TV sections instead of the old mixed catalog rows."""
     seen = {}
@@ -762,8 +811,8 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     def no_cast(*a, **k):
         raise AssertionError("cast must not run when no device")
 
-    monkeypatch.setattr(cli, "cast", no_cast)  # _move_to_cast seam
-    monkeypatch.setattr(cast_flow.caster, "cast", no_cast)  # cast_flow seam
+    monkeypatch.setattr(cli.cast_flow, "run_cast", no_cast)  # Alt-C / cast path
+    monkeypatch.setattr(cast_flow.caster, "cast", no_cast)
     seen = {}
     monkeypatch.setattr(cli, "play", lambda *a, **k: seen.update(local=True) or (0.0, 0.0, ""))
     opts = cli.PlayOpts(
@@ -776,14 +825,15 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
 
 
 def test_play_video_local_to_cast_on_signal(monkeypatch):
-    """Alt-C in mpv (play() returns 'cast') re-casts from the current position."""
+    """Alt-C in mpv goes through cast_flow.run_cast (vet/remux), not a raw catt cast."""
     cfg = Config(torrentio_base="tb", hwdec="")
-    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
+    stream = {"url": "http://u", "name": "S"}
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [stream])
     monkeypatch.setattr(
         cli.stream_select,
         "prepare_stream",
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: (
-            cli.stream_select.VettedStream({"url": "http://u", "name": "S"}, auto, None)
+            cli.stream_select.VettedStream(stream, auto, None)
         ),
     )
     monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
@@ -791,20 +841,30 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
     monkeypatch.setattr(cli, "play", lambda *a, **k: (55.0, 100.0, "cast"))
     monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
     seen = {}
-    monkeypatch.setattr(
-        cli,
-        "cast",
-        lambda *a, **k: (
-            seen.update(start=k.get("start"), device=k.get("device")) or _ok(55.0, 100.0)
-        ),
-    )
+
+    def fake_run_cast(cfg, results, chosen, **k):
+        seen.update(
+            start=k.get("start"),
+            device=k.get("device"),
+            n_results=len(results),
+            url=chosen.get("url"),
+        )
+        return cast_flow.CastOutcome(
+            pos=55.0, dur=100.0, advance=False, action="cast", stream=chosen,
+            reencoded=False, notice=None, audio_lang=None, audio_verified=False,
+            safety_sub_lang=None, sub_paths=(), sub_match=None, sub_offset=None,
+            subs_delivered=True, started=True, cast_error=None,
+        )
+
+    monkeypatch.setattr(cli.cast_flow, "run_cast", fake_run_cast)
     opts = cli.PlayOpts(
         auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
     notice, advance, _q = cli._play_video(
         cfg, "movie", "tt1", "M", opts, auto=False, next_label=None, on_save=None
     )
-    assert seen == {"start": 55.0, "device": "TV"} and advance is False
+    assert seen == {"start": 55.0, "device": "TV", "n_results": 1, "url": "http://u"}
+    assert advance is False
 
 
 # --- leaf-list keys (Tab / Alt-C) ------------------------------------------
@@ -1222,6 +1282,52 @@ def test_main_settings_short_circuits_dispatch(monkeypatch):
     )  # fmt: skip
     assert rc == 0
     assert ran == [cfg]
+
+
+def test_main_settings_with_json_is_usage_error(monkeypatch, capsys):
+    """`--json --settings` must not open fzf or hang an agent — JSON usage error."""
+    cfg = Config(torrentio_base="tb")
+    monkeypatch.setattr(
+        cli.settings, "run_settings", lambda c: pytest.fail("settings must not run with --json")
+    )
+    rc, _ = _run_main(
+        monkeypatch, ["--json", "--settings"], cfg,
+        dispatch=lambda *a, **k: pytest.fail("_dispatch must not run"),
+    )  # fmt: skip
+    assert rc == 2
+    out = capsys.readouterr()
+    assert '"error": "usage"' in out.out or '"error":"usage"' in out.out.replace(" ", "")
+    assert "--settings" in out.out
+
+
+def test_main_headless_flag_without_json_is_usage_error(monkeypatch, capsys):
+    cfg = Config(torrentio_base="tb")
+    rc, _ = _run_main(
+        monkeypatch, ["--stop"], cfg,
+        dispatch=lambda *a, **k: pytest.fail("_dispatch must not run on misuse"),
+    )  # fmt: skip
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--stop" in err and "--json" in err
+
+
+def test_main_year_without_json_is_usage_error(monkeypatch, capsys):
+    cfg = Config(torrentio_base="tb")
+    rc, _ = _run_main(
+        monkeypatch, ["--year", "1999", "matrix"], cfg,
+        dispatch=lambda *a, **k: pytest.fail("must not dispatch"),
+    )  # fmt: skip
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--year" in err and "--json" in err
+
+
+def test_main_audio_lang_without_json_reaches_dispatch(monkeypatch):
+    """--audio-lang is not headless-only: TUI path may use it."""
+    cfg = Config(torrentio_base="tb")
+    rc, seen = _run_main(monkeypatch, ["--audio-lang", "eng", "dune"], cfg)
+    assert rc == 0
+    assert seen["opts"].audio_lang == "eng"
 
 
 def test_main_explain_without_query_is_usage_error(monkeypatch, capsys):

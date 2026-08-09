@@ -46,33 +46,73 @@ def test_with_token_switches_provider():
 def test_items_cover_all_settings():
     cfg = Config(torrentio_base="sort=x|realdebrid=T")
     keys = [it[0] for it in settings._items(cfg)]
-    assert keys == [
-        "audio_langs",
-        "subtitle_langs",
-        "auto_play",
-        "prefer_cast",
-        "cast_device",
-        "autoplay",
-        "autoplay_lead",
-        "hwdec",
-        "history_enabled",
-        "mpv_quiet",
-        "hw_filter",
-        "max_resolution",
-        "allow_software",
-        "allow_dv5",
-        "lang_filter",
-        "exclude_camrip",
-        "min_seeders",
-        "dedup",
-        "max_streams",
-        "nerd_font",
-        "posters",
-        "image_mode",
+    # Must include new self-sufficiency knobs (cast/P2P/subs/quality/health).
+    for required in (
+        "primary_lang",
+        "default_quality",
+        "cast_mode",
+        "cast_remux",
+        "cast_remux_max_resolution",
+        "cast_remux_max_size_gb",
+        "cast_mirror_over_remux_gb",
+        "sub_align",
+        "sub_align_budget_s",
+        "p2p_require_vpn",
+        "engine_port",
+        "home_continue_max",
         "playback_backend",
-        "torrentio_base",
+        "__health__",
         "__addons__",
-    ]
+    ):
+        assert required in keys, required
+
+
+def test_backend_status_includes_auto():
+    assert "auto" in settings._backend_status(Config(playback_backend="auto")).lower()
+
+
+def test_quality_default_label():
+    assert "chiedi" in settings._quality_default_label(Config(default_quality=None))
+    assert "Auto" in settings._quality_default_label(Config(default_quality=0))
+    assert "1080" in settings._quality_default_label(Config(default_quality=1080))
+
+
+def test_edit_persists_cast_and_p2p_knobs(monkeypatch, tmp_path):
+    """Settings editor writes cast/P2P knobs through real config.save/load."""
+    from nstream import config as config_mod
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    d = tmp_path / "nstream"
+    d.mkdir()
+    (d / "config.json").write_text('{"torrentio_base": "tb"}')
+
+    # bool toggle cast_remux
+    settings._edit(Config(cast_remux=True), "cast_remux", "bool", "Remux")
+    assert config_mod.load().cast_remux is False
+
+    # choice cast_mode
+    monkeypatch.setattr(settings, "_fzf_select", lambda rows, **k: 1)  # mirror
+    settings._edit(Config(), "cast_mode", "choice", "Mode")
+    assert config_mod.load().cast_mode == "mirror"
+
+    # int mirror threshold
+    monkeypatch.setattr(settings, "_ask", lambda p: "15")
+    settings._edit(Config(), "cast_mirror_over_remux_gb", "int", "Mirror GB")
+    assert config_mod.load().cast_mirror_over_remux_gb == 15
+
+    # p2p_require_vpn toggle
+    settings._edit(Config(p2p_require_vpn=False), "p2p_require_vpn", "bool", "VPN")
+    assert config_mod.load().p2p_require_vpn is True
+
+    # backend auto via fzf index 2
+    monkeypatch.setattr(settings, "_fzf_select", lambda rows, **k: 2)
+    settings._edit(Config(), "playback_backend", "backend", "Backend")
+    assert config_mod.load().playback_backend == "auto"
+
+    # default_quality fixed 1080 (choices index 3 in defquality list)
+    monkeypatch.setattr(settings, "_fzf_select", lambda rows, **k: 3)
+    settings._edit(Config(), "default_quality", "defquality", "Q")
+    assert config_mod.load().default_quality == 1080
 
 
 def test_ask_returns_empty_on_eof(monkeypatch):

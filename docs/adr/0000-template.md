@@ -7,7 +7,9 @@
 ## Context
 
 What forces the decision — the problem, constraint, or pressure. State facts, not opinions.
-Cite the code that anchors it (`src/nstream/<mod>.py:line`).
+Cite the code that anchors it by **symbol** (`stream_select.prepare_stream`,
+`quality._text`), not fragile line numbers. Line numbers may be mentioned once as a snapshot
+at write time, but must not be the only anchor.
 
 ## Decision
 
@@ -25,4 +27,6 @@ What becomes true once this is in place — both the gains and the costs/obligat
 
 ## References
 
-External docs, related ADRs, the modules/lines affected.
+External docs, related ADRs, modules/symbols affected. Do **not** use personal vault
+wikilinks (`[[…]]`); they do not resolve in this repository. Optional empirical data may live
+under `docs/adr/NNNN-phase*/` (see ADR 0020).

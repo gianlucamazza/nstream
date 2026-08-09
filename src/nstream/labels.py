@@ -14,13 +14,14 @@ from . import quality, tracks, ui
 from .types import HistoryEntry, Meta, Stream, Video
 
 
-def meta_label(m: Meta) -> str:
+def meta_label(m: Meta, *, watchlisted: bool = False) -> str:
     caps = ui.active_caps()
     g, pal = ui.glyphs(caps), ui.palette(caps)
     icon = g.series if m.get("type") == "series" else g.movie
     info = m.get("releaseInfo", "")
     year = f"  {ui.ansi(f'({info})', pal.dim)}" if info else ""
-    label = f"{icon}  {ui.ansi(m.get('name', '?'), pal.accent)}{year}"
+    star = f"{g.star} " if watchlisted else ""
+    label = f"{star}{icon}  {ui.ansi(m.get('name', '?'), pal.accent)}{year}"
     # Cheap hint from the slim catalog (year only): flag titles from a future year.
     # Same-year-but-unreleased titles are caught precisely at selection time.
     yr = re.match(r"(\d{4})", str(info))
