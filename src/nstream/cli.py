@@ -168,6 +168,11 @@ def _play_video(
         ui.status(notice, kind="fail")
         print(f"nstream: {notice}", file=sys.stderr)
         return (notice, False, e.quality)
+    except stream_select.NoPlayableStream as e:
+        # The reason returns as the notice so it reaches the fzf header: stderr scrolls away
+        # under the menu's fullscreen redraw, and a silent return reads as "nothing happened".
+        ui.status(e.reason, kind="fail")
+        return (e.reason, False, opts.quality if opts.quality is not None else 0)
     except stream_select.ContentTooShort as e:
         # Every probed source is a placeholder, not the video: say so instead of playing
         # 30 seconds of "removed for copyright". Retrying wouldn't change the file.

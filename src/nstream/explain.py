@@ -120,6 +120,24 @@ def _breaker_section() -> list[str]:
     return lines
 
 
+def _links_section(cfg: Config, results: list[Stream]) -> list[str]:
+    """Direct links vs pure torrents — the shape of the result set, which is what tells a
+    debrid that stopped serving (0 direct links) apart from a title nobody cached. Symptom
+    only: no provider is named or probed (`stream_select.unresolvable_reason` owns the why)."""
+    from . import stream_select
+
+    direct = sum(1 for s in results if s.get("url"))
+    torrents = sum(1 for s in results if s.get("infoHash"))
+    lines = [
+        "",
+        f"SORGENTI: {direct}/{len(results)} con link diretto · {torrents} torrent",
+    ]
+    reason = stream_select.unresolvable_reason(cfg, results)
+    if reason:
+        lines.append(f"  {ui.g().warn} {reason}")
+    return lines
+
+
 def explain_streams(
     cfg: Config,
     results: list[Stream],
@@ -160,6 +178,7 @@ def explain_streams(
         for i, r in enumerate(excluded):
             lines.append(_row(i + 1, r, spec.audio_langs, ui.g().warn, cast=cast, title=spec.title))
             lines[-1] = lines[-1].replace("[", f"[escluso: {r.reason}] [", 1)
+    lines.extend(_links_section(cfg, results))
     lines.extend(_breaker_section())
     return "\n".join(lines)
 
@@ -203,7 +222,7 @@ def explain_data(
     """Machine-readable counterpart of `explain_streams`, for `--json --explain`: the same
     ranking reconstruction as a dict — caps, filters, counts, playable rows best-first
     with their score components, excluded rows with the reason. Parsed metadata only."""
-    from . import state
+    from . import state, stream_select
 
     playable, excluded, caps, spec = _rank(
         cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
@@ -229,6 +248,8 @@ def explain_data(
         },
         "counts": {
             "total": len(results),
+            "direct_links": sum(1 for s in results if s.get("url")),
+            "torrents": sum(1 for s in results if s.get("infoHash")),
             "playable": len(playable),
             "excluded": len(excluded),
             "duplicates": (
@@ -246,6 +267,7 @@ def explain_data(
             for r in excluded
         ],
         "breakers": state.open_breakers(),
+        "unresolvable_reason": stream_select.unresolvable_reason(cfg, results),
     }
 
 

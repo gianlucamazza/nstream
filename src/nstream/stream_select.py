@@ -71,6 +71,43 @@ class QualityUnavailable(Exception):
         self.available = list(available)
 
 
+class NoPlayableStream(Exception):
+    """The title has streams, but none of them can be served right now.
+
+    Exists to split the two meanings `None` used to carry on the selection path: `None` is
+    the user backing out (ESC), this is exhaustion. Only the latter deserves a notice, and a
+    notice that survives the fzf redraw — see `cli._play_video`, which turns `reason` into
+    the menu header."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def unresolvable_reason(
+    cfg: Config, results: list[Stream], chosen: Stream | None = None
+) -> str | None:
+    """Why nothing can be turned into a playable url, or None when the reason lies elsewhere
+    (hardware/cast filters, quality tier) and the caller has a better message.
+
+    `chosen` — the candidate that just failed to resolve — is consulted first: a pure torrent
+    refused by the privacy gate is the exact answer, even when other rows in `results` still
+    carry a url the ranking put behind it. Without it, the result set's *shape* answers.
+
+    Provider-agnostic by construction: it reports what the streams look like (no direct link,
+    only torrents) and never names — nor probes — a debrid service."""
+    blocked = engine.p2p_block_reason(cfg)
+    if chosen is not None and blocked and chosen.get("infoHash") and not chosen.get("url"):
+        return f"{blocked} — la sorgente scelta è un torrent, attiva la VPN o usa un debrid"
+    if not results or any(s.get("url") and not s.get("unresolvable") for s in results):
+        return None
+    if blocked and any(s.get("infoHash") for s in results):
+        return f"solo sorgenti torrent e {blocked} — attiva la VPN o usa un debrid"
+    if debrid.get_resolver(cfg) is None:
+        return "nessun link diretto dalle fonti debrid — token scaduto o titolo non in cache"
+    return None
+
+
 def _future_release(iso: str | None) -> datetime | None:
     """Parse a Cinemeta `released` ISO date; return it only if it's in the future."""
     if not iso:
@@ -162,19 +199,20 @@ def _pick_stream(
 
     When `cast`, rank against the Chromecast receiver's profile (not the laptop GPU)
     and demote streams whose audio it can't decode (TrueHD/DTS/DTS-HD → silent).
-    `exact_resolution` (>0) hard-filters to that resolution before ranking."""
+    `exact_resolution` (>0) hard-filters to that resolution before ranking.
+
+    Returns None only when the user backed out of the menu; an empty ranking raises
+    `NoPlayableStream` — except under `exact_resolution`, which the caller reports as
+    `QualityUnavailable` (it knows which tiers do exist)."""
     if not cfg.hw_filter:
         pool = results
         if exact_resolution:
             pool = [s for s in results if quality.parse_stream(s).resolution == exact_resolution]
         if not pool:
-            ui.status(
-                f"nessuno stream {exact_resolution}p"
-                if exact_resolution
-                else "nessuno stream disponibile",
-                kind="fail",
-            )
-            return None
+            if exact_resolution:
+                ui.status(f"nessuno stream {exact_resolution}p", kind="fail")
+                return None
+            raise NoPlayableStream("nessuno stream disponibile")
         ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in pool]
         return pool[0] if auto else fzf(ranked, "stream> ")
 
@@ -203,13 +241,19 @@ def _pick_stream(
         if exact_resolution:
             ui.status(f"nessuno stream {exact_resolution}p disponibile", kind="fail")
             return None
-        msg = (
+        raise NoPlayableStream(
             "nessuno stream compatibile col Chromecast (prova Tab o --local)"
             if cast
             else "nessuno stream supportato dall'hardware"
         )
-        ui.status(msg, kind="fail")
-        return None
+
+    if not playable and not excluded:
+        # Empty menu: fzf wouldn't even open, and a bare return is indistinguishable from ESC.
+        raise NoPlayableStream(
+            f"nessuno stream {exact_resolution}p"
+            if exact_resolution
+            else (unresolvable_reason(cfg, results) or "nessuno stream disponibile")
+        )
 
     def _full() -> Stream | None:
         items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
@@ -468,13 +512,20 @@ def pick_and_resolve(
     title: str = "",
     exact_resolution: int = 0,
 ) -> Stream | None:
-    """Pick a stream and make it playable. Returns None on ESC or an unresolvable pick."""
+    """Pick a stream and make it playable. Returns None on ESC (or on a manual pick that
+    won't resolve); raises `NoPlayableStream` when the auto-pick can't be served — the
+    reason is the one thing the user needs and the one thing the old silent None dropped."""
     chosen = _pick_stream(
         cfg, results, auto=auto, cast=cast, title=title, exact_resolution=exact_resolution
     )
     if not chosen:
         return None
-    return _resolve_stream(cfg, chosen)
+    ready = _resolve_stream(cfg, chosen)
+    if ready is None and auto:
+        raise NoPlayableStream(
+            unresolvable_reason(cfg, results, chosen) or "nessuna sorgente riproducibile"
+        )
+    return ready
 
 
 def _auto_candidates(
@@ -712,8 +763,9 @@ def prepare_stream(
     expected_runtime_s: float = 0.0,
 ) -> VettedStream | None:  # fmt: skip
     """Pick one stream from `results`, resolve it, and vet it for playback. Returns the
-    vetted result, or None when the user backed out (ESC) of a (re)selection.
-    Raises `ContentTooShort` when every probed source is a placeholder (ADR 0028).
+    vetted result, or None when the user backed out (ESC) of a (re)selection — None means
+    *that*, nothing else. Exhaustion raises: `NoPlayableStream` when nothing can be served,
+    `ContentTooShort` when every probed source is a placeholder (ADR 0028).
 
     `auto` overrides `opts.auto` for this single video (the binge loop forces it True from
     the second episode on). Steps: quality resolve → pick+resolve → cached-miss fallback
@@ -773,7 +825,12 @@ def prepare_stream(
     if auto:
         _verify_availability(cfg, results, cast=opts.cast, title=title, exact_resolution=exact)
         if not results:
-            return None  # everything url-ready was removed — headless reports sources_removed
+            # Everything url-ready was removed — headless reports sources_removed, the TUI
+            # says so instead of dropping back to the menu with no explanation.
+            raise NoPlayableStream(
+                "tutte le sorgenti risultano non più disponibili — riprova, o azzera la "
+                "denylist con --forget-dead"
+            )
     chosen = pick_and_resolve(
         cfg, results, auto=auto, cast=opts.cast, title=title, exact_resolution=exact
     )
@@ -781,9 +838,7 @@ def prepare_stream(
         # Auto + hard quality tier with nothing playable: fail loudly (TUI notice /
         # headless quality_unavailable). Manual ESC on the stream menu stays None.
         if auto and exact:
-            raise QualityUnavailable(
-                exact, available_resolutions(cfg, results, cast=opts.cast)
-            )
+            raise QualityUnavailable(exact, available_resolutions(cfg, results, cast=opts.cast))
         return None
 
     # Cached-miss fallback (debrid/auto): a "[RD+]" marker is a guess, so verify the ready url

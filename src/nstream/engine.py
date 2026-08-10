@@ -322,6 +322,16 @@ def _largest_index(files: list[dict]) -> int:
 _p2p_gate_said = False
 
 
+def p2p_block_reason(cfg: Config) -> str | None:
+    """Why a swarm join would be refused right now, or None when P2P is allowed (ADR 0032).
+
+    The gate's predicate without its side effects, for callers that must *explain* an
+    unplayable result set (`stream_select.unresolvable_reason`) rather than trigger it."""
+    if cfg.p2p_require_vpn and not vpn_active():
+        return "streaming P2P bloccato: nessuna VPN e p2p_require_vpn=true"
+    return None
+
+
 def _p2p_gate(cfg: Config) -> None:
     """Privacy gate for joining a torrent swarm (ADR 0032). Raises `P2PBlocked` when
     `p2p_require_vpn` is set and no VPN interface is up; otherwise warns (when no VPN) and
@@ -331,8 +341,9 @@ def _p2p_gate(cfg: Config) -> None:
     invoke is one a new resolve path silently opts out of — which is how the cast path came
     to resolve P2P streams with the setting on and no VPN up."""
     global _p2p_gate_said
+    blocked = p2p_block_reason(cfg)
     if not vpn_active():
-        if cfg.p2p_require_vpn:
+        if blocked:
             # Say it here rather than leaving it to the caller: two of the three resolve paths
             # discard EngineUnavailable silently, and an invisible refusal reads as "no sources".
             if not _p2p_gate_said:
@@ -342,7 +353,7 @@ def _p2p_gate(cfg: Config) -> None:
                     "bloccato.\n         Attiva la VPN, oppure usa un provider debrid.",
                     file=sys.stderr,
                 )
-            raise P2PBlocked("streaming P2P bloccato: nessuna VPN e p2p_require_vpn=true")
+            raise P2PBlocked(blocked)
         if not _p2p_gate_said:
             _p2p_gate_said = True
             print(

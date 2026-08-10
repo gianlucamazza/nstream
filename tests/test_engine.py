@@ -349,6 +349,17 @@ def test_p2p_gate_blocks_without_vpn_when_required(monkeypatch, capsys):
     assert "bloccato" in capsys.readouterr().err
 
 
+def test_p2p_block_reason_matches_the_gate(monkeypatch):
+    """The predicate the explainers read must agree with the gate that enforces it."""
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    assert "p2p_require_vpn" in (engine.p2p_block_reason(cfg) or "")
+    monkeypatch.setattr(engine, "vpn_active", lambda: True)
+    assert engine.p2p_block_reason(cfg) is None
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    assert engine.p2p_block_reason(Config(torrentio_base="tb", p2p_require_vpn=False)) is None
+
+
 def test_p2p_gate_warns_without_vpn_but_proceeds(monkeypatch, capsys):
     _ungated(monkeypatch)
     monkeypatch.setattr(engine, "vpn_active", lambda: False)

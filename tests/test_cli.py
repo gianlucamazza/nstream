@@ -192,6 +192,26 @@ def test_play_video_cast_fallback_selects_local_profile(monkeypatch):
     assert (notice, advance) == (None, False)
 
 
+def test_play_video_surfaces_no_playable_reason(monkeypatch):
+    """Exhaustion must come back as a notice: it becomes the fzf header, the only channel
+    that survives the menu's fullscreen redraw (a silent None reads as "nothing happened")."""
+    cfg = Config(torrentio_base="tb", hwdec="")
+    reason = "solo sorgenti torrent e streaming P2P bloccato: nessuna VPN"
+    monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"infoHash": "A", "name": "S"}])
+    monkeypatch.setattr(
+        cli.stream_select, "prepare_stream",
+        lambda *a, **k: (_ for _ in ()).throw(cli.stream_select.NoPlayableStream(reason)),
+    )  # fmt: skip
+    monkeypatch.setattr(cli, "play", lambda *a, **k: pytest.fail("must not play"))
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance, _q = cli._play_video(
+        cfg, "movie", "tt1", "M", opts, auto=True, next_label=None, on_save=None
+    )
+    assert notice == reason and advance is False
+
+
 def test_play_video_cast_fetch_overlaps_device_scan(monkeypatch):
     """On the cast path the stream fetch runs in a background thread, started BEFORE
     the (slow, up to ~20s) catt scan resolves the device, and joined before selection."""
@@ -850,10 +870,22 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
             url=chosen.get("url"),
         )
         return cast_flow.CastOutcome(
-            pos=55.0, dur=100.0, advance=False, action="cast", stream=chosen,
-            reencoded=False, notice=None, audio_lang=None, audio_verified=False,
-            safety_sub_lang=None, sub_paths=(), sub_match=None, sub_offset=None,
-            subs_delivered=True, started=True, cast_error=None,
+            pos=55.0,
+            dur=100.0,
+            advance=False,
+            action="cast",
+            stream=chosen,
+            reencoded=False,
+            notice=None,
+            audio_lang=None,
+            audio_verified=False,
+            safety_sub_lang=None,
+            sub_paths=(),
+            sub_match=None,
+            sub_offset=None,
+            subs_delivered=True,
+            started=True,
+            cast_error=None,
         )
 
     monkeypatch.setattr(cli.cast_flow, "run_cast", fake_run_cast)

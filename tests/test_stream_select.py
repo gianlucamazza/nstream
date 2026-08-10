@@ -659,12 +659,16 @@ def test_prepare_stream_forced_audio_lang_raises_when_missing(monkeypatch):
     monkeypatch.setattr(stream_select, "prune_dead", lambda cfg, r: (r, 0))
     monkeypatch.setattr(stream_select, "_mark_native_cached", lambda *a, **k: None)
     monkeypatch.setattr(stream_select, "resolve_quality", lambda *a, **k: 0)
-    monkeypatch.setattr(
-        stream_select, "audio_languages", lambda *a, **k: ("eng",)
-    )
+    monkeypatch.setattr(stream_select, "audio_languages", lambda *a, **k: ("eng",))
     opts = PlayOpts(
-        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False,
-        audio_lang="ita", quality=0,
+        auto=True,
+        cast=False,
+        sub_mode=None,
+        sub_lang=None,
+        history=False,
+        autoplay=False,
+        audio_lang="ita",
+        quality=0,
     )
     with pytest.raises(stream_select.AudioLangUnavailable) as ei:
         stream_select.prepare_stream(
@@ -688,8 +692,14 @@ def test_prepare_stream_forced_audio_lang_picks_stream(monkeypatch):
         lambda *a, **k: (ita, True),
     )
     opts = PlayOpts(
-        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False,
-        audio_lang="ita", quality=0,
+        auto=True,
+        cast=False,
+        sub_mode=None,
+        sub_lang=None,
+        history=False,
+        autoplay=False,
+        audio_lang="ita",
+        quality=0,
     )
     v = stream_select.prepare_stream(
         cfg, [eng, ita], opts, auto=True, reselect_on_wrong_audio=False, title="X"
@@ -707,17 +717,12 @@ def test_resolve_quality_uses_config_default_without_picker(monkeypatch):
     cfg = Config(torrentio_base="tb", default_quality=1080)
     opts = _gopts(quality=None)
     assert (
-        stream_select.resolve_quality(
-            cfg, [], opts, cast=False, title="X", offer_picker=True
-        )
+        stream_select.resolve_quality(cfg, [], opts, cast=False, title="X", offer_picker=True)
         == 1080
     )
     cfg2 = Config(torrentio_base="tb", default_quality=0)
     assert (
-        stream_select.resolve_quality(
-            cfg2, [], opts, cast=False, title="X", offer_picker=True
-        )
-        == 0
+        stream_select.resolve_quality(cfg2, [], opts, cast=False, title="X", offer_picker=True) == 0
     )
 
 
@@ -730,9 +735,7 @@ def test_resolve_quality_default_applies_when_offer_picker_false(monkeypatch):
     )
     cfg = Config(torrentio_base="tb", default_quality=1080)
     assert (
-        stream_select.resolve_quality(
-            cfg, [], _gopts(quality=None), cast=False, offer_picker=False
-        )
+        stream_select.resolve_quality(cfg, [], _gopts(quality=None), cast=False, offer_picker=False)
         == 1080
     )
 
@@ -745,12 +748,7 @@ def test_resolve_quality_cli_beats_config_default(monkeypatch):
     )
     cfg = Config(torrentio_base="tb", default_quality=1080)
     opts = _gopts(quality=720)
-    assert (
-        stream_select.resolve_quality(
-            cfg, [], opts, cast=False, offer_picker=True
-        )
-        == 720
-    )
+    assert stream_select.resolve_quality(cfg, [], opts, cast=False, offer_picker=True) == 720
 
 
 def test_prepare_stream_raises_quality_unavailable(monkeypatch):
@@ -764,9 +762,7 @@ def test_prepare_stream_raises_quality_unavailable(monkeypatch):
     monkeypatch.setattr(stream_select, "_mark_native_cached", lambda *a, **k: None)
     monkeypatch.setattr(stream_select, "resolve_quality", lambda *a, **k: 1080)
     monkeypatch.setattr(stream_select, "pick_and_resolve", lambda *a, **k: None)
-    monkeypatch.setattr(
-        stream_select, "available_resolutions", lambda *a, **k: [720]
-    )
+    monkeypatch.setattr(stream_select, "available_resolutions", lambda *a, **k: [720])
     cfg = Config(torrentio_base="tb", audio_langs=["ita"])
     with pytest.raises(stream_select.QualityUnavailable) as ei:
         stream_select.prepare_stream(
@@ -1195,7 +1191,7 @@ def test_verify_drops_gone_and_denylists(monkeypatch):
     assert state.is_dead("g1") and not state.is_dead("l1")
 
 
-def test_prepare_stream_returns_none_when_all_sources_removed(monkeypatch):
+def test_prepare_stream_raises_when_all_sources_removed(monkeypatch):
     gone: Stream = {"url": "https://rd/gone", "infoHash": "G9", "name": "[RD+] x\n1080p"}
     results = [gone]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: list(results))
@@ -1206,10 +1202,95 @@ def test_prepare_stream_returns_none_when_all_sources_removed(monkeypatch):
         stream_select, "_pick_stream", lambda *a, **k: pytest.fail("nothing left to pick")
     )
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
-    out = stream_select.prepare_stream(
-        cfg, results, _gopts(), auto=True, reselect_on_wrong_audio=False, title="T"
+    with pytest.raises(stream_select.NoPlayableStream) as e:
+        stream_select.prepare_stream(
+            cfg, results, _gopts(), auto=True, reselect_on_wrong_audio=False, title="T"
+        )
+    assert "--forget-dead" in e.value.reason and results == []
+
+
+# --- why nothing is playable (NoPlayableStream / unresolvable_reason) ------
+
+
+def test_unresolvable_reason_blames_the_p2p_gate(monkeypatch):
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    reason = stream_select.unresolvable_reason(cfg, [{"infoHash": "A"}, {"infoHash": "B"}])
+    assert reason and "torrent" in reason and "VPN" in reason
+
+
+def test_unresolvable_reason_prefers_the_candidate_that_failed(monkeypatch):
+    """Real case: two junk `url` rows the ranking put last still leave the auto-pick a pure
+    torrent — the set's shape would say nothing, the failed candidate says everything."""
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    results: list[Stream] = [{"url": "https://x/dead"}, {"infoHash": "A"}]
+    assert stream_select.unresolvable_reason(cfg, results) is None
+    reason = stream_select.unresolvable_reason(cfg, results, results[1])
+    assert reason and "VPN" in reason
+
+
+def test_unresolvable_reason_silent_when_a_direct_link_exists(monkeypatch):
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    assert stream_select.unresolvable_reason(cfg, [{"url": "https://rd/x"}]) is None
+    # A url already proven unresolvable doesn't count as a link.
+    assert (
+        stream_select.unresolvable_reason(
+            cfg, [{"url": "https://rd/x", "infoHash": "A", "unresolvable": True}]
+        )
+        is not None
     )
-    assert out is None and results == []
+
+
+def test_unresolvable_reason_reports_missing_debrid_links(monkeypatch):
+    """No torrents to fall back on either: the set carries no servable link at all."""
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: True)
+    cfg = Config(torrentio_base="tb")
+    reason = stream_select.unresolvable_reason(cfg, [{"name": "x"}])
+    assert reason and "debrid" in reason
+
+
+def test_prepare_stream_raises_with_the_reason_when_p2p_is_blocked(monkeypatch):
+    """The case that used to drop back to the menu in silence (ADR 0032 gate + no debrid)."""
+    only: Stream = {"infoHash": "A", "name": "x\n1080p"}
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: only)
+    monkeypatch.setattr(stream_select, "_verify_availability", lambda cfg, r, **k: r)
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+
+    def _blocked(cfg, stream):
+        raise stream_select.engine.P2PBlocked("streaming P2P bloccato: nessuna VPN")
+
+    monkeypatch.setattr(stream_select.engine, "resolve", _blocked)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    with pytest.raises(stream_select.NoPlayableStream) as e:
+        stream_select.prepare_stream(
+            cfg, [only], _gopts(), auto=True, reselect_on_wrong_audio=False, title="T"
+        )
+    assert "VPN" in e.value.reason
+
+
+def test_prepare_stream_still_returns_none_on_esc(monkeypatch):
+    """ESC stays None: the exception means exhaustion, never a user backing out."""
+    s: Stream = {"url": "https://rd/x"}
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: None)
+    monkeypatch.setattr(stream_select, "_verify_availability", lambda cfg, r, **k: r)
+    cfg = Config(torrentio_base="tb")
+    out = stream_select.prepare_stream(
+        cfg, [s], _gopts(), auto=False, reselect_on_wrong_audio=False, title="T"
+    )
+    assert out is None
+
+
+def test_pick_stream_raises_on_empty_ranking(monkeypatch):
+    """An empty menu never opens fzf — without the raise it is indistinguishable from ESC."""
+    monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: ([], []))
+    monkeypatch.setattr(stream_select.engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    with pytest.raises(stream_select.NoPlayableStream):
+        stream_select._pick_stream(cfg, [{"infoHash": "A"}], auto=False)
+    with pytest.raises(stream_select.NoPlayableStream):
+        stream_select._pick_stream(cfg, [{"infoHash": "A"}], auto=True)
 
 
 def test_prepare_stream_prunes_denylisted_before_ranking(monkeypatch):

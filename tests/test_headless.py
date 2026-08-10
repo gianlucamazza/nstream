@@ -1478,6 +1478,21 @@ def test_json_reports_sources_truncated(monkeypatch, capsys, tmp_path):
     assert out["truncated_sources"] == 2
 
 
+def test_json_no_playable_stream_carries_the_reason(monkeypatch, capsys, tmp_path):
+    """The caller (skill/agent) must learn *why* — a blocked P2P gate is actionable,
+    a bare `no_playable_stream` is not."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    _wire_movie(monkeypatch)
+    reason = "solo sorgenti torrent e streaming P2P bloccato: nessuna VPN"
+    monkeypatch.setattr(
+        headless_play.stream_select, "prepare_stream",
+        lambda *a, **k: (_ for _ in ()).throw(stream_select.NoPlayableStream(reason)),
+    )  # fmt: skip
+    rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "no_playable_stream" and reason in out["message"]
+
+
 def test_audio_lang_short_file_is_not_reported_as_lang_unavailable(monkeypatch, capsys, tmp_path):
     """The incident's exact path: with --audio-lang, truncated sources must not degrade to
     `audio_lang_unavailable` — that would send the caller chasing a dub that exists."""

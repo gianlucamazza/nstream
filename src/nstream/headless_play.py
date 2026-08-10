@@ -56,6 +56,57 @@ def emit_truncated(e: stream_select.ContentTooShort, title: str) -> None:
     )
 
 
+def _emit_unplayable(
+    title: str,
+    *,
+    keys_before: list[str],
+    removed: int,
+    exact: int,
+    available_resolutions: list[int],
+    reason: str | None = None,
+) -> int:
+    """Report a selection that produced no stream, picking the most specific code available:
+    `sources_removed` (proven gone, ADR 0025) > `quality_unavailable` (a hard tier emptied
+    the set) > `no_playable_stream`. `reason` is `NoPlayableStream`'s explanation — a
+    blocked P2P gate, an expired debrid — and replaces the generic message when present."""
+    # Report "removed" only when the denylist says so, so the caller learns that instead of
+    # a generic "nothing playable" that invites a pointless retry.
+    proven_gone = sum(1 for k in keys_before if state.is_dead(k))
+    if proven_gone and proven_gone == len(keys_before):
+        emit_json(
+            {
+                "ok": False,
+                "error": "sources_removed",
+                "message": f"le sorgenti di «{title}» risultano rimosse dal debrid",
+                "removed_sources": removed + proven_gone,
+            }
+        )
+        return 1
+    # Quality filter may have emptied the set even if the pre-check passed (e.g. HW).
+    if exact:
+        emit_json(
+            {
+                "ok": False,
+                "error": "quality_unavailable",
+                "message": f"nessuno stream {exact}p riproducibile per «{title}»",
+                "available_resolutions": available_resolutions,
+            }
+        )
+        return 1
+    emit_json(
+        {
+            "ok": False,
+            "error": "no_playable_stream",
+            "message": (
+                f"nessuno stream riproducibile per «{title}»: {reason}"
+                if reason
+                else f"nessuno stream riproducibile per «{title}»"
+            ),
+        }
+    )
+    return 1
+
+
 def describe_stream(cfg: Config, chosen: Stream) -> dict:
     """Descriptive JSON for the chosen stream — parsed quality only, never the url/token."""
     info = quality.parse_stream(chosen)
@@ -185,45 +236,28 @@ def auto_play(
     except stream_select.ContentTooShort as e:
         emit_truncated(e, title)
         return 1
+    except stream_select.NoPlayableStream as e:
+        return _emit_unplayable(
+            title,
+            keys_before=keys_before,
+            removed=removed,
+            exact=exact,
+            available_resolutions=available_resolutions,
+            reason=e.reason,
+        )
     if opts.audio_lang and vetted is not None:
         # prepare_stream's forced path already verified (or accepted und); report confirmed
         # when we can still see the tag on the chosen stream after resolve.
         real = stream_select.stream_audio_langs(cfg, vetted.stream)
         audio_verified = opts.audio_lang in real if real is not None else False
     if vetted is None:
-        # The pre-commit verification may have just proven the remaining sources gone
-        # (ADR 0025): report that only when the denylist says so, so the caller learns
-        # "removed" instead of a generic "nothing playable" that invites a pointless retry.
-        proven_gone = sum(1 for k in keys_before if state.is_dead(k))
-        if proven_gone and proven_gone == len(keys_before):
-            emit_json(
-                {
-                    "ok": False,
-                    "error": "sources_removed",
-                    "message": f"le sorgenti di «{title}» risultano rimosse dal debrid",
-                    "removed_sources": removed + proven_gone,
-                }
-            )
-            return 1
-        # Quality filter may have emptied the set even if the pre-check passed (e.g. HW).
-        if exact:
-            emit_json(
-                {
-                    "ok": False,
-                    "error": "quality_unavailable",
-                    "message": f"nessuno stream {exact}p riproducibile per «{title}»",
-                    "available_resolutions": available_resolutions,
-                }
-            )
-            return 1
-        emit_json(
-            {
-                "ok": False,
-                "error": "no_playable_stream",
-                "message": f"nessuno stream riproducibile per «{title}»",
-            }
+        return _emit_unplayable(
+            title,
+            keys_before=keys_before,
+            removed=removed,
+            exact=exact,
+            available_resolutions=available_resolutions,
         )
-        return 1
     chosen = vetted.stream
     stream_block = describe_stream(cfg, chosen)
     # ADR 0021: resolve the per-invocation quality into opts — the cast decision tree

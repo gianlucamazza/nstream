@@ -55,11 +55,11 @@ The TUI stores recent queries and a metadata-only local watchlist in
 
 **Structured fields first, free text second (ADR 0026):**
 
-| Field | Primary source | Fallback |
-| ----- | -------------- | -------- |
-| `release_name` | `behaviorHints.filename` | first line of `description`, then `title` |
-| `size_gb` | `behaviorHints.videoSize` | regex on text corpus |
-| `container` | filename extension | URL path |
+| Field          | Primary source            | Fallback                                  |
+| -------------- | ------------------------- | ----------------------------------------- |
+| `release_name` | `behaviorHints.filename`  | first line of `description`, then `title` |
+| `size_gb`      | `behaviorHints.videoSize` | regex on text corpus                      |
+| `container`    | filename extension        | URL path                                  |
 
 Heuristic parsers (resolution, codec, HDR/DV, languages, source, audio, seeders, cached
 marker) read a **union** text corpus: `name` + `description` + `title` + filename
@@ -75,7 +75,7 @@ Hardware checks always apply; the rest are opt-in config knobs (`allow_software`
 
 The **cast audio** exclusion (TrueHD/DTS/DTS-HD, and remux, when casting) only applies when
 Tier-2 remux is **off** (`cfg.cast_remux = false`). With remux on (default), those titles are
-only *ranked* below native-AAC releases, not dropped (ADR 0005).
+only _ranked_ below native-AAC releases, not dropped (ADR 0005).
 
 Language filter only excludes a stream **tagged exclusively with non-preferred languages**.
 **Untagged streams are never excluded**.
@@ -86,15 +86,15 @@ Language filter only excludes a stream **tagged exclusively with non-preferred l
 (cached, resolution, lang, source, hevc, seeders_bucketed, -size)
 ```
 
-| term | meaning |
-| ---- | ------- |
-| `cached` | instant debrid stream ranks first |
-| `resolution` | higher wins |
-| `lang` | 2 = preferred (or multi), 1 = untagged, 0 = non-preferred only |
-| `source` | remux(6) > bluray(5) > webdl(4) > unknown(3) > webrip(2) > hdtv/dvd(1) > camrip(0) |
-| `hevc` | HEVC over H.264 at equal source |
-| `seeders` | capped at 40 (`_SEED_BUCKET`) |
-| `-size` | smaller among equals |
+| term         | meaning                                                                            |
+| ------------ | ---------------------------------------------------------------------------------- |
+| `cached`     | instant debrid stream ranks first                                                  |
+| `resolution` | higher wins                                                                        |
+| `lang`       | 2 = preferred (or multi), 1 = untagged, 0 = non-preferred only                     |
+| `source`     | remux(6) > bluray(5) > webdl(4) > unknown(3) > webrip(2) > hdtv/dvd(1) > camrip(0) |
+| `hevc`       | HEVC over H.264 at equal source                                                    |
+| `seeders`    | capped at 40 (`_SEED_BUCKET`)                                                      |
+| `-size`      | smaller among equals                                                               |
 
 `cached` and `resolution` stay dominant (no surprising resolution downgrade for language).
 
@@ -104,12 +104,12 @@ Language filter only excludes a stream **tagged exclusively with non-preferred l
 (cached, remux_within_size, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
 ```
 
-| term | meaning |
-| ---- | ------- |
-| `remux_within_size` | demote likely-remux releases above `cast_remux_max_size_gb` |
-| `cast_audio` | 2 = DMR-native audio, 1 = untagged, 0 = Dolby/DTS (needs Tier-2) |
-| `remux_within_cap` | prefer remux candidates ≤ `cast_remux_max_resolution` |
-| `cast_h264` | weak tie-breaker (receiver also plays HEVC) |
+| term                | meaning                                                          |
+| ------------------- | ---------------------------------------------------------------- |
+| `remux_within_size` | demote likely-remux releases above `cast_remux_max_size_gb`      |
+| `cast_audio`        | 2 = DMR-native audio, 1 = untagged, 0 = Dolby/DTS (needs Tier-2) |
+| `remux_within_cap`  | prefer remux candidates ≤ `cast_remux_max_resolution`            |
+| `cast_h264`         | weak tie-breaker (receiver also plays HEVC)                      |
 
 After ranking, cast picks pass `cast_vet` (next section). **Mirror-over-remux (ADR 0015):**
 when a remux would exceed `cast_mirror_over_remux_gb` (default 10) and the mirror sender is
@@ -120,10 +120,10 @@ forces mirror; `--no-mirror` suppresses forced and auto paths for that run (ADR 
 
 Per-session **exact resolution** filter (`PlayOpts.quality` / `--quality`):
 
-| Value | Meaning |
-| ----- | ------- |
-| `None` | TUI shows picker; headless = no filter |
-| `0` | Auto (no exact filter; binge sticky) |
+| Value                       | Meaning                                        |
+| --------------------------- | ---------------------------------------------- |
+| `None`                      | TUI shows picker; headless = no filter         |
+| `0`                         | Auto (no exact filter; binge sticky)           |
 | `720` / `1080` / `2160` / … | Hard-filter: only that `StreamInfo.resolution` |
 
 Applied in `unsupported_reason` after the hardware `max_resolution` cap. Unknown resolution
@@ -142,11 +142,11 @@ Aliases: `auto`, `4k`/`uhd`/`2160`, `fhd`/`1080`, `hd`/`720`, `sd`/`480`. Headle
 `cast_vet` enforces what the Default Media Receiver can actually present. Ranking is a
 preference; vetting is a **gate** (and may reselect).
 
-| Gate | Function | ADR | Behaviour |
-| ---- | -------- | --- | --------- |
-| Audio plan | `vet_cast_audio` | 0005 | Prefer primary lang as first track; remux `0:a:N`; reselect dub; safety subs |
-| Real video codec | `vet_cast_video` | 0017 | ffprobe codec; drop DivX/etc.; may yield `video_codec_unsupported` |
-| Container | `vet_cast_container` | 0022 | mkv → MP4 rewrap when DMR needs it |
+| Gate             | Function             | ADR  | Behaviour                                                                    |
+| ---------------- | -------------------- | ---- | ---------------------------------------------------------------------------- |
+| Audio plan       | `vet_cast_audio`     | 0005 | Prefer primary lang as first track; remux `0:a:N`; reselect dub; safety subs |
+| Real video codec | `vet_cast_video`     | 0017 | ffprobe codec; drop DivX/etc.; may yield `video_codec_unsupported`           |
+| Container        | `vet_cast_container` | 0022 | mkv → MP4 rewrap when DMR needs it                                           |
 
 DMR plays the file’s **default** audio track and cannot switch embedded tracks. In-cast `a`
 re-casts a different release. Details: [user/cast.md](user/cast.md).
@@ -163,10 +163,10 @@ its cache endpoint in 2024 — ADR 0002). Two guards, auto-pick only:
 
 Probe (`net.probe_url`) is **classified, not boolean**:
 
-| Verdict | Signal | Effect |
-| ------- | ------ | ------ |
-| `live` | 2xx with plausible total size | keep |
-| `gone` | 404/410/4xx | drop **and** denylist |
+| Verdict   | Signal                                                | Effect                             |
+| --------- | ----------------------------------------------------- | ---------------------------------- |
+| `live`    | 2xx with plausible total size                         | keep                               |
+| `gone`    | 404/410/4xx                                           | drop **and** denylist              |
 | `unknown` | incomplete size, 403/405/416, 5xx, timeout, transport | drop this run — **never** denylist |
 
 Size mismatch never escalates to `gone` (in-flight `[RD download]` vs emptied file).
@@ -174,6 +174,14 @@ Size mismatch never escalates to `gone` (in-flight `[RD download]` vs emptied fi
 `gone` → `XDG_STATE_HOME/nstream/dead-sources.json` (TTL 30 days, 500 max) → `prune_dead`
 pre-ranking. `nstream --forget-dead` clears. Headless `sources_removed` only when the denylist
 accounts for **every** candidate; empty merely-not-ready set is `no_playable_stream`.
+
+## Nothing playable (ADR 0033)
+
+`prepare_stream` returns `None` **only** when the user backs out (ESC). Exhaustion raises
+`NoPlayableStream`, whose `reason` (`unresolvable_reason` + `engine.p2p_block_reason`) becomes
+the fzf header in the TUI and the `no_playable_stream` message headlessly — a set of pure
+torrents with the P2P gate closed, or no direct link left by the debrid. `--explain` shows the
+same shape up front: `SORGENTI: n/m con link diretto · k torrent`.
 
 ## Per-addon circuit breaker (ADR 0027)
 
@@ -187,12 +195,12 @@ lists Open addons.
 Duration from ffprobe (`tracks.Tracks.duration`, memoized) vs expected runtime
 (`api.expected_runtime_s`):
 
-| Measured | Expected | Effect |
-| -------- | -------- | ------ |
-| `duration ≥ 0.35 × expected` | known (≥ 10 min) | keep (including longer) |
-| `duration < 0.35 × expected` | known (≥ 10 min) | drop this run, never denylist |
-| 0 (probe failed) | any | keep |
-| any | unknown / &lt; 10 min | guard off |
+| Measured                     | Expected              | Effect                        |
+| ---------------------------- | --------------------- | ----------------------------- |
+| `duration ≥ 0.35 × expected` | known (≥ 10 min)      | keep (including longer)       |
+| `duration < 0.35 × expected` | known (≥ 10 min)      | drop this run, never denylist |
+| 0 (probe failed)             | any                   | keep                          |
+| any                          | unknown / &lt; 10 min | guard off                     |
 
 Series expected runtime is the **series** meta typical episode length. Proven-short candidates
 are removed from the working set so later reselects cannot land back on them. Headless:
@@ -202,11 +210,11 @@ are removed from the working set so later reselects cannot land back on them. He
 
 Not a stream rank term, but part of “what you hear/see”:
 
-| Tier | `subtitles_match` | When |
-| ---- | ----------------- | ---- |
-| Protocol hash | `hash` | OpenSubtitles moviehash of the exact file |
-| Audio-anchored align | `audio` | Native engine on local/remux media; confidence-gated |
-| Language guess | `lang` | Otherwise |
+| Tier                 | `subtitles_match` | When                                                 |
+| -------------------- | ----------------- | ---------------------------------------------------- |
+| Protocol hash        | `hash`            | OpenSubtitles moviehash of the exact file            |
+| Audio-anchored align | `audio`           | Native engine on local/remux media; confidence-gated |
+| Language guess       | `lang`            | Otherwise                                            |
 
 Config: `sub_align`, `sub_align_budget_s`. Manual `--sub-offset` / `--sub-fps` always win.
 Cast path delivers WebVTT text tracks (ADR 0012).

@@ -49,6 +49,20 @@ def test_explain_streams_empty():
     assert "nessuno stream" in explain.explain_streams(CFG, [], cast=False)
 
 
+def test_explain_streams_shows_source_shape(monkeypatch):
+    """0 direct links + a blocked gate is the whole diagnosis for a title that won't play."""
+    out = explain.explain_streams(CFG, [S_4K_ITA, S_1080_UNTAGGED], cast=False)
+    assert "SORGENTI: 2/2 con link diretto" in out
+    from nstream import engine
+
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    torrent: Stream = {"infoHash": "A", "title": "Movie.2024.1080p-GRP\n👤 9 💾 6.0 GB"}
+    out = explain.explain_streams(cfg, [torrent], cast=False)
+    assert "SORGENTI: 0/1 con link diretto · 1 torrent" in out
+    assert "VPN" in out and "token" not in out
+
+
 def test_auto_pick_returns_best():
     pick = explain.auto_pick(CFG, [S_1080_UNTAGGED, S_4K_ITA], cast=False)
     assert pick is not None and pick.stream is S_4K_ITA

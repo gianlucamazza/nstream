@@ -22,29 +22,29 @@ with this document.
 
 Always pass `--json`. Quote the title.
 
-| Intent | Command |
-| ------ | ------- |
-| Cast to TV | `nstream --json --cast "X"` |
-| Local mpv | `nstream --json --local "X"` |
-| Mirror cast (1080p SDR) | `nstream --json --mirror "X"` |
-| Suppress mirror / auto-over-remux | `nstream --json --cast --no-mirror "X"` |
-| Disambiguate year | `… --year 1999` |
-| Movies / series only | `… --movies` or `… --series` |
-| Episode | `… --season 1 --episode 3` |
-| Device | `… --device "Salotto"` |
-| Subtitles | `… --subs` or `… --sub-lang ita` |
-| Sub retime | `… --sub-offset -2.5` / `… --sub-fps 25:23.976` |
-| Force dub | `… --audio-lang eng` |
-| Force resolution | `… --quality 1080` (`4k`/`2160`, `720`, `auto`, …) |
-| Probe (no play) | `nstream --json --probe "X"` |
-| List episodes | `nstream --json --probe "Series"` (no `--episode`) |
-| Explain ranking | `nstream --json --explain "X"` |
-| Continue / next | `nstream --json -c ["X"]` |
-| Browse catalog | `nstream --json --cast --browse popolari\|nuovi\|top` |
-| Stop / status / pause / resume | `--stop` / `--status` / `--pause` / `--resume` |
-| Seek / volume | `--seek SEC` / `--volume N` |
-| Clear dead denylist | `nstream --json --forget-dead` |
-| Clear addon circuit breakers | `nstream --json --forget-breakers` |
+| Intent                            | Command                                               |
+| --------------------------------- | ----------------------------------------------------- |
+| Cast to TV                        | `nstream --json --cast "X"`                           |
+| Local mpv                         | `nstream --json --local "X"`                          |
+| Mirror cast (1080p SDR)           | `nstream --json --mirror "X"`                         |
+| Suppress mirror / auto-over-remux | `nstream --json --cast --no-mirror "X"`               |
+| Disambiguate year                 | `… --year 1999`                                       |
+| Movies / series only              | `… --movies` or `… --series`                          |
+| Episode                           | `… --season 1 --episode 3`                            |
+| Device                            | `… --device "Salotto"`                                |
+| Subtitles                         | `… --subs` or `… --sub-lang ita`                      |
+| Sub retime                        | `… --sub-offset -2.5` / `… --sub-fps 25:23.976`       |
+| Force dub                         | `… --audio-lang eng`                                  |
+| Force resolution                  | `… --quality 1080` (`4k`/`2160`, `720`, `auto`, …)    |
+| Probe (no play)                   | `nstream --json --probe "X"`                          |
+| List episodes                     | `nstream --json --probe "Series"` (no `--episode`)    |
+| Explain ranking                   | `nstream --json --explain "X"`                        |
+| Continue / next                   | `nstream --json -c ["X"]`                             |
+| Browse catalog                    | `nstream --json --cast --browse popolari\|nuovi\|top` |
+| Stop / status / pause / resume    | `--stop` / `--status` / `--pause` / `--resume`        |
+| Seek / volume                     | `--seek SEC` / `--volume N`                           |
+| Clear dead denylist               | `nstream --json --forget-dead`                        |
+| Clear addon circuit breakers      | `nstream --json --forget-breakers`                    |
 
 Incompatible with `--json`: interactive-only flags such as `--sub-menu` → `error: usage`.
 
@@ -65,55 +65,55 @@ headless.
 
 Common fields:
 
-| Field | Meaning |
-| ----- | ------- |
-| `action` | `cast` \| `play` \| `probe` \| `episodes` \| `explain` \| lifecycle (`stop`/`status`/`pause`/`resume`/`seek`/`volume`) \| `forget_dead` \| `forget_breakers` |
-| `title` | Display title |
-| `device` | Cast device (when casting) |
-| `stream` | Descriptive pick (`resolution`, `codec`, `size_gb`, …) — **no URL** |
-| `quality` | Requested filter (`null` = none/Auto) |
-| `available_resolutions` | Tiers on offer |
-| `audio_lang` / `available_audio` / `audio_verified` | Dub played and alternatives |
-| `duration_verified` | `true` if runtime check passed; `null` if not checkable |
-| `reencoded` | Tier-2 remux used |
-| `selection` | Title pick: `exact` \| `year` \| `first` |
-| `subtitles` / `subtitles_match` / `subtitles_offset` | Sub lang and evidence tier |
-| `volume` / `muted` / `notice` | Cast audio state |
+| Field                                                | Meaning                                                                                                                                                      |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `action`                                             | `cast` \| `play` \| `probe` \| `episodes` \| `explain` \| lifecycle (`stop`/`status`/`pause`/`resume`/`seek`/`volume`) \| `forget_dead` \| `forget_breakers` |
+| `title`                                              | Display title                                                                                                                                                |
+| `device`                                             | Cast device (when casting)                                                                                                                                   |
+| `stream`                                             | Descriptive pick (`resolution`, `codec`, `size_gb`, …) — **no URL**                                                                                          |
+| `quality`                                            | Requested filter (`null` = none/Auto)                                                                                                                        |
+| `available_resolutions`                              | Tiers on offer                                                                                                                                               |
+| `audio_lang` / `available_audio` / `audio_verified`  | Dub played and alternatives                                                                                                                                  |
+| `duration_verified`                                  | `true` if runtime check passed; `null` if not checkable                                                                                                      |
+| `reencoded`                                          | Tier-2 remux used                                                                                                                                            |
+| `selection`                                          | Title pick: `exact` \| `year` \| `first`                                                                                                                     |
+| `subtitles` / `subtitles_match` / `subtitles_offset` | Sub lang and evidence tier                                                                                                                                   |
+| `volume` / `muted` / `notice`                        | Cast audio state                                                                                                                                             |
 
 `--status` adds `player_state`, `position`, `duration`, `active_tracks`, `receiver_error`.
 
 ### Subtitle evidence tiers (ADR 0020)
 
-| `subtitles_match` | Meaning |
-| ----------------- | ------- |
-| `hash` | OpenSubtitles moviehash of the exact file |
-| `audio` | Native alignment against local/remux media; offset in `subtitles_offset` |
-| `lang` | Language guess only |
+| `subtitles_match` | Meaning                                                                  |
+| ----------------- | ------------------------------------------------------------------------ |
+| `hash`            | OpenSubtitles moviehash of the exact file                                |
+| `audio`           | Native alignment against local/remux media; offset in `subtitles_offset` |
+| `lang`            | Language guess only                                                      |
 
 Manual `--sub-offset` / `--sub-fps` always win (engine steps aside). Toggle engine:
 `sub_align`, `sub_align_budget_s`.
 
 ## Error codes
 
-| `error` | Meaning | Recovery |
-| ------- | ------- | -------- |
-| `no_result` | No title match / empty history; with `--year`, every candidate has another year | Retry spelling; show `years`; `--movies`/`--series` |
-| `no_stream_sources` | No addon configured | Enable Torrentio or add manifests |
-| `no_streams` | Title ok, catalog empty for it | Wait / other source |
-| `no_playable_stream` | Filters or not-ready urls (e.g. debrid still fetching) | Retry later; lower quality; `--local` |
-| `cast_failed` | Delivery never started | Check TV/network; read `cast_error` / stderr; history untouched |
-| `sources_removed` | All candidates proven 404/410 | Do not retry; `--local` or `--forget-dead` if believed back |
-| (slow / missing addon) | Not an error code — Open circuit breaker (ADR 0027) | `--explain` lists Open addons; `--forget-breakers` to reset |
-| `sources_truncated` | Duration ≪ expected runtime | Other quality/backend; check `expected_runtime_s` |
-| `video_codec_unsupported` | Real codec not castable | `--local` or other quality |
-| `audio_lang_unavailable` | Requested dub missing | Show `available_audio` |
-| `quality_unavailable` | Requested res missing | Show `available_resolutions` |
-| `episode_not_found` | Bad season/episode | Show `available` |
-| `series_completed` | Past finale on continue/next | Inform user |
-| `device_not_found` | No cast target | `catt scan`; `--device` |
-| `network` | Addon/API failure | Retry later; `message` |
-| `usage` | Bad flag combo | Fix command |
-| `config` | Config/token problem (some paths) | `nstream --settings`; stderr |
+| `error`                   | Meaning                                                                                                                                                                  | Recovery                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| `no_result`               | No title match / empty history; with `--year`, every candidate has another year                                                                                          | Retry spelling; show `years`; `--movies`/`--series`             |
+| `no_stream_sources`       | No addon configured                                                                                                                                                      | Enable Torrentio or add manifests                               |
+| `no_streams`              | Title ok, catalog empty for it                                                                                                                                           | Wait / other source                                             |
+| `no_playable_stream`      | Filters or not-ready urls (e.g. debrid still fetching). `message` carries the reason when nstream knows it — blocked P2P gate, no direct link from the debrid (ADR 0033) | Retry later; lower quality; `--local`; act on the reason        |
+| `cast_failed`             | Delivery never started                                                                                                                                                   | Check TV/network; read `cast_error` / stderr; history untouched |
+| `sources_removed`         | All candidates proven 404/410                                                                                                                                            | Do not retry; `--local` or `--forget-dead` if believed back     |
+| (slow / missing addon)    | Not an error code — Open circuit breaker (ADR 0027)                                                                                                                      | `--explain` lists Open addons; `--forget-breakers` to reset     |
+| `sources_truncated`       | Duration ≪ expected runtime                                                                                                                                              | Other quality/backend; check `expected_runtime_s`               |
+| `video_codec_unsupported` | Real codec not castable                                                                                                                                                  | `--local` or other quality                                      |
+| `audio_lang_unavailable`  | Requested dub missing                                                                                                                                                    | Show `available_audio`                                          |
+| `quality_unavailable`     | Requested res missing                                                                                                                                                    | Show `available_resolutions`                                    |
+| `episode_not_found`       | Bad season/episode                                                                                                                                                       | Show `available`                                                |
+| `series_completed`        | Past finale on continue/next                                                                                                                                             | Inform user                                                     |
+| `device_not_found`        | No cast target                                                                                                                                                           | `catt scan`; `--device`                                         |
+| `network`                 | Addon/API failure                                                                                                                                                        | Retry later; `message`                                          |
+| `usage`                   | Bad flag combo                                                                                                                                                           | Fix command                                                     |
+| `config`                  | Config/token problem (some paths)                                                                                                                                        | `nstream --settings`; stderr                                    |
 
 Config errors may also exit non-zero with a stderr line only.
 
