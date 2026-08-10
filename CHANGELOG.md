@@ -5,6 +5,24 @@ All notable changes to nstream are documented here. Version source:
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [1.37.1] — 2026-08-10
+
+### Fixed
+
+- **ADR 0033 Accepted:** a title with nothing playable no longer returns to the menu in
+  silence. `stream_select.prepare_stream` reserves `None` for the user backing out (ESC) and
+  raises `NoPlayableStream(reason)` on exhaustion; the reason reaches the fzf header (TUI) and
+  the `no_playable_stream` message (headless). Typical case: every source is a pure torrent and
+  the P2P privacy gate (ADR 0032) is closed, or the debrid left no direct link.
+
+### Added
+
+- `--explain`: `SORGENTI: n/m con link diretto · k torrent` line, plus `counts.direct_links`,
+  `counts.torrents` and `unresolvable_reason` in the JSON output — the same diagnosis before
+  attempting playback.
+- `engine.p2p_block_reason`: the privacy gate's predicate without its side effects, so
+  explainers can state the refusal without triggering it.
+
 ## [1.37.0] — 2026-08-09
 
 ### Added
