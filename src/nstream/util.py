@@ -10,6 +10,8 @@ playback (callers that must surface an error let `atomic_write` re-raise).
 from __future__ import annotations
 
 import contextlib
+import fcntl
+import functools
 import json
 import os
 import random
@@ -17,10 +19,54 @@ import re
 import signal
 import subprocess
 import tempfile
+import time
 import urllib.error
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO
+from typing import IO, cast
+
+
+@contextlib.contextmanager
+def file_lock(path: Path, *, timeout: float = 0.1):
+    """Serialize updates without making playback wait indefinitely for another process."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        path.with_name(f".{path.stem}.lock"), os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("state lock busy") from None
+                time.sleep(0.005)
+        yield
+    finally:
+        os.close(fd)
+
+
+def state_update(path_fn: Callable[[], Path], fallback=None):
+    """Best-effort locked read/modify/write; never run an update without the lock."""
+
+    def decorate[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+        @functools.wraps(fn)
+        def update(*args: P.args, **kwargs: P.kwargs) -> R:
+            try:
+                path = path_fn()
+                with file_lock(path):
+                    if path.is_symlink():
+                        return cast(R, fallback)
+                    return fn(*args, **kwargs)
+            except OSError:
+                return cast(R, fallback)
+
+        return update
+
+    return decorate
+
 
 # External-command timeouts (seconds), centralised so they're consistent and tunable.
 FFPROBE_TIMEOUT = 20.0
@@ -72,13 +118,24 @@ def atomic_write(
     writers and readers never see a partial file). The temp file is cleaned up and the
     OSError re-raised on failure — best-effort callers wrap this in `try/except OSError`."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Preserve malformed JSON only when an actual overwrite is about to occur.
+    if path.suffix == ".json" and path.exists() and not path.is_symlink():
+        raw = path.read_bytes()
+        try:
+            if not isinstance(json.loads(raw), dict):
+                raise ValueError("state must be a JSON object")
+        except (ValueError, UnicodeError):
+            backup = path.with_name(f"{path.name}.corrupt-{time.time_ns()}")
+            atomic_write_bytes(backup, raw, prefix=".recovery-")
     fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=path.parent)
     try:
         os.chmod(tmp, mode)  # set perms before any content is written
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             write_fn(f)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
@@ -107,7 +164,7 @@ def load_json[T](path: Path, fallback: T) -> T:
     was expected). Best-effort: never raises."""
     try:
         data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, UnicodeError):
         return fallback
     return data if isinstance(data, type(fallback)) else fallback
 
@@ -126,17 +183,19 @@ class RunState:
         self.path = Path(base) / f"nstream-{name}.json"
 
     def read(self) -> dict | None:
-        with contextlib.suppress(OSError, json.JSONDecodeError):
-            return json.loads(self.path.read_text())
+        with contextlib.suppress(OSError, ValueError, UnicodeError):
+            if self.path.is_symlink() or self.path.stat().st_uid != os.getuid():
+                return None
+            data = json.loads(self.path.read_text())
+            return data if isinstance(data, dict) else None
         return None
 
     def write(self, data: dict) -> None:
-        # O_NOFOLLOW + 0600: on the world-writable /tmp fallback a pre-planted symlink
-        # must not redirect the write (same hardening as bridge's runtime-dir fallback).
+        # Private atomic replacement never follows a pre-planted destination symlink.
         with contextlib.suppress(OSError):
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data))
+            if self.path.is_symlink():
+                return
+            atomic_write(self.path, lambda f: json.dump(data, f), prefix=".runtime-")
 
     def clear(self) -> None:
         with contextlib.suppress(OSError):

@@ -1,7 +1,7 @@
 """Per-addon circuit breaker (ADR 0027).
 
-Persisted best-effort under XDG_STATE; a race loses at most a counter, never blocks
-playback. Failures that trip the breaker are retryable network failures / gather
+Persisted under a bounded lock in XDG_STATE; contention skips a best-effort update.
+Failures that trip the breaker are retryable network failures / gather
 timeouts — not empty catalogs (an up addon may legitimately return zero streams).
 """
 
@@ -21,6 +21,7 @@ _log = log.get_logger("breaker")
 FAIL_THRESHOLD = 3
 # Seconds to stay Open before a single Half-Open probe is allowed.
 OPEN_COOLDOWN_S = 300.0
+HALF_OPEN_LEASE_S = 30.0
 MAX_ENTRIES = 64
 
 _STATE_NAME = "addon-breakers"
@@ -39,7 +40,16 @@ def _read() -> dict[str, dict]:
     if not isinstance(data, dict):
         return {}
     entries = data.get("breakers")
-    return entries if isinstance(entries, dict) else {}
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        key: rec
+        for key, rec in entries.items()
+        if isinstance(rec, dict)
+        and all(
+            isinstance(rec.get(field, 0), int | float) for field in ("ts", "opened_at", "fails")
+        )
+    }
 
 
 def _write(entries: dict[str, dict]) -> None:
@@ -59,6 +69,7 @@ def _now() -> float:
     return time.time()
 
 
+@util.state_update(_path, True)
 def allow(key: str, *, now: float | None = None) -> bool:
     """True if this addon base may be queried. Open → False until cooldown; then Half-Open."""
     if not key:
@@ -81,11 +92,16 @@ def allow(key: str, *, now: float | None = None) -> bool:
             _log.info("breaker half-open: %s", key)
             return True
         return False
-    # half_open: only one in-flight probe; concurrent callers may both go through —
-    # acceptable (at most double TIMEOUT once per window).
+    if now - float(rec.get("ts") or 0) < HALF_OPEN_LEASE_S:
+        return False
+    # A process may have exited while holding the probe lease; allow recovery.
+    entries = _read()
+    entries[key] = {**rec, "ts": now}
+    _write(entries)
     return True
 
 
+@util.state_update(_path)
 def record_success(key: str) -> None:
     if not key:
         return
@@ -97,6 +113,7 @@ def record_success(key: str) -> None:
     _write(entries)
 
 
+@util.state_update(_path)
 def record_failure(key: str, *, reason: str = "") -> None:
     """Count a retryable failure. Opens the breaker at FAIL_THRESHOLD."""
     if not key:
@@ -160,6 +177,7 @@ def open_breakers(*, now: float | None = None) -> list[dict]:
     return out
 
 
+@util.state_update(_path, 0)
 def forget_breakers() -> int:
     """Clear all breakers (CLI escape hatch, analogue of --forget-dead)."""
     n = len(_read())

@@ -25,10 +25,9 @@ def _stub_fzf(monkeypatch, *, returncode=0, stdout="", missing=False):
     captured = {}
 
     class _Proc:
-        pass
-
-    _Proc.returncode = returncode
-    _Proc.stdout = stdout
+        def __init__(self):
+            self.returncode = returncode
+            self.stdout = stdout
 
     def fake(cmd, **k):
         captured["cmd"] = cmd

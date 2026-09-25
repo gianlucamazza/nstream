@@ -34,6 +34,7 @@ from . import (
     engine,
     log,
     mirror,
+    picker,
     quality,
     remux,
     state,
@@ -49,6 +50,30 @@ _log = log.get_logger("cast_flow")
 # Printed when `--mirror` is forced but the mirror backend isn't available (ADR 0023): an
 # explicit --mirror otherwise forces the mirror even for a DMR-decodable title.
 MIRROR_UNAVAILABLE = "nstream: mirror non disponibile → cast diretto"
+
+
+def _cast_would_wait(cfg: Config, plan: cast_vet.CastAudioPlan) -> bool:
+    """True when delivering `plan` fetches a complete file before the TV can start.
+
+    Remux and an undecodable track always wait. A direct plan waits only when the
+    container itself is not loadable (MKV rewrap, ADR 0022)."""
+    if plan.mode == "remux" or plan.needs_remux:
+        return True
+    if not plan.stream.get("url"):
+        return False
+    return not quality.container_castable(cast_vet.cast_container(cfg, plan.stream))
+
+
+def _prepare_line(stream: Stream, plan: cast_vet.CastAudioPlan, target: str) -> str:
+    """One non-tty-safe line before a full-file prepare (ADR 0035)."""
+    info = quality.parse_stream(stream)
+    lang = plan.real_lang or target or "?"
+    size = f", ~{info.size_gb:.1f}GB" if info.size_gb else ""
+    box = info.container or "?"
+    return (
+        f"nstream: preparo il file intero ({box}{size}, audio {lang}) "
+        "— la TV parte a preparazione finita"
+    )
 
 
 class CastStreamUnresolved(Exception):
@@ -178,6 +203,43 @@ def run_cast(
     plan = cast_vet.vet_cast_audio(
         cfg, results, chosen, target_lang, exact_resolution=exact, expected_s=expected_runtime_s
     )
+    # ADR 0035: a soft language preference must not force a full-file fetch when a
+    # verified direct cast exists at this quality. Explicit `--audio-lang` stays hard.
+    # Headless takes the direct cast and reports it; a TUI asks once before dropping
+    # the primary dub.
+    notice_defer: str | None = None
+    if not opts.audio_lang and target_lang and _cast_would_wait(cfg, plan):
+        instant = cast_vet.find_instant_direct(
+            cfg,
+            results,
+            tuple(cfg.audio_langs),
+            exact_resolution=exact,
+            expected_s=expected_runtime_s,
+        )
+        if instant is not None and instant.stream is not plan.stream:
+            take = instant.real_lang == target_lang
+            if not take:
+                if sys.stdin.isatty() and sys.stderr.isatty():
+                    take = picker.confirm(
+                        f"«{target_lang}» solo dopo il download completo. "
+                        f"Parto subito in {instant.real_lang}?",
+                        default_yes=True,
+                        non_tty_default=True,
+                    )
+                else:
+                    take = True
+            if take:
+                if instant.real_lang != target_lang:
+                    notice_defer = cast_vet.instant_defer_notice(plan, instant, target_lang)
+                    print(f"nstream: {notice_defer}", file=sys.stderr)
+                    if not opts.sub_lang:
+                        safety_sub_lang = target_lang
+                else:
+                    print(
+                        "nstream: release diretta nella stessa lingua, salto il remux",
+                        file=sys.stderr,
+                    )
+                plan = instant
     if plan.stream is not chosen:
         # The language reselect only offers video-castable candidates (its guard shares
         # this vetting), so a swap clears the bad-video verdict along with the stream.
@@ -220,7 +282,7 @@ def run_cast(
     sub_lang = safety_sub_lang or opts.sub_lang
     _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
 
-    notice: str | None = None
+    notice: str | None = notice_defer
     reencoded = False
     # Backend strategy. The DMR plays AAC/HEVC/4K/HDR natively and instantly — strictly better
     # than the mirror (1080p SDR re-encode, latency) — so mirroring only helps when the audio is
@@ -272,6 +334,8 @@ def run_cast(
             # Reached the else with --mirror forced ⇒ `mirror.available()` is False (the only
             # way `mirror_ok` is False here): honour the intent with an honest fallback notice.
             print(MIRROR_UNAVAILABLE, file=sys.stderr)
+        if needs_remux:
+            print(_prepare_line(chosen, plan, target_lang), file=sys.stderr)
         remux_path = (
             remux.remux_for_cast(
                 chosen["url"],

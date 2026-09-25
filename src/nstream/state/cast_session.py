@@ -18,6 +18,7 @@ CAST_SESSION = "watch"
 CAST_SESSION_TTL = 6 * 3600.0
 
 
+@util.state_update(lambda: util.RunState(CAST_SESSION).path)
 def clear_cast_session() -> None:
     """Drop the fire-and-return cast session, if any. Called at the start of every new
     cast (`cast_flow.run_cast` / Alt-C): the new content replaces what the session
@@ -25,6 +26,7 @@ def clear_cast_session() -> None:
     util.RunState(CAST_SESSION).clear()
 
 
+@util.state_update(lambda: util.RunState(CAST_SESSION).path)
 def expire_cast_session() -> None:
     """Best-effort: drop the cast session once its TTL has passed. Called at every
     headless entry, so an agent that never issues `--stop` doesn't leave a dead session
@@ -91,6 +93,7 @@ def cast_session_label(session: dict | None = None) -> str | None:
     return f"In onda · {title}"
 
 
+@util.state_update(lambda: util.RunState(CAST_SESSION).path)
 def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
     """Persist the fire-and-return cast session (entry + device) across nstream runs.
     Interactive and `--follow` casts don't need this — their poll loop saves directly."""
@@ -99,6 +102,7 @@ def remember_cast(cfg: Config, entry: HistoryEntry, device: str | None) -> None:
     util.RunState(CAST_SESSION).write({**entry, "device": device or ""})
 
 
+@util.state_update(lambda: util.RunState(CAST_SESSION).path, False)
 def update_from_receiver(
     cfg: Config,
     device: str | None,

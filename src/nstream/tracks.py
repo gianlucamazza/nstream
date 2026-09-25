@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from . import util
+from . import log, util
 
 
 @dataclass(frozen=True)
@@ -112,6 +112,7 @@ def cached_duration(url: str) -> float:
     return tr.duration if tr else 0.0
 
 
+@log.phase("probe")
 def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
     """Probe `url` for embedded audio/subtitle tracks (+ video count / duration). Returns
     empty lists if ffprobe is unavailable or the probe fails (caller falls back to mpv

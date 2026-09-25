@@ -3,13 +3,45 @@
 from __future__ import annotations
 
 import threading
+import urllib.error
+import urllib.request
+from dataclasses import replace
+from email.message import Message
+from typing import cast
 
 import pytest
 
 from nstream import addons, api
 from nstream.config import Config
+from nstream.types import Stream
 
 CFG = Config(torrentio_base="tb")
+
+
+def test_single_source_deadline_ignores_late_success(monkeypatch):
+    from nstream.state import breaker
+
+    release = threading.Event()
+    ended = threading.Event()
+    records = []
+    monkeypatch.setattr(api, "_GATHER_BUDGET", 0.02)
+    monkeypatch.setattr(breaker, "record_failure", lambda *a, **kw: records.append("failed"))
+    monkeypatch.setattr(breaker, "record_success", lambda *a: records.append("success"))
+
+    def slow():
+        try:
+            release.wait(1)
+            return [1]
+        finally:
+            ended.set()
+
+    try:
+        assert api._gather([slow], keys=["http://test"]) == []
+        assert records == ["failed"]
+    finally:
+        release.set()
+    assert ended.wait(1)
+    assert records == ["failed"]
 
 
 @pytest.fixture(autouse=True)
@@ -35,11 +67,15 @@ def test_streams_aggregate_and_dedup(monkeypatch):
 
     def fake_get(url, **k):
         if url.startswith("http://a"):
-            return {"streams": [{"url": "u1"}, {"url": "u2"}]}
-        return {"streams": [{"url": "u2"}, {"url": "u3"}]}  # u2 duplicate
+            return {"streams": [{"url": "http://u1"}, {"url": "http://u2"}]}
+        return {"streams": [{"url": "http://u2"}, {"url": "http://u3"}]}  # u2 duplicate
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
-    assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["u1", "u2", "u3"]
+    assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == [
+        "http://u1",
+        "http://u2",
+        "http://u3",
+    ]
 
 
 def test_streams_one_addon_fails_does_not_block(monkeypatch, capsys):
@@ -50,10 +86,10 @@ def test_streams_one_addon_fails_does_not_block(monkeypatch, capsys):
     def fake_get(url, **k):
         if url.startswith("http://a"):
             raise api.NetworkError("down")
-        return {"streams": [{"url": "u3"}]}
+        return {"streams": [{"url": "http://u3"}]}
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
-    assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["u3"]
+    assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["http://u3"]
     # No per-addon error spam (avoids the double "stream … / nessuno stream" message).
     assert capsys.readouterr().err == ""
 
@@ -70,12 +106,12 @@ def test_streams_stuck_addon_dropped_at_deadline(monkeypatch):
     def fake_get(url, **k):
         if url.startswith("http://a"):
             release.wait(5.0)  # hung addon: never answers within the budget
-            return {"streams": [{"url": "late"}]}
-        return {"streams": [{"url": "fast"}]}
+            return {"streams": [{"url": "http://late"}]}
+        return {"streams": [{"url": "http://fast"}]}
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
     try:
-        assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["fast"]
+        assert [s["url"] for s in api.streams(CFG, "movie", "tt1")] == ["http://fast"]
     finally:
         release.set()  # unblock the abandoned worker so the suite exits promptly
 
@@ -116,7 +152,7 @@ def test_streams_pass_addon_labels_to_gather(monkeypatch):
     def capture(tasks, *, labels=None, keys=None):
         seen["labels"] = list(labels or [])
         seen["keys"] = list(keys or [])
-        return [{"url": "u1"}]
+        return [{"url": "http://u1"}]
 
     monkeypatch.setattr(api, "_gather", capture)
     api.streams(CFG, "movie", "tt1")
@@ -350,8 +386,9 @@ class _Resp:
         self._body = body
         self.headers = headers or {}
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        body, self._body = self._body[:size], self._body[size:]
+        return body
 
     def __enter__(self):
         return self
@@ -362,20 +399,20 @@ class _Resp:
 
 def test_http_get_json_plain(monkeypatch):
     body = _json.dumps({"ok": 1}).encode()
-    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: _Resp(body))
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp(body))
     assert api.http_get_json("http://x", what="t") == {"ok": 1}
 
 
 def test_http_get_json_gzip(monkeypatch):
     body = _gzip.compress(_json.dumps({"ok": 2}).encode())
     resp = _Resp(body, {"Content-Encoding": "gzip"})
-    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: resp)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp)
     assert api.http_get_json("http://x", what="t") == {"ok": 2}
 
 
 def test_http_get_json_corrupt_gzip_raises(monkeypatch):
     resp = _Resp(b"\x1f\x8bnot-gzip", {"Content-Encoding": "gzip"})
-    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: resp)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: resp)
     with pytest.raises(api.NetworkError, match="non valida"):
         api.http_get_json("http://x", what="t")
 
@@ -388,7 +425,7 @@ def test_browse_combines_movie_and_series(monkeypatch):
         types=("movie", "series"),
         catalogs=(("movie", "top"), ("series", "top")),
     )
-    cine = addons.Addon(**{**cine.__dict__, "builtin": True})
+    cine = replace(cine, builtin=True)
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
 
     def fake_get(url, **k):
@@ -494,7 +531,7 @@ def test_streams_not_cached(monkeypatch):
 
     def fake_get(url, **k):
         calls["n"] += 1
-        return {"streams": [{"url": "u1"}]}
+        return {"streams": [{"url": "http://u1"}]}
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
     api.streams(CFG, "movie", "tt1")
@@ -513,7 +550,7 @@ def test_filename_join_key_prefers_behaviorhints():
     # The key is NORMALIZED (ADR 0026): case-folded, container extension stripped. It is only
     # ever a dict/set key inside the fuse and the dedup — never displayed, never written back
     # into a stream — so normalizing it can't leak into what the user sees.
-    s = {"title": "Title line\nextra", **_bh("Movie.2024.x265.mkv")}
+    s: Stream = {"title": "Title line\nextra", **_bh("Movie.2024.x265.mkv")}
     assert api._filename(s) == "movie.2024.x265"
     # description (protocol-current) outranks the deprecated title headline
     assert api._filename({"description": "Movie.2024.WEB\n💾 2 GB", "title": "Other"}) == (
@@ -532,7 +569,7 @@ def test_merge_hybrid_fuses_by_filename():
         {"infoHash": "AAA", "fileIdx": 0, "sources": ["tracker:x"], api._P2P_TAG: True, **_bh(fn)},
         {"infoHash": "BBB", api._P2P_TAG: True, **_bh("PureTorrent.Only.mkv")},
     ]
-    out = api._merge_hybrid(debrid, torrents)
+    out = api._merge_hybrid(cast(list[Stream], debrid), cast(list[Stream], torrents))
     # the matched release carries BOTH the debrid url and the torrent's infoHash/fileIdx/sources
     fused = next(s for s in out if api._filename(s) == api._filename(_bh(fn)))
     assert fused["url"] == "https://rd/u1" and fused["infoHash"] == "AAA"
@@ -555,7 +592,7 @@ def test_fuse_url_and_torrent_cross_addon():
     ]
     # Only playable rows (as streams() would pass)
     playable = [s for s in streams if s.get("url") or s.get("infoHash")]
-    out = api._fuse_url_and_torrent(playable)
+    out = api._fuse_url_and_torrent(cast(list[Stream], playable))
     fused = next(s for s in out if s.get("url") == "https://debrid/x")
     assert fused["infoHash"] == "deadbeef" and fused["fileIdx"] == 1
     # pure absorbed into ready — no orphan duplicate
@@ -651,23 +688,23 @@ def test_url_playable_true_on_partial(monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp())
     assert api.url_playable("http://x") is True
 
 
 def test_url_playable_false_on_connection_error(monkeypatch):
     def boom(*a, **k):
-        raise api.urllib.error.URLError("down")
+        raise urllib.error.URLError("down")
 
-    monkeypatch.setattr(api.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
     assert api.url_playable("http://x") is False
 
 
 def test_url_playable_optimistic_on_method_rejection(monkeypatch):
     def reject(*a, **k):
-        raise api.urllib.error.HTTPError("http://x", 405, "no", {}, None)
+        raise urllib.error.HTTPError("http://x", 405, "no", Message(), None)
 
-    monkeypatch.setattr(api.urllib.request, "urlopen", reject)
+    monkeypatch.setattr(urllib.request, "urlopen", reject)
     assert api.url_playable("http://x") is True  # HEAD/Range rejected, resource still exists
 
 

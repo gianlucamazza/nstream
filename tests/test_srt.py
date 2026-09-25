@@ -69,8 +69,10 @@ def test_decode_sub_preserves_latin1_accents(tmp_path):
     mojibake every `è`/`à` on the TV (the addon's SubEncoding field is unreliable)."""
     p = tmp_path / "s.srt"
     p.write_bytes("1\n00:00:01,000 --> 00:00:02,000\nperché è già là\n".encode("latin-1"))
-    assert "perché è già là" in srt.decode(str(p))
+    decoded = srt.decode(str(p))
+    assert decoded is not None and "perché è già là" in decoded
     vtt = srt.to_vtt(str(p))
+    assert vtt is not None
     text = Path(vtt).read_text(encoding="utf-8")  # VTT spec REQUIRES UTF-8
     assert "perché è già là" in text and text.startswith("WEBVTT")
 

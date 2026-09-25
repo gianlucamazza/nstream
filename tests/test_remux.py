@@ -11,6 +11,7 @@ import io
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +32,8 @@ def _state(tmp_path, monkeypatch):
     monkeypatch.setattr(remux, "_free_gb", lambda path: 100.0)
     tracks.clear_cache()  # _probe_meta reads the per-url probe memo — keep tests isolated
     yield
+    for path in list(remux._PREPARE_LOCKS):
+        remux._release_prepare_lock(path)
     tracks.clear_cache()
 
 
@@ -286,6 +289,25 @@ def test_run_ffmpeg_drains_big_stderr_without_deadlock():
     rc, stderr = remux._run_ffmpeg([sys.executable, "-c", script], duration=0.0)
     assert rc == 3
     assert stderr.endswith("MARKER")  # full stderr read back for the error message
+
+
+def test_run_ffmpeg_reports_tenths_when_stderr_is_not_a_tty(capsys, monkeypatch):
+    """Headless prepare stays visible: a line at 0% and the next one at 10%, not every percent."""
+    script = (
+        "import sys;"
+        "sys.stdout.write('out_time_us=0\\n');"
+        "sys.stdout.write('out_time_us=500000\\n');"
+        "sys.stdout.write('out_time_us=1500000\\n');"
+        "sys.exit(0)"
+    )
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: False)
+    rc, _stderr = remux._run_ffmpeg(
+        [sys.executable, "-c", script], duration=10.0, size_label="~2.2G"
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "  0%" in err and " 10%" in err and "~2.2G" in err
+    assert "  5%" not in err
 
 
 def test_run_ffmpeg_launch_failure_returns_none():
@@ -604,7 +626,8 @@ def test_cast_file_headless_bridge_failed_falls_back_to_catt(monkeypatch, tmp_pa
     assert 777 in rec["killed"]  # bridge-path server reaped before the fallback
     args, _kw = rec["popen"][0]
     assert args[:5] == ["catt", "-d", "10.0.0.5", "cast", str(f)]  # same temp re-served
-    assert remux._read_state()["mode"] == "catt"
+    stored = remux._read_state()
+    assert stored is not None and stored["mode"] == "catt"
 
 
 def test_cast_file_headless_ctrl_c_propagates_no_catt_fallback(monkeypatch, tmp_path):
@@ -710,6 +733,30 @@ def test_gc_stale_removes_all_when_server_dead(tmp_path, monkeypatch):
     monkeypatch.setattr(remux, "_pid_alive", lambda pid: False)
     remux._gc_stale()
     assert not f.exists()
+
+
+def test_gc_stale_keeps_in_progress_remux_until_server_state_exists(tmp_path):
+    """A concurrent status command must not unlink the output under a running ffmpeg."""
+    path = remux._new_remux_temp()
+    f = tmp_path / Path(path).name
+    f.write_bytes(b"partial")
+
+    remux._gc_stale()
+
+    assert f.exists()
+    assert Path(f"{path}.lock").exists()
+
+
+def test_write_state_atomically_replaces_prepare_lock(tmp_path):
+    path = remux._new_remux_temp()
+    f = tmp_path / Path(path).name
+    f.write_bytes(b"complete")
+
+    remux._write_state(os.getpid(), path, "TV", mode="serve")
+    remux._gc_stale()
+
+    assert f.exists()
+    assert not Path(f"{path}.lock").exists()
 
 
 # --- stop / state ---------------------------------------------------------

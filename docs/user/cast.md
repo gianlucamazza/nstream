@@ -75,9 +75,10 @@ stderr shows a prepare message during remux. JSON field `reencoded: true` when r
 
 ### Firewall (Tier-2 only)
 
-The TV **pulls** the remuxed file from the host (Range HTTP on ports **45000–47000**). On
-default-deny `ufw`, nstream best-effort adds a LAN allow rule (passwordless sudo). On failure
-it prints the rule to add by hand. Direct casts and castbridge control are outbound-only.
+The TV **pulls** the remuxed file from the host (Range HTTP on ports **45000–47000**).
+nstream never changes the firewall or invokes sudo during playback. On a connection
+failure it prints guidance for an administrator to apply an appropriately scoped rule.
+Direct casts and castbridge control are outbound-only.
 
 ## Cast-time vetting
 

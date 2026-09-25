@@ -188,7 +188,7 @@ def test_ensure_daemon_flock_recheck_skips_spawn(monkeypatch, tmp_path):
 
     def connect(*a, **k):
         if not socks:  # first (pre-lock) probe: nothing listening yet
-            socks.append(None)  # type: ignore[arg-type]
+            socks.append(_FakeSock())  # sentinel: the first probe did not connect
             return None
         socks.append(_FakeSock())
         return socks[-1]

@@ -250,9 +250,12 @@ def test_choose_hash_match_has_no_alternates(monkeypatch, stub_download, tmp_pat
 
 
 def _opts_plain(**kw):
-    base = dict(auto=True, cast=True, sub_mode="auto", sub_lang=None, history=True, autoplay=True)
-    base.update(kw)
-    return PlayOpts(**base)
+    from dataclasses import replace
+
+    return replace(
+        PlayOpts(auto=True, cast=True, sub_mode="auto", sub_lang=None, history=True, autoplay=True),
+        **kw,
+    )
 
 
 def _srt_file(tmp_path, name="ita.srt"):
@@ -328,11 +331,13 @@ def test_align_local_falls_back_to_alternate(monkeypatch, tmp_path, stub_downloa
 
     monkeypatch.setattr(subs, "_download_subtitle", fake_download)
     diag = subalign.Alignment(0.0, 0.9, 0.2, 100.0, 50, 0.1, 0.2, 6, 8)
+    attempted = False
 
     def fake_align(spans, fp):
+        nonlocal attempted
         # first call (delivered) refuses; second (alternate) aligns at -7
-        if not hasattr(fake_align, "n"):
-            fake_align.n = 1
+        if not attempted:
+            attempted = True
             return subalign.Verdict(None, 1.0, "low_score", diag)
         return subalign.Verdict(-7.0, 1.0, "aligned", diag)
 

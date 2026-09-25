@@ -342,7 +342,7 @@ def test_log_redaction_covers_native_token_carriers():
 
     url = f"{debrid._TORBOX_API}/torrents/requestdl?token=SECRETTOK123&torrent_id=7"
     assert "SECRETTOK123" not in log.redact(url)
-    assert "token=<redacted>" in log.redact(url)
+    assert log.redact(url) == "<url>"
     hdr = "Authorization: Bearer SECRETTOK123"
     assert "SECRETTOK123" not in log.redact(hdr)
     assert "Bearer <redacted>" in log.redact(hdr)

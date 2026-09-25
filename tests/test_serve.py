@@ -267,7 +267,7 @@ def test_ensure_firewall_noop_without_ufw(monkeypatch):
     assert called == []
 
 
-def test_ensure_firewall_adds_rule_when_absent(monkeypatch):
+def test_ensure_firewall_never_changes_host_policy(monkeypatch):
     monkeypatch.setattr(serve.shutil, "which", lambda _: "/usr/bin/ufw")
     cmds = []
 
@@ -283,22 +283,7 @@ def test_ensure_firewall_adds_rule_when_absent(monkeypatch):
 
     monkeypatch.setattr(serve.subprocess, "run", fake_run)
     serve.ensure_firewall("192.168.1.75")
-    allow = next(c for c in cmds if "allow" in c)
-    # Byte-identical to catt/skill-cast's rule so ufw dedups to one shared rule.
-    assert allow == [
-        "sudo",
-        "-n",
-        "ufw",
-        "allow",
-        "from",
-        "192.168.1.0/24",
-        "to",
-        "any",
-        "port",
-        "45000:47000",
-        "proto",
-        "tcp",
-    ]
+    assert cmds == []
 
 
 def test_ensure_firewall_skips_when_present(monkeypatch):

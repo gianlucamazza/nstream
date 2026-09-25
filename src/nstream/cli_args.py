@@ -3,9 +3,30 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
+from typing import Never
 
 from . import __version__
 from .api import CAT_MAP
+
+
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> Never:
+        if "--json" in sys.argv[1:]:
+            # argparse messages can echo arbitrary user input, including credentials.
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "usage",
+                        "message": "argomenti non validi; consulta --help",
+                    }
+                )
+            )
+            raise SystemExit(2)
+        super().error(message)
+
 
 # Flags that only the headless path implements. Using any without `--json` is a usage
 # error (no silent no-op into the TUI home). `--audio-lang` is intentionally *not*
@@ -45,7 +66,7 @@ def headless_only_misuse(args: argparse.Namespace) -> str | None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = ArgumentParser(
         prog="nstream",
         description=(
             "Native terminal-first Stremio-like client "
@@ -53,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("query", nargs="*", help="titolo da cercare (altrimenti chiede)")
+    parser.add_argument(
+        "--doctor", action="store_true", help="diagnostica locale senza rete o playback"
+    )
     parser.add_argument(
         "--play",
         action="store_true",

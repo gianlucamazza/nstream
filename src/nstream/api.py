@@ -18,12 +18,11 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast
 
-from . import addons, log, sources, util
+from . import addons, log, net, sources, util
 from .config import Config
 
 # HTTP-JSON primitives live in `net` (below both api and addons) to break the addons↔api
@@ -41,6 +40,7 @@ __all__ = ["TIMEOUT", "UA", "NetworkError", "http_get_json", "url_playable"]
 _CACHED_NAME_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
 
 _MAX_WORKERS = 8
+_addon_pool = net.AddonPool(workers=_MAX_WORKERS)
 # Overall deadline (seconds) for one concurrent gather. A single stuck addon can take
 # ~80s alone (retries × per-request timeout); past this shared budget its future is
 # dropped — same best-effort spirit as `_safe` with NetworkError — so one hung addon
@@ -96,8 +96,9 @@ def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, str]:
     return (exact, prefix, words, year, name)
 
 
+@log.phase("gather")
 def _gather(
-    tasks: list[Callable[[], list]],
+    tasks: Sequence[Callable[[], list]],
     *,
     labels: list[str] | None = None,
     keys: list[str] | None = None,
@@ -106,8 +107,8 @@ def _gather(
     order (so the built-in providers keep priority for dedup). A task raising
     NetworkError contributes nothing (best-effort aggregation), and the whole gather
     shares one `_GATHER_BUDGET` deadline: a future still pending past it is dropped
-    (cancelled best-effort, empty result) so a stuck addon can't block the TUI. One
-    task → run inline (no thread overhead).
+    (cancelled best-effort, empty result) so a stuck addon can't block the TUI.
+    Single-source requests use the same worker/deadline path.
 
     `keys` (addon base URLs) feed the per-addon circuit breaker (ADR 0027): Open
     sources are skipped without network; failures/timeouts count toward Open; any
@@ -146,33 +147,25 @@ def _gather(
     results_by_i: dict[int, list] = {}
     timed_out = 0
     failed = 0
+    deadline = time.monotonic() + _GATHER_BUDGET
 
     def _run(i: int, task: Callable[[], list], label: str, key: str) -> tuple[int, list, str]:
         try:
-            rows = task()
-            if key:
-                brk.record_success(key)
+            with net.request_budget(deadline):
+                net.remaining()
+                rows = task()
             return i, rows, "ok"
         except NetworkError as e:
             _log.debug("addon saltato%s: %s", f" ({label})" if label else "", e)
-            if key:
-                brk.record_failure(key, reason="network")
             return i, [], "fail"
 
-    if len(active) == 1:
-        i, t, lab, key = active[0]
-        i, rows, status = _run(i, t, lab, key)
-        results_by_i[i] = rows
-        if status == "fail":
-            failed = 1
-    else:
+    if active:
         if sys.stderr.isatty():
             msg = f"interrogo {len(active)} fonti…"
             if skipped:
                 msg += f" · {skipped} in breaker"
             ui.status(msg, kind="search")
-        deadline = time.monotonic() + _GATHER_BUDGET
-        ex = ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(active)))
+        ex = _addon_pool
         try:
             fut_map = {ex.submit(_run, i, t, lab, key): (i, lab, key) for i, t, lab, key in active}
             done = 0
@@ -184,17 +177,25 @@ def _gather(
                 finished = set()
                 try:
                     for f in as_completed(pending, timeout=remaining):
+                        if time.monotonic() >= deadline:
+                            break
                         finished.add(f)
+                        i, lab, key = fut_map[f]
                         try:
                             i, rows, status = f.result()
                         except Exception:  # noqa: BLE001 — worker should not raise
                             i, lab, key = fut_map[f]
                             rows, status = [], "fail"
-                            if key:
-                                brk.record_failure(key, reason="error")
                         results_by_i[i] = rows
                         if status == "fail":
                             failed += 1
+                        # Only the collector owns breaker effects. A timed-out worker
+                        # cannot later close the breaker with an obsolete success.
+                        if key:
+                            if status == "fail":
+                                brk.record_failure(key, reason="network")
+                            else:
+                                brk.record_success(key)
                         done += 1
                         if sys.stderr.isatty():
                             lab = fut_map[f][1]
@@ -221,7 +222,8 @@ def _gather(
                         lab,
                     )
         finally:
-            ex.shutdown(wait=False, cancel_futures=True)
+            for future in fut_map:
+                future.cancel()
         if sys.stderr.isatty():
             got = sum(1 for r in results_by_i.values() if r)
             msg = f"fonti: {got}/{len(active)} con risultati"
@@ -286,6 +288,7 @@ def _catalog_tasks(
     return tasks, labels, keys
 
 
+@log.phase("search")
 def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     q = urllib.parse.quote(query)
     tasks: list[Callable[[], list]] = []
@@ -572,10 +575,13 @@ def _tagged(streams: list[Stream]) -> list[Stream]:
 def _stamp_addon(streams: list, addon_name: str) -> list[Stream]:
     """Tag each stream dict with its source addon name (provenance for labels/explain)."""
     out: list[Stream] = []
+    if not isinstance(streams, list):
+        return out
     for s in streams:
-        if isinstance(s, dict):
-            s["addon"] = addon_name
-            out.append(cast("Stream", s))
+        normalized = sources.normalize_stream(s)
+        if normalized is not None:
+            normalized["addon"] = addon_name
+            out.append(normalized)
     return out
 
 

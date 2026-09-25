@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -25,15 +26,19 @@ from nstream import (
     util,
 )
 from nstream.config import Config
+from nstream.playback import PlaybackOutcome
 from nstream.types import HistoryEntry, Meta
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
 
 def _cast_opts(**kw):
-    base = dict(auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
-    base.update(kw)
-    return headless.PlayOpts(**base)
+    return replace(
+        headless.PlayOpts(
+            auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+        ),
+        **kw,
+    )
 
 
 def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
@@ -148,7 +153,9 @@ def test_run_auto_movie_emits_json(monkeypatch, capsys):
     _wire_movie(monkeypatch)
     seen = {}
     monkeypatch.setattr(
-        headless_play, "play", lambda *a, **k: seen.update(played=True) or (0.0, 0.0, "")
+        headless_play,
+        "play",
+        lambda *a, **k: seen.update(played=True) or PlaybackOutcome(0.0, 0.0, "", started=True),
     )
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
@@ -161,7 +168,9 @@ def test_run_auto_movie_emits_json(monkeypatch, capsys):
 
 def test_run_auto_skips_fzf(monkeypatch):
     _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
 
     def boom(*a, **k):
         raise AssertionError("fzf called")
@@ -185,7 +194,9 @@ def test_run_auto_exact_match_over_first(monkeypatch, capsys):
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert out["imdb_id"] == "tt1" and out["selection"] == "exact"
@@ -205,7 +216,9 @@ def test_run_auto_year_disambiguates(monkeypatch, capsys):
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     headless.run_auto(CFG, _hns(query=["dune"], year="2021"), _hopts())
     assert json.loads(capsys.readouterr().out)["imdb_id"] == "new"
 
@@ -242,7 +255,9 @@ def test_run_auto_series_season_episode(monkeypatch, capsys):
         "streams",
         lambda cfg, t, v: seen.update(vid=v) or [{"name": "x", "title": "y", "url": "u"}],
     )
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     headless.run_auto(CFG, _hns(query=["severance"], season=1, episode=2), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert seen["vid"] == "tt2:1:2"
@@ -329,7 +344,9 @@ def test_run_auto_no_debrid_url_leak(monkeypatch, capsys):
             "url": "http://rd.example/secret-token-abc123/dune.mp4",
         },
     )
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = capsys.readouterr().out
     assert "secret-token-abc123" not in out and "http" not in out
@@ -343,7 +360,9 @@ def test_run_auto_sub_menu_rejected(monkeypatch, capsys):
 
 def test_run_auto_enriched_json_audio_fields(monkeypatch, capsys):
     _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert out["available_audio"] == ["ita", "eng"]
@@ -357,7 +376,9 @@ def test_run_auto_audio_lang_forces_dub(monkeypatch, capsys):
     monkeypatch.setattr(
         headless_play.stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"})
     )
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
         history=False, autoplay=False, audio_lang="eng",
@@ -495,7 +516,9 @@ def test_run_auto_browse(monkeypatch, capsys):
         headless_play.stream_select, "audio_languages", lambda cfg, results, *, cast: ("eng",)
     )
     monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     rc = headless.run_auto(CFG, _hns(browse="popolari"), _hopts())
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["title"] == "Popular" and out["selection"] == "browse"
@@ -657,7 +680,9 @@ def _wire_fargo(monkeypatch):
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(headless_play, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
 
 
 def test_run_auto_series_flag_picks_series_over_same_title_movie(monkeypatch, capsys):
@@ -747,7 +772,7 @@ def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
         lambda *a, **k: _plan("remux", stream, audio_index=1),
     )
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: "/tmp/out.mp4")
-    seen = {"detached": 0}
+    seen: dict = {"detached": 0}
     monkeypatch.setattr(
         cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
@@ -890,7 +915,9 @@ def _hist_opts(cast):
 def test_local_play_saves_history(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (600.0, 6000.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(600.0, 6000.0, "", started=True)
+    )
     rc = headless.run_auto(CFG, _hns(query=["dune"]), _hist_opts(cast=False))
     assert rc == 0
     e = headless.state.load_history(CFG)["tt1"]
@@ -1298,7 +1325,9 @@ def test_run_auto_quality_echoes_on_success(monkeypatch, capsys):
         )
 
     monkeypatch.setattr(headless_play.stream_select, "prepare_stream", prep)
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     opts = headless.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None,
         history=False, autoplay=False, quality=1080,
@@ -1514,7 +1543,9 @@ def test_audio_lang_short_file_is_not_reported_as_lang_unavailable(monkeypatch, 
 def test_json_success_reports_duration_verified(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     stream = _wire_movie(monkeypatch)
-    monkeypatch.setattr(headless_play, "play", lambda *a, **k: (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
+    )
     monkeypatch.setattr(headless_play.api, "expected_runtime_s", lambda cfg, t, v: 8160.0)
     # The guard measured this file earlier in the run (memoized probe) → verified.
     monkeypatch.setattr(headless_play.tracks, "cached_duration", lambda url: 8100.0)

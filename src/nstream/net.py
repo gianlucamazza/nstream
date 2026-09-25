@@ -11,12 +11,18 @@ debrid token); callers pass a `what=` label instead.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import gzip
+import io
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import Future
 from dataclasses import dataclass
+from queue import Full, Queue
 
 from . import log, util
 
@@ -24,10 +30,72 @@ _log = log.get_logger("net")
 
 UA = "Mozilla/5.0 nstream"
 TIMEOUT = 20.0
+MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_DECODED_BYTES = 32 * 1024 * 1024
+_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "http_deadline", default=None
+)
+
+
+@contextlib.contextmanager
+def request_budget(deadline: float):
+    """Share a monotonic deadline across every HTTP retry in an addon task."""
+    token = _deadline.set(deadline)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def remaining() -> float:
+    deadline = _deadline.get()
+    left = TIMEOUT if deadline is None else deadline - time.monotonic()
+    if left <= 0:
+        raise NetworkError("budget rete esaurito")
+    return min(TIMEOUT, left)
 
 
 class NetworkError(Exception):
     """A request failed after exhausting retries, or hit a non-retryable status."""
+
+
+class AddonPool:
+    """Fixed daemon workers and a bounded queue; stalled DNS cannot hold CLI exit.
+
+    Python cannot interrupt a running system resolver. These workers own only
+    reads; the caller owns persistent effects and cancels pending futures.
+    """
+
+    def __init__(self, workers: int = 8, pending: int = 64):
+        self.queue: Queue = Queue(maxsize=pending)
+        self.workers = workers
+        self.started = False
+        self.lock = threading.Lock()
+
+    def submit(self, fn, *args) -> Future:
+        future = Future()
+        with self.lock:
+            if not self.started:
+                for index in range(self.workers):
+                    threading.Thread(target=self._work, name=f"addon-{index}", daemon=True).start()
+                self.started = True
+        try:
+            self.queue.put_nowait((future, fn, args))
+        except Full:
+            future.set_exception(NetworkError("fonti occupate; riprova più tardi"))
+        return future
+
+    def _work(self):
+        while True:
+            future, fn, args = self.queue.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(fn(*args))
+                    except BaseException as exc:
+                        future.set_exception(exc)
+            finally:
+                self.queue.task_done()
 
 
 # --- stream availability probe (ADR 0025) --------------------------------------------
@@ -99,7 +167,7 @@ def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Pro
 
     Each signal decides only what it can actually prove:
 
-    - **status** (404/410/4xx) proves the resource is *not there* → `gone`, the one verdict
+    - **status** (404/410) proves the resource is *not there* → `gone`, the one verdict
       strong enough to be remembered across runs.
     - **size** (served total far below `expected_bytes`) proves the file is *not usable now*
       → `unknown`. It cannot tell a growing transfer from an emptied file, so it never
@@ -118,12 +186,16 @@ def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Pro
             return Probe(UNKNOWN, status=e.code, reason="metodo o range rifiutato")
         if 500 <= e.code < 600:
             return Probe(UNKNOWN, status=e.code, reason=f"errore server HTTP {e.code}")
-        return Probe(GONE, status=e.code, reason=f"HTTP {e.code}")
+        return Probe(
+            GONE if e.code in (404, 410) else UNKNOWN, status=e.code, reason=f"HTTP {e.code}"
+        )
     except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
         return Probe(UNKNOWN, reason=f"irraggiungibile ({type(e).__name__})")
 
     if status >= 400:
-        return Probe(GONE, status=status, reason=f"HTTP {status}")
+        return Probe(
+            GONE if status in (404, 410) else UNKNOWN, status=status, reason=f"HTTP {status}"
+        )
     if expected_bytes > 0 and served is not None:
         floor = max(_MIN_REAL_BYTES, int(expected_bytes * _MIN_REAL_RATIO))
         if served < floor:
@@ -144,11 +216,26 @@ def url_playable(url: str, *, timeout: float = 6.0) -> bool:
 
 def _read_json(resp) -> dict:
     """Read a urllib response body, transparently gunzipping when needed."""
-    raw = resp.read()
+    raw = bytearray()
+    read = getattr(resp, "read1", resp.read)
+    while True:
+        remaining()
+        chunk = read(min(65536, MAX_JSON_BYTES + 1 - len(raw)))
+        if not chunk:
+            break
+        raw.extend(chunk)
+        if len(raw) > MAX_JSON_BYTES:
+            raise NetworkError("risposta troppo grande")
     enc = (resp.headers.get("Content-Encoding") or "").lower() if resp.headers else ""
     if "gzip" in enc or raw[:2] == b"\x1f\x8b":
-        raw = gzip.decompress(raw)
-    return json.loads(raw)
+        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as zipped:
+            raw = zipped.read(MAX_DECODED_BYTES + 1)
+        if len(raw) > MAX_DECODED_BYTES:
+            raise NetworkError("risposta decompressa troppo grande")
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise NetworkError("risposta non valida: atteso oggetto JSON")
+    return value
 
 
 def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dict:
@@ -156,7 +243,7 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "gzip"})
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=remaining()) as resp:
                 return _read_json(resp)
         except urllib.error.HTTPError as e:
             # Don't retry client errors (auth, not found, bad config).
@@ -164,7 +251,7 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
                 raise NetworkError(f"{what}: HTTP {e.code}") from None
             last_exc = e
             wait = util.retry_after(e)
-        except (json.JSONDecodeError, gzip.BadGzipFile, EOFError) as e:
+        except (ValueError, gzip.BadGzipFile, EOFError) as e:
             # Bad body (incl. corrupt gzip) — caught before the broad OSError branch
             # since BadGzipFile is an OSError; retrying wouldn't help.
             raise NetworkError(f"{what}: risposta non valida") from e
@@ -175,7 +262,10 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
         if attempt >= retries:
             break
         _log.debug("%s: tentativo %d fallito (%s), retry", what, attempt + 1, last_exc)
-        time.sleep(wait if wait is not None else util.backoff(attempt))
+        delay = wait if wait is not None else util.backoff(attempt)
+        if _deadline.get() is not None:
+            delay = min(delay, remaining())
+        time.sleep(delay)
 
     _log.warning("%s: rete non raggiungibile dopo %d tentativi", what, retries + 1)
     raise NetworkError(f"{what}: rete non raggiungibile dopo {retries + 1} tentativi") from last_exc

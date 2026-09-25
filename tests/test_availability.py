@@ -46,8 +46,8 @@ def test_expected_bytes_from_announced_size():
 def test_prune_dead_filters_known_removed(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     state.mark_dead("abc", "gone")
-    dead = {"infoHash": "abc", "url": "http://d"}
-    alive = {"infoHash": "xyz", "url": "http://a"}
+    dead: Stream = {"infoHash": "abc", "url": "http://d"}
+    alive: Stream = {"infoHash": "xyz", "url": "http://a"}
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     kept, dropped = availability.prune_dead(cfg, [dead, alive])
     assert dropped == 1 and kept == [alive]
@@ -56,7 +56,7 @@ def test_prune_dead_filters_known_removed(tmp_path, monkeypatch):
 def test_prune_dead_noop_on_local_backend(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     state.mark_dead("abc", "gone")
-    dead = {"infoHash": "abc"}
+    dead: Stream = {"infoHash": "abc"}
     cfg = Config(torrentio_base="tb", playback_backend="local")
     assert availability.prune_dead(cfg, [dead]) == ([dead], 0)
 

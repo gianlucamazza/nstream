@@ -5,6 +5,23 @@ from __future__ import annotations
 from nstream import sources
 
 
+def test_normalization_rejects_local_file_and_malformed_fields():
+    assert sources.normalize_stream({"url": "file:///etc/passwd"}) is None
+    assert sources.normalize_stream({"url": "--script=malicious"}) is None
+    assert sources.normalize_stream({"url": ["https://example.test"]}) is None
+    row = sources.normalize_stream(
+        {
+            "url": "https://example.test/video",
+            "fileIdx": -1,
+            "behaviorHints": {"filename": [], "videoSize": {}},
+            "title": 17,
+        }
+    )
+    assert row is not None
+    assert "fileIdx" not in row and "title" not in row
+    assert row["behaviorHints"] == {}
+
+
 def test_presets_catalog_nonempty_unique_ids():
     assert sources.STREAM_PRESETS
     ids = [p.id for p in sources.STREAM_PRESETS]
@@ -15,8 +32,8 @@ def test_presets_catalog_nonempty_unique_ids():
 
 
 def test_preset_lookup():
-    assert sources.preset("comet") is not None
-    assert sources.preset("comet").name == "Comet"
+    preset = sources.preset("comet")
+    assert preset is not None and preset.name == "Comet"
     assert sources.preset("nope") is None
     assert sources.preset_by_name("MediaFusion") is not None
     assert sources.preset_by_name("mediafusion") is not None

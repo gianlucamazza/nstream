@@ -56,6 +56,9 @@ Always pass `--json`. Quote the title.
   report success.
 - **Do not silently change language or quality** on `audio_lang_unavailable` /
   `quality_unavailable` — show `available_*` and ask.
+- A soft `audio_langs` preference may start a later language when the preferred dub
+  needs a full remux and a direct MP4/WebM exists (ADR 0035). Read `notice` and
+  `audio_lang` — that is the dub that started. `--audio-lang` still forces the dub.
 - **`sources_removed` / `sources_truncated`:** do not blindly retry the same command.
 - **Cast is fire-and-return by default**; use `--stop` to persist position; `--follow` only
   when the user wants the process to hold for the full runtime (JSONL events).

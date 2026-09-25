@@ -757,6 +757,7 @@ class VettedStream:
     quality: int = 0  # 0 = Auto; N = exact resolution filter
 
 
+@log.phase("selection")
 def prepare_stream(
     cfg: Config, results: list[Stream], opts: PlayOpts, *,
     auto: bool, reselect_on_wrong_audio: bool, title: str = "",

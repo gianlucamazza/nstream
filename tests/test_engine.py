@@ -240,9 +240,9 @@ class _FakeSpawned:
         self.calls.append("wait")
 
 
-def test_detach_spawned_clears_state_and_disarms_shutdown():
+def test_detach_spawned_clears_state_and_disarms_shutdown(monkeypatch):
     proc = _FakeSpawned()
-    engine._spawned = proc
+    monkeypatch.setattr(engine, "_spawned", proc)
     engine.detach_spawned()
     assert engine._spawned is None  # handle dropped → the server outlives nstream
     engine._shutdown()  # the atexit hook must now terminate nothing
@@ -255,9 +255,9 @@ def test_detach_spawned_noop_without_spawn():
     assert engine._spawned is None
 
 
-def test_shutdown_without_detach_terminates():
+def test_shutdown_without_detach_terminates(monkeypatch):
     proc = _FakeSpawned()
-    engine._spawned = proc
+    monkeypatch.setattr(engine, "_spawned", proc)
     engine._shutdown()
     assert "terminate" in proc.calls and engine._spawned is None
 

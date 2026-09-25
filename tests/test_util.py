@@ -110,7 +110,9 @@ def test_runstate_read_corrupt_returns_none(tmp_path, monkeypatch):
 def test_runstate_write_is_best_effort(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     st = util.RunState("demo")
-    st.path = tmp_path / "missing" / "state.json"  # unwritable: parent absent
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("occupied")
+    st.path = parent / "state.json"  # unwritable: parent is a regular file
     st.write({"a": 1})  # must not raise
     assert st.read() is None
 

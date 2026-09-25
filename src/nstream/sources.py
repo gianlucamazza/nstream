@@ -14,6 +14,49 @@ can share the catalog without cycles.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
+from urllib.parse import urlsplit
+
+from .types import Stream
+
+
+def normalize_stream(value: object) -> Stream | None:
+    """Validate untrusted addon fields once before ranking or launching a backend."""
+    if not isinstance(value, dict):
+        return None
+    row = dict(value)
+    for field in ("url", "infoHash", "name", "title", "description"):
+        if field in row and not isinstance(row[field], str):
+            row.pop(field)
+    url = row.get("url")
+    if url:
+        try:
+            parsed = urlsplit(url)
+            valid = parsed.scheme in ("http", "https") and bool(parsed.hostname)
+            valid = valid and not any(ord(c) < 32 for c in url)
+        except ValueError:
+            valid = False
+        if not valid:
+            row.pop("url")
+    if "fileIdx" in row and (type(row["fileIdx"]) is not int or row["fileIdx"] < 0):
+        row.pop("fileIdx")
+    if "sources" in row:
+        values = row["sources"]
+        row["sources"] = (
+            [v for v in values if isinstance(v, str)] if isinstance(values, list) else []
+        )
+    hints = row.get("behaviorHints")
+    if not isinstance(hints, dict):
+        row.pop("behaviorHints", None)
+    else:
+        hints = dict(hints)
+        for field in ("filename", "videoHash"):
+            if field in hints and not isinstance(hints[field], str):
+                hints.pop(field)
+        if "videoSize" in hints and (type(hints["videoSize"]) is not int or hints["videoSize"] < 0):
+            hints.pop("videoSize")
+        row["behaviorHints"] = hints
+    return cast(Stream, row) if is_playable_stream(row) else None
 
 
 @dataclass(frozen=True)
@@ -83,7 +126,11 @@ def is_playable_stream(stream: object) -> bool:
     """
     if not isinstance(stream, dict):
         return False
-    return bool(stream.get("url") or stream.get("infoHash"))
+    return any(
+        isinstance(value, str) and bool(value)
+        for key, value in stream.items()
+        if key in ("url", "infoHash")
+    )
 
 
 def no_stream_source_message() -> str:

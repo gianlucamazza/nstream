@@ -69,6 +69,7 @@ def test_align_two_families_both_converge_to_same_timing():
     va = subalign.align(_subs_from_speech(fp, late_by=0.0), fp)
     vb = subalign.align(_subs_from_speech(fp, late_by=14.0), fp)
     assert va.reason == vb.reason == "aligned"
+    assert va.offset_s is not None and vb.offset_s is not None
     assert abs((vb.offset_s - va.offset_s) - (-14.0)) <= 0.4
 
 

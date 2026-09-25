@@ -335,6 +335,67 @@ def _reselect_cast_for_lang(
     return remux_fallback or direct_bad_container or tagged_guess
 
 
+def find_instant_direct(
+    cfg: Config,
+    results: list[Stream],
+    langs: tuple[str, ...],
+    *,
+    exact_resolution: int = 0,
+    expected_s: float = 0.0,
+    probe_cap: int = 6,
+) -> CastAudioPlan | None:
+    """Verified direct cast in the earliest `langs` entry that has one (ADR 0035).
+
+    A direct cast is MP4/WebM, a DMR-decodable first audio track, and that track's
+    language confirmed by ffprobe. Name tags only decide who is worth a probe; an
+    unprobeable release and a `multi` whose real first track is another language do
+    not qualify. The probe budget matches `_reselect_cast_for_lang`."""
+    wanted = [lang for lang in langs if lang]
+    if not wanted:
+        return None
+    wanted_set = set(wanted)
+    best: CastAudioPlan | None = None
+    best_rank = len(wanted)
+    probed = 0
+    for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
+        named = r.info.languages
+        if not (named & wanted_set or "multi" in named):
+            continue
+        if probed >= probe_cap:
+            break
+        probed += 1
+        s = r.stream
+        if not stream_select._playable_url(cfg, s):
+            continue
+        if not (_video_castable(cfg, s) and _duration_castable(cfg, s, expected_s)):
+            continue
+        if cast_container(cfg, s) not in quality.CAST_CONTAINER_DECODABLE:
+            continue
+        audio = _cast_audio_tracks(cfg, s)
+        if not audio:
+            continue
+        code = languages.track_lang(audio[0].lang, audio[0].title)
+        if code not in wanted_set or not remux._decodable(audio[0].codec):
+            continue
+        rank = wanted.index(code)
+        if rank < best_rank:
+            best = CastAudioPlan("direct", s, 0, code, verified=True)
+            best_rank = rank
+            if rank == 0:
+                return best
+    return best
+
+
+def instant_defer_notice(slow: CastAudioPlan, instant: CastAudioPlan, target: str) -> str:
+    """Why headless started `instant` instead of waiting for `slow` (ADR 0035)."""
+    info = quality.parse_stream(slow.stream)
+    detail = [info.container or "?", info.audio or "?"]
+    if info.size_gb:
+        detail.append(f"~{info.size_gb:.1f}GB")
+    played = instant.real_lang or "?"
+    return f"audio {target} solo dopo remux completo ({', '.join(detail)}); cast diretto {played}"
+
+
 def vet_cast_audio(
     cfg: Config,
     results: list[Stream],

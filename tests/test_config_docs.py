@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from nstream.config import INT_BOUNDS, Config, _ENUM_VALUES
+from nstream.config import _ENUM_VALUES, INT_BOUNDS, Config
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "config.example.json"

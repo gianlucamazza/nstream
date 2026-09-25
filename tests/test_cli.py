@@ -14,7 +14,8 @@ import pytest
 
 from nstream import cast_delivery, cast_flow, cli, subs
 from nstream.config import Config
-from nstream.types import HistoryEntry, Meta
+from nstream.playback import PlaybackOutcome
+from nstream.types import HistoryEntry, Meta, Stream
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -141,7 +142,9 @@ def test_play_video_no_save_when_duration_zero(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 0.0, False))  # duration unobserved
+    monkeypatch.setattr(
+        cli, "play", lambda *a, **k: PlaybackOutcome(42.0, 0.0, "", started=True)
+    )  # duration unobserved
     saved = []
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
@@ -157,7 +160,7 @@ def test_play_video_no_crash_on_empty_stream_name(monkeypatch):
     """Regression: a stream with an empty name must not raise IndexError."""
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": ""}])
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
+    monkeypatch.setattr(cli, "play", lambda *a, **k: PlaybackOutcome(10.0, 100.0, "", started=True))
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
@@ -174,7 +177,7 @@ def test_play_video_cast_fallback_selects_local_profile(monkeypatch):
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
     monkeypatch.setattr(cli, "_resolve_cast_device", lambda *a, **k: None)  # no TV on the LAN
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
+    monkeypatch.setattr(cli, "play", lambda *a, **k: PlaybackOutcome(10.0, 100.0, "", started=True))
     seen = {}
 
     def spy(cfg, results, opts, **kw):
@@ -232,7 +235,7 @@ def test_play_video_cast_fetch_overlaps_device_scan(monkeypatch):
 
     monkeypatch.setattr(cli.api, "streams", fake_streams)
     monkeypatch.setattr(cli, "_resolve_cast_device", fake_resolve)
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (10.0, 100.0, False))
+    monkeypatch.setattr(cli, "play", lambda *a, **k: PlaybackOutcome(10.0, 100.0, "", started=True))
     opts = cli.PlayOpts(
         auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
@@ -362,7 +365,7 @@ def test_series_player_binds_cfg_and_type(monkeypatch):
 def _fzf_script(returns):
     """A stub fzf_key that yields `returns` in order and records the headers it saw.
     Each item is a (key, value) tuple (key "" = Enter, "tab" = the override) or None."""
-    seen = {"headers": [], "i": 0}
+    seen: dict = {"headers": [], "i": 0}
 
     def fake(items, prompt, *, header=None, expect=("tab",), preview=None):
         seen["headers"].append(header)
@@ -376,7 +379,7 @@ def _fzf_script(returns):
 def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
     """_pick_meta replays the list after a pick (back-to-list) and shows the
     playback notice as the next header; ESC (None) leaves with rc 0."""
-    items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
+    items: list[tuple[str, Meta]] = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
     fake_fzf, seen = _fzf_script([("", items[0][1]), None])  # pick once, then ESC
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     monkeypatch.setattr(cli, "play_meta", lambda *a, **k: "non ancora disponibile")
@@ -393,7 +396,7 @@ def test_pick_meta_loops_until_esc_and_threads_header(monkeypatch):
 
 def test_pick_meta_tab_flips_auto(monkeypatch):
     """Tab on a movie title flips the default (auto) to manual for that pick."""
-    items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
+    items: list[tuple[str, Meta]] = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
     fake_fzf, _ = _fzf_script([("tab", items[0][1]), None])
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     seen_auto = {}
@@ -716,10 +719,12 @@ def test_choose_tracks_subs_none(monkeypatch):
     from nstream import subs
 
     monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
+    seen_menu = False
 
     def fzf(items, prompt, *, header=None):
-        if prompt == "riproduzione> " and not hasattr(fzf, "seen"):
-            fzf.seen = True
+        nonlocal seen_menu
+        if prompt == "riproduzione> " and not seen_menu:
+            seen_menu = True
             return items[2][1]  # 💬 Sottotitoli
         if prompt == "sottotitoli> ":
             return items[0][1]  # "nessuno" → "no"
@@ -736,7 +741,7 @@ def test_play_video_auto_skips_track_menu(monkeypatch):
     """--play / binge (auto=True) must NOT open the pre-play track menu."""
     cfg = Config(torrentio_base="tb", hwdec="")
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [{"url": "http://u", "name": "S"}])
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (0.0, 0.0, False))
+    monkeypatch.setattr(cli, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True))
 
     def boom(*a, **k):
         raise AssertionError("choose_tracks must not be called when auto")
@@ -767,7 +772,8 @@ def test_play_video_interactive_calls_track_menu(monkeypatch):
         cli,
         "play",
         lambda *a, **k: (
-            seen.update(aid=k.get("audio_id"), sid=k.get("sub_id")) or (0.0, 0.0, False)
+            seen.update(aid=k.get("audio_id"), sid=k.get("sub_id"))
+            or PlaybackOutcome(0.0, 0.0, "", started=True)
         ),
     )
     opts = cli.PlayOpts(
@@ -834,7 +840,11 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(cli.cast_flow, "run_cast", no_cast)  # Alt-C / cast path
     monkeypatch.setattr(cast_flow.caster, "cast", no_cast)
     seen = {}
-    monkeypatch.setattr(cli, "play", lambda *a, **k: seen.update(local=True) or (0.0, 0.0, ""))
+    monkeypatch.setattr(
+        cli,
+        "play",
+        lambda *a, **k: seen.update(local=True) or PlaybackOutcome(0.0, 0.0, "", started=True),
+    )
     opts = cli.PlayOpts(
         auto=False, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
     )
@@ -847,7 +857,7 @@ def test_play_video_cast_unavailable_falls_back_to_local(monkeypatch):
 def test_play_video_local_to_cast_on_signal(monkeypatch):
     """Alt-C in mpv goes through cast_flow.run_cast (vet/remux), not a raw catt cast."""
     cfg = Config(torrentio_base="tb", hwdec="")
-    stream = {"url": "http://u", "name": "S"}
+    stream: Stream = {"url": "http://u", "name": "S"}
     monkeypatch.setattr(cli.api, "streams", lambda *a, **k: [stream])
     monkeypatch.setattr(
         cli.stream_select,
@@ -858,7 +868,9 @@ def test_play_video_local_to_cast_on_signal(monkeypatch):
     )
     monkeypatch.setattr(cli, "choose_tracks", lambda *a, **k: (None, None, ()))
     monkeypatch.setattr(cli.shutil, "which", lambda _x: "/usr/bin/catt")
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (55.0, 100.0, "cast"))
+    monkeypatch.setattr(
+        cli, "play", lambda *a, **k: PlaybackOutcome(55.0, 100.0, "cast", started=True)
+    )
     monkeypatch.setattr(cli, "_resolve_device", lambda c, **k: "TV")
     seen = {}
 
@@ -913,7 +925,7 @@ def test_apply_key_alt_c_casts():
 
 
 def test_pick_meta_alt_c_sets_cast(monkeypatch):
-    items = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
+    items: list[tuple[str, Meta]] = [("Dune", {"id": "tt1", "type": "movie", "name": "Dune"})]
     fake_fzf, _ = _fzf_script([("alt-c", items[0][1]), None])
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
     seen = {}
@@ -964,9 +976,14 @@ _CAST_STREAM = {
 
 
 def _cast_opts(**kw):
-    base = dict(auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
-    base.update(kw)
-    return cli.PlayOpts(**base)
+    from dataclasses import replace
+
+    return replace(
+        cli.PlayOpts(
+            auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False
+        ),
+        **kw,
+    )
 
 
 def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True):
@@ -1193,7 +1210,7 @@ def test_play_history_on_save_roundtrip(monkeypatch, tmp_path):
         lambda cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw: _VETTED(results[0]),
     )  # fmt: skip
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: subs.SubsPick())
-    monkeypatch.setattr(cli, "play", lambda *a, **k: (42.0, 100.0, ""))
+    monkeypatch.setattr(cli, "play", lambda *a, **k: PlaybackOutcome(42.0, 100.0, "", started=True))
     entry = HistoryEntry(video_id="tt3", type="movie", title="Dune")
     opts = cli.PlayOpts(
         auto=True, cast=False, sub_mode=None, sub_lang=None, history=True, autoplay=False
@@ -1221,7 +1238,11 @@ def test_play_history_resume_start_threaded(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "auto_subs", lambda *a, **k: subs.SubsPick())
     seen = {}
     monkeypatch.setattr(
-        cli, "play", lambda *a, **k: seen.update(start=k.get("start")) or (600.0, 10000.0, "")
+        cli,
+        "play",
+        lambda *a, **k: (
+            seen.update(start=k.get("start")) or PlaybackOutcome(600.0, 10000.0, "", started=True)
+        ),
     )
     entry = HistoryEntry(video_id="tt3", type="movie", title="Dune")
     opts = cli.PlayOpts(

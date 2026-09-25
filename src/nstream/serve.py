@@ -18,7 +18,7 @@ Two run modes:
 Leaf module: stdlib (`http.server`/`socket`/`socketserver`) + `log`, imports nothing from
 `cli`. The served path is local (no debrid token); request lines are logged only at debug.
 
-Hardening: the firewall opens 45000-47000 to the whole LAN, so the URL path carries a
+Hardening: an administrator permits receiver access to ports 45000-47000; the URL carries a
 **per-cast random token** (`/cast/<token>/stream.mp4`) — the only client that needs it (the
 receiver) gets the full URL via LOAD, anyone scanning the port gets 404. The DMR sends no
 auth headers, so a capability URL is the strongest gate that keeps the cast contract intact.
@@ -101,36 +101,11 @@ def _lan_subnet(host_ip: str) -> str:
 
 
 def ensure_firewall(bind_ip: str) -> None:
-    """Best-effort: make sure ufw lets the Chromecast reach our file server (inbound from the
-    LAN on the cast port range). The receiver connects *back* to us, so a default-deny ufw would
-    drop the cast (`cast_startup_failed`). Mirrors skill-cast's idempotent `fw_rule_present ||
-    fw_setup` with the **same rule string** (`from <subnet> to any port 45000:47000 proto tcp`),
-    so nstream/catt/skill-cast share one rule. No-op — never raising — when ufw isn't installed,
-    sudo isn't passwordless, or ufw is inactive (other firewalls / non-Linux): casting then relies
-    on a pre-existing rule, and a startup failure is surfaced via `firewall_hint`."""
-    if not shutil.which("ufw"):
-        return
-    subnet = _lan_subnet(bind_ip)
-    try:
-        status = subprocess.run(
-            ["sudo", "-n", "ufw", "status"], capture_output=True, text=True, timeout=5
-        )
-        if status.returncode != 0:
-            return  # no passwordless sudo, or ufw inactive → leave it to a pre-existing rule
-        # Idempotent: ufw also dedups, but avoid a needless privileged call when already open.
-        if _CAST_RANGE_SPEC in status.stdout and subnet in status.stdout:
-            return
-        add = subprocess.run(
-            ["sudo", "-n", "ufw", "allow", "from", subnet, "to", "any",
-             "port", _CAST_RANGE_SPEC, "proto", "tcp"],
-            capture_output=True, text=True, timeout=5,
-        )  # fmt: skip
-        if add.returncode == 0:
-            _log.info("ufw: aperto %s/tcp da %s per il cast serving", _CAST_RANGE_SPEC, subnet)
-        else:
-            _log.warning("ufw allow non riuscito: %s", (add.stderr or "").strip()[:160])
-    except (OSError, subprocess.SubprocessError) as e:
-        _log.debug("ensure_firewall best-effort fallita: %s", e)
+    """Compatibility hook: playback never changes host firewall policy (ADR 0034).
+
+    Connection failures surface `firewall_hint`; administrators apply their own
+    least-privilege rule explicitly. Do not invoke sudo, even when passwordless.
+    """
 
 
 def firewall_hint(bind_ip: str, port: int | None = None) -> str:

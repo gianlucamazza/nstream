@@ -1,17 +1,55 @@
 """Shared test guards for the nstream suite."""
 
 import os
+import socket
 from pathlib import Path
 
 import pytest
 
-from nstream import api, bridge
+from nstream import api, bridge, quality
 
 # Keep subprocess smoke tests on the checkout too. Some developer machines have an
 # older globally installed nstream, which otherwise makes `python -m nstream` test the
 # wrong code even though pytest itself uses pyproject's pythonpath setting.
 _SRC = str(Path(__file__).parents[1] / "src")
 os.environ["PYTHONPATH"] = _SRC + os.pathsep + os.environ.get("PYTHONPATH", "")
+
+
+@pytest.fixture(autouse=True)
+def _no_host_gpu_probe(monkeypatch, request):
+    if request.path.name != "test_quality.py":
+        monkeypatch.setattr(quality, "detect_caps", lambda: quality.HwCaps())
+
+
+@pytest.fixture(autouse=True)
+def _isolated_storage(monkeypatch, tmp_path):
+    for variable, directory in (
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+    ):
+        root = tmp_path / directory
+        root.mkdir(exist_ok=True)
+        monkeypatch.setenv(variable, str(root))
+    config = tmp_path / "config" / "nstream"
+    config.mkdir()
+    (config / "config.json").write_text("{}")
+
+
+@pytest.fixture(autouse=True)
+def _no_external_network(monkeypatch):
+    connect = socket.socket.connect
+
+    def local_only(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6) and address[0] not in (
+            "127.0.0.1",
+            "::1",
+            "localhost",
+        ):
+            raise AssertionError("test attempted external network access")
+        return connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", local_only)
 
 
 @pytest.fixture(autouse=True)

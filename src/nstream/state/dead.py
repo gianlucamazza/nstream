@@ -39,6 +39,7 @@ def is_dead(key: str) -> bool:
     return bool(key) and key in dead_sources()
 
 
+@util.state_update(dead_sources_path)
 def mark_dead(key: str, reason: str = "") -> None:
     """Remember that `key` (infoHash / filename / release name) is provably gone. Never
     called for a transient failure — only for `net.Probe.dead` (ADR 0025)."""
@@ -52,6 +53,7 @@ def mark_dead(key: str, reason: str = "") -> None:
     _dead_write(entries)
 
 
+@util.state_update(dead_sources_path, 0)
 def forget_dead() -> int:
     """Clear the denylist (user escape hatch). Returns how many entries were dropped."""
     count = len(_dead_read())

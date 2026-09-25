@@ -7,6 +7,9 @@ module attributes cast_flow re-imports: `cast_flow.cast_vet` / `remux` / `mirror
 
 from __future__ import annotations
 
+import sys
+from dataclasses import replace
+
 import pytest
 
 from nstream import cast_delivery, cast_flow, subs, util
@@ -15,7 +18,7 @@ from nstream.types import Stream
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
-_STREAM = {
+_STREAM: Stream = {
     "name": "[RD+] Torrentio\n1080p",
     "title": "Dune.2024.1080p.WEB-DL.HEVC.ITA-GRP\n👤 9 💾 8 GB",
     "url": "http://u/dune.mkv",
@@ -23,9 +26,10 @@ _STREAM = {
 
 
 def _opts(**kw):
-    base = dict(auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False)
-    base.update(kw)
-    return PlayOpts(**base)
+    return replace(
+        PlayOpts(auto=True, cast=True, sub_mode=None, sub_lang=None, history=False, autoplay=False),
+        **kw,
+    )
 
 
 def _plan(mode, stream, audio_index=0, real_lang="ita", verified=True, needs_remux=False):
@@ -51,7 +55,7 @@ def _boom(msg):
 def _wire(monkeypatch, plan, *, langs=("ita",)):
     """Hermetic run_cast: stub vet_cast_video/vet_cast_audio (the real ones ffprobe the
     url), the in-cast switch helpers, auto_subs and detach_spawned. Returns the spy dict."""
-    seen = {"subs": [], "detached": 0}
+    seen: dict = {"subs": [], "detached": 0}
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "vet_cast_video",
@@ -67,6 +71,8 @@ def _wire(monkeypatch, plan, *, langs=("ita",)):
     )
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, stream: "mp4")
     monkeypatch.setattr(cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: plan)
+    # ADR 0035 stays opt-in per test: the real search ffprobes URLs.
+    monkeypatch.setattr(cast_flow.cast_vet, "find_instant_direct", lambda *a, **k: None)
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages",
         lambda cfg, results, exact_resolution=0, **_kw: langs,
@@ -103,7 +109,7 @@ def _run(opts, stream, *, start=None, results=None, **kw):
 def test_remux_success_uses_cast_file(monkeypatch):
     """Tier-2 plan + remux OK → cast_file with start/follow/on_event threaded; the direct
     cast never runs and the outcome reports reencoded."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
@@ -135,7 +141,7 @@ def test_remux_success_uses_cast_file(monkeypatch):
 def test_remux_failure_degrades_to_direct(monkeypatch, capsys):
     """remux refused/failed → stderr warns and the direct cast carries the ORIGINAL url;
     the warning is also returned as the outcome notice (the --json field)."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg failed
     monkeypatch.setattr(
@@ -152,13 +158,80 @@ def test_remux_failure_degrades_to_direct(monkeypatch, capsys):
     assert out.reencoded is False and out.action == "cast"
 
 
+def test_headless_prefers_direct_over_remux(monkeypatch, capsys):
+    """Soft language preference: a verified English MP4 starts now; Italian waits."""
+    slow: Stream = _STREAM.copy()
+    eng: Stream = {"url": "http://u/eng.mp4", "name": "Film.2015.1080p.AAC.mp4"}
+    seen = _wire(monkeypatch, _plan("remux", slow, real_lang="ita"))
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "find_instant_direct",
+        lambda *a, **k: _plan("direct", eng, real_lang="eng"),
+    )
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("direct cast must skip the remux"))
+    monkeypatch.setattr(
+        cast_flow.caster,
+        "cast",
+        lambda *a, **k: seen.update(url=a[2]) or _ok(),
+    )
+    out = _run(_opts(), slow, follow=False)
+    assert seen["url"] == eng["url"]
+    assert seen["subs"] == ["ita"]
+    assert out.audio_lang == "eng" and out.reencoded is False
+    assert out.notice and "cast diretto eng" in out.notice
+    assert "cast diretto eng" in capsys.readouterr().err
+
+
+def test_tty_can_keep_the_remux(monkeypatch):
+    """A TUI that declines the instant dub still prepares the primary-language file."""
+    stream: Stream = _STREAM.copy()
+    eng: Stream = {"url": "http://u/eng.mp4"}
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "find_instant_direct",
+        lambda *a, **k: _plan("direct", eng, real_lang="eng"),
+    )
+    monkeypatch.setattr(cast_flow.picker, "confirm", lambda *a, **k: False)
+    monkeypatch.setattr(
+        cast_flow.remux,
+        "remux_for_cast",
+        lambda url, cfg, *, audio_index, size_gb=0.0: seen.update(remux=True) or "/tmp/out.mp4",
+    )
+    monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("declined instant cast must remux"))
+    out = _run(_opts(), stream)
+    assert seen["remux"] is True and out.reencoded is True and out.notice is None
+
+
+def test_explicit_audio_lang_does_not_search_instant(monkeypatch):
+    """`--audio-lang` keeps the full remux even when a direct release exists."""
+    stream: Stream = _STREAM.copy()
+    seen = _wire(monkeypatch, _plan("remux", stream))
+    monkeypatch.setattr(
+        cast_flow.cast_vet,
+        "find_instant_direct",
+        lambda *a, **k: seen.update(searched=True),
+    )
+    monkeypatch.setattr(
+        cast_flow.remux,
+        "remux_for_cast",
+        lambda url, cfg, *, audio_index, size_gb=0.0: "/tmp/out.mp4",
+    )
+    monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
+    _run(_opts(audio_lang="ita"), stream)
+    assert "searched" not in seen
+
+
 # --- absent dub (normalizations 1 + 2) ---------------------------------------
 
 
 def test_absent_safety_subs_once_with_notice(monkeypatch, capsys):
     """No dub carries the primary language → auto_subs runs exactly ONCE with the safety
     language, stderr explains (on every path), and the pick is cast directly anyway."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
     monkeypatch.setattr(
@@ -182,7 +255,7 @@ def test_absent_dolby_still_remuxes_with_safety_subs(monkeypatch, capsys):
     """Root-cause regression: target language absent AND the fallback dub's default track is
     Dolby (`needs_remux`). The remux must still run (else silent), while the safety subs and
     the 'non disponibile' notice of the absent path are preserved — the two axes coexist."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng", needs_remux=True))
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
@@ -208,7 +281,7 @@ def test_absent_dolby_still_remuxes_with_safety_subs(monkeypatch, capsys):
 def test_safety_sub_lang_passthrough(monkeypatch):
     """A caller-provided safety language (from prepare_stream's vet) reaches auto_subs and
     the outcome untouched when the cast plan isn't `absent`."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     out = _run(_opts(), stream, safety_sub_lang="ita")
@@ -220,7 +293,7 @@ def test_explicit_sub_lang_overrides_absent_safety(monkeypatch, capsys):
     """`--sub-lang` set + target audio absent: the explicit subtitle language wins over the
     primary-language safety default (auto_subs gets no safety lang), and it's threaded to the
     cast as the caption-track language. The audio-absent warning still prints."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux on this path"))
     captured: dict = {}
@@ -239,7 +312,7 @@ def test_explicit_sub_lang_overrides_absent_safety(monkeypatch, capsys):
 def test_bridge_subtitles_reported_delivered(monkeypatch):
     """The bridge cast now carries subtitles: when the delivery reports subs_delivered=True,
     the outcome reflects it (no 'not loaded' honesty notice) and threads the safety language."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("direct cast, no remux"))
     captured: dict = {}
@@ -259,7 +332,7 @@ def test_bridge_subtitles_reported_delivered(monkeypatch):
 def test_mirror_gates_on_remux_audio(monkeypatch):
     """--mirror + undecodable audio (plan remux) → cast_via_mirror with follow threaded;
     remux and the direct cast must not run."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
@@ -285,7 +358,7 @@ def test_mirror_gates_on_remux_audio(monkeypatch):
 def test_explicit_mirror_forces_mirror_when_available(monkeypatch):
     """--mirror with DMR-decodable audio now FORCES the mirror (ADR 0023): the manual intent
     wins even for a title the DMR could play directly."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
@@ -299,7 +372,7 @@ def test_explicit_mirror_forces_mirror_when_available(monkeypatch):
 
 def test_explicit_mirror_falls_back_when_unavailable(monkeypatch, capsys):
     """--mirror but the mirror backend is unavailable → honest fallback notice + direct cast."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: seen.update(cast=True) or _ok())
@@ -311,7 +384,7 @@ def test_explicit_mirror_falls_back_when_unavailable(monkeypatch, capsys):
 # --- auto mirror over a pathological 4K remux (ADR 0015) ----------------------
 
 # A 4K Dolby-only release: undecodable audio (needs_remux) + a huge fetch.
-_STREAM_4K = {
+_STREAM_4K: Stream = {
     "name": "[RD+] Torrentio\n2160p",
     "title": "Dune.2024.2160p.UHD.BluRay.REMUX.TrueHD\n👤 12 💾 55 GB",
     "url": "http://u/dune-4k.mkv",
@@ -332,7 +405,7 @@ def _wire_mirror(monkeypatch, seen):
 def test_auto_mirror_on_pathological_4k_remux(monkeypatch, capsys):
     """No --mirror, but a 4K Dolby-only remux (55 GB ≥ threshold) with the mirror available →
     auto-prefer the mirror: it preempts the remux and the outcome carries the degrade notice."""
-    stream = dict(_STREAM_4K)
+    stream: Stream = _STREAM_4K.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     _wire_mirror(monkeypatch, seen)
     out = _run(_opts(mirror=None), stream)  # NOT forced — the size threshold drives it
@@ -345,7 +418,7 @@ def test_auto_mirror_on_pathological_4k_remux(monkeypatch, capsys):
 def test_no_auto_mirror_for_small_1080p_remux(monkeypatch):
     """A modest 1080p Dolby remux (8 GB < threshold) → the remux still wins (native video),
     the mirror is not auto-chosen even though it's available."""
-    stream = dict(_STREAM)  # 1080p, 8 GB
+    stream: Stream = _STREAM.copy()  # 1080p, 8 GB
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
@@ -367,7 +440,7 @@ def test_auto_mirror_disabled_by_zero_threshold(monkeypatch):
     """cast_mirror_over_remux_gb=0 disables the auto-switch: even a 55 GB 4K remux takes the
     remux path (the config opt-out), the mirror is never auto-chosen."""
     cfg = Config(torrentio_base="tb", cast_mirror_over_remux_gb=0)
-    stream = dict(_STREAM_4K)
+    stream: Stream = _STREAM_4K.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
     monkeypatch.setattr(
@@ -402,7 +475,7 @@ def test_remux_pathological_helper():
 def test_bad_container_triggers_rewrap(monkeypatch):
     """A DMR-incompatible container (mkv) with decodable audio still routes through the Tier-2
     rewrap to MP4 — the direct cast (which the DMR would refuse) never runs."""
-    stream = dict(_STREAM)  # 1080p, 8 GB → rewrap (not pathological), not the mirror
+    stream: Stream = _STREAM.copy()  # 1080p, 8 GB → rewrap (not pathological), not the mirror
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, s: "mkv")
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
@@ -420,7 +493,7 @@ def test_bad_container_triggers_rewrap(monkeypatch):
 def test_bad_container_4k_prefers_mirror(monkeypatch):
     """A 4K MKV with no MP4 twin and decodable audio: the rewrap would be a huge fetch, so the
     pathological-4K auto-switch (ADR 0015) prefers the mirror over the container rewrap."""
-    stream = dict(_STREAM_4K)  # 2160p, 55 GB
+    stream: Stream = _STREAM_4K.copy()  # 2160p, 55 GB
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, s: "mkv")
     _wire_mirror(monkeypatch, seen)
@@ -431,7 +504,7 @@ def test_bad_container_4k_prefers_mirror(monkeypatch):
 def test_bad_container_mirrors_when_rewrap_unavailable(monkeypatch, capsys):
     """ADR 0022 gap: a bad-container pick with the rewrap unavailable (cast_remux off / ffmpeg
     missing → remux_for_cast None) mirrors instead of a silent black .mkv direct cast."""
-    stream = dict(_STREAM)  # 1080p, not pathological
+    stream: Stream = _STREAM.copy()  # 1080p, not pathological
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, s: "mkv")
     monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
@@ -451,7 +524,7 @@ def test_bad_container_mirrors_when_rewrap_unavailable(monkeypatch, capsys):
 def test_direct_cast_declares_container_mime(monkeypatch):
     """A castable-container direct cast declares the container MIME on the LOAD instead of
     leaving the DMR to sniff (ADR 0022)."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, s: "mp4")
     monkeypatch.setattr(
@@ -468,7 +541,7 @@ def test_direct_cast_declares_container_mime(monkeypatch):
 def test_lang_switch_wired_only_when_allowed(monkeypatch):
     """allow_lang_switch=True with several dubs → langs + resolver reach the cast; with a
     single language both stay empty; headless (False) never pays the extra rank pass."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream), langs=("ita", "eng"))
     monkeypatch.setattr(
         cast_flow.caster, "cast",
@@ -495,7 +568,7 @@ def test_meta_threaded_and_backend_never_sees_next_label(monkeypatch):
     """meta is threaded with its fields preserved and the container contentType added (ADR
     0022 augments meta, it does not replace its content). A delivery backend must NOT receive
     `next_label`: the advance decision is `cast_flow`'s alone (ADR 0029)."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))  # cast_container stubbed → mp4
     meta = cast_flow.caster.CastMeta(poster="http://img/p.jpg")
     monkeypatch.setattr(
@@ -520,7 +593,7 @@ def test_meta_threaded_and_backend_never_sees_next_label(monkeypatch):
 def test_detach_spawned_gated_on_follow(monkeypatch, follow, expected):
     """The TorrServer handoff (engine.detach_spawned) runs inside the helper, only on
     fire-and-return (follow=False) — interactive follow keeps ownership."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     _run(_opts(), stream, follow=follow)
@@ -557,7 +630,7 @@ def test_run_cast_raises_when_video_unsupported_and_no_mirror(monkeypatch):
     """No castable video anywhere and no mirror: run_cast must fail explicitly BEFORE any
     side effect (session clear, subs fetch) — casting would play black with state PLAYING
     and no receiver error (the Coherence DivX incident, 2026-07-16)."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(
         cast_flow.cast_vet,
@@ -577,7 +650,7 @@ def test_run_cast_raises_when_video_unsupported_and_no_mirror(monkeypatch):
 def test_run_cast_mirrors_when_video_unsupported(monkeypatch):
     """Undecodable video + mirror available → forced mirror (mpv decodes locally), even
     though the audio alone would have allowed a direct cast; the notice says why."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(
         cast_flow.cast_vet,
@@ -601,7 +674,7 @@ def test_run_cast_video_verdict_cleared_by_audio_reselect(monkeypatch):
     """vet_cast_audio swapping the stream clears the bad-video verdict: the language
     reselect only offers video-castable candidates, so the swap must cast directly
     instead of forcing the mirror for the abandoned stream's codec."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     good = {"name": "S", "title": "T", "url": "http://u/good.mkv"}
     seen = _wire(monkeypatch, _plan("direct", good))  # audio vet swaps to `good`
     monkeypatch.setattr(
@@ -628,7 +701,7 @@ def test_remux_path_runs_align_local_on_remux_output(monkeypatch):
     """Tier 2 of the subtitle pipeline runs against the REMUX OUTPUT (the file the
     receiver plays), after the remux and before the VTT is built: the aligned paths
     must be what cast_file serves, and the outcome must carry match/offset."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(
         cast_flow.remux,
@@ -656,7 +729,7 @@ def test_remux_path_runs_align_local_on_remux_output(monkeypatch):
 
 def test_direct_path_never_runs_align_local(monkeypatch):
     """No remux → no local media → tier 2 must not run (honest lang delivery)."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(
         cast_flow.subs, "align_local", _boom("align_local must not run without a local file")
@@ -672,7 +745,7 @@ def test_direct_path_never_runs_align_local(monkeypatch):
 def test_run_cast_threads_resolved_quality_to_all_reselects(monkeypatch):
     """run_cast derives exact from opts.quality (the boundary replace() guarantees it is
     resolved) and hands it to video vet, audio vet and the in-cast switch helpers."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = {}
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_video",
@@ -748,7 +821,7 @@ def test_no_mirror_suppresses_pathological_auto_switch(monkeypatch, capsys):
 def test_no_mirror_with_undecodable_video_raises(monkeypatch):
     """--no-mirror + video the DMR can't render: the explicit user intent wins — fail
     explicitly instead of silently mirroring (manual always wins)."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_video",
@@ -763,7 +836,7 @@ def test_absent_safety_subs_reported_when_actually_delivered(monkeypatch, capsys
     """Twin of `test_absent_safety_subs_once_with_notice`: when the fetch DOES deliver a
     track, the confirmation line appears — proving the message follows the SubsPick and is
     not merely suppressed everywhere."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng"))
     monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no remux for an absent language"))
     monkeypatch.setattr(
@@ -785,7 +858,7 @@ def test_absent_safety_subs_reported_when_actually_delivered(monkeypatch, capsys
 def test_run_cast_threads_expected_runtime_to_all_vets(monkeypatch):
     """ADR 0028: every cast reselect must know the expected runtime, or a placeholder can
     win the swap even though `prepare_stream` just rejected one."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     seen = {}
     monkeypatch.setattr(
         cast_flow.cast_vet, "vet_cast_video",
@@ -847,7 +920,7 @@ def test_advance_parity_across_backends(monkeypatch, backend):
     `advance=False` hardcoded, so a binge on the TV died after one episode whenever the audio
     needed a remux. `advance` is now derived in cast_flow from what the backend observed, so
     every delivery path answers identically."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     opts = _opts(mirror=True) if backend == "mirror" else _opts()
     _wire_backend(monkeypatch, backend, stream, pos=98.0, dur=100.0)
     out = _run(opts, stream, next_label="S01E02")
@@ -856,7 +929,7 @@ def test_advance_parity_across_backends(monkeypatch, backend):
 
 @pytest.mark.parametrize("backend", ["direct", "remux", "mirror"])
 def test_no_advance_without_a_next_episode(monkeypatch, backend):
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     opts = _opts(mirror=True) if backend == "mirror" else _opts()
     _wire_backend(monkeypatch, backend, stream, pos=98.0, dur=100.0)
     assert _run(opts, stream).advance is False  # a film that ended is not a binge
@@ -864,7 +937,7 @@ def test_no_advance_without_a_next_episode(monkeypatch, backend):
 
 @pytest.mark.parametrize("backend", ["direct", "remux", "mirror"])
 def test_no_advance_on_early_stop(monkeypatch, backend):
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     opts = _opts(mirror=True) if backend == "mirror" else _opts()
     _wire_backend(monkeypatch, backend, stream, pos=50.0, dur=100.0)
     assert _run(opts, stream, next_label="S01E02").advance is False
@@ -874,7 +947,7 @@ def test_no_advance_on_early_stop(monkeypatch, backend):
 def test_no_advance_when_position_was_never_observed(monkeypatch, backend):
     """Fire-and-return: nobody polled, so (0, 0) comes back. An unobserved position must
     never read as a finished episode."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     opts = _opts(mirror=True) if backend == "mirror" else _opts()
     _wire_backend(monkeypatch, backend, stream, pos=0.0, dur=0.0)
     assert _run(opts, stream, next_label="S01E02").advance is False
@@ -884,7 +957,7 @@ def test_run_cast_raises_when_settled_stream_unresolved(monkeypatch):
     """The KeyError: 'url' crash (2026-08-08). If the audio reselect lands on a candidate
     that never resolved, every delivery branch would dereference a missing key. run_cast
     fails once, honestly, at the settle point — before any backend or side effect."""
-    stream = dict(_STREAM)
+    stream: Stream = _STREAM.copy()
     dead = {"infoHash": "deadbeef", "title": "Film.2006.iTA-GRP"}  # no url
     _wire(monkeypatch, _plan("direct", dead))
     monkeypatch.setattr(cast_flow.caster, "cast", _boom("must not cast an unresolved stream"))

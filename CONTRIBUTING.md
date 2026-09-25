@@ -45,6 +45,10 @@ Read [CLAUDE.md](CLAUDE.md) for agent-oriented hard constraints. Summary for hum
 
 ## Tests
 
+The complete gate is `bash scripts/check.sh` (also run in CI on Python 3.13/3.14).
+See [verification and recovery](docs/verification.md) for package, benchmark, and real
+mpv checks and the separate audiovisual receiver acceptance procedure.
+
 | Kind | Location | Notes |
 | ---- | -------- | ----- |
 | Unit | `tests/test_*.py` | Prefer unit before integration |

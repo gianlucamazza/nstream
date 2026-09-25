@@ -9,12 +9,12 @@ because it owns independent stores. Domains below are logical clusters (not impo
 
 ```
 src/nstream/
-├── orchestration    cli · cli_args · headless · headless_play · series · settings
+├── orchestration    cli · cli_args · headless · headless_play · application · series · settings · doctor
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
 │                    · remux · mirror · bridge · serve · discovery
 ├── subs             subs · subalign · srt · oshash · (_bench dev-only)
-├── playback         player · labels · picker · preview · ui · explain
+├── playback         playback · player · labels · picker · preview · ui · explain
 ├── discovery/API    api · addons · net
 └── foundation       config · types · state/ · log · util · languages
 ```
@@ -61,6 +61,8 @@ flowchart BT
 | `cli_args` | `build_parser()` — flag surface for TUI and `--json` |
 | `headless` | `--json` entry: title select, lifecycle (`--stop`/`--status`/…), delegates play |
 | `headless_play` | One-title resolve → prepare_stream → play/cast → success JSON |
+| `application` | Shared local subtitle/track preparation and verified playback for both frontends |
+| `doctor` | Read-only installation/config diagnostics; no network or backend effects |
 | `series` | series-only flow (ADR 0009) + continuation policy: `next_up` / `next_video` (ADR 0029) |
 | `settings` | fzf settings menu |
 
@@ -113,6 +115,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | Module | Role |
 |--------|------|
 | `player` | mpv launch, IPC position, hwdec/quiet/lang defaults |
+| `playback` | Typed local playback outcome and media-evidence error contract |
 | `labels` | fzf/mpv display strings |
 | `picker` | Shared fzf helpers |
 | `preview` | Poster + metadata card (`__preview`) |
@@ -126,6 +129,11 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `api` | Resource dispatch, gather budget, per-addon breaker (ADR 0027), fuse/dedup streams |
 | `addons` | Manifest client + cache |
 | `net` | Retrying HTTP JSON + URL probe classification |
+
+`net.AddonPool` bounds daemon workers and queued work. `api._gather` alone records
+breaker outcomes; HTTP work inherits its monotonic deadline. `util.state_update`
+serializes best-effort store updates with bounded locks and corrupt-file recovery.
+Architecture invariants are enforced by `tests/test_architecture.py`.
 
 ### Foundation
 

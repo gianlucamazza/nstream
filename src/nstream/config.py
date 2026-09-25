@@ -287,7 +287,7 @@ def _bounded_int(raw: dict, key: str, default: int) -> int:
     lo, hi = INT_BOUNDS[key]
     try:
         return max(lo, min(int(raw.get(key, default)), hi))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -298,7 +298,7 @@ def _optional_quality(raw: dict) -> int | None:
         return None
     try:
         val = int(raw["default_quality"])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if val < 0:
         return None
@@ -321,17 +321,24 @@ def _ensure_private(path: Path) -> None:
         pass
 
 
-def load() -> Config:
+def load(*, secure_permissions: bool = True) -> Config:
     path = config_path()
     try:
         raw = json.loads(path.read_text())
     except FileNotFoundError as e:
         raise ConfigError(f"config mancante: {path}") from e
-    except json.JSONDecodeError as e:
+    except (ValueError, UnicodeError) as e:
         raise ConfigError(f"config non valido ({path}): {e}") from e
+    except OSError:
+        raise ConfigError("config non leggibile; controlla i permessi") from None
     if not isinstance(raw, dict):
         raise ConfigError(f"config non valido ({path}): atteso un oggetto JSON")
-    _ensure_private(path)
+    for key in ("subtitle_langs", "audio_langs", "addons", "mpv_args"):
+        value = raw.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ConfigError(f"config non valido: {key} deve essere una lista di stringhe")
+    if secure_permissions:
+        _ensure_private(path)
 
     # Token-less default so a fresh config still streams locally; a debrid segment is
     # added to torrentio_base only when the user opts into a paid provider.

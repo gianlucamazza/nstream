@@ -11,18 +11,19 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 from collections.abc import Iterator
 from importlib import resources
 
-from . import quality
+from . import log, quality
 from .config import Config
+from .playback import PlaybackError, PlaybackOutcome, require_started
 
 # IPC socket handshake: mpv creates the socket shortly after launch, so retry a few
 # times before giving up. The recv timeout lets the tracker notice mpv exiting promptly
@@ -31,6 +32,7 @@ _SOCKET_CONNECT_RETRIES = 50
 _SOCKET_CONNECT_DELAY = 0.1
 _IPC_RECV_TIMEOUT = 0.5
 _TRACKER_JOIN_TIMEOUT = 2.0
+_log = log.get_logger("player")
 
 
 def _track_position(
@@ -39,6 +41,7 @@ def _track_position(
     proc: subprocess.Popen,
 ) -> None:
     """Observe mpv's time-pos/duration over the IPC socket; record the last values."""
+    started_at = time.monotonic()
     sock: socket.socket | None = None
     for _ in range(_SOCKET_CONNECT_RETRIES):
         if proc.poll() is not None:
@@ -48,12 +51,14 @@ def _track_position(
             sock.connect(sock_path)
             break
         except OSError:
+            if sock is not None:
+                sock.close()
             sock = None
             time.sleep(_SOCKET_CONNECT_DELAY)
     if sock is None:
         return
     try:
-        for cid, prop in ((1, "time-pos"), (2, "duration")):
+        for cid, prop in ((1, "time-pos"), (2, "duration"), (3, "eof-reached")):
             sock.sendall(f'{{"command":["observe_property",{cid},"{prop}"]}}\n'.encode())
         # Time out recv so we notice mpv exiting promptly and the thread joins
         # cleanly — otherwise a blocked recv could outlive mpv and lose the last
@@ -70,6 +75,8 @@ def _track_position(
             if not chunk:
                 break
             buf += chunk
+            if len(buf) > 1024 * 1024:
+                return  # malformed IPC must not grow memory without bound
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
                 if not line.strip():
@@ -78,12 +85,32 @@ def _track_position(
                     msg = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("event") == "file-loaded":
+                    holder["started"] = 1.0
+                if msg.get("event") == "end-file":
+                    holder["ended"] = max(holder.get("ended", 0), float(msg.get("reason") == "eof"))
+                    holder["failed"] = float(msg.get("reason") == "error")
                 if msg.get("event") == "property-change" and msg.get("data") is not None:
                     name = msg.get("name")
+                    if name == "eof-reached" and msg["data"] is True:
+                        holder["ended"] = 1.0
                     if name in ("time-pos", "duration"):
-                        holder["position" if name == "time-pos" else "duration"] = float(
-                            msg["data"]
-                        )
+                        try:
+                            value = float(msg["data"])
+                        except (ValueError, TypeError):
+                            continue
+                        if not math.isfinite(value) or value < 0:
+                            continue
+                        holder["position" if name == "time-pos" else "duration"] = value
+                        if name == "time-pos":
+                            if not holder.get("started"):
+                                _log.debug(
+                                    "phase=backend_start elapsed_ms=%.1f",
+                                    (time.monotonic() - started_at) * 1000,
+                                )
+                            holder["started"] = 1.0
     except OSError:
         pass
     finally:
@@ -237,8 +264,9 @@ def play(
     cast_enabled: bool = False,
     work_dir: str | None = None,
     audio_lang: str | None = None,
-) -> tuple[float, float, str]:
-    """Play `url` in mpv. Returns (position, duration, signal) where `signal` is
+) -> PlaybackOutcome:
+    """Play `url` in mpv. Returns a verified PlaybackOutcome (legacy unpacking supported).
+    `signal` is
     "next" when the next-episode overlay asked to continue, "cast" when the user hit
     the in-player "send to TV" key (Alt-C), or "" otherwise.
 
@@ -255,6 +283,9 @@ def play(
         sock_path = os.path.join(work_dir, "mpv.sock")
         signal_path = os.path.join(work_dir, "signal")
         info_path = os.path.join(work_dir, "info")
+        outcome_path = os.path.join(work_dir, "outcome")
+        with contextlib.suppress(OSError):
+            os.unlink(outcome_path)
         # Defaults come before mpv_args so explicit user flags win. nstream is the
         # single source of truth for resume (via --start over IPC), so
         # --no-resume-playback stops mpv's own watch-later from doing a second,
@@ -291,7 +322,7 @@ def play(
         # The next-episode card and the in-player "send to TV" key both report back via
         # the same signal file. Pass it whenever either feature is active.
         if next_label:
-            with open(info_path, "w", encoding="utf-8") as f:
+            with contextlib.suppress(OSError), open(info_path, "w", encoding="utf-8") as f:
                 f.write(next_label + "\n")
             args += [
                 f"--script-opts-append=nstream-info={info_path}",
@@ -301,21 +332,51 @@ def play(
             args.append(f"--script-opts-append=nstream-signal={signal_path}")
         if cast_enabled:
             args.append("--script-opts-append=nstream-cast=yes")
+        args.append(f"--script-opts-append=nstream-outcome={outcome_path}")
         args.append(url)
         try:
-            proc = subprocess.Popen(args)
+            proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            print("nstream: mpv non trovato", file=sys.stderr)
-            return (0.0, 0.0, "")
+            raise PlaybackError("player_missing", "mpv non trovato — installa mpv") from None
         tracker = threading.Thread(
             target=_track_position, args=(sock_path, holder, proc), daemon=True
         )
         tracker.start()
-        proc.wait()
-        tracker.join(timeout=_TRACKER_JOIN_TIMEOUT)
+        try:
+            rc = proc.wait()
+        except BaseException:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            raise
+        finally:
+            tracker.join(timeout=_TRACKER_JOIN_TIMEOUT)
+        with contextlib.suppress(OSError, ValueError):
+            with open(outcome_path, encoding="utf-8") as f:
+                loaded, reason = f.read(64).splitlines()
+            holder["started"] = max(holder.get("started", 0), float(loaded == "1"))
+            holder["ended"] = float(reason == "eof")
+            holder["failed"] = float(reason == "error")
         signal = ""
         if next_label or cast_enabled:
             with contextlib.suppress(OSError), open(signal_path, encoding="utf-8") as f:
                 signal = f.read().strip()
 
-    return (holder["position"], holder["duration"], signal)
+    return require_started(
+        PlaybackOutcome(
+            holder["position"],
+            holder["duration"],
+            signal,
+            started=bool(holder.get("started")),
+            reason="failed"
+            if rc or holder.get("failed")
+            else "ended"
+            if holder.get("ended")
+            else "stopped",
+            error="player_failed" if rc or holder.get("failed") else None,
+        )
+    )

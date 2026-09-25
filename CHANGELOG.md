@@ -5,6 +5,39 @@ All notable changes to nstream are documented here. Version source:
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+## [1.38.0] — 2026-09-25
+
+### Added
+
+- Shared local playback service, explicit media-start evidence, and actionable player
+  errors. Movies no longer activate the next-episode overlay or quit half a second
+  before EOF.
+- `--doctor` / `--json --doctor`: read-only local diagnostics. Optional binaries are
+  reported apart from required ones.
+- Reproducible verification: `scripts/check.sh` (Ruff, ty, pytest, wheel contents,
+  disposable install) on Python 3.13 and 3.14, architecture contracts, subprocess
+  playback acceptance, benchmarks, and an mpv smoke that does not touch the desktop
+  or the TV.
+- **ADR 0034 Accepted:** bounded addon gathering, deadline-aware retries, bounded JSON
+  decoding, validated stream fields, collector-owned breaker updates, serialized
+  best-effort state writes, atomic runtime snapshots, and a private recovery copy
+  before a malformed JSON file is replaced. Existing state files stay compatible.
+
+### Changed
+
+- **ADR 0035 Accepted:** a soft `audio_langs` preference no longer forces a full-file
+  remux when a verified direct cast (MP4/WebM, decodable first track) exists at the
+  same quality. Headless starts that direct cast, keeps primary-language safety
+  subtitles, and explains the choice in `notice`. A TUI asks once. `--audio-lang`
+  still waits for the preferred dub. Remux progress is printed even when stderr is
+  not a terminal.
+- Playback no longer changes the host firewall. Capability URLs are redacted in logs
+  and machine-readable output.
+- The development-only subtitle benchmark is excluded from the wheel with `exclude`,
+  not `force-exclude`.
+
 ## [1.37.1] — 2026-08-10
 
 ### Fixed

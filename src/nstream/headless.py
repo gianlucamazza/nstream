@@ -139,8 +139,13 @@ def run(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     """The `--json` entry `cli._dispatch` calls. Catch NetworkError here so a network
     failure emits a JSON error object, not the human stderr message main() would print
     (which would break the agent parsing stdout)."""
+    from .playback import PlaybackError
+
     try:
         return run_auto(cfg, args, opts)
+    except PlaybackError as e:
+        _emit_json({"ok": False, "error": e.code, "message": str(e)})
+        return 1
     except api.NetworkError as e:
         _emit_json({"ok": False, "error": "network", "message": str(e)})
         return 1

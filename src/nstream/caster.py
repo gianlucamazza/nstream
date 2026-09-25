@@ -587,7 +587,8 @@ def _raw_info(device: str | None) -> dict:
         res = subprocess.run(
             [*base, "info", "-j"], capture_output=True, text=True, timeout=util.CATT_INFO_TIMEOUT
         )
-        return json.loads(res.stdout or "{}")
+        value = json.loads(res.stdout or "{}")
+        return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError, subprocess.SubprocessError):
         return {}
 

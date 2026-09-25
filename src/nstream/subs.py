@@ -23,6 +23,7 @@ from .picker import fzf
 from .types import Stream, Subtitle
 
 _log = log.get_logger("subs")
+_PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,6 @@ def choose_tracks(
     sid: int | str | None = None
     sub_paths: tuple[str, ...] = ()
     # Sentinels: fzf returns None for ESC, so "automatic" can't be a None *value*.
-    _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
     while True:
         items: list[tuple[str, object]] = [
             (f"{ui.g().play}  Avvia", _PLAY),

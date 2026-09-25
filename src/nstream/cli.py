@@ -17,12 +17,14 @@ from . import (
     __version__,
     addons,
     api,
+    application,
     cast_control,
     cast_flow,
     caster,
     cli_args,
     debrid,
     discovery,
+    doctor,
     explain,
     headless,
     log,
@@ -36,7 +38,6 @@ from . import (
 from . import (
     quality as quality_mod,
 )
-from . import subs as subs_mod
 from .api import CAT_MAP, CATALOG_PAGE, GENRES
 from .caster import CastUnavailable
 from .caster import resolve_device as _resolve_device
@@ -54,6 +55,7 @@ from .labels import (
     meta_label,
 )
 from .picker import ask_query, fzf, fzf_key
+from .playback import PlaybackError
 from .player import play
 from .subs import auto_subs, choose_tracks  # re-export: tests + _play_on_mpv
 from .types import (
@@ -202,12 +204,16 @@ def _play_video(
                 cast_meta=cast_meta, expected_runtime_s=expected_s,
             )  # fmt: skip
         else:
-            res = _play_on_mpv(
-                cfg, results, chosen, work_dir,
-                typ=typ, video_id=video_id, title=title, opts=opts,
-                start=start, next_label=next_label, auto=auto, safety_sub_lang=safety_sub_lang,
-                cast_meta=cast_meta, expected_runtime_s=expected_s,
-            )  # fmt: skip
+            try:
+                res = _play_on_mpv(
+                    cfg, results, chosen, work_dir,
+                    typ=typ, video_id=video_id, title=title, opts=opts,
+                    start=start, next_label=next_label, auto=auto, safety_sub_lang=safety_sub_lang,
+                    cast_meta=cast_meta, expected_runtime_s=expected_s,
+                )  # fmt: skip
+            except PlaybackError as e:
+                ui.status(str(e), kind="fail")
+                return (str(e), False, quality_choice)
             if res is None:
                 # Backed out of the track menu → return to the list; keep quality sticky.
                 return (None, False, quality_choice)
@@ -301,29 +307,28 @@ def _play_on_mpv(
 ) -> tuple[float, float, bool] | None:
     """Play locally in mpv. Returns (pos, dur, advance), or None if the user backed
     out of the pre-play track menu (so the caller returns to the list)."""
-    audio_id: int | None = None
-    sub_id: str | int | None = None
-    if auto:
-        subs_pick = auto_subs(
-            cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
-            video_url=chosen.get("url"), filename=subs_mod.stream_filename(chosen),
-        )  # fmt: skip
-        subs_mod.report_safety_subs(subs_pick, safety_sub_lang)
-        sub_paths = subs_pick.paths
-    else:
-        sel = choose_tracks(cfg, chosen["url"], typ, video_id, work_dir)
-        if sel is None:
-            return None
-        audio_id, sub_id, sub_paths = sel
-    # Device discovery still needs catt (scan); castbridge is the preferred *delivery*
-    # backend once a device IP is known. Without catt, Alt-C has no way to resolve a target.
-    cast_ok = shutil.which("catt") is not None
-    pos, dur, signal = play(
-        cfg, title, chosen["url"],
-        start=start, sub_paths=sub_paths, audio_id=audio_id, sub_id=sub_id,
-        next_label=next_label, cast_enabled=cast_ok, work_dir=work_dir,
-        audio_lang=opts.audio_lang,
-    )  # fmt: skip
+    result = application.play_local(
+        cfg,
+        application.LocalRequest(
+            title,
+            typ,
+            video_id,
+            chosen,
+            opts,
+            work_dir,
+            start=start,
+            next_label=next_label,
+            cast_enabled=shutil.which("catt") is not None,
+            auto=auto,
+            safety_sub_lang=safety_sub_lang,
+        ),
+        backend=play,
+        acquire_subs=auto_subs,
+        choose_tracks=choose_tracks,
+    )
+    if result is None:
+        return None
+    pos, dur, signal = result.playback
     if signal == "cast":  # Alt-C in mpv: move this playback to the TV from `pos`
         return _move_to_cast(
             cfg, results, chosen, work_dir, title, pos, dur,
@@ -984,7 +989,9 @@ def _json_error(error: str, message: str) -> None:
     """Emit the one JSON error object the `--json` contract promises on stdout, for
     failure paths that die before (or outside) `headless.run` — a missing/corrupt
     config, an unexpected crash. Without it an agent parsing stdout sees nothing."""
-    sys.stdout.write(json.dumps({"ok": False, "error": error, "message": message}) + "\n")
+    sys.stdout.write(
+        json.dumps({"ok": False, "error": error, "message": log.redact(message)}) + "\n"
+    )
     sys.stdout.flush()
 
 
@@ -1036,9 +1043,12 @@ def main() -> int:
     parser = cli_args.build_parser()
     args = parser.parse_args()
 
+    if args.doctor:
+        return doctor.run(json_mode=args.json)
+
     log.setup_logging(args.debug or bool(os.environ.get("NSTREAM_DEBUG")))
     _log.info("nstream %s avvio (cast=%s)", __version__, args.cast or "")
-    _log.debug("args: %r", vars(args))
+    _log.debug("mode: json=%s cast=%s", args.json, args.cast)
 
     try:
         cfg = _ensure_config(headless_mode=args.json)
@@ -1148,11 +1158,19 @@ def main() -> int:
 def _entry() -> None:
     # Configure logging before anything else so a crash in main() is captured even
     # when nstream runs inside the foot launcher (where the traceback would scroll away).
-    log.setup_logging(bool(os.environ.get("NSTREAM_DEBUG")))
+    if "--doctor" not in sys.argv[1:]:
+        log.setup_logging(bool(os.environ.get("NSTREAM_DEBUG")))
     try:
         sys.exit(main())
     except (KeyboardInterrupt, EOFError):
+        if "--json" in sys.argv[1:]:
+            _json_error("cancelled", "operazione annullata")
         sys.exit(130)
+    except PlaybackError as e:
+        if "--json" in sys.argv[1:]:
+            _json_error(e.code, str(e))
+        print(f"nstream: {e}", file=sys.stderr)
+        sys.exit(1)
     except Exception:
         _log.exception("crash non gestito")
         message = f"errore inatteso — dettagli in {log.log_path()}"

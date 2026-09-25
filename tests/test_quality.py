@@ -868,8 +868,8 @@ def test_parse_container_falls_back_to_url_extension():
 
 def test_parse_cache_keys_on_container():
     """Two streams identical but for the container must not collide in the parse cache."""
-    a = {"name": "T", "title": "Dune", "behaviorHints": {"filename": "d.mkv"}}
-    b = {"name": "T", "title": "Dune", "behaviorHints": {"filename": "d.mp4"}}
+    a: Stream = {"name": "T", "title": "Dune", "behaviorHints": {"filename": "d.mkv"}}
+    b: Stream = {"name": "T", "title": "Dune", "behaviorHints": {"filename": "d.mp4"}}
     assert quality.parse_stream(a).container == "mkv"
     assert quality.parse_stream(b).container == "mp4"
 

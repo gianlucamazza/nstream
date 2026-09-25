@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import urllib.error
+from email.message import Message
 
 import pytest
 
@@ -18,8 +19,9 @@ class _Resp:
         self._body = body
         self.headers = headers or {}
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        body, self._body = self._body[:size], self._body[size:]
+        return body
 
     def __enter__(self):
         return self
@@ -29,7 +31,34 @@ class _Resp:
 
 
 def _http_error(code: int, headers: dict | None = None) -> urllib.error.HTTPError:
-    return urllib.error.HTTPError("http://x", code, "boom", headers or {}, None)
+    message = Message()
+    for key, value in (headers or {}).items():
+        message[key] = value
+    return urllib.error.HTTPError("http://x", code, "boom", message, None)
+
+
+@pytest.mark.parametrize("status", [400, 401, 408, 429, 503])
+def test_transient_or_auth_errors_never_persist_as_dead(monkeypatch, status):
+    def fail(*args, **kwargs):
+        raise _http_error(status)
+
+    monkeypatch.setattr(net.urllib.request, "urlopen", fail)
+    assert not net.probe_url("http://x").dead
+
+
+def test_body_and_decompression_limits(monkeypatch):
+    monkeypatch.setattr(net, "MAX_JSON_BYTES", 64)
+    with pytest.raises(net.NetworkError, match="grande"):
+        net._read_json(_Resp(b"x" * 65))
+    monkeypatch.setattr(net, "MAX_DECODED_BYTES", 64)
+    with pytest.raises(net.NetworkError, match="grande"):
+        net._read_json(_Resp(gzip.compress(b"x" * 1000)))
+
+
+@pytest.mark.parametrize("body", [b"[]", b"null", b'"hello"'])
+def test_json_requires_object(body):
+    with pytest.raises(net.NetworkError, match="non valida"):
+        net._read_json(_Resp(body))
 
 
 @pytest.fixture

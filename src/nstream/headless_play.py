@@ -15,8 +15,10 @@ from dataclasses import replace
 
 from . import (
     api,
+    application,
     cast_flow,
     caster,
+    log,
     quality,
     state,
     stream_select,
@@ -28,13 +30,12 @@ from .caster import resolve_device as _resolve_device
 from .config import Config, PlayOpts
 from .player import play
 from .subs import auto_subs
-from .subs import stream_filename as subs_filename
 from .types import HistoryEntry, Stream
 
 
 def emit_json(obj: dict) -> None:
     """One machine-readable JSON object on stdout (no url/token)."""
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.write(json.dumps(log.public_value(obj), ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
@@ -408,17 +409,26 @@ def auto_play(
                     notice = f"{notice}; {vol_notice}" if notice else vol_notice
                     print(f"nstream: {vol_notice}", file=sys.stderr)
         else:
-            subs_pick = auto_subs(
-                cfg, typ, video_id, work_dir, opts, safety_sub_lang=vetted.safety_sub_lang,
-                video_url=chosen.get("url"), filename=subs_filename(chosen),
-            )  # fmt: skip
+            result = application.play_local(
+                cfg,
+                application.LocalRequest(
+                    title,
+                    typ,
+                    video_id,
+                    chosen,
+                    opts,
+                    work_dir,
+                    start=start,
+                    safety_sub_lang=vetted.safety_sub_lang,
+                ),
+                backend=play,
+                acquire_subs=auto_subs,
+            )
+            assert result is not None  # auto selection never opens a cancellable track menu
+            subs_pick = result.subtitles
             sub_paths, sub_match = subs_pick.paths, subs_pick.match
             sub_offset = subs_pick.offset_s
-            # Local mpv blocks until the window closes (intended; the user is watching).
-            hist_pos, hist_dur, _sig = play(
-                cfg, title, chosen["url"],
-                start=start, sub_paths=sub_paths, cast_enabled=False, work_dir=work_dir,
-            )  # fmt: skip
+            hist_pos, hist_dur = result.playback.position, result.playback.duration
             action = "play"
 
     # Same guard as the interactive flow: only persist a resume we can reason about —

@@ -312,6 +312,7 @@ def test_cast_via_mirror_headless_success_detaches_and_keeps_state(monkeypatch, 
     assert kw["start_new_session"] is True  # detached session
     assert proc.wait_calls == 0
     st = mirror._read_state()
+    assert st is not None
     work_dir = st.pop("work_dir")  # dynamic mkdtemp path, checked separately below
     assert st == {
         "device": "1.2.3.4", "sink_module": 99, "headless": "HEADLESS-9",

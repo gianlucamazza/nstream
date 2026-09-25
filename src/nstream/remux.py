@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import fcntl
 import os
 import shutil
 import subprocess
@@ -33,6 +34,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import BinaryIO
 
 from . import bridge, cast_delivery, caster, log, picker, serve, srt, ui, util
 from .config import Config
@@ -61,6 +63,11 @@ _START_POLL = 2.0
 # ffmpeg fetches the whole remote stream, so an unsized remux on a nearly-full disk can
 # still fill it. With a known size the proportional `size_gb * 1.1` check applies instead.
 _MIN_FREE_GB = 5.0
+
+# Keep an advisory lock from temp creation until the detached server state is durable.
+# A concurrent headless command (for example the status widget) runs `_gc_stale`; without
+# this reservation it sees an in-progress remux as unowned and unlinks it under ffmpeg.
+_PREPARE_LOCKS: dict[str, BinaryIO] = {}
 
 
 def needs_remux(audio_codec: str) -> bool:
@@ -149,14 +156,20 @@ def _gc_stale() -> None:
     keep = st.get("file") if st and _pid_alive(st.get("pid")) else None
     with contextlib.suppress(OSError):
         for f in _cache_dir().glob("cast-*.mp4"):
-            if str(f) != keep:
+            path = str(f)
+            if path != keep and not _prepare_active(path):
                 f.unlink(missing_ok=True)
+                Path(f"{path}.lock").unlink(missing_ok=True)
         for pat in ("cast-*.mp4.srt", "cast-*.mp4.vtt"):  # subtitle sidecars of detached casts
             for f in _cache_dir().glob(pat):
                 if not keep or str(f) != f"{keep}{f.suffix}":
                     f.unlink(missing_ok=True)
         for f in _cache_dir().glob("catt-*.log"):  # startup-diagnosis stderr leftovers
             f.unlink(missing_ok=True)
+        for f in _cache_dir().glob("cast-*.mp4.lock"):
+            path = str(f)[: -len(".lock")]
+            if path != keep and not _prepare_active(path):
+                f.unlink(missing_ok=True)
 
 
 def _read_state() -> dict | None:
@@ -168,6 +181,9 @@ def _write_state(pid: int, file: str, device: str | None, mode: str = "catt") ->
     or "serve" (our Range server serves, castbridge casts) so `stop()` tears down the right
     receiver session."""
     _runstate().write({"pid": pid, "file": file, "device": device, "mode": mode})
+    # The durable serving state now protects the file from GC; release the preparation
+    # reservation only after the state write so there is no unowned window.
+    _release_prepare_lock(file)
 
 
 def _clear_state() -> None:
@@ -178,8 +194,53 @@ def _pid_alive(pid: int | None) -> bool:
     return util.pid_alive(pid)
 
 
+def _new_remux_temp() -> str:
+    """Create a remux path already protected from cross-process stale-file GC."""
+    fd, lock_path = tempfile.mkstemp(suffix=".mp4.lock", prefix="cast-", dir=str(_cache_dir()))
+    lock = os.fdopen(fd, "r+b")
+    path = lock_path[: -len(".lock")]
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        out_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(out_fd)
+    except BaseException:
+        lock.close()
+        with contextlib.suppress(OSError):
+            os.unlink(lock_path)
+        raise
+    _PREPARE_LOCKS[path] = lock
+    return path
+
+
+def _prepare_active(path: str) -> bool:
+    """Whether another process currently owns the preparation lock for `path`."""
+    try:
+        lock = open(f"{path}.lock", "r+b")  # noqa: SIM115
+    except OSError:
+        return False
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return True
+    fcntl.flock(lock, fcntl.LOCK_UN)
+    lock.close()
+    return False
+
+
+def _release_prepare_lock(path: str) -> None:
+    lock = _PREPARE_LOCKS.pop(path, None)
+    if lock is not None:
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+    with contextlib.suppress(OSError):
+        os.unlink(f"{path}.lock")
+
+
 def _rm(path: str | None) -> None:
     if path:
+        _release_prepare_lock(path)
         with contextlib.suppress(OSError):
             os.unlink(path)
 
@@ -242,23 +303,25 @@ def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tup
         except (OSError, subprocess.SubprocessError) as e:
             return None, str(e)
         pct = -1
-        show = sys.stderr.isatty()
-        if show:
-            # Immediate feedback: duration-known paths jump to 0%, else a static "…".
-            ui.progress(_frame(0 if duration > 0 else None))
+        # A tty redraws in place (every percent). A pipe still needs the wait to be
+        # visible (ADR 0035): one line up front, then each 10% — `ui.progress` already
+        # prints a plain newline when stderr is not a tty.
+        bucket = 1 if sys.stderr.isatty() else 10
+        ui.progress(_frame(0 if duration > 0 else None))
+        pct = 0 if duration > 0 else -1
         if proc.stdout is not None:
             for line in proc.stdout:
-                if show and duration > 0 and line.startswith("out_time_us="):
+                if duration > 0 and line.startswith("out_time_us="):
                     try:
                         cur = int(line.split("=", 1)[1]) / 1_000_000
                     except ValueError:
                         continue
-                    new = min(99, int(cur / duration * 100))
-                    if new != pct:
-                        pct = new
+                    shown = (min(99, int(cur / duration * 100)) // bucket) * bucket
+                    if shown != pct:
+                        pct = shown
                         ui.progress(_frame(pct))
         proc.wait()
-        if show:
+        if sys.stderr.isatty():
             # Clear the progress line; the cast "in onda" line is the next status.
             ui.progress_done()
         err.seek(0)
@@ -346,8 +409,7 @@ def remux_to_file(
     else:
         codec = cfg.cast_audio_codec or "aac"
         acodec = ["-c:a", codec, "-b:a", _audio_bitrate(sel.channels if sel else None)]
-    fd, path = tempfile.mkstemp(suffix=".mp4", prefix="cast-", dir=str(_cache_dir()))
-    os.close(fd)
+    path = _new_remux_temp()
     cmd = [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         "-i", url,

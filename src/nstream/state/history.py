@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
-import os
+import math
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 
 from .. import util
 from ..config import Config, library_path, state_path
@@ -47,7 +46,18 @@ def make_entry(
 def load_history(cfg: Config) -> dict[str, HistoryEntry]:
     if not cfg.history_enabled:
         return {}
-    return util.load_json(state_path(), {})
+    data = util.load_json(state_path(), {})
+    return {
+        key: entry
+        for key, entry in data.items()
+        if isinstance(entry, dict)
+        and all(
+            isinstance(entry.get(field, 0), int | float)
+            and math.isfinite(entry.get(field, 0))
+            and entry.get(field, 0) >= 0
+            for field in ("position", "duration", "ts")
+        )
+    }
 
 
 # Within this many seconds of the end a title counts as finished, even if the
@@ -94,25 +104,6 @@ def resume_position(cfg: Config, video_id: str) -> float | None:
     return start
 
 
-@contextlib.contextmanager
-def _history_lock() -> Iterator[None]:
-    """Serialise the save_entry read-modify-write across processes (a headless `--follow`
-    can end while an interactive session saves another title; without the lock the last
-    atomic_write silently drops the other writer's entry). Best-effort like all state I/O:
-    if the lock file can't be opened, proceed unlocked rather than block playback."""
-    try:
-        fd = os.open(state_path().with_name(".history.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
-    except OSError:
-        yield
-        return
-    try:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
-
-
 # A "started" entry (duration 0, no real position ever merged) is clutter in
 # continue-watching past this age — pruned on every history write.
 STARTED_TTL = 7 * 86400.0
@@ -124,7 +115,10 @@ MAX_WATCHLIST = 500
 
 def _library_read() -> dict:
     data = util.load_json(library_path(), {})
-    return data if isinstance(data, dict) else {}
+    for key in ("watchlist", "searches"):
+        if not isinstance(data.get(key, []), list):
+            data[key] = []
+    return data
 
 
 def _library_write(data: dict) -> None:
@@ -150,6 +144,7 @@ def is_watchlisted(cfg: Config, video_id: str) -> bool:
     return any(m.get("id") == video_id for m in watchlist(cfg))
 
 
+@util.state_update(library_path, False)
 def toggle_watchlist(cfg: Config, meta: Meta) -> bool:
     """Toggle a title and return its new state. Watchlist entries are metadata-only."""
     if not cfg.history_enabled or not meta.get("id"):
@@ -178,6 +173,7 @@ def recent_searches(cfg: Config) -> list[str]:
     return [v for v in values if isinstance(v, str) and v.strip()][:MAX_RECENT_SEARCHES]
 
 
+@util.state_update(library_path)
 def remember_search(cfg: Config, query: str) -> None:
     if not cfg.history_enabled or not query.strip():
         return
@@ -189,7 +185,10 @@ def remember_search(cfg: Config, query: str) -> None:
     _library_write(data)
 
 
-def save_entry(cfg: Config, entry: HistoryEntry, *, drop: Iterable[str] = ()) -> None:
+@util.state_update(state_path)
+def save_entry(
+    cfg: Config, entry: HistoryEntry, *, drop: Iterable[str] = (), started: bool = False
+) -> None:
     """Persist `entry` (or retire it when watched). `drop` retires additional video_ids
     in the same locked write — used by `note_started` to replace a binge's stale
     zero-progress siblings without a second read-modify-write cycle."""
@@ -200,8 +199,24 @@ def save_entry(cfg: Config, entry: HistoryEntry, *, drop: Iterable[str] = ()) ->
         return
     with contextlib.suppress(OSError):  # atomic_write recreates it (and surfaces the error)
         state_path().parent.mkdir(parents=True, exist_ok=True)
-    with _history_lock():
+    with contextlib.suppress(OSError):
         history = load_history(cfg)
+        if started:
+            entry = entry.copy()
+            previous = history.get(vid)
+            if previous and not entry.get("duration"):
+                entry["duration"] = previous.get("duration", 0.0)
+            if entry.get("type") == "series" and entry.get("series_id"):
+                drop = (
+                    *drop,
+                    *(
+                        key
+                        for key, value in history.items()
+                        if key != vid
+                        and value.get("series_id") == entry["series_id"]
+                        and (not value.get("duration") or _watched(value))
+                    ),
+                )
         for stale in drop:
             history.pop(stale, None)
         now = time.time()
@@ -239,22 +254,7 @@ def note_started(cfg: Config, entry: HistoryEntry) -> None:
     later via `update_from_receiver` (`--stop`/`--status`). For a series, sibling
     episodes still at zero progress are retired in the same write — a binge leaves
     only the latest started episode, while siblings with real progress stay."""
-    history = load_history(cfg)
-    prev = history.get(entry.get("video_id", ""))
-    if prev and not entry.get("duration"):
-        entry["duration"] = prev.get("duration", 0.0)
-    drop: tuple[str, ...] = ()
-    if entry.get("type") == "series" and entry.get("series_id"):
-        # Retire zero-progress siblings (a binge leaves only the latest started) AND
-        # watched ones (kept only so resume could advance — this start IS the advance).
-        drop = tuple(
-            vid
-            for vid, e in history.items()
-            if e.get("series_id") == entry["series_id"]
-            and vid != entry.get("video_id")
-            and (not e.get("duration") or _watched(e))
-        )
-    save_entry(cfg, entry, drop=drop)
+    save_entry(cfg, entry, started=True)
 
 
 def watched_series(cfg: Config) -> list[HistoryEntry]:

@@ -78,7 +78,7 @@ Common fields:
 | `reencoded`                                          | Tier-2 remux used                                                                                                                                            |
 | `selection`                                          | Title pick: `exact` \| `year` \| `first`                                                                                                                     |
 | `subtitles` / `subtitles_match` / `subtitles_offset` | Sub lang and evidence tier                                                                                                                                   |
-| `volume` / `muted` / `notice`                        | Cast audio state                                                                                                                                             |
+| `volume` / `muted` / `notice`                        | Cast audio state. `audio_lang` is the dub that started. When the preferred language would need a full-file remux and a direct MP4/WebM exists in a later `audio_langs` entry, headless starts that direct cast and `notice` says why (ADR 0035). `--audio-lang` does not take this shortcut. |
 
 `--status` adds `player_state`, `position`, `duration`, `active_tracks`, `receiver_error`.
 
@@ -115,7 +115,15 @@ Manual `--sub-offset` / `--sub-fps` always win (engine steps aside). Toggle engi
 | `usage`                   | Bad flag combo                                                                                                                                                           | Fix command                                                     |
 | `config`                  | Config/token problem (some paths)                                                                                                                                        | `nstream --settings`; stderr                                    |
 
-Config errors may also exit non-zero with a stderr line only.
+Argument/config errors emit one JSON object and exit non-zero. Local playback failure
+uses `player_missing` or `player_failed`; interruption emits `cancelled` and exits 130.
+Ordinary commands emit one result object; existing `--cast --follow` keeps its JSONL
+events followed by the final result. Backend event fields are scrubbed for URLs/tokens.
+
+`nstream --json --doctor` reports required/optional local tools, config validity and
+permissions. It runs before config loading/onboarding and does not change permissions,
+start playback, or contact a provider. Its `network_tested` and `playback_tested` fields
+are false by design. See [verification](verification.md).
 
 ## Stream sources (config only)
 

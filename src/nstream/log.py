@@ -11,11 +11,14 @@ launcher — is captured for diagnosis.
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import logging.handlers
 import os
 import re
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .config import DEBRID_PROVIDERS
@@ -36,7 +39,19 @@ _REDACTIONS = (
 def redact(text: str) -> str:
     for pat, repl in _REDACTIONS:
         text = pat.sub(repl, text)
-    return text
+    # Arbitrary addon capability URLs cannot be covered by provider-specific patterns.
+    return re.sub(r"https?://[^\s\"']+", "<url>", text, flags=re.I)
+
+
+def public_value(value):
+    """Scrub machine-readable output too, including arbitrary backend event fields."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {key: public_value(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [public_value(item) for item in value]
+    return value
 
 
 class RedactFilter(logging.Filter):
@@ -118,3 +133,22 @@ def setup_logging(debug: bool = False) -> logging.Logger:
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"nstream.{name}")
+
+
+def phase(name: str):
+    """Measure a named phase without recording arguments, results, or content identifiers."""
+
+    def decorate[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+        @functools.wraps(fn)
+        def measured(*args: P.args, **kwargs: P.kwargs) -> R:
+            started = time.monotonic()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                get_logger("timing").debug(
+                    "phase=%s elapsed_ms=%.1f", name, (time.monotonic() - started) * 1000
+                )
+
+        return measured
+
+    return decorate

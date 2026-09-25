@@ -23,11 +23,16 @@ def test_redact_resolve_url():
     url = "https://torrentio.strem.fun/resolve/realdebrid/TOKEN123/abc/movie.mkv"
     out = log.redact(url)
     assert "TOKEN123" not in out
-    assert "/resolve/realdebrid/<redacted>" in out
+    assert out == "<url>"
 
 
 def test_redact_noop_when_clean():
     assert log.redact("just a normal message") == "just a normal message"
+
+
+def test_event_payload_redacts_arbitrary_capability_urls():
+    payload = {"event": "failed", "detail": ["https://cdn.example/signed/SECRET?key=unknown"]}
+    assert log.public_value(payload) == {"event": "failed", "detail": ["<url>"]}
 
 
 def test_redact_filter_scrubs_record():
@@ -50,7 +55,7 @@ def test_setup_logging_writes_redacted_file(tmp_path, monkeypatch):
         h.flush()
     text = (tmp_path / "nstream" / "nstream.log").read_text()
     assert "playback" in text
-    assert "/resolve/realdebrid/<redacted>" in text
+    assert "url=<url>" in text
 
 
 def test_setup_logging_redacts_exception_traceback(tmp_path, monkeypatch):

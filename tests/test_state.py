@@ -7,8 +7,26 @@ import stat
 
 from nstream import state, util
 from nstream.config import Config
+from nstream.types import Meta
 
 CFG = Config(torrentio_base="tb")
+
+
+def test_corrupt_history_preserved_before_write():
+    path = state.history.state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"broken original")
+    state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10, 100))
+    backups = list(path.parent.glob("history.json.corrupt-*"))
+    assert len(backups) == 1 and backups[0].read_bytes() == b"broken original"
+    assert state.load_history(CFG)["tt1"]["position"] == 10
+
+
+def test_contended_history_write_is_bounded():
+    path = state.history.state_path()
+    with util.file_lock(path):
+        state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10, 100))
+    assert state.load_history(CFG) == {}
 
 
 def test_make_entry_movie():
@@ -138,7 +156,7 @@ def test_load_corrupt_history_is_empty(tmp_path, monkeypatch):
 
 def test_watchlist_toggle_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    meta = {"id": "tt1", "type": "movie", "name": "A", "poster": "https://img"}
+    meta: Meta = {"id": "tt1", "type": "movie", "name": "A", "poster": "https://img"}
     assert state.toggle_watchlist(CFG, meta) is True
     assert state.is_watchlisted(CFG, "tt1") is True
     assert state.watchlist(CFG)[0]["name"] == "A"
@@ -242,16 +260,16 @@ def test_update_from_receiver_watched_retires_entry(tmp_path, monkeypatch):
 
 def test_history_lock_degrades_when_unopenable(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    real_open = state.history.os.open
+    real_open = util.os.open
 
     def deny(path, *a, **k):
         if str(path).endswith(".history.lock"):
             raise OSError("no lock for you")
         return real_open(path, *a, **k)
 
-    monkeypatch.setattr(state.history.os, "open", deny)
+    monkeypatch.setattr(util.os, "open", deny)
     state.save_entry(CFG, state.make_entry("tt1", "A", "movie", 10.0, 100.0))
-    assert state.load_history(CFG)["tt1"]["position"] == 10.0  # unlocked but not blocked
+    assert state.load_history(CFG) == {}  # unavailable lock skips the write, never blocks playback
 
 
 # --- staleness guards + binge hygiene (round 2) ------------------------------

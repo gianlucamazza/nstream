@@ -18,7 +18,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | Theme                         | ADRs                                  |
 | ----------------------------- | ------------------------------------- |
 | Debrid / backends             | 0001–0004                             |
-| Cast delivery & discovery     | 0005–0013, 0015–0017, 0022–0023, 0031 |
+| Cast delivery & discovery     | 0005–0013, 0015–0017, 0022–0023, 0031, 0035 |
 | Selection / sources / privacy | 0014, 0021, 0024–0030, 0032           |
 | Subtitles                     | 0012, 0018–0020                       |
 | Series / UX structure         | 0009, 0029                            |
@@ -60,6 +60,8 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0031](0031-delivery-backend-reports-started.md)      | A delivery backend reports whether the cast started; `ok: true` requires it | Accepted           | —          |
 | [0032](0032-p2p-privacy-gate-at-the-swarm-join.md)    | The P2P privacy gate lives at the swarm join, not at one call site          | Accepted           | —          |
 | [0033](0033-exhaustion-raises-none-means-esc.md)      | Exhaustion raises; `None` means the user backed out                         | Accepted           | 2026-08-10 |
+| [0034](0034-bounded-effects-and-playback-evidence.md) | Bounded effects, local playback evidence, and reproducible verification | Accepted | 2026-09-09 |
+| [0035](0035-direct-cast-before-full-remux.md)         | A soft language preference yields to a direct cast                       | Accepted | 2026-09-25 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

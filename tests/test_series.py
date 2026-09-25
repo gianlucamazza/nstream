@@ -322,7 +322,8 @@ def _entry(season, episode, *, position=10.0, duration=100.0, vid=None):
 
 def test_next_video_crosses_the_season_boundary():
     eps = _multi_season((2, 2))
-    assert series.next_video(eps, {"season": 1, "episode": 2})["id"] == "tt:2:1"
+    nxt = series.next_video(eps, {"season": 1, "episode": 2})
+    assert nxt is not None and nxt["id"] == "tt:2:1"
 
 
 def test_next_video_none_past_the_finale():
@@ -338,13 +339,15 @@ def test_next_video_unknown_position_never_restarts():
 
 def test_next_video_skips_gaps():
     eps = [Video(id="a", season=1, episode=1), Video(id="c", season=1, episode=3)]
-    assert series.next_video(eps, {"season": 1, "episode": 1})["id"] == "c"
+    nxt = series.next_video(eps, {"season": 1, "episode": 1})
+    assert nxt is not None and nxt["id"] == "c"
 
 
 def test_next_up_finished_season_finale_advances_to_next_season(monkeypatch):
     eps = _multi_season((2, 2))
     monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: eps)
     nu = series.next_up(CFG, _entry(1, 2, position=99.0))  # watched finale of S01
+    assert nu.video is not None
     assert nu.selection == "next" and nu.video["id"] == "tt:2:1"
 
 
@@ -359,6 +362,7 @@ def test_next_up_unfinished_episode_resumes_without_touching_the_catalogue(monke
         series.api, "episodes", lambda cfg, sid: pytest.fail("no episode fetch on resume")
     )
     nu = series.next_up(CFG, _entry(1, 2, position=10.0))
+    assert nu.video is not None
     assert nu.selection == "resume" and nu.video["episode"] == 2
 
 
@@ -371,6 +375,7 @@ def test_next_up_empty_catalogue_resumes(monkeypatch):
     """An unreadable episode list is a catalogue hiccup, not a reason to block playback."""
     monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: [])
     nu = series.next_up(CFG, _entry(1, 2, position=99.0))
+    assert nu.video is not None
     assert nu.selection == "resume" and nu.video["episode"] == 2
 
 

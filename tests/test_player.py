@@ -31,7 +31,9 @@ class _FakePopen:
 @pytest.fixture
 def stub_mpv(monkeypatch):
     monkeypatch.setattr(player.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(player, "_track_position", lambda *a, **k: None)
+    monkeypatch.setattr(
+        player, "_track_position", lambda path, holder, proc: holder.update(started=1.0)
+    )
 
 
 # --- play() arg + signal contract -----------------------------------------

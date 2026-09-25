@@ -17,8 +17,22 @@
 
 local options = require 'mp.options'
 
-local opts = { info = "", signal = "", lead = 15, resume = 0, cast = "" }
+local opts = { info = "", signal = "", outcome = "", lead = 15, resume = 0, cast = "" }
 options.read_options(opts, "nstream")
+
+-- Keep final media evidence even when mpv closes IPC before its last event is read.
+local loaded = false
+local function record_outcome(reason)
+    if opts.outcome == "" then return end
+    local f = io.open(opts.outcome, "w")
+    if not f then return end
+    f:write((loaded and "1" or "0") .. "\n" .. reason .. "\n")
+    f:close()
+end
+mp.register_event("file-loaded", function()
+    loaded = true
+    record_outcome("loaded")
+end)
 
 local function read_first_line(path)
     if path == "" then return nil end
@@ -154,7 +168,7 @@ mp.observe_property("duration", "number", function(_, val)
 end)
 
 mp.observe_property("time-pos", "number", function(_, pos)
-    if triggered or cancelled or not pos or not duration or duration <= 0 then
+    if opts.info == "" or triggered or cancelled or not pos or not duration or duration <= 0 then
         return
     end
     local remaining = duration - pos
@@ -172,6 +186,7 @@ end)
 
 -- Natural end of file (not a manual quit): advance if the overlay was up.
 mp.register_event("end-file", function(ev)
+    record_outcome(ev.reason or "unknown")
     if ev.reason == "eof" and active and not cancelled then
         trigger()
     end

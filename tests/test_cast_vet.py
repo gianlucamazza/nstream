@@ -117,8 +117,10 @@ class _R:
     """Minimal RankedStream stand-in (stream + name-tag languages) for reselect tests."""
 
     def __init__(self, stream, languages):
+        from types import SimpleNamespace
+
         self.stream = stream
-        self.info = type("I", (), {"languages": languages})()
+        self.info = SimpleNamespace(languages=languages, resolution=0)
 
 
 def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
@@ -295,6 +297,78 @@ def _container_env(monkeypatch, probes, candidates=()):
     monkeypatch.setattr(
         stream_select, "_cast_playable", lambda cfg, results, exact_resolution=0: list(candidates)
     )
+
+
+def test_instant_direct_prefers_primary_mp4_over_english(monkeypatch):
+    """Italian AAC in MP4 beats an English AAC MP4, whichever comes first."""
+    ita: Stream = {"url": "http://x/ita.mp4"}
+    eng: Stream = {"url": "http://x/eng.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/ita.mp4": ("mov,mp4,m4a", "hevc", [Track(1, "ita", "aac")]),
+            "http://x/eng.mp4": ("mov,mp4,m4a", "hevc", [Track(1, "eng", "aac")]),
+        },
+        [_R(eng, frozenset({"eng"})), _R(ita, frozenset({"ita"}))],
+    )
+    plan = cast_vet.find_instant_direct(_ccfg(), [eng, ita], ("ita", "eng"))
+    assert plan is not None and plan.stream is ita and plan.mode == "direct"
+    assert plan.real_lang == "ita" and plan.verified
+
+
+def test_instant_direct_english_mp4_when_italian_is_mkv_ac3(monkeypatch):
+    """The Lobster shape: Italian AC-3 inside MKV is not instant; English AAC MP4 is."""
+    mkv: Stream = {"url": "http://x/ita.mkv", "name": "Film.2015.1080p.AC3.ITA.mkv"}
+    eng: Stream = {"url": "http://x/eng.mp4", "name": "Film.2015.1080p.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/ita.mkv": (
+                "matroska,webm",
+                "hevc",
+                [Track(1, "ita", "ac3", 6), Track(2, "eng", "aac")],
+            ),
+            "http://x/eng.mp4": ("mov,mp4,m4a", "hevc", [Track(1, "eng", "aac")]),
+        },
+        [_R(mkv, frozenset({"ita", "eng"})), _R(eng, frozenset({"eng"}))],
+    )
+    plan = cast_vet.find_instant_direct(_ccfg(), [mkv, eng], ("ita", "eng"))
+    assert plan is not None and plan.stream is eng and plan.real_lang == "eng"
+    slow = cast_vet._cast_plan_for(mkv, [Track(1, "ita", "ac3", 6)], "ita")
+    notice = cast_vet.instant_defer_notice(slow, plan, "ita")
+    assert "cast diretto eng" in notice and "ac3" in notice
+
+
+def test_instant_direct_none_when_only_mkv(monkeypatch):
+    """No MP4/WebM → nothing to start early; the caller keeps the remux."""
+    mkv: Stream = {"url": "http://x/ita.mkv"}
+    eng: Stream = {"url": "http://x/eng.mkv"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/ita.mkv": ("matroska,webm", "hevc", [Track(1, "ita", "ac3", 6)]),
+            "http://x/eng.mkv": ("matroska,webm", "hevc", [Track(1, "eng", "aac")]),
+        },
+        [_R(mkv, frozenset({"ita"})), _R(eng, frozenset({"eng"}))],
+    )
+    assert cast_vet.find_instant_direct(_ccfg(), [mkv, eng], ("ita", "eng")) is None
+
+
+def test_instant_direct_rejects_spanish_first_track(monkeypatch):
+    """A name-`multi` MP4 whose real first track is Spanish is not an Italian or English direct."""
+    spa: Stream = {"url": "http://x/spa.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/spa.mp4": (
+                "mov,mp4,m4a",
+                "hevc",
+                [Track(1, "spa", "aac"), Track(2, "eng", "aac")],
+            ),
+        },
+        [_R(spa, frozenset({"multi", "spa"}))],
+    )
+    assert cast_vet.find_instant_direct(_ccfg(), [spa], ("ita", "eng")) is None
 
 
 def test_vet_cast_container_passes_castable(monkeypatch):

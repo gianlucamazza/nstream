@@ -889,7 +889,8 @@ def test_pick_audio_stream_returns_first_with_lang(monkeypatch):
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
     monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
-    assert stream_select.pick_audio_stream(cfg, [], "ita", cast=False)["url"] == "u2"
+    selected = stream_select.pick_audio_stream(cfg, [], "ita", cast=False)
+    assert selected is not None and selected["url"] == "u2"
 
 
 def test_pick_audio_stream_none_when_absent(monkeypatch):
@@ -936,6 +937,7 @@ def test_pick_audio_stream_verified_confirms(monkeypatch):
     # real tracks of u2 confirm ita
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"ita"}))
     stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
+    assert stream is not None
     assert stream["url"] == "u2" and verified is True
 
 
@@ -976,6 +978,7 @@ def test_pick_audio_verified_skips_short_file(monkeypatch):
     stream, verified = stream_select.pick_audio_stream_verified(
         cfg, [], "eng", cast=False, expected_runtime_s=3300.0
     )
+    assert stream is not None
     assert stream["url"] == "real" and verified is False
 
 
@@ -1009,6 +1012,7 @@ def test_pick_audio_verified_no_expected_keeps_current_behaviour(monkeypatch):
         lambda *a, **k: pytest.fail("must not probe when the runtime is unknown"),
     )
     stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
+    assert stream is not None
     assert stream["url"] == "u1" and verified is True
 
 

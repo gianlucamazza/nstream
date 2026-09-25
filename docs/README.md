@@ -12,6 +12,7 @@ Audience map — pick the page that matches the job.
 | **Architectural why** | [adr/README.md](adr/README.md) | individual ADRs |
 | **Roadmap / non-goals** | [roadmap.md](roadmap.md) | Proposed ADRs in the index |
 | **Historical audit** | [archive/audit-2026-06-09.md](archive/audit-2026-06-09.md) | **not** a live backlog |
+| **Verification / recovery** | [verification.md](verification.md) | Local gates, package checks, benchmarks, hardware acceptance |
 
 ## Document roles (single source of truth)
 

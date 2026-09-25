@@ -144,7 +144,7 @@ preference; vetting is a **gate** (and may reselect).
 
 | Gate             | Function             | ADR  | Behaviour                                                                    |
 | ---------------- | -------------------- | ---- | ---------------------------------------------------------------------------- |
-| Audio plan       | `vet_cast_audio`     | 0005 | Prefer primary lang as first track; remux `0:a:N`; reselect dub; safety subs |
+| Audio plan       | `vet_cast_audio`     | 0005, 0035 | Prefer primary lang as first track; remux `0:a:N`; reselect dub; safety subs. A soft `audio_langs` preference yields to a verified direct cast (MP4/WebM, decodable first track) at the same quality instead of a full-file remux. `--audio-lang` does not. |
 | Real video codec | `vet_cast_video`     | 0017 | ffprobe codec; drop DivX/etc.; may yield `video_codec_unsupported`           |
 | Container        | `vet_cast_container` | 0022 | mkv → MP4 rewrap when DMR needs it                                           |
 
