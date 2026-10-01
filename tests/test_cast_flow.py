@@ -1081,3 +1081,27 @@ def test_failed_cast_keeps_the_previous_cast_session(monkeypatch):
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     _run(_opts(), stream)
     assert cleared == [1]
+
+
+def test_subtitles_are_fetched_while_the_remux_runs(monkeypatch):
+    # The subtitle fetch used to precede the whole-file prepare; it now overlaps it.
+    import threading
+
+    stream: Stream = _STREAM.copy()
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    subs_started = threading.Event()
+
+    def fetch(*a, **k):
+        subs_started.set()
+        return subs.SubsPick()
+
+    def remux_for_cast(url, cfg, **k):
+        assert subs_started.wait(2), "subtitle fetch did not start during the remux"
+        return "/tmp/out.mp4"
+
+    monkeypatch.setattr(cast_flow.subs, "auto_subs", fetch)
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", remux_for_cast)
+    monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
+    monkeypatch.setattr(cast_flow.subs, "align_local", lambda cfg, pick, *a, **k: pick)
+    out = _run(_opts(), stream)
+    assert out.reencoded is True and seen is not None

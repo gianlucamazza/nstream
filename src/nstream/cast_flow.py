@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 from . import (
@@ -111,6 +112,9 @@ class CastRemuxInfeasible(Exception):
         self.reason = reason
         super().__init__(f"remux non fattibile: {reason}")
 
+
+# One worker: the subtitle fetch that overlaps a Tier-2 prepare (see `run_cast`).
+_SUBS_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="subs")
 
 # Resolution (px height) at/above which a release is 4K/UHD: a remux of one is a tens-of-GB
 # fetch regardless of the parsed size, so it trips the mirror-over-remux rule even when the
@@ -436,17 +440,6 @@ def run_cast(
         # The audio fact is known here; the safety-net subtitle outcome is not, and is
         # reported by `subs.report_safety_subs` below (same rule as the local path).
         notices.emit(f"audio {target_lang} non disponibile{real}", code="audio_lang_absent")
-    # Exactly one auto_subs call, with the effective safety language (normalization 2).
-    # The resolved url/filename enable the exact-file hash match (ADR 0018).
-    subs_pick = subs.auto_subs(
-        cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
-        video_url=chosen["url"], filename=subs.stream_filename(chosen),
-    )  # fmt: skip
-    subs.report_safety_subs(subs_pick, safety_sub_lang)
-    sub_paths = subs_pick.paths
-    # Language of the fetched subtitle track (labels the side-loaded caption track on the TV).
-    sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
-    _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
 
     notice: str | None = notice_defer
     reencoded = False
@@ -465,6 +458,28 @@ def run_cast(
         needs_remux=needs_remux, bad_video=bad_video, refused_mirror=refused_mirror,
         available=mirror.available,
     )  # fmt: skip
+    # Exactly one auto_subs call, with the effective safety language (normalization 2).
+    # The resolved url/filename enable the exact-file hash match (ADR 0018). When the
+    # delivery starts with a whole-file prepare, the subtitle fetch runs alongside it
+    # instead of before it: its seconds hide behind the remux's minutes.
+    pending_subs: Future[subs.SubsPick] | None = None
+    if needs_remux and not use_mirror:
+        pending_subs = _SUBS_POOL.submit(
+            subs.auto_subs, cfg, typ, video_id, work_dir, opts,
+            safety_sub_lang=safety_sub_lang,
+            video_url=chosen["url"], filename=subs.stream_filename(chosen),
+        )  # fmt: skip
+        subs_pick = subs.SubsPick()
+    else:
+        subs_pick = subs.auto_subs(
+            cfg, typ, video_id, work_dir, opts, safety_sub_lang=safety_sub_lang,
+            video_url=chosen["url"], filename=subs.stream_filename(chosen),
+        )  # fmt: skip
+        subs.report_safety_subs(subs_pick, safety_sub_lang)
+    sub_paths = subs_pick.paths
+    # Language of the fetched subtitle track (labels the side-loaded caption track on the TV).
+    sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
+    _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
     if use_mirror:
         if mirror_notice:
             notice = mirror_notice
@@ -496,6 +511,11 @@ def run_cast(
             if needs_remux
             else None
         )
+        if pending_subs is not None:  # fetched while the remux ran
+            subs_pick = pending_subs.result()
+            subs.report_safety_subs(subs_pick, safety_sub_lang)
+            sub_paths = subs_pick.paths
+            sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
         if remux_path:
             # Tier 2 of the subtitle pipeline (ADR 0020): the remux output IS the local
             # media file the receiver will play — align the delivered subtitle against
