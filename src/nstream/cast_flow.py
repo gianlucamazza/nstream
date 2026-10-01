@@ -445,7 +445,7 @@ def run_cast(
     subs.report_safety_subs(subs_pick, safety_sub_lang)
     sub_paths = subs_pick.paths
     # Language of the fetched subtitle track (labels the side-loaded caption track on the TV).
-    sub_lang = safety_sub_lang or opts.sub_lang
+    sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
     _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
 
     notice: str | None = notice_defer

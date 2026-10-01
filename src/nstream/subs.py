@@ -40,6 +40,7 @@ class SubsPick:
     match: str | None = None  # "hash" | "audio" | "lang" when paths is non-empty
     offset_s: float | None = None  # measured+applied correction when match == "audio"
     alternates: tuple[Subtitle, ...] = ()
+    lang: str | None = None  # language of the delivered track (labels the cast track)
 
 
 def report_safety_subs(pick: SubsPick, lang: str | None) -> None:
@@ -195,16 +196,17 @@ def _choose(subs: list[Subtitle], pref: dict[str, int], work_dir: str) -> SubsPi
     if best_lang not in pref:
         return None
     pool = [s for s in subs if s.get("lang", "") == best_lang][:_POOL_CAP]
-    if pool[0].get("hash_match"):  # sorted hash-first within the language
-        path = _download_subtitle(pool[0], work_dir)
+    # Walk the pool: a download that fails moves on to the next candidate (it used to end
+    # the pick with up to five alternates unused). Hash matches sort first in a language.
+    for i, cand in enumerate(pool):
+        path = _download_subtitle(cand, work_dir)
         if not path:
-            return SubsPick()
-        notices.emit("sottotitoli sincronizzati al file (hash-match)")
-        return SubsPick((path,), "hash")
-    path = _download_subtitle(pool[0], work_dir)
-    if not path:
-        return SubsPick()
-    return SubsPick((path,), "lang", alternates=tuple(pool[1:]))
+            continue
+        if cand.get("hash_match"):
+            notices.emit("sottotitoli sincronizzati al file (hash-match)")
+            return SubsPick((path,), "hash", lang=best_lang)
+        return SubsPick((path,), "lang", alternates=tuple(pool[i + 1 :]), lang=best_lang)
+    return SubsPick()
 
 
 retime_srt = srt.retime
@@ -271,7 +273,7 @@ def align_local(
         notices.emit(
             f"sottotitoli allineati all'audio del file (offset {offset:+.1f}s)",
         )
-        return SubsPick((path,), "audio", offset_s=offset)
+        return SubsPick((path,), "audio", offset_s=offset, lang=pick.lang)
     return pick
 
 

@@ -4,6 +4,7 @@ import pytest
 
 from nstream import subs
 from nstream.config import Config, PlayOpts
+from nstream.types import Subtitle
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -409,3 +410,17 @@ def test_report_safety_subs_only_on_real_outcome(capsys):
     # No safety language requested → nothing to report either way.
     subs.report_safety_subs(subs.SubsPick(paths=("/tmp/a.srt",), match="hash"), None)
     assert capsys.readouterr().err == ""
+
+
+def test_choose_moves_on_when_a_download_fails(monkeypatch, tmp_path):
+    # A failed download used to end the pick with the alternates unused.
+    pool: list[Subtitle] = [
+        {"lang": "ita", "url": "u1"},
+        {"lang": "ita", "url": "u2"},
+        {"lang": "ita", "url": "u3"},
+    ]
+    got = {"u1": None, "u2": str(tmp_path / "2.srt"), "u3": str(tmp_path / "3.srt")}
+    monkeypatch.setattr(subs, "_download_subtitle", lambda s, wd: got[s["url"]])
+    pick = subs._choose(pool, {"ita": 0}, str(tmp_path))
+    assert pick is not None and pick.paths == (got["u2"],) and pick.lang == "ita"
+    assert [a["url"] for a in pick.alternates] == ["u3"]
