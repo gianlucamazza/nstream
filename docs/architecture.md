@@ -26,7 +26,15 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
 - **Top (few/no internal imports):** `util`, `ui`, `languages`, `types`, `sources`, `net`, `log`
   — pure helpers and registries. `labels` sits near the top (display only).
 - **Bottom (orchestrator):** `cli` — everything else **never** imports `cli`
-- Same tier (no cycles): `headless` ↔ `headless_play` ↔ `cast_flow` ↔ `stream_select` / `cast_vet`
+- One-way chain (no cycles): `headless` → `headless_play` → `cast_flow` → `cast_vet` →
+  `stream_select`
+- **Domain never prompts (ADR 0037):** whether a run may ask is `PlayOpts.interactive`, set by
+  the frontend (TUI True, `--json` False) — never a TTY probe. Yes/no questions arrive as the
+  injected `PlayOpts.confirm`. Domain modules must not import `picker`/`labels`; the remaining
+  pre-0037 edges (fzf menus in `caster`, `stream_select`, `subs`) are listed in
+  `tests/test_architecture.py::_KNOWN_DEBT`, which may only shrink
+- Machine output: every `--json` object goes through `log.emit_json` (scrubbed)
+- Candidate pass shared by play, `--explain`, `--probe`: `stream_select.prepare_candidates`
 - `cast_vet` → `stream_select` helpers (`_playable_url`, `_cast_playable`, `audio_languages`)
 - `availability` is a leaf under selection (probe + denylist); `stream_select` orchestrates targets
 - Domain payloads: import from `nstream.types`, not `config`
@@ -39,7 +47,8 @@ flowchart BT
   api[discovery: net addons api]
   sel[selection: quality availability stream_select …]
   cast[cast: cast_vet cast_flow caster remux mirror …]
-  play[playback: player picker ui …]
+  play[playback: player ui …]
+  tui[TUI: picker labels]
   orch[orchestration: headless series cli]
   foundation --> api
   foundation --> sel
@@ -49,6 +58,7 @@ flowchart BT
   sel --> play
   cast --> orch
   play --> orch
+  tui --> orch
 ```
 
 ## Domains
@@ -133,7 +143,8 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 `net.AddonPool` bounds daemon workers and queued work. `api._gather` alone records
 breaker outcomes; HTTP work inherits its monotonic deadline. `util.state_update`
 serializes best-effort store updates with bounded locks and corrupt-file recovery.
-Architecture invariants are enforced by `tests/test_architecture.py`.
+`tests/test_architecture.py` enforces: stdlib-only runtime, nothing imports `cli`, no import
+cycles, and no new domain→TUI edge (ratchet). Other rules on this page are review-enforced.
 
 ### Foundation
 

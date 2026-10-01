@@ -1,6 +1,7 @@
 # 0037. Interactivity is an explicit mode; the domain never opens fzf
 
-- **Status:** Proposed
+- **Status:** Accepted (migration in progress: remaining domain→TUI edges in
+  `tests/test_architecture.py::_KNOWN_DEBT`)
 - **Date:** 2026-10-01
 - **Deciders:** maintainer
 
