@@ -23,18 +23,22 @@ from .types import Stream
 
 
 def cast_languages(
-    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
+    cfg: Config, results: list[Stream], *, exact_resolution: int = 0, title: str = ""
 ) -> tuple[str, ...]:
     """Audio languages available among Cast-compatible streams, preferred ones first."""
-    return stream_select.audio_languages(cfg, results, cast=True, exact_resolution=exact_resolution)
+    return stream_select.audio_languages(
+        cfg, results, cast=True, exact_resolution=exact_resolution, title=title
+    )
 
 
 def cast_resolver(
-    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
+    cfg: Config, results: list[Stream], *, exact_resolution: int = 0, title: str = ""
 ) -> Callable[[str], str | None]:
     """Return a fn picking the best Cast-compatible stream URL for a language, or None.
     Closes over the already-fetched `results` so switching needs no extra network call."""
-    playable = stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution)
+    playable = stream_select.cast_playable(
+        cfg, results, exact_resolution=exact_resolution, title=title
+    )
 
     def resolve(lang: str) -> str | None:
         for r in playable:  # already ranked best-first
@@ -114,6 +118,7 @@ def vet_cast_video(
     *,
     probe_cap: int = 4,
     exact_resolution: int = 0,
+    title: str = "",
     expected_s: float = 0.0,
 ) -> tuple[Stream, str]:
     """Verify the DMR can render `chosen`'s REAL video before casting (ADR 0017). The name
@@ -133,7 +138,9 @@ def vet_cast_video(
         return chosen, ""
     why = f"video {bad.upper()} non decodificabile dal TV" if bad else "sorgente non risolvibile"
     probed = 0
-    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(
+        cfg, results, exact_resolution=exact_resolution, title=title
+    ):
         s = r.stream
         if s is chosen or s.get("url") == chosen.get("url"):
             continue
@@ -180,6 +187,7 @@ def vet_cast_container(
     *,
     probe_cap: int = 4,
     exact_resolution: int = 0,
+    title: str = "",
     expected_s: float = 0.0,
 ) -> tuple[Stream, bool]:
     """Ensure the DMR can LOAD `chosen`'s container before a direct cast (ADR 0022). The
@@ -195,7 +203,9 @@ def vet_cast_container(
     if _container_castable(cfg, chosen):
         return chosen, False
     probed = 0
-    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(
+        cfg, results, exact_resolution=exact_resolution, title=title
+    ):
         s = r.stream
         if s is chosen or s.get("url") == chosen.get("url"):
             continue
@@ -269,6 +279,7 @@ def _reselect_cast_for_lang(
     *,
     probe_cap: int = 6,
     exact_resolution: int = 0,
+    title: str = "",
     expected_s: float = 0.0,
 ) -> CastAudioPlan | None:
     """Find another cast candidate (best-first) carrying `target_lang`, preferring one castable
@@ -289,7 +300,9 @@ def _reselect_cast_for_lang(
     direct_bad_container: CastAudioPlan | None = None
     budget = quality.remux_size_budget(cfg)
     probed = 0
-    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(
+        cfg, results, exact_resolution=exact_resolution, title=title
+    ):
         s = r.stream
         if s is current or s.get("url") == current.get("url"):
             continue
@@ -348,6 +361,7 @@ def find_instant_direct(
     langs: tuple[str, ...],
     *,
     exact_resolution: int = 0,
+    title: str = "",
     expected_s: float = 0.0,
     probe_cap: int = 6,
 ) -> CastAudioPlan | None:
@@ -364,7 +378,9 @@ def find_instant_direct(
     best: CastAudioPlan | None = None
     best_rank = len(wanted)
     probed = 0
-    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(
+        cfg, results, exact_resolution=exact_resolution, title=title
+    ):
         named = r.info.languages
         # Worth a probe: a release whose name claims a wanted language, or an UNTAGGED one
         # already in a DMR-loadable container — the most common direct-castable kind (a
@@ -416,6 +432,7 @@ def vet_cast_audio(
     target_lang: str,
     *,
     exact_resolution: int = 0,
+    title: str = "",
     expected_s: float = 0.0,
 ) -> CastAudioPlan:
     """Decide how to cast `chosen` so the audio plays in `target_lang` (default `cfg.primary`;
@@ -437,6 +454,7 @@ def vet_cast_audio(
             chosen,
             target_lang,
             exact_resolution=exact_resolution,
+            title=title,
             expected_s=expected_s,
         )  # fmt: skip
         or plan

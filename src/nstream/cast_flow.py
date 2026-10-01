@@ -171,6 +171,7 @@ def _defer_to_instant(
     *,
     exact: int,
     expected_s: float,
+    title: str = "",
 ) -> tuple[cast_vet.CastAudioPlan, str | None, bool]:
     """ADR 0035: a soft language preference must not force a full-file fetch when a verified
     direct cast exists at this quality. Explicit `--audio-lang` stays hard. Headless takes the
@@ -181,7 +182,12 @@ def _defer_to_instant(
     if opts.audio_lang or not target_lang or not _cast_would_wait(cfg, plan):
         return plan, None, False
     instant = cast_vet.find_instant_direct(
-        cfg, results, tuple(cfg.audio_langs), exact_resolution=exact, expected_s=expected_s
+        cfg,
+        results,
+        tuple(cfg.audio_langs),
+        exact_resolution=exact,
+        title=title,
+        expected_s=expected_s,
     )
     if instant is None or instant.stream is plan.stream:
         return plan, None, False
@@ -229,6 +235,7 @@ def _settle(
     *,
     exact: int,
     expected_s: float,
+    title: str = "",
 ) -> _Settled:
     """Settle the stream and decide what delivering it needs, feasibility included.
 
@@ -258,7 +265,12 @@ def _settle(
             else:
                 langs = (opts.audio_lang,) if opts.audio_lang else tuple(cfg.audio_langs)
                 alt = cast_vet.find_instant_direct(
-                    cfg, results, langs, exact_resolution=exact, expected_s=expected_s
+                    cfg,
+                    results,
+                    langs,
+                    exact_resolution=exact,
+                    title=title,
+                    expected_s=expected_s,
                 )
                 if alt is None or alt.stream is chosen:
                     if not mirror_ok_now and opts.mirror is None:
@@ -336,7 +348,13 @@ def _with_container_mime(meta: caster.CastMeta | None, container: str) -> caster
 
 
 def _lang_switch(
-    cfg: Config, results: list[Stream], opts: PlayOpts, *, exact: int, allowed: bool
+    cfg: Config,
+    results: list[Stream],
+    opts: PlayOpts,
+    *,
+    exact: int,
+    allowed: bool,
+    title: str = "",
 ) -> tuple[tuple[str, ...], Callable[[str], str | None] | None, caster.ChooseLang | None]:
     """The in-cast audio switch ('a'): (dubs, resolver, menu). Only an interactive caller
     with a frontend menu pays the extra rank passes (ADR 0037); headless leaves it off."""
@@ -347,10 +365,14 @@ def _lang_switch(
     def choose_lang(codes: tuple[str, ...]) -> str | None:
         return menu([(languages.name(c), c) for c in codes], "audio> ")
 
-    cast_langs = cast_vet.cast_languages(cfg, results, exact_resolution=exact)
+    cast_langs = cast_vet.cast_languages(cfg, results, exact_resolution=exact, title=title)
     if len(cast_langs) <= 1:
         return (), None, choose_lang
-    return cast_langs, cast_vet.cast_resolver(cfg, results, exact_resolution=exact), choose_lang
+    return (
+        cast_langs,
+        cast_vet.cast_resolver(cfg, results, exact_resolution=exact, title=title),
+        choose_lang,
+    )
 
 
 @log.phase("run_cast")
@@ -394,7 +416,12 @@ def run_cast(
     # the callers replace() it with VettedStream.quality) constrains EVERY reselect below.
     exact = stream_select.exact_resolution(opts.quality or 0)
     chosen, bad_video = cast_vet.vet_cast_video(
-        cfg, results, chosen, exact_resolution=exact, expected_s=expected_runtime_s
+        cfg,
+        results,
+        chosen,
+        exact_resolution=exact,
+        title=title,
+        expected_s=expected_runtime_s,
     )
     # --no-mirror is an explicit user intent: with undecodable video and the mirror
     # suppressed, fail explicitly rather than override the user (ADR 0021).
@@ -406,24 +433,51 @@ def run_cast(
     # this is the optimization, the settled-stream check below is the guarantee.
     pre_container = chosen
     chosen, _bad_container = cast_vet.vet_cast_container(
-        cfg, results, chosen, target_lang, exact_resolution=exact, expected_s=expected_runtime_s
+        cfg,
+        results,
+        chosen,
+        target_lang,
+        exact_resolution=exact,
+        title=title,
+        expected_s=expected_runtime_s,
     )
     if chosen is not pre_container:
         bad_video = ""  # a vetted MP4 candidate supersedes the original's video verdict
     plan = cast_vet.vet_cast_audio(
-        cfg, results, chosen, target_lang, exact_resolution=exact, expected_s=expected_runtime_s
+        cfg,
+        results,
+        chosen,
+        target_lang,
+        exact_resolution=exact,
+        title=title,
+        expected_s=expected_runtime_s,
     )
     # ADR 0035: a soft language preference must not force a full-file fetch when a
     # verified direct cast exists at this quality. Explicit `--audio-lang` stays hard.
     # Headless takes the direct cast and reports it; a TUI asks once before dropping
     # the primary dub.
     plan, notice_defer, safety_from_defer = _defer_to_instant(
-        cfg, results, opts, plan, target_lang, exact=exact, expected_s=expected_runtime_s
+        cfg,
+        results,
+        opts,
+        plan,
+        target_lang,
+        exact=exact,
+        expected_s=expected_runtime_s,
+        title=title,
     )
     if safety_from_defer and not opts.sub_lang:
         safety_sub_lang = target_lang
     st = _settle(
-        cfg, results, opts, plan, chosen, bad_video, exact=exact, expected_s=expected_runtime_s
+        cfg,
+        results,
+        opts,
+        plan,
+        chosen,
+        bad_video,
+        exact=exact,
+        expected_s=expected_runtime_s,
+        title=title,
     )
     plan, chosen, bad_video = st.plan, st.chosen, st.bad_video
     final_container, needs_rewrap, needs_remux = st.container, st.needs_rewrap, st.needs_remux
@@ -556,7 +610,7 @@ def run_cast(
                 degraded_audio = True
             meta = _with_container_mime(meta, final_container)
             langs, resolver, choose_lang = _lang_switch(
-                cfg, results, opts, exact=exact, allowed=allow_lang_switch
+                cfg, results, opts, exact=exact, allowed=allow_lang_switch, title=title
             )
             delivery = caster.cast(
                 cfg, title, chosen["url"],

@@ -242,11 +242,9 @@ def _pick_stream(
             StreamMenu([quality.RankedStream(s, quality.parse_stream(s)) for s in pool], [])
         )
 
-    caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(
-        cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution
+    playable, excluded = _rank(
+        cfg, results, cast=cast, title=title, exact_resolution=exact_resolution
     )
-    playable, excluded = quality.rank_streams(results, caps, spec)
     # Build a notice that survives into the fzf header (stderr scrolls away under fullscreen).
     notice_parts: list[str] = []
     if exact_resolution:
@@ -285,43 +283,64 @@ def _pick_stream(
     return menu(StreamMenu(playable, excluded, notice, cfg.max_streams))
 
 
+def _rank(
+    cfg: Config,
+    results: list[Stream],
+    *,
+    cast: bool,
+    title: str = "",
+    exact_resolution: int = 0,
+    lang_filter: bool = True,
+) -> tuple[list[quality.RankedStream], list[quality.RankedStream]]:
+    """THE ranking spec of a session: target profile (Chromecast or local GPU), the searched
+    `title` (demotes a release Torrentio mapped under the wrong id) and the per-session
+    `exact_resolution` (ADR 0021). Every pick, listing and reselect goes through here, so
+    they cannot order the same results differently — the reselects used to rank without
+    the title and could prefer another film's release. `lang_filter=False` keeps every
+    dub visible (listing/switching). Returns (playable best-first, excluded)."""
+    caps = quality.cast_caps() if cast else quality.detect_caps()
+    spec = quality.FilterSpec.from_config(
+        cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution,
+        lang_filter=lang_filter,
+    )  # fmt: skip
+    return quality.rank_streams(results, caps, spec)
+
+
 def _playable_set(
     cfg: Config,
     results: list[Stream],
     *,
     cast: bool,
+    title: str = "",
     exact_resolution: int = 0,
 ) -> list[quality.RankedStream]:
-    """Streams playable on the target profile (Chromecast or local GPU), ranked best-first,
-    ignoring the language filter so every available dub is visible (for listing/switching).
-    Optional `exact_resolution` applies the per-session quality hard-filter."""
-    caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(
-        cfg, cast_audio=cast, lang_filter=False, exact_resolution=exact_resolution
-    )
-    playable, _ = quality.rank_streams(results, caps, spec)
-    return playable
+    """Streams playable on the target profile, ranked best-first, every dub visible."""
+    return _rank(
+        cfg, results, cast=cast, title=title, exact_resolution=exact_resolution, lang_filter=False
+    )[0]
 
 
 def cast_playable(
-    cfg: Config, results: list[Stream], *, exact_resolution: int = 0
+    cfg: Config, results: list[Stream], *, exact_resolution: int = 0, title: str = ""
 ) -> list[quality.RankedStream]:
     """Streams the Chromecast can play (cast profile + Cast-compatible audio).
 
     `exact_resolution` is the resolved per-invocation quality choice (ADR 0021): EVERY
     cast (re)selection path must thread it, or a reselect can legally return a release
     the user's `--quality` excluded — the parity defect that bit three times in one day."""
-    return _playable_set(cfg, results, cast=True, exact_resolution=exact_resolution)
+    return _playable_set(cfg, results, cast=True, exact_resolution=exact_resolution, title=title)
 
 
 def audio_languages(
-    cfg: Config, results: list[Stream], *, cast: bool, exact_resolution: int = 0
+    cfg: Config, results: list[Stream], *, cast: bool, exact_resolution: int = 0, title: str = ""
 ) -> tuple[str, ...]:
     """Audio languages available among playable streams (local or cast profile), with the
     user's preferred languages first. Name-tag based, like the rest of the language ranking."""
     langs = {
         lang
-        for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution)
+        for r in _playable_set(
+            cfg, results, cast=cast, exact_resolution=exact_resolution, title=title
+        )
         for lang in r.info.languages
         if lang != "multi"
     }
@@ -337,9 +356,10 @@ def pick_audio_stream(
     *,
     cast: bool,
     exact_resolution: int = 0,
+    title: str = "",
 ) -> Stream | None:
     """The best playable stream whose audio includes `lang` (url resolved), or None."""
-    for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution):
+    for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution, title=title):
         if lang in r.info.languages and playable_url(cfg, r.stream):
             return r.stream
     return None
@@ -353,6 +373,7 @@ def pick_audio_stream_verified(
     cast: bool,
     probe_cap: int = 4,
     exact_resolution: int = 0,
+    title: str = "",
     expected_runtime_s: float = 0.0,
 ) -> tuple[Stream | None, bool]:
     """Track-accurate variant: among the playable streams whose NAME tags `lang`, ffprobe up
@@ -370,7 +391,7 @@ def pick_audio_stream_verified(
     probed = 0
     short: list[Stream] = []
     last_short: availability.DurationVerdict | None = None
-    for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution):
+    for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution, title=title):
         if lang not in r.info.languages:
             continue
         if probed >= probe_cap:
@@ -553,11 +574,7 @@ def _auto_candidates(
         if exact_resolution:
             return [s for s in results if quality.parse_stream(s).resolution == exact_resolution]
         return list(results)
-    caps = quality.cast_caps() if cast else quality.detect_caps()
-    spec = quality.FilterSpec.from_config(
-        cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution
-    )
-    playable, _ = quality.rank_streams(results, caps, spec)
+    playable, _ = _rank(cfg, results, cast=cast, title=title, exact_resolution=exact_resolution)
     return [r.stream for r in playable]
 
 
@@ -825,7 +842,9 @@ def prepare_stream(
     # soft primary-language guard below — the user already named the language.
     if opts.audio_lang:
         lang = opts.audio_lang
-        available = tuple(audio_languages(cfg, results, cast=opts.cast, exact_resolution=exact))
+        available = tuple(
+            audio_languages(cfg, results, cast=opts.cast, exact_resolution=exact, title=title)
+        )
         if lang not in available:
             raise AudioLangUnavailable(lang, available)
         chosen, _verified = pick_audio_stream_verified(
@@ -834,6 +853,7 @@ def prepare_stream(
             lang,
             cast=opts.cast,
             exact_resolution=exact,
+            title=title,
             expected_runtime_s=expected_runtime_s,
         )
         if chosen is None:

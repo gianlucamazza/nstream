@@ -1447,3 +1447,24 @@ def test_unfiltered_exact_quality_exhaustion_raises():
     with pytest.raises(stream_select.QualityUnavailable) as e:
         stream_select._pick_stream(cfg, [s720], auto=True, cast=False, exact_resolution=1080)
     assert e.value.available == [720]
+
+
+def test_reselects_rank_like_the_pick():
+    """Parity (plan item 5): the cast reselect list must order the session's results like
+    the initial pick — it used to rank without the searched title, so a cached release of
+    another film (Torrentio mis-mapping) led every audio/container/video reselect."""
+    junk: Stream = {
+        "name": "[RD+] Torrentio\n",
+        "title": "Charlie Brown and Snoopy Anthology MP4\n👤 4 💾 0.22 GB ⚙️ x",
+        "url": "http://junk",
+    }
+    real: Stream = {
+        "name": "Torrentio\n720p",
+        "title": "I.S.S..2023.720p.WEBRip.x264.AAC.mp4\n👤 10 💾 0.86 GB ⚙️ x",
+        "url": "http://real",
+    }
+    cfg = Config(torrentio_base="tb")
+    pick = stream_select._auto_candidates(cfg, [junk, real], cast=True, title="I.S.S.")
+    reselect = stream_select.cast_playable(cfg, [junk, real], title="I.S.S.")
+    assert pick[0] is real
+    assert [r.stream for r in reselect] == pick

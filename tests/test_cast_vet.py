@@ -98,7 +98,7 @@ def test_vet_cast_audio_reselects_when_chosen_lacks_target(monkeypatch):
     monkeypatch.setattr(
         stream_select,
         "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(alt, frozenset({"ita"}))],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(alt, frozenset({"ita"}))],
     )
     plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita")
     assert plan.mode == "direct" and plan.stream is alt and plan.real_lang == "ita"
@@ -106,7 +106,9 @@ def test_vet_cast_audio_reselects_when_chosen_lacks_target(monkeypatch):
 
 def test_vet_cast_audio_absent_when_nobody_has_target(monkeypatch):
     monkeypatch.setattr(cast_vet, "_cast_audio_tracks", lambda cfg, s: [Track(1, "eng", "aac")])
-    monkeypatch.setattr(stream_select, "cast_playable", lambda cfg, results, exact_resolution=0: [])
+    monkeypatch.setattr(
+        stream_select, "cast_playable", lambda cfg, results, exact_resolution=0, **_k: []
+    )
     plan = cast_vet.vet_cast_audio(_ccfg(), [{"url": "u"}], {"url": "u"}, "ita")
     assert plan.mode == "absent"
 
@@ -149,7 +151,7 @@ def test_reselect_prefers_tagged_unverified_over_wrong_language(monkeypatch):
     monkeypatch.setattr(cast_vet, "_cast_audio_tracks", tracks_of)
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [
+        lambda cfg, results, exact_resolution=0, **_k: [
             _R(wrong, frozenset({"eng", "rus"})),
             _R(ita_tagged, frozenset({"eng", "ita"})),  # name explicitly claims ita
         ],
@@ -171,7 +173,7 @@ def test_reselect_multi_unprobeable_not_trusted_as_target(monkeypatch):
     )  # fmt: skip
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(wrong, frozenset({"rus"})), _R(multi, frozenset({"multi"}))],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(wrong, frozenset({"rus"})), _R(multi, frozenset({"multi"}))],
     )  # fmt: skip
     assert cast_vet._reselect_cast_for_lang(_ccfg(), [], wrong, "ita") is None
 
@@ -191,7 +193,7 @@ def test_reselect_verified_direct_beats_tagged_guess(monkeypatch):
     monkeypatch.setattr(cast_vet, "_cast_audio_tracks", tracks_of)
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [
+        lambda cfg, results, exact_resolution=0, **_k: [
             _R(wrong, frozenset({"rus"})),
             _R(guess, frozenset({"ita"})),
             _R(real, frozenset({"ita"})),
@@ -212,7 +214,9 @@ def _video_env(monkeypatch, codecs, candidates=()):
         lambda url: stream_select.tracks.Tracks(video_codec=codecs.get(url, "")),
     )  # fmt: skip
     monkeypatch.setattr(
-        stream_select, "cast_playable", lambda cfg, results, exact_resolution=0: list(candidates)
+        stream_select,
+        "cast_playable",
+        lambda cfg, results, exact_resolution=0, **_k: list(candidates),
     )
 
 
@@ -252,7 +256,7 @@ def test_vet_cast_video_respects_probe_cap(monkeypatch):
         or stream_select.tracks.Tracks(video_codec="mpeg4"),
     )  # fmt: skip
     monkeypatch.setattr(
-        stream_select, "cast_playable", lambda cfg, results, exact_resolution=0: dead
+        stream_select, "cast_playable", lambda cfg, results, exact_resolution=0, **_k: dead
     )
     stream, verdict = cast_vet.vet_cast_video(_ccfg(), [], bad, probe_cap=2)
     assert (stream, verdict) == (bad, "mpeg4")
@@ -274,7 +278,7 @@ def test_reselect_for_lang_skips_undecodable_video(monkeypatch):
     monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(divx, frozenset({"ita"}))],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(divx, frozenset({"ita"}))],
     )  # fmt: skip
     plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, divx], chosen, "ita")
     assert plan.stream is chosen and plan.mode == "absent"  # fallback + safety subs, not black
@@ -295,7 +299,9 @@ def _container_env(monkeypatch, probes, candidates=()):
 
     monkeypatch.setattr(stream_select.tracks, "probe_tracks", probe)
     monkeypatch.setattr(
-        stream_select, "cast_playable", lambda cfg, results, exact_resolution=0: list(candidates)
+        stream_select,
+        "cast_playable",
+        lambda cfg, results, exact_resolution=0, **_k: list(candidates),
     )
 
 
@@ -461,7 +467,7 @@ def test_reselect_for_lang_honors_exact_resolution(monkeypatch):
     cast_playable itself; here we pin that the exact value REACHES it."""
     seen = {}
 
-    def fake_playable(cfg, results, exact_resolution=0):
+    def fake_playable(cfg, results, exact_resolution=0, **_k):
         seen["exact"] = exact_resolution
         return []
 
@@ -491,7 +497,7 @@ def test_vet_cast_video_threads_exact(monkeypatch):
     )  # fmt: skip
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: seen.update(exact=exact_resolution) or [],
+        lambda cfg, results, exact_resolution=0, **_k: seen.update(exact=exact_resolution) or [],
     )  # fmt: skip
     cast_vet.vet_cast_video(_ccfg(), [], {"url": "divx"}, exact_resolution=720)
     assert seen["exact"] == 720
@@ -501,7 +507,7 @@ def test_cast_resolver_and_languages_thread_exact(monkeypatch):
     seen = []
     monkeypatch.setattr(
         stream_select, "_playable_set",
-        lambda cfg, results, *, cast, exact_resolution=0: seen.append(exact_resolution) or [],
+        lambda cfg, results, *, cast, exact_resolution=0, **_k: seen.append(exact_resolution) or [],
     )  # fmt: skip
     cast_vet.cast_languages(_ccfg(), [], exact_resolution=1080)
     cast_vet.cast_resolver(_ccfg(), [], exact_resolution=1080)
@@ -575,7 +581,7 @@ def test_reselect_cast_skips_short_candidate(monkeypatch):
     monkeypatch.setattr(cast_vet.availability.tracks, "probe_tracks", probe)
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(fake, frozenset({"ita"}))],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(fake, frozenset({"ita"}))],
     )  # fmt: skip
     plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, fake], chosen, "ita", expected_s=3300.0)
     assert plan.stream is chosen and plan.mode == "absent"  # fallback + subs, not 30 seconds
@@ -615,7 +621,7 @@ def test_reselect_cast_no_extra_probe_for_duration(monkeypatch):
     monkeypatch.setattr(stream_select.tracks.util, "run_cmd", run_cmd)
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(alt, frozenset({"ita"}))],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(alt, frozenset({"ita"}))],
     )  # fmt: skip
     stream_select.tracks.clear_cache()
     cast_vet.vet_cast_audio(_ccfg(), [chosen, alt], chosen, "ita")
@@ -658,7 +664,7 @@ def test_unresolvable_candidate_is_not_a_tagged_guess(monkeypatch):
     )  # fmt: skip
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(dead, frozenset({"ita"}))],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(dead, frozenset({"ita"}))],
     )  # fmt: skip
     assert cast_vet._reselect_cast_for_lang(_ccfg(), [], wrong, "ita") is None
 
@@ -675,7 +681,7 @@ def test_unresolvable_never_wins_video_reselect(monkeypatch):
     )  # fmt: skip
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(dead, frozenset())],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(dead, frozenset())],
     )  # fmt: skip
     # Keeps the honest bad-codec verdict → the caller mirrors or fails, never casts a url-less
     # stream. Without the gate this returned `(dead, "")`.
@@ -694,7 +700,7 @@ def test_unresolvable_never_wins_container_reselect(monkeypatch):
     )
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(dead, frozenset())],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(dead, frozenset())],
     )  # fmt: skip
     # True = "keep `chosen` and rewrap it to MP4", the honest outcome. Without the gate this
     # returned `(dead, False)` — a direct cast of a stream with no url.
@@ -714,7 +720,7 @@ def test_unresolvable_consumes_probe_budget(monkeypatch):
     )  # fmt: skip
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [*dead, _R(live, frozenset())],
+        lambda cfg, results, exact_resolution=0, **_k: [*dead, _R(live, frozenset())],
     )  # fmt: skip
     # probe_cap=2 is exhausted by the two dead candidates: the live one is never reached.
     assert cast_vet.vet_cast_video(_ccfg(), [], bad, probe_cap=2) == (bad, "mpeg4")
@@ -728,7 +734,7 @@ def test_cast_resolver_walks_past_unresolvable(monkeypatch):
     cfg = Config(torrentio_base="tb", audio_langs=["ita", "eng"])
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda c, results, exact_resolution=0: [_R(dead, frozenset({"ita"})), _R(_S_ITA, frozenset({"ita"}))],
+        lambda c, results, exact_resolution=0, **_k: [_R(dead, frozenset({"ita"})), _R(_S_ITA, frozenset({"ita"}))],
     )  # fmt: skip
     assert cast_vet.cast_resolver(cfg, [])("ita") == "http://ita"
     assert attempts == ["deadbeef"]  # the dead one WAS tried, then walked past
@@ -751,7 +757,7 @@ def test_reselect_skips_remux_over_the_budget(monkeypatch):
     monkeypatch.setattr(cast_vet.quality, "remux_size_budget", lambda cfg: 20)
     monkeypatch.setattr(
         stream_select, "cast_playable",
-        lambda cfg, results, exact_resolution=0: [_R(huge, frozenset({"ita"}), size_gb=66.6)],
+        lambda cfg, results, exact_resolution=0, **_k: [_R(huge, frozenset({"ita"}), size_gb=66.6)],
     )  # fmt: skip
     plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, huge], chosen, "ita")
     assert plan.stream is chosen and plan.mode == "absent"
