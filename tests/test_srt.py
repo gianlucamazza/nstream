@@ -105,3 +105,46 @@ def test_cue_spans_skips_malformed_and_accepts_dot_separator(tmp_path):
 
 def test_cue_spans_unreadable_returns_empty(tmp_path):
     assert srt.cue_spans(str(tmp_path / "missing.srt")) == ()
+
+
+def test_retime_drops_cues_before_zero_instead_of_piling_them(tmp_path):
+    # 2026-10-01: a −4800 s shift collapsed 1018 cues onto 00:00:00,000.
+    p = tmp_path / "s.srt"
+    p.write_text(
+        "1\n00:10:00,000 --> 00:10:02,500\nprima\n\n"
+        "2\n01:19:59,000 --> 01:20:01,000\na cavallo\n\n"
+        "3\n01:21:00,000 --> 01:21:02,000\ndopo\n",
+        encoding="utf-8",
+    )
+    assert srt.retime(str(p), -4800.0, 1.0)
+    cues = srt.parse_cues(p.read_text(encoding="utf-8"))
+    assert [c.lines for c in cues] == [("a cavallo",), ("dopo",)]
+    assert cues[0].start == 0.0 and cues[0].end == 1.0  # straddling cue keeps its tail
+    assert cues[1].start == 60.0
+
+
+def test_decode_cp1252_punctuation_and_utf16(tmp_path):
+    p = tmp_path / "a.srt"
+    p.write_bytes(b"1\n00:00:01,000 --> 00:00:02,000\n\x93Ciao\x94 \x85\n")
+    assert "“Ciao” …" in (srt.decode(str(p)) or "")
+    q = tmp_path / "b.srt"
+    q.write_bytes("1\n00:00:01,000 --> 00:00:02,000\nàèì\n".encode("utf-16"))
+    assert len(srt.cue_spans(str(q))) == 1 and "àèì" in (srt.decode(str(q)) or "")
+
+
+def test_to_vtt_emits_valid_cues(tmp_path):
+    p = tmp_path / "c.srt"
+    p.write_text(
+        '1\n00:00:01,5 --> 00:00:02,25 X1:10 X2:20\n{\\an8}<font color="red">Ti amo <3</font>\n'
+        "\n  \n"
+        "2\n00:00:03,000 --> 00:00:04,000\nA --> B & <i>C</i>\n",
+        encoding="utf-8",
+    )
+    vtt_path = srt.to_vtt(str(p))
+    assert vtt_path is not None
+    with open(vtt_path, encoding="utf-8") as f:
+        vtt = f.read()
+    assert vtt.startswith("WEBVTT\n")
+    assert "00:00:01.500 --> 00:00:02.250\nTi amo &lt;3\n" in vtt  # 3-digit ms, no tags
+    assert "A → B &amp; <i>C</i>" in vtt
+    assert "X1:" not in vtt and "{\\an8}" not in vtt
