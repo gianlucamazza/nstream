@@ -22,7 +22,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import cast
 
-from . import addons, log, net, sources, util
+from . import addons, languages, log, net, sources, util
 from .config import Config
 
 # HTTP-JSON primitives live in `net` (below both api and addons) to break the addons↔api
@@ -639,6 +639,14 @@ def _filename(s: Stream) -> str:
     return util.release_key(name)
 
 
+def _carry_cjk_alias(dst: Stream, src: Stream) -> None:
+    """Keep the collapsed row's CJK-script name as evidence on the winner (issue #6)."""
+    if src.get("cjk_alias") or languages.has_cjk_script(
+        f"{src.get('title') or ''}\n{src.get('description') or ''}"
+    ):
+        dst["cjk_alias"] = True
+
+
 def _copy_torrent_identity(dst: Stream, src: Stream) -> None:
     """Copy infoHash/fileIdx/sources onto a ready-url stream for P2P fallback."""
     if "infoHash" in src and "infoHash" not in dst:
@@ -732,12 +740,14 @@ def _dedup_by_release(streams: list[Stream]) -> list[Stream]:
             continue
         if _release_rank(s) > _release_rank(prev):
             _copy_torrent_identity(s, prev)
+            _carry_cjk_alias(s, prev)
             # Keep the richer addon label when the winner lacked one.
             if not s.get("addon") and prev.get("addon"):
                 s["addon"] = prev["addon"]
             best[fn] = s
         else:
             _copy_torrent_identity(prev, s)
+            _carry_cjk_alias(prev, s)
             if not prev.get("addon") and s.get("addon"):
                 # Prefer showing both when they differ? Keep the winner's; if empty, take loser.
                 prev["addon"] = s["addon"]

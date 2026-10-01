@@ -52,6 +52,7 @@ class StreamInfo:
     info_hash: str = ""  # pure-torrent streams only; resolved to a url by the engine
     file_idx: int | None = None  # which file in the torrent (None = largest)
     has_url: bool = False  # a ready debrid url: playable without touching the swarm
+    hardsub_cjk: bool = False  # probable hardcoded CJK subtitles (CJK-script name, HC/CHS tags)
 
 
 # An explicit "NNNNp" wins over the 8K/4K/UHD/2K aliases: "UHD.BluRay.1080p" is a 1080p
@@ -73,6 +74,20 @@ def _release_filename(stream: Stream) -> str:
     """`behaviorHints.filename` — the protocol's canonical identity for the release file."""
     hints = stream.get("behaviorHints")
     return (hints.get("filename") or "") if isinstance(hints, dict) else ""
+
+
+# Release tags for burned-in subtitles. Capitals only and token-bounded: "hc" or "chs" in a
+# word must not match (the ambiguous-token rule of `_AMBIGUOUS_TOKENS`).
+_HARDSUB_TAG = re.compile(
+    r"(?<![A-Za-z0-9])(?:HC|HCSUB|HARDSUB|HARDSUBS|CHS|CHT|KORSUB)(?![A-Za-z0-9])"
+)
+
+
+def no_hardsub(info: StreamInfo, audio_langs: tuple[str, ...]) -> bool:
+    """`no_hardsub` term: True unless the release probably has hardcoded CJK subtitles and
+    the user prefers no CJK language (a Chinese-subtitled encode is the right pick for a
+    Chinese speaker). A demotion, never an exclusion."""
+    return not info.hardsub_cjk or bool(languages.CJK & set(audio_langs))
 
 
 def _text(stream: Stream) -> str:
@@ -350,6 +365,7 @@ def parse_stream(stream: Stream) -> StreamInfo:
         # Two rows sharing a filename but differing in ready-url presence are NOT the same
         # StreamInfo: `has_url` decides whether the swarm-health filter applies.
         bool(stream.get("url")),
+        bool(stream.get("cjk_alias")),
     )
     info = _PARSE_CACHE.get(key)
     if info is None:
@@ -377,6 +393,9 @@ def _parse_stream_uncached(stream: Stream) -> StreamInfo:
         info_hash=stream.get("infoHash") or "",
         file_idx=stream.get("fileIdx"),
         has_url=bool(stream.get("url")),
+        hardsub_cjk=bool(
+            stream.get("cjk_alias") or languages.has_cjk_script(text) or _HARDSUB_TAG.search(text)
+        ),
     )
 
 
@@ -794,6 +813,7 @@ def score_components(
         )
         return {
             "title_match": _title_guard(info, title, audio_langs),
+            "no_hardsub": no_hardsub(info, audio_langs),
             "cached": info.cached,
             "remux_within_size": within_remux_size,
             "lang": _lang_rank(info, audio_langs),
@@ -808,6 +828,7 @@ def score_components(
         }
     return {
         "title_match": _title_guard(info, title, audio_langs),
+        "no_hardsub": no_hardsub(info, audio_langs),
         "cached": info.cached,
         "resolution": info.resolution,
         "lang": _lang_rank(info, audio_langs),

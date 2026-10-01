@@ -83,12 +83,13 @@ Language filter only excludes a stream **tagged exclusively with non-preferred l
 ### 3. Score (`quality.score_components` / `_score`, highest precedence first)
 
 ```
-(title_match, cached, resolution, lang, source, hevc, seeders_bucketed, -size)
+(title_match, no_hardsub, cached, resolution, lang, source, hevc, seeders_bucketed, -size)
 ```
 
 | term          | meaning                                                                            |
 | ------------- | ---------------------------------------------------------------------------------- |
 | `title_match` | demote a release unrelated to the title (Torrentio mis-mapping); see below         |
+| `no_hardsub` | demote probable burned-in CJK subtitles: a CJK-script name on any addon (kept through the release collapse as `cjk_alias`) or `HC`/`CHS`/`CHT`/`KORSUB` tags; void when a CJK language is preferred. The instant direct cast (ADR 0035) skips these releases (#6) |
 | `cached`      | instant debrid stream ranks first                                                  |
 | `resolution`  | higher wins                                                                        |
 | `lang`        | 2 = preferred (or multi), 1 = untagged, 0 = non-preferred only                     |
@@ -105,7 +106,7 @@ name is English, so a localized-title release would otherwise sink.
 **Cast score** (`cast=True`, models the Default Media Receiver, not the GPU):
 
 ```
-(title_match, cached, remux_within_size, lang, direct_cast, cast_audio, remux_within_cap, resolution, source, cast_h264, seeders_bucketed, -size)
+(title_match, no_hardsub, cached, remux_within_size, lang, direct_cast, cast_audio, remux_within_cap, resolution, source, cast_h264, seeders_bucketed, -size)
 ```
 
 | term                | meaning                                                                                       |

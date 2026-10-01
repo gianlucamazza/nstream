@@ -382,6 +382,10 @@ def find_instant_direct(
         cfg, results, exact_resolution=exact_resolution, title=title
     ):
         named = r.info.languages
+        # Never start a release with probable burned-in CJK subtitles just to start fast
+        # (issue #6: a "DreamHD" MP4 the user then watched with Chinese text on screen).
+        if not quality.no_hardsub(r.info, tuple(cfg.audio_langs)):
+            continue
         # Worth a probe: a release whose name claims a wanted language, or an UNTAGGED one
         # already in a DMR-loadable container — the most common direct-castable kind (a
         # plain English WEB-DL .mp4), which the tag-only filter never considered.

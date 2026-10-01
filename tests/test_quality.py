@@ -1118,3 +1118,39 @@ def test_title_match_folds_accents(release, title):
     """Accented catalog titles used to lose their accented letters ("Léon" → "lon") and
     demote every real release."""
     assert quality._title_matches(release, title)
+
+
+@pytest.mark.parametrize(
+    ("stream", "flagged"),
+    [
+        ({"name": "Torrentio\n1080p", "title": "暖暖内含光\n👤 1 💾 3.3 GB"}, True),
+        ({"name": "Torrentio\n1080p", "title": "Movie.2004.1080p.HC.WEBRip.x264\n💾 2 GB"}, True),
+        ({"name": "Torrentio\n1080p", "title": "Movie.2004.1080p.CHS.ENG.mp4\n💾 2 GB"}, True),
+        (
+            {
+                "name": "Torrentio\n1080p",
+                "title": "Movie.2004.1080p.DreamHD.mp4",
+                "cjk_alias": True,
+            },
+            True,
+        ),
+        ({"name": "Torrentio\n1080p", "title": "Chs.Matchbox.2004.1080p.BluRay.x264"}, False),
+        ({"name": "Torrentio\n1080p", "title": "Movie.2004.1080p.BluRay.x264-SPARKS"}, False),
+    ],
+)
+def test_hardsub_cjk_flag(stream, flagged):
+    assert quality.parse_stream(stream).hardsub_cjk is flagged
+
+
+def test_hardsub_release_is_demoted_unless_cjk_is_preferred():
+    """Issue #6: a cached hardsubbed encode used to out-rank a clean uncached release."""
+    hard: Stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Movie.2004.1080p.AAC.x264-DreamHD.mp4\n💾 3.3 GB",
+        "cjk_alias": True,
+    }
+    clean: Stream = {"name": "Torrentio\n1080p", "title": "Movie.2004.1080p.BluRay.x264\n💾 8 GB"}
+    playable, _ = quality.rank_streams([hard, clean], _CAPS_HW, FilterSpec(audio_langs=("ita",)))
+    assert playable[0].stream is clean and hard in [r.stream for r in playable]
+    playable, _ = quality.rank_streams([hard, clean], _CAPS_HW, FilterSpec(audio_langs=("zho",)))
+    assert playable[0].stream is hard

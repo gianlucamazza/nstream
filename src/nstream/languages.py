@@ -85,6 +85,16 @@ def bcp47(code: str) -> str:
     return two or code
 
 
+# Han, kana and Hangul. A release named (on any addon) in these scripts is a CJK-market
+# release, which almost always means hardcoded subtitles (issue #6).
+_CJK_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+CJK = frozenset({"zho", "jpn", "kor"})
+
+
+def has_cjk_script(text: str) -> bool:
+    return bool(_CJK_SCRIPT.search(text or ""))
+
+
 def normalize(tag: str) -> str | None:
     """Map any language tag (ISO-639-1/2, release token, or name) to the canonical code,
     or None if unknown. Used to match ffprobe track tags (often 2-letter, e.g. `it`/`en`)

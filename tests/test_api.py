@@ -890,3 +890,14 @@ def test_gather_never_started_task_has_no_breaker_effect(monkeypatch):
     monkeypatch.setattr(api, "_addon_pool", _StuckPool())
     assert api._gather([lambda: [1]], keys=["http://healthy"]) == []
     assert records == []
+
+
+def test_dedup_by_release_keeps_a_cjk_name_as_evidence():
+    """Issue #6: TorrentsDB names the DreamHD file in Chinese; the Torrentio row wins the
+    collapse but must keep that evidence."""
+    fn = {"filename": "Eternal.Sunshine.2004.1080p.AAC.x264-DreamHD.mp4"}
+    winner: Stream = {"name": "[RD+] Torrentio", "title": "Eternal.Sunshine...DreamHD",
+                      "url": "http://u", "behaviorHints": dict(fn)}  # fmt: skip
+    loser: Stream = {"name": "TorrentsDB", "title": "暖暖内含光\n👤 1", "behaviorHints": dict(fn)}
+    out = api._dedup_by_release([loser, winner])
+    assert len(out) == 1 and out[0].get("cjk_alias") is True

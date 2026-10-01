@@ -62,6 +62,10 @@ class Stream(TypedDict, total=False):
     # can't serve it). Stamped by `stream_select.playable_url`, the mirror of the positive
     # memo it already writes into `url`. Never serialized — it dies with the invocation.
     unresolvable: bool
+    # Set by `api._dedup_by_release` when another addon names this same file in CJK script
+    # (e.g. TorrentsDB "暖暖内含光" for a "DreamHD" encode): evidence of hardcoded subtitles
+    # the winning row's own (Latin) name does not carry.
+    cjk_alias: bool
 
 
 class Subtitle(TypedDict, total=False):

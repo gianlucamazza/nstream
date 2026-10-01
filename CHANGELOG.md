@@ -25,6 +25,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - A recast of the title the TV is playing (another dub, a retry) resumes where the TV is
   at LOAD time, not where it was when the command began.
 - `urlproxy` resumes dropped upstream reads and never prints tracebacks (#5).
+- Releases with burned-in CJK subtitles are demoted (CJK-script name on any addon, HC/CHS
+  tags) and never picked for an instant direct cast (#6).
 
 ## [1.39.0] — 2026-10-01
 

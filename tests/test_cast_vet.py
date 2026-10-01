@@ -116,13 +116,14 @@ def test_vet_cast_audio_absent_when_nobody_has_target(monkeypatch):
 class _R:
     """Minimal RankedStream stand-in (stream + name-tag languages) for reselect tests."""
 
-    def __init__(self, stream, languages, size_gb=0.0, container=""):
+    def __init__(self, stream, languages, size_gb=0.0, container="", hardsub=False):
         from types import SimpleNamespace
 
         self.stream = stream
         self.info = SimpleNamespace(
-            languages=languages, resolution=0, size_gb=size_gb, container=container
-        )
+            languages=languages, resolution=0, size_gb=size_gb, container=container,
+            hardsub_cjk=hardsub,
+        )  # fmt: skip
 
 
 def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
@@ -778,3 +779,18 @@ def test_instant_direct_considers_untagged_mp4(monkeypatch):
     )
     plan = cast_vet.find_instant_direct(_ccfg(), [mkv, plain], ("ita", "eng"))
     assert plan is not None and plan.stream is plain and plan.real_lang == "eng"
+
+
+def test_instant_direct_skips_hardsubbed_releases(monkeypatch):
+    """Issue #6: the instant cast must not start a release with burned-in CJK subtitles."""
+    mkv: Stream = {"url": "http://x/ita.mkv"}
+    hard: Stream = {"url": "http://x/dreamhd.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/ita.mkv": ("matroska,webm", "hevc", [Track(1, "ita", "dts", 6)]),
+            "http://x/dreamhd.mp4": ("mov,mp4,m4a", "h264", [Track(1, "eng", "aac")]),
+        },
+        [_R(mkv, frozenset({"ita"})), _R(hard, frozenset(), container="mp4", hardsub=True)],
+    )
+    assert cast_vet.find_instant_direct(_ccfg(), [mkv, hard], ("ita", "eng")) is None
