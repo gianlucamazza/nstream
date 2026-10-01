@@ -75,7 +75,6 @@ _TUI = {"picker", "labels"}
 # Edges that predate ADR 0037 and are being removed (prompter injection). The set may only
 # shrink: a new edge fails, and a fixed one must be deleted from here.
 _KNOWN_DEBT = {
-    ("caster", "picker"),
     ("stream_select", "picker"),
     ("stream_select", "labels"),
     ("subs", "picker"),

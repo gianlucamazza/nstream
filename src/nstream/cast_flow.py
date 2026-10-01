@@ -32,6 +32,7 @@ from . import (
     cast_vet,
     caster,
     engine,
+    languages,
     log,
     mirror,
     quality,
@@ -439,7 +440,12 @@ def run_cast(
             # passes; headless callers leave allow_lang_switch False.
             langs: tuple[str, ...] = ()
             resolver = None
-            if allow_lang_switch:
+            choose_lang = None
+            if allow_lang_switch and opts.choose is not None:
+                menu = opts.choose
+                choose_lang = lambda codes: menu(  # noqa: E731
+                    [(languages.name(c), c) for c in codes], "audio> "
+                )
                 cast_langs = cast_vet.cast_languages(cfg, results, exact_resolution=exact)
                 if len(cast_langs) > 1:
                     langs = cast_langs
@@ -447,7 +453,7 @@ def run_cast(
             delivery = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,
-                langs=langs, resolve_lang=resolver, follow=follow,
+                langs=langs, resolve_lang=resolver, choose_lang=choose_lang, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
             pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered

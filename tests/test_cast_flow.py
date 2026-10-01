@@ -551,13 +551,13 @@ def test_lang_switch_wired_only_when_allowed(monkeypatch):
             seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or _ok()
         ),
     )  # fmt: skip
-    _run(_opts(), stream, allow_lang_switch=True)
+    _run(_opts(choose=lambda rows, p: None), stream, allow_lang_switch=True)
     assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages",
         lambda cfg, results, exact_resolution=0, **_kw: ("ita",),
     )  # fmt: skip
-    _run(_opts(), stream, allow_lang_switch=True)
+    _run(_opts(choose=lambda rows, p: None), stream, allow_lang_switch=True)
     assert seen["langs"] == () and seen["resolver"] is None
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages", _boom("headless must skip the rank pass")
@@ -786,7 +786,7 @@ def test_run_cast_threads_resolved_quality_to_all_reselects(monkeypatch):
     cast_flow.run_cast(
         CFG, [stream], stream,
         device="192.168.1.5", title="T", typ="movie", video_id="tt1",
-        work_dir="/tmp", opts=_opts(quality=1080), start=None, allow_lang_switch=True,
+        work_dir="/tmp", opts=_opts(quality=1080, choose=lambda rows, p: None), start=None, allow_lang_switch=True,
     )  # fmt: skip
     assert seen == {
         "video": 1080, "container": 1080, "audio": 1080, "langs": 1080, "resolver": 1080

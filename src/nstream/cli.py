@@ -227,7 +227,12 @@ def _resolve_cast_device(cfg: Config, opts: PlayOpts) -> str | None:
     auto-cast confirmation. An explicit cast action (Alt-C → `cast_choose`) is its own
     confirmation, so only the auto route (`prefer_cast`/`--cast`) asks."""
     try:
-        return _resolve_device(cfg, choose=opts.cast_choose, confirm=not opts.cast_choose)
+        return _resolve_device(
+            cfg,
+            choose=opts.cast_choose,
+            confirm=None if opts.cast_choose else _confirm_cast_device,
+            picker=_choose_device,
+        )
     except CastUnavailable as e:
         print(f"nstream: {e} — riproduco in locale", file=sys.stderr)
         _log.info("cast non attivo (%s) → fallback locale", e)
@@ -355,7 +360,7 @@ def _move_to_cast(
     remux/mirror apply — the local pick was ranked for the GPU, not the DMR. Never
     auto-advances (the user is switching destination mid-play)."""
     try:
-        device = _resolve_device(cfg, choose=True)
+        device = _resolve_device(cfg, choose=True, picker=_choose_device)
     except CastUnavailable as e:
         print(f"nstream: {e}", file=sys.stderr)
         return (pos, dur, False)
@@ -386,6 +391,31 @@ def _move_to_cast(
         )
         return (pos, dur, False)
     return (outcome.pos, outcome.dur, False)
+
+
+# Session latch for the auto-cast confirmation (ADR 0037 moved it out of `caster`): once the
+# user okays casting, later plays (binge auto-advance, next episode) don't re-ask. A refusal
+# is per-play (asked again).
+_cast_confirmed = False
+
+
+def _confirm_cast_device(name: str, ip: str) -> bool:
+    """`caster.resolve_device(confirm=)` for the TUI: announce an auto-resolved TV once."""
+    global _cast_confirmed
+    if _cast_confirmed:
+        return True
+    _cast_confirmed = _confirm(f"{ui.g().tv} Chromecast trovato: {name} ({ip}) — casto lì?", True)
+    return _cast_confirmed
+
+
+def _choose_device(devices: list[tuple[str, str]]) -> str | None:
+    """`caster.resolve_device(picker=)` for the TUI: pick by name, cast by IP."""
+    return fzf(devices, "dispositivo> ")
+
+
+def _choose(rows: list, prompt: str):
+    """`PlayOpts.choose` for the TUI: the fzf single-choice menu."""
+    return fzf(rows, prompt)
 
 
 def _confirm(question: str, default_yes: bool) -> bool:
@@ -1146,6 +1176,7 @@ def main() -> int:
         sub_scale=sub_scale,
         interactive=not args.json,
         confirm=None if args.json else _confirm,
+        choose=None if args.json else _choose,
     )
     try:
         return _dispatch(cfg, args, opts)

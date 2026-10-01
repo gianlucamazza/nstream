@@ -7,6 +7,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import util
 
@@ -51,6 +52,9 @@ class PlayOpts:
     # The frontend's yes/no prompt `(question, default_yes) -> bool`, injected so domain
     # code never imports the fzf picker (ADR 0037). None on non-interactive runs.
     confirm: Callable[[str, bool], bool] | None = field(default=None, compare=False)
+    # The frontend's single-choice menu `(rows, prompt) -> value | None` (None = ESC),
+    # rows being `(label, value)` pairs. None on non-interactive runs (ADR 0037).
+    choose: Callable[[list[tuple[str, Any]], str], Any] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

@@ -1158,14 +1158,14 @@ def test_play_on_cast_direct_in_cast_switch_wiring(monkeypatch):
             seen.update(langs=k.get("langs"), resolver=k.get("resolve_lang")) or _ok()
         ),
     )  # fmt: skip
-    _call_cast(_cast_opts(), stream)
+    _call_cast(_cast_opts(choose=lambda rows, p: None), stream)
     assert seen["langs"] == ("ita", "eng") and callable(seen["resolver"])
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "cast_languages",
         lambda cfg, results, exact_resolution=0, **_kw: ("ita",),
     )
-    _call_cast(_cast_opts(), stream)
+    _call_cast(_cast_opts(choose=lambda rows, p: None), stream)
     assert seen["langs"] == () and seen["resolver"] is None
 
 
@@ -1530,3 +1530,17 @@ def test_move_to_cast_not_started_keeps_local_position(monkeypatch):
         typ="movie", video_id="tt1", opts=_cast_opts(),
     )  # fmt: skip
     assert out == (1234.0, 5000.0, False)
+
+
+def test_confirm_cast_device_latches_yes_not_refusal(monkeypatch):
+    # The once-per-session confirm moved from caster to the TUI (ADR 0037).
+    monkeypatch.setattr(cli, "_cast_confirmed", False)
+    prompts = []
+    monkeypatch.setattr(cli, "_confirm", lambda q, d: prompts.append((q, d)) or False)
+    assert cli._confirm_cast_device("TV1", "10.0.0.9") is False
+    assert cli._cast_confirmed is False  # a refusal is per-play: asked again next time
+    monkeypatch.setattr(cli, "_confirm", lambda q, d: prompts.append((q, d)) or True)
+    assert cli._confirm_cast_device("TV1", "10.0.0.9") is True
+    assert "TV1" in prompts[-1][0] and prompts[-1][1] is True  # default yes
+    monkeypatch.setattr(cli, "_confirm", lambda q, d: pytest.fail("must not re-ask"))
+    assert cli._confirm_cast_device("TV1", "10.0.0.9") is True  # latched for the session

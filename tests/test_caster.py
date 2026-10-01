@@ -71,28 +71,20 @@ def test_resolve_device_single_auto_ip(monkeypatch):
     assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.9"
 
 
-# --- auto-cast confirmation --------------------------------------------------
-
-
-@pytest.fixture(autouse=True)
-def _reset_confirm_latch():
-    caster._cast_confirmed = False
-    yield
-    caster._cast_confirmed = False
+# --- auto-cast confirmation (injected by the frontend, ADR 0037) -------------
 
 
 def test_resolve_device_confirm_accepted(monkeypatch):
     monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
-    monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: True)
-    assert caster.resolve_device(Config(torrentio_base="tb"), confirm=True) == "10.0.0.9"
+    ip = caster.resolve_device(Config(torrentio_base="tb"), confirm=lambda name, ip: True)
+    assert ip == "10.0.0.9"
 
 
 def test_resolve_device_confirm_declined_raises(monkeypatch):
     # A declined confirmation must fall back like an absent device (local playback).
     monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
-    monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: False)
     with pytest.raises(caster.CastUnavailable, match="rifiutato"):
-        caster.resolve_device(Config(torrentio_base="tb"), confirm=True)
+        caster.resolve_device(Config(torrentio_base="tb"), confirm=lambda name, ip: False)
 
 
 def test_resolve_device_confirm_preferred_device(monkeypatch):
@@ -102,46 +94,15 @@ def test_resolve_device_confirm_preferred_device(monkeypatch):
         _scan([("Salotto", "192.168.1.5"), ("Camera", "192.168.1.6")]),
     )
     asked = []
-    monkeypatch.setattr(caster, "_confirm_device", lambda name, ip: not asked.append((name, ip)))
     cfg = Config(torrentio_base="tb", cast_device="Salotto")
-    assert caster.resolve_device(cfg, confirm=True) == "192.168.1.5"
+    ip = caster.resolve_device(cfg, confirm=lambda name, ip: not asked.append((name, ip)))
+    assert ip == "192.168.1.5"
     assert asked == [("Salotto", "192.168.1.5")]
 
 
-class _Tty:
-    def isatty(self):
-        return True
-
-
-def test_confirm_device_default_yes_and_session_latch(monkeypatch):
-    monkeypatch.setattr(caster.sys, "stdin", _Tty())
-    monkeypatch.setattr(caster.sys, "stderr", _Tty())
-    prompts = []
-
-    def _yes(msg, **k):
-        prompts.append(msg)
-        return True
-
-    monkeypatch.setattr(caster, "_confirm", _yes)
-    assert caster._confirm_device("TV1", "10.0.0.9") is True  # Sì
-    assert "TV1" in prompts[0] and "10.0.0.9" in prompts[0]
-    # Latched: the next play (binge advance) must not re-ask.
-    monkeypatch.setattr(caster, "_confirm", lambda *a, **k: pytest.fail("must not re-ask"))
-    assert caster._confirm_device("TV1", "10.0.0.9") is True
-
-
-def test_confirm_device_refusal_not_latched(monkeypatch):
-    monkeypatch.setattr(caster.sys, "stdin", _Tty())
-    monkeypatch.setattr(caster.sys, "stderr", _Tty())
-    monkeypatch.setattr(caster, "_confirm", lambda *a, **k: False)
-    assert caster._confirm_device("TV1", "10.0.0.9") is False
-    assert caster._cast_confirmed is False  # a refusal is per-play, asked again next time
-
-
 def test_resolve_device_headless_never_confirms(monkeypatch):
-    # ADR 0037: headless callers don't pass confirm=True, so no prompt can fire.
+    # ADR 0037: a caller that injects no prompt can't be prompted.
     monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
-    monkeypatch.setattr(caster, "_confirm", lambda *a, **k: pytest.fail("must not prompt"))
     assert caster.resolve_device(Config(torrentio_base="tb"), headless=True) == "10.0.0.9"
 
 
@@ -149,21 +110,30 @@ def test_resolve_device_multiple_prompts_ip(monkeypatch):
     monkeypatch.setattr(
         caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
     )
-    monkeypatch.setattr(caster, "fzf", lambda items, prompt: "10.0.0.2")
-    assert caster.resolve_device(Config(torrentio_base="tb")) == "10.0.0.2"
+    ip = caster.resolve_device(Config(torrentio_base="tb"), picker=lambda devices: "10.0.0.2")
+    assert ip == "10.0.0.2"
 
 
 def test_resolve_device_choose_forces_picker_by_name(monkeypatch):
     monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1")]))
     seen = {}
 
-    def fk(items, prompt):
-        seen["items"] = items
+    def pick(devices):
+        seen["items"] = devices
         return "10.0.0.1"
 
-    monkeypatch.setattr(caster, "fzf", fk)
-    assert caster.resolve_device(Config(torrentio_base="tb"), choose=True) == "10.0.0.1"
+    assert caster.resolve_device(Config(torrentio_base="tb"), choose=True, picker=pick) == (
+        "10.0.0.1"
+    )
     assert seen["items"] == [("TV1", "10.0.0.1")]  # label=name, value=ip
+
+
+def test_resolve_device_ambiguous_without_picker_raises(monkeypatch):
+    monkeypatch.setattr(
+        caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
+    )
+    with pytest.raises(caster.CastUnavailable, match="--device"):
+        caster.resolve_device(Config(torrentio_base="tb"))
 
 
 def test_resolve_device_none_raises(monkeypatch):
@@ -177,9 +147,8 @@ def test_resolve_device_cancel_raises(monkeypatch):
     monkeypatch.setattr(
         caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
     )
-    monkeypatch.setattr(caster, "fzf", lambda items, prompt: None)
     with pytest.raises(caster.CastUnavailable):
-        caster.resolve_device(Config(torrentio_base="tb"))
+        caster.resolve_device(Config(torrentio_base="tb"), picker=lambda devices: None)
 
 
 # --- discovery cache fast paths / non-blocking guarantees -------------------
@@ -488,10 +457,10 @@ def test_cast_hotkey_switches_audio(monkeypatch):
     )
     keys = iter(["a", None, None, None, None])
     monkeypatch.setattr(caster, "_poll_wait", lambda _t: next(keys, None))
-    monkeypatch.setattr(caster, "fzf", lambda items, prompt: "eng")
     caster.cast(
         CFG, "Film", "http://ita",
         device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: "http://eng",
+        choose_lang=lambda codes: "eng",
     )  # fmt: skip
     recasts = [c for c in calls if "cast" in c and "http://eng" in c]
     assert recasts and "-t" in recasts[0]  # re-cast the eng url with a seek
@@ -501,11 +470,11 @@ def test_cast_hotkey_esc_keeps_current(monkeypatch):
     calls = _cast_run(monkeypatch, info_seq=[{"player_state": "IDLE"}])
     keys = iter(["a", None, None, None, None])
     monkeypatch.setattr(caster, "_poll_wait", lambda _t: next(keys, None))
-    monkeypatch.setattr(caster, "fzf", lambda items, prompt: None)  # ESC
     resolved = []
     caster.cast(
         CFG, "Film", "http://ita",
         device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: resolved.append(lang),
+        choose_lang=lambda codes: None,  # ESC
     )  # fmt: skip
     assert resolved == []  # ESC → resolver never called, no re-cast
     assert not [c for c in calls if "cast" in c and "-t" in c]
@@ -520,9 +489,12 @@ def test_resolve_device_headless_ambiguous_raises(monkeypatch):
     monkeypatch.setattr(
         caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("TV2", "10.0.0.2")])
     )
-    monkeypatch.setattr(caster, "fzf", lambda *a, **k: (_ for _ in ()).throw(AssertionError("fzf")))
+
+    def no_picker(devices):
+        raise AssertionError("headless must not open a picker")
+
     with pytest.raises(caster.CastUnavailable):
-        caster.resolve_device(CFG, headless=True)
+        caster.resolve_device(CFG, headless=True, picker=no_picker)
 
 
 def test_resolve_device_headless_prefers_named(monkeypatch):

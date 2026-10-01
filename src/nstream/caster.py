@@ -1,8 +1,8 @@
 """Chromecast playback via `catt`: device resolution, launching the cast, polling its
 status for resume/auto-advance, and the in-cast audio-language switch.
 
-Still imports the fzf picker for the device and in-cast audio menus — pre-ADR 0037 debt
-tracked in `tests/test_architecture.py::_KNOWN_DEBT`. cli calls `cast()`,
+Menus are injected by the frontend (ADR 0037): `resolve_device(confirm=, picker=)` and
+`cast(choose_lang=)`; this module never imports the fzf picker. cli calls `cast()`,
 `resolve_device()` and `CastUnavailable`. catt is invoked with subprocess
 directly (the poll loop needs returncode/stderr and a per-iteration process).
 """
@@ -23,8 +23,6 @@ from dataclasses import dataclass
 
 from . import bridge, cast_delivery, discovery, languages, log, serve, srt, ui, util
 from .config import Config
-from .picker import confirm as _confirm
-from .picker import fzf
 
 _log = log.get_logger("cast")
 
@@ -54,26 +52,10 @@ class CastUnavailable(Exception):
     """Raised when no Chromecast can be resolved (ambiguous / none / absent)."""
 
 
-# Session latch for the auto-cast confirmation: once the user okays casting, later plays
-# (binge auto-advance, next episode) don't re-ask. A refusal is per-play (asked again).
-_cast_confirmed = False
-
-
-def _confirm_device(name: str, ip: str) -> bool:
-    """Confirm the auto-resolved cast target on an interactive tty (fzf Sì/No, default
-    yes), so a `prefer_cast` route to the TV is announced instead of silent.
-    Only reached with `confirm=True`, which only the interactive TUI passes (ADR 0037); an
-    already-confirmed session always passes."""
-    global _cast_confirmed
-    if _cast_confirmed:
-        return True
-    ok = _confirm(
-        f"{ui.g().tv} Chromecast trovato: {name} ({ip}) — casto lì?",
-        default_yes=True,
-        non_tty_default=True,
-    )
-    _cast_confirmed = ok
-    return ok
+# Frontend prompts injected by the caller (ADR 0037): the domain never opens fzf.
+ConfirmDevice = Callable[[str, str], bool]  # (name, ip) -> cast there?
+ChooseDevice = Callable[[list[tuple[str, str]]], str | None]  # [(name, ip)] -> ip | None (ESC)
+ChooseLang = Callable[[tuple[str, ...]], str | None]  # dub codes -> code | None (ESC)
 
 
 # How often to poll `catt info -j` while casting (resume tracking + end detection).
@@ -98,7 +80,8 @@ def resolve_device(
     choose: bool = False,
     headless: bool = False,
     prefer: str | None = None,
-    confirm: bool = False,
+    confirm: ConfirmDevice | None = None,
+    picker: ChooseDevice | None = None,
 ) -> str:
     """Resolve the value for `catt -d` — an **IP** from discovery (verified cache or
     the background `catt scan`), so casting is robust to mDNS name-resolution flakiness
@@ -113,9 +96,11 @@ def resolve_device(
     name (or `cfg.cast_device`) must be on the LAN, else a single device is used, else it
     raises CastUnavailable so the caller can surface a clean error instead of blocking.
 
-    `confirm` asks once per session (fzf Sì/No on a tty) before an **auto**-resolved device is
-    used — so a `prefer_cast` start announces where the video is going instead of silently
-    casting. Explicit picks (`prefer`, the fzf picker) never re-ask; a refusal raises
+    `confirm(name, ip)` (the frontend's prompt, ADR 0037) is asked before an
+    **auto**-resolved device is used — so a `prefer_cast` start announces where the video is
+    going instead of silently casting. `picker(devices)` chooses among several; without one
+    an ambiguous LAN raises like headless. Explicit picks (`prefer`, the picker) never
+    re-ask; a refusal raises
     CastUnavailable so the caller falls back to local playback."""
     # A missing binary must not masquerade as an empty network: run_cmd swallows the
     # OSError, so an instant empty scan would read as "no Chromecast" when the real
@@ -136,7 +121,7 @@ def resolve_device(
     if cfg.cast_device and not choose:
         ip = by_name.get(cfg.cast_device)
         if ip:
-            if confirm and not _confirm_device(cfg.cast_device, ip):
+            if confirm is not None and not confirm(cfg.cast_device, ip):
                 raise CastUnavailable(f"cast su '{cfg.cast_device}' rifiutato")
             return ip
         _log.info("device preferito '%s' non in rete → ridiscovery", cfg.cast_device)
@@ -147,16 +132,16 @@ def resolve_device(
         raise CastUnavailable("nessun Chromecast in rete")
     if len(devices) == 1 and not choose:
         name, ip = devices[0]
-        if confirm and not _confirm_device(name, ip):
+        if confirm is not None and not confirm(name, ip):
             raise CastUnavailable(f"cast su '{name}' rifiutato")
         return ip
-    if headless:
-        # Ambiguous LAN and no usable preference: a headless caller can't pick — surface
-        # it as an error (the agent re-runs with --device) instead of opening fzf.
+    if headless or picker is None:
+        # Ambiguous LAN and no usable preference: a caller without a picker can't choose —
+        # surface it as an error (the agent re-runs with --device) instead of blocking.
         names = ", ".join(name for name, _ in devices)
         raise CastUnavailable(f"più dispositivi in rete ({names}): specifica --device")
     # Several devices (or an explicit choice): pick by name, cast by IP.
-    chosen = fzf([(name, ip) for name, ip in devices], "dispositivo> ")
+    chosen = picker(list(devices))
     if chosen is None:
         raise CastUnavailable("scelta dispositivo annullata")
     return chosen
@@ -256,14 +241,14 @@ def _switch_cast_audio(
     base: list[str],
     langs: tuple[str, ...],
     resolve_lang: Callable[[str], str | None],
+    choose_lang: ChooseLang,
     pos: float,
     dest: str,
 ) -> None:
     """Re-cast a release in the chosen audio language from the current position.
     The Chromecast plays the file's default track, so this picks a differently-dubbed
     release rather than switching tracks in place (best-effort, single-dub friendly)."""
-    items = [(languages.name(lang), lang) for lang in langs]
-    lang = fzf(items, "audio> ")
+    lang = choose_lang(langs)
     if lang is None:  # ESC → keep the current cast
         return
     print(f"{ui.g().tv} cambio audio: {languages.name(lang)}…", file=sys.stderr)
@@ -293,6 +278,7 @@ def cast(
     sub_lang: str | None = None,
     langs: tuple[str, ...] = (),
     resolve_lang: Callable[[str], str | None] | None = None,
+    choose_lang: ChooseLang | None = None,
     follow: bool = True,
     meta: CastMeta | None = None,
     on_event: EventCb | None = None,
@@ -308,7 +294,9 @@ def cast(
     `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast. Both
     senders now carry subtitles: the castbridge path serves the SRT as a side-loaded WebVTT track
     (`sub_lang` labels it), the catt path uses `-s`."""
-    can_switch = bool(langs) and resolve_lang is not None and follow and sys.stdin.isatty()
+    # The in-cast switch needs a frontend menu (`choose_lang`, ADR 0037); stdin being a TTY
+    # is only the capability to read the 'a' keypress (`_poll_wait`), not the policy.
+    can_switch = bool(langs) and resolve_lang is not None and choose_lang is not None and follow
     if device and bridge.bridge_available() and not can_switch:
         result = _cast_via_bridge(
             title,
@@ -333,6 +321,7 @@ def cast(
         sub_paths=sub_paths,
         langs=langs,
         resolve_lang=resolve_lang,
+        choose_lang=choose_lang,
         follow=follow,
         on_event=on_event,
     )
@@ -458,6 +447,7 @@ def _cast_via_catt(
     sub_paths: tuple[str, ...] = (),
     langs: tuple[str, ...] = (),
     resolve_lang: Callable[[str], str | None] | None = None,
+    choose_lang: ChooseLang | None = None,
     follow: bool = True,
     on_event: EventCb | None = None,
 ) -> cast_delivery.CastResult:
@@ -503,7 +493,7 @@ def _cast_via_catt(
         _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
         return cast_delivery.CastResult(0.0, 0.0, error="cast_failed")
 
-    can_switch = bool(langs) and resolve_lang is not None
+    can_switch = bool(langs) and resolve_lang is not None and choose_lang is not None
     if can_switch and follow:
         ui.cast_live(dest, follow=True)
         ui.status_detail("a: cambia lingua audio")
@@ -523,7 +513,7 @@ def _cast_via_catt(
     try:
         while True:
             if _poll_wait(_CAST_POLL) == "a" and can_switch:
-                _switch_cast_audio(base, langs, resolve_lang, holder["position"], dest)
+                _switch_cast_audio(base, langs, resolve_lang, choose_lang, holder["position"], dest)
                 started, idle = False, 0  # new media re-buffers
                 continue
             try:
