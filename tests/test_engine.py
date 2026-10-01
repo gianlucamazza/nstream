@@ -420,3 +420,16 @@ def test_p2p_gate_notice_repeats_per_play(monkeypatch, capsys):
     with pytest.raises(engine.P2PBlocked):
         engine._p2p_gate(cfg)
     assert capsys.readouterr().err.count("streaming P2P") == 1  # said again on the next play
+
+
+def test_p2p_notice_once_per_process(monkeypatch):
+    """The cfg is frozen for the run: without the process flag a binge repeated the notice
+    (and the config write) every episode."""
+    monkeypatch.setattr(engine, "_p2p_noticed", False)
+    saved = []
+    monkeypatch.setattr(engine.config_mod, "save", lambda d: saved.append(d))
+    cfg = Config(torrentio_base="tb", p2p_ack=False)
+    with engine.notices.capture() as bag:
+        engine._p2p_notice_once(cfg)
+        engine._p2p_notice_once(cfg)
+    assert len(bag) == 1 and saved == [{"p2p_ack": True}]
