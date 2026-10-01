@@ -46,17 +46,20 @@ _EXTINF = re.compile(r"#EXTINF:([0-9.]+)")
 class Job:
     """What to produce: the source url, the audio mapping/encoding (ffmpeg args) and the
     initial play head `head_s` (the resume point the LOAD will seek to: the pacing must let
-    the producer reach it, and nothing before it needs to stay on disk)."""
+    the producer reach it, and nothing before it needs to stay on disk). `ss_s` > 0 starts
+    the producer there instead (fast resume): the playlist then begins at that point and
+    the receiver counts from 0 — callers add `first_pts` to what it reports."""
 
     url: str
     audio_map: str = "0:a:0?"
     audio_args: tuple[str, ...] = ("-c:a", "aac", "-ac", "2", "-b:a", "192k")
     head_s: float = 0.0
+    ss_s: float = 0.0
 
     def to_dict(self) -> dict:
         return {
             "url": self.url, "audio_map": self.audio_map,
-            "audio_args": list(self.audio_args), "head_s": self.head_s,
+            "audio_args": list(self.audio_args), "head_s": self.head_s, "ss_s": self.ss_s,
         }  # fmt: skip
 
     @classmethod
@@ -64,23 +67,45 @@ class Job:
         return cls(
             str(d["url"]), str(d["audio_map"]),
             tuple(str(a) for a in d["audio_args"]), float(d.get("head_s") or 0.0),
+            float(d.get("ss_s") or 0.0),
         )  # fmt: skip
 
 
 def producer_cmd(src: str, out_dir: str, job: Job) -> list[str]:
     """The ffmpeg argv: video copied, one audio track, MPEG-TS segments in a growing EVENT
     playlist. `temp_file` renames each segment and playlist into place, so the server never
-    serves a half-written file. `src` must already be token-free (a loopback url)."""
+    serves a half-written file. `src` must already be token-free (a loopback url).
+
+    With `job.ss_s` the input is opened at that point (keyframe before it, audio aligned to
+    it: `-noaccurate_seek`, matrix #12) and the source timestamps are kept (`-copyts`, no
+    mux delay), so `first_pts` reads where the playlist really starts."""
+    seek = ["-ss", f"{job.ss_s:.3f}", "-noaccurate_seek"] if job.ss_s > 0 else []
+    keep_ts = ["-copyts", "-muxdelay", "0", "-muxpreload", "0"] if job.ss_s > 0 else []
     return [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-        "-rw_timeout", "30000000", "-i", src,
-        "-map", "0:v:0", "-map", job.audio_map, "-c:v", "copy", *job.audio_args,
+        "-rw_timeout", "30000000", *seek, "-i", src,
+        "-map", "0:v:0", "-map", job.audio_map, "-c:v", "copy", *job.audio_args, *keep_ts,
         "-f", "hls", "-hls_time", str(SEGMENT_S), "-hls_list_size", "0",
         "-hls_playlist_type", "event", "-hls_segment_type", "mpegts",
         "-hls_flags", "temp_file",
         "-hls_segment_filename", os.path.join(out_dir, "index%d.ts"),
         os.path.join(out_dir, PLAYLIST),
     ]  # fmt: skip
+
+
+def first_pts(out_dir: str) -> float | None:
+    """The source time the playlist starts at (first segment's start), or None. With a
+    fast-resume `ss_s` it is the keyframe at or before it — the offset between what the
+    receiver reports (playlist time, from 0) and the film."""
+    proc = util.run_cmd(
+        ["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0",
+         os.path.join(out_dir, "index0.ts")],
+        timeout=10,
+    )  # fmt: skip
+    try:
+        return float((proc.stdout or "").split()[0]) if proc and proc.returncode == 0 else None
+    except (IndexError, ValueError):
+        return None
 
 
 def timeline(out_dir: str) -> list[tuple[int, float, float]]:

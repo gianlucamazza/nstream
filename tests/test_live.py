@@ -196,3 +196,11 @@ def test_real_producer_turns_ac3_mkv_into_aac_hls(tmp_path):
     assert "#EXT-X-PLAYLIST-TYPE:EVENT" in (out / live.PLAYLIST).read_text()
     p.stop()
     assert not out.exists()
+
+
+def test_producer_cmd_fast_resume_seeks_input_and_keeps_timestamps(tmp_path):
+    cmd = live.producer_cmd("http://127.0.0.1:1/r", str(tmp_path), live.Job("u", ss_s=4520.0))
+    assert cmd[cmd.index("-ss") + 1] == "4520.000" and cmd.index("-ss") < cmd.index("-i")
+    assert "-noaccurate_seek" in cmd and "-copyts" in cmd
+    plain = live.producer_cmd("http://127.0.0.1:1/r", str(tmp_path), live.Job("u"))
+    assert "-ss" not in plain and "-copyts" not in plain

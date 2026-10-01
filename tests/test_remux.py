@@ -875,7 +875,7 @@ def test_cast_file_reaps_previous_detached_server(monkeypatch, tmp_path):
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert (out.pos, out.dur, out.subs_delivered) == (0.0, 0.0, False)
     assert 999999 in rec["killed"] and not old.exists()
-    st = remux._read_state()
+    st = remux._read_state() or {}
     assert st is not None
     assert st["file"] == str(f)  # slot now owned by the new cast
 
@@ -1019,7 +1019,7 @@ def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
     assert seen["job"].audio_args[:2] == ("-c:a", "aac") and "-ac" in seen["job"].audio_args
     assert remux._read_state() == {
         "pid": 4242, "file": seen["dir"], "device": "10.0.0.5", "mode": "live",
-        "url": seen["url"], "title": "T",
+        "url": seen["url"], "title": "T", "offset": 0.0,
     }  # fmt: skip
 
 
@@ -1094,3 +1094,35 @@ def test_live_seek_leaves_short_jumps_and_clamps_to_produced(monkeypatch, tmp_pa
 
 def test_live_seek_is_none_without_a_live_cast(monkeypatch):
     assert remux.live_seek("10.0.0.5", 900.0) is None
+
+
+def test_cast_live_fast_resume_starts_the_producer_at_the_resume_point(monkeypatch, tmp_path):
+    """Resume at 50 min used to produce 50 min first (223 s, field 2026-10-01). Now the
+    producer opens the source there, the LOAD starts at playlist 0, and the measured
+    keyframe offset maps the receiver's timeline (and the subtitles) back to the film."""
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    monkeypatch.setattr(remux.live, "first_pts", lambda d: 3027.125)
+    sub = tmp_path / "s.srt"
+    sub.write_text("1\n00:50:30,000 --> 00:50:32,000\nciao\n")
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, start=3030.5,
+        sub_paths=(str(sub),), follow=False,
+    )  # fmt: skip
+    assert out is not None and out.started
+    assert seen["job"].ss_s == 3030.5 and seen["job"].head_s == 0.0
+    assert seen["kwargs"]["current_time"] == 0.0
+    assert (remux._read_state() or {})["offset"] == 3027.125
+    vtt = Path(seen["dir"], "subs.vtt").read_text()
+    assert "00:00:02.875 --> 00:00:04.875" in vtt  # 3030 s - 3027.125 s
+
+
+def test_live_seek_maps_film_time_to_playlist_time(monkeypatch, tmp_path):
+    loads = _live_state(monkeypatch, tmp_path, pos=3100.0)
+    st = remux._read_state() or {}
+    remux._write_state(4242, st["file"], "10.0.0.5", mode="live", url=st["url"], offset=3000.0)
+    assert remux.live_seek("10.0.0.5", 3500.0) is True
+    assert loads[-1][1] == 500.0
+    ctl = []
+    monkeypatch.setattr(remux.bridge, "control", lambda d, c, v: ctl.append((c, v)) or True)
+    assert remux.live_seek("10.0.0.5", 3110.0) is True  # short jump: native, in playlist time
+    assert ctl == [("seek", 110.0)]

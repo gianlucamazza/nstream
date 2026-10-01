@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import dataclasses
 import fcntl
 import os
 import secrets
@@ -212,7 +213,9 @@ def _read_state() -> dict | None:
     return _runstate().read()
 
 
-def _write_state(pid: int, file: str, device: str | None, mode: str = "catt", **extra: str) -> None:
+def _write_state(
+    pid: int, file: str, device: str | None, mode: str = "catt", **extra: object
+) -> None:
     """Track the serving process for `--stop`/GC. `mode` is "catt" (detached catt serves+casts),
     "serve" (our Range server serves, castbridge casts) or "live" (HLS directory, ADR 0039)
     so `stop()` tears down the right receiver session. `extra`: a live cast keeps its
@@ -801,6 +804,30 @@ _LIVE_STALL_S = 45.0
 _LIVE_POLL_S = 0.5
 
 
+# Resume points closer than this to the start are produced from 0 (the LOAD seeks there).
+_LIVE_FAST_RESUME_S = 60.0
+
+
+def _live_vtt(sub_path: str, out_dir: str, offset: float) -> bool:
+    """Write the caption track for a live cast to `out_dir/subs.vtt`, shifted by `-offset`
+    when the playlist starts mid-film (the receiver's timeline then begins at 0)."""
+    tmp = os.path.join(out_dir, "subs.srt")
+    try:
+        shutil.copyfile(sub_path, tmp)
+    except OSError:
+        return False
+    if offset and not srt.retime(tmp, -offset, 1.0):
+        return False
+    vtt = srt.to_vtt(tmp)
+    if not vtt:
+        return False
+    try:
+        os.replace(vtt, os.path.join(out_dir, "subs.vtt"))
+    except OSError:
+        return False
+    return True
+
+
 def live_available(cfg: Config) -> bool:
     """Whether a Tier-2 cast can go live (ADR 0039): config on and ffmpeg present."""
     return cfg.cast_remux and cfg.cast_live and available()
@@ -898,7 +925,13 @@ def cast_live(
     head = float(start or 0.0)
     if duration and head >= duration - 2 * live.SEGMENT_S:
         head = 0.0
-    job = _live_job(url, cfg, t.audio, audio_index, head)
+    # Fast resume: past a minute in, the producer opens the source AT the resume point
+    # (seconds to start) instead of producing everything before it (223 s for 50 min,
+    # field 2026-10-01). The receiver then counts from 0: `offset` maps it back.
+    fast = head > _LIVE_FAST_RESUME_S
+    job = _live_job(url, cfg, t.audio, audio_index, 0.0 if fast else head)
+    if fast:
+        job = dataclasses.replace(job, ss_s=head)
     serve.reap_sub_server()
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
@@ -906,14 +939,12 @@ def cast_live(
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
     out_dir = _new_remux_temp(".hls")
-    vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
-    if vtt and not follow:
-        # The per-play work dir dies with a headless return; the copy dies with out_dir.
-        try:
-            shutil.copyfile(vtt, os.path.join(out_dir, "subs.vtt"))
-            vtt = os.path.join(out_dir, "subs.vtt")
-        except OSError:
-            vtt = None
+    # The caption track lives in out_dir (it dies with it, and a headless return removes the
+    # work dir). Written now unshifted — the detached server needs the file to exist — and
+    # rewritten once the offset is known.
+    vtt = None
+    if sub_paths and _live_vtt(sub_paths[0], out_dir, 0.0):
+        vtt = os.path.join(out_dir, "subs.vtt")
     producer: live.Producer | None = None
     server = None
     pid: int | None = None
@@ -948,7 +979,8 @@ def cast_live(
 
     label = f"  → {int(head) // 60}:{int(head) % 60:02d}" if head > 60 else ""
     try:
-        ready = _await_live(out_dir, head + 2 * live.SEGMENT_S, failed=failed, label=label)
+        target = (0.0 if fast else head) + 2 * live.SEGMENT_S
+        ready = _await_live(out_dir, target, failed=failed, label=label)
     except BaseException:
         teardown()
         raise
@@ -963,7 +995,12 @@ def cast_live(
     # refuses an HLS LOAD outright — LOAD_FAILED without fetching the playlist (field,
     # 2026-10-01: app CA5T0001 failed; the default app played the same url, also with a
     # start offset).
-    kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), head)
+    offset = 0.0
+    if fast:
+        offset = live.first_pts(out_dir) or head  # the keyframe the playlist starts at
+        if vtt:
+            _live_vtt(sub_paths[0], out_dir, offset)
+    kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), 0.0 if fast else head)
     kwargs["content_type"] = _HLS_TYPE
     if vtt:
         kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
@@ -993,11 +1030,11 @@ def cast_live(
     if not follow:
         _write_state(
             pid or 0, out_dir, device, mode="live",
-            url=serve.served_hls_url(bind_ip, port, token), title=title,
+            url=serve.served_hls_url(bind_ip, port, token), title=title, offset=offset,
         )  # fmt: skip
         return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
     dur = out.dur if out.dur > 0 else duration
-    return cast_delivery.CastResult(out.pos, dur, delivered, started=True)
+    return cast_delivery.CastResult(out.pos + offset, dur, delivered, started=True)
 
 
 # The receiver honours a seek on the live playlist only a little past where it plays
@@ -1007,23 +1044,25 @@ _LIVE_NATIVE_SEEK_S = 30.0
 
 
 def live_seek(device: str | None, target: float) -> bool | None:
-    """Seek the active live cast by re-LOADing its playlist at `target` (clamped to what
-    the producer has made). None when no live cast is active or the jump is short enough
-    for the receiver's own seek — the caller then uses the normal media-control path."""
+    """Seek the active live cast to film time `target`. A far jump re-LOADs the playlist
+    there (clamped to what the producer has made); a short one is the receiver's own seek,
+    in playlist time when the cast started mid-film (`offset`). None when no live cast is
+    active — the caller then uses the normal media-control path."""
     st = _read_state()
     if not st or st.get("mode") != "live" or not st.get("url") or not _pid_alive(st.get("pid")):
         return None
     dev = device or st.get("device")
     if not dev or dev != st.get("device"):
         return None
-    pos = float(caster.status(dev).get("position") or 0.0)
-    if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
-        return None
+    offset = float(st.get("offset") or 0.0)
+    pos = float(caster.status(dev).get("position") or 0.0)  # film time (status adds offset)
     produced = live.produced_s(str(st.get("file") or ""))
-    target = max(0.0, min(target, produced - 2 * live.SEGMENT_S))
+    rel = max(0.0, min(target - offset, produced - 2 * live.SEGMENT_S))
+    if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
+        return bridge.control(dev, "seek", rel) if offset else None
     events = bridge.cast_load(
         dev, st["url"], follow=False,
-        title=str(st.get("title") or ""), content_type=_HLS_TYPE, current_time=target,
+        title=str(st.get("title") or ""), content_type=_HLS_TYPE, current_time=rel,
     )  # fmt: skip
     try:
         for ev in events:

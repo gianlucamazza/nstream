@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import NamedTuple
 
-from . import bridge, log
+from . import bridge, log, util
 
 _log = log.get_logger("cast_delivery")
 
@@ -28,6 +28,21 @@ EventCb = Callable[[dict], None]
 # Fraction of the runtime past which an `ended` event counts as finished — the series
 # auto-advance heuristic (a manual stop mid-episode must not binge ahead).
 CAST_DONE = 0.97
+
+
+def live_offset(device: str | None) -> float:
+    """Film time at which the active live cast's playlist starts (ADR 0039 fast resume), or
+    0. The receiver reports playlist time; every reader of its position adds this. Read
+    from the `remux` run state (no import of `remux`: it sits above this module)."""
+    st = util.RunState("remux").read()
+    if not st or st.get("mode") != "live" or not util.pid_alive(st.get("pid")):
+        return 0.0
+    if device and st.get("device") != device:
+        return 0.0
+    try:
+        return float(st.get("offset") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def is_finished(pos: float, dur: float) -> bool:
