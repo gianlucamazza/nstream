@@ -112,8 +112,13 @@ def media_control(
     cmd = cmd.strip().lower()
     if cmd not in ("pause", "play", "seek"):
         return False, f"comando media sconosciuto: {cmd}"
-    ok = bridge.bridge_available() and bridge.control(dev, cmd, value)
-    if not ok:
+    # A long jump on a live cast (ADR 0039) is a re-LOAD at the target; None = not live.
+    reloaded = remux.live_seek(dev, value) if cmd == "seek" else None
+    if reloaded is not None:
+        ok = reloaded
+    else:
+        ok = bridge.bridge_available() and bridge.control(dev, cmd, value)
+    if not ok and reloaded is None:
         if cmd == "seek":
             catt_args = ["seek", str(int(value))]
         elif cmd == "pause":

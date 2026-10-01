@@ -1019,6 +1019,7 @@ def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
     assert seen["job"].audio_args[:2] == ("-c:a", "aac") and "-ac" in seen["job"].audio_args
     assert remux._read_state() == {
         "pid": 4242, "file": seen["dir"], "device": "10.0.0.5", "mode": "live",
+        "url": seen["url"], "title": "T",
     }  # fmt: skip
 
 
@@ -1054,3 +1055,42 @@ def test_cast_live_ignores_the_custom_receiver(monkeypatch):
         device="10.0.0.5", audio_index=0, follow=False,
     )  # fmt: skip
     assert "app_id" not in seen["kwargs"]
+
+
+def _live_state(monkeypatch, tmp_path, *, pos: float, produced: int = 100):
+    from nstream import live
+
+    d = tmp_path / "cast-x.hls"
+    d.mkdir()
+    lines = ["#EXTM3U"] + [f"#EXTINF:10.0,\nindex{i}.ts" for i in range(produced)]
+    (d / live.PLAYLIST).write_text("\n".join(lines) + "\n")
+    remux._write_state(4242, str(d), "10.0.0.5", mode="live", url="http://h/pl.m3u8", title="T")
+    monkeypatch.setattr(remux, "_pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(remux.caster, "status", lambda dev: {"position": pos})
+    loads: list = []
+
+    def load(dev, url, *, follow, **kw):
+        loads.append((url, kw["current_time"], kw["content_type"]))
+        yield {"kind": "started"}
+
+    monkeypatch.setattr(remux.bridge, "cast_load", load)
+    return loads
+
+
+def test_live_seek_reloads_far_jumps(monkeypatch, tmp_path):
+    """The receiver clamps a far seek on a live playlist (+180 → +5, field 2026-10-01):
+    the playlist is LOADed again at the target instead."""
+    loads = _live_state(monkeypatch, tmp_path, pos=600.0)
+    assert remux.live_seek("10.0.0.5", 900.0) is True
+    assert loads == [("http://h/pl.m3u8", 900.0, "application/vnd.apple.mpegurl")]
+
+
+def test_live_seek_leaves_short_jumps_and_clamps_to_produced(monkeypatch, tmp_path):
+    loads = _live_state(monkeypatch, tmp_path, pos=600.0, produced=80)  # 800 s produced
+    assert remux.live_seek("10.0.0.5", 620.0) is None  # short: the receiver's own seek
+    assert remux.live_seek("10.0.0.5", 5000.0) is True
+    assert loads[-1][1] == 800.0 - 12  # never past what the producer has made
+
+
+def test_live_seek_is_none_without_a_live_cast(monkeypatch):
+    assert remux.live_seek("10.0.0.5", 900.0) is None

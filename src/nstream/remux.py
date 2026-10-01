@@ -212,11 +212,12 @@ def _read_state() -> dict | None:
     return _runstate().read()
 
 
-def _write_state(pid: int, file: str, device: str | None, mode: str = "catt") -> None:
-    """Track the serving process for `--stop`/GC. `mode` is "catt" (detached catt serves+casts)
-    or "serve" (our Range server serves, castbridge casts) so `stop()` tears down the right
-    receiver session."""
-    _runstate().write({"pid": pid, "file": file, "device": device, "mode": mode})
+def _write_state(pid: int, file: str, device: str | None, mode: str = "catt", **extra: str) -> None:
+    """Track the serving process for `--stop`/GC. `mode` is "catt" (detached catt serves+casts),
+    "serve" (our Range server serves, castbridge casts) or "live" (HLS directory, ADR 0039)
+    so `stop()` tears down the right receiver session. `extra`: a live cast keeps its
+    playlist url and title for `live_seek`."""
+    _runstate().write({"pid": pid, "file": file, "device": device, "mode": mode, **extra})
     # The durable serving state now protects the file from GC; release the preparation
     # reservation only after the state write so there is no unowned window.
     _release_prepare_lock(file)
@@ -990,10 +991,49 @@ def cast_live(
         return None  # → the complete-file remux takes over
     delivered = cast_delivery.caption_active(kwargs, out.tracks)
     if not follow:
-        _write_state(pid or 0, out_dir, device, mode="live")
+        _write_state(
+            pid or 0, out_dir, device, mode="live",
+            url=serve.served_hls_url(bind_ip, port, token), title=title,
+        )  # fmt: skip
         return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
     dur = out.dur if out.dur > 0 else duration
     return cast_delivery.CastResult(out.pos, dur, delivered, started=True)
+
+
+# The receiver honours a seek on the live playlist only a little past where it plays
+# (field 2026-10-01: ±30-60 s exact, +90 → +35, +180 → +5): farther, the playlist is
+# LOADed again at the target, which the receiver does honour.
+_LIVE_NATIVE_SEEK_S = 30.0
+
+
+def live_seek(device: str | None, target: float) -> bool | None:
+    """Seek the active live cast by re-LOADing its playlist at `target` (clamped to what
+    the producer has made). None when no live cast is active or the jump is short enough
+    for the receiver's own seek — the caller then uses the normal media-control path."""
+    st = _read_state()
+    if not st or st.get("mode") != "live" or not st.get("url") or not _pid_alive(st.get("pid")):
+        return None
+    dev = device or st.get("device")
+    if not dev or dev != st.get("device"):
+        return None
+    pos = float(caster.status(dev).get("position") or 0.0)
+    if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
+        return None
+    produced = live.produced_s(str(st.get("file") or ""))
+    target = max(0.0, min(target, produced - 2 * live.SEGMENT_S))
+    events = bridge.cast_load(
+        dev, st["url"], follow=False,
+        title=str(st.get("title") or ""), content_type=_HLS_TYPE, current_time=target,
+    )  # fmt: skip
+    try:
+        for ev in events:
+            if ev.get("kind") == "started":
+                return True
+            if ev.get("kind") == "failed":
+                return False
+    finally:
+        events.close()
+    return False
 
 
 def _log_catt_stderr(path: str) -> None:

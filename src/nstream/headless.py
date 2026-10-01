@@ -493,8 +493,13 @@ def _run_control(cfg: Config, args: argparse.Namespace) -> int:
     else:
         action, cmd, value = "resume", "play", 0.0
         catt_args = ["play"]
-    ok = bridge.bridge_available() and bridge.control(device, cmd, value)
-    if not ok:
+    # A long jump on a live cast (ADR 0039) is a re-LOAD at the target; None = not live.
+    reloaded = remux.live_seek(device, value) if cmd == "seek" else None
+    if reloaded is not None:
+        ok = reloaded
+    else:
+        ok = bridge.bridge_available() and bridge.control(device, cmd, value)
+    if not ok and reloaded is None:
         res = util.run_cmd(["catt", "-d", device, *catt_args], timeout=util.CATT_INFO_TIMEOUT)
         ok = bool(res and res.returncode == 0)
     _emit_json(
