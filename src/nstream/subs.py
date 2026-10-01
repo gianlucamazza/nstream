@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import hashlib
+import io
 import os
 import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from . import api, log, notices, oshash, srt, subalign, tracks
+from . import api, log, notices, oshash, srt, subalign, tracks, util
 from .config import Config, PlayOpts
 from .types import Stream, Subtitle
 
@@ -63,21 +66,62 @@ def stream_filename(stream: Stream) -> str | None:
     return name if isinstance(name, str) and name else None
 
 
+# A subtitle is tens of KB; these bound a hostile or broken provider (a gzip bomb).
+_SUB_MAX_BYTES = 2 * 1024 * 1024
+_SUB_MAX_DECODED = 8 * 1024 * 1024
+# Downloads are immutable per URL: re-casting a title, or the alignment walking the
+# alternates again, must not re-fetch them. Bounded like the poster cache.
+_SUB_CACHE_MAX_FILES = 300
+_SUB_CACHE_MAX_BYTES = 30 * 1024 * 1024
+
+
+def _sub_cache_path(url: str) -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return Path(base) / "nstream" / "subs" / hashlib.sha256(url.encode()).hexdigest()
+
+
+def _fetch_subtitle(url: str) -> bytes | None:
+    """The decompressed bytes of one subtitle download, None on failure or over a cap."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": api.UA})
+        with urllib.request.urlopen(req, timeout=api.TIMEOUT) as resp:
+            raw = resp.read(_SUB_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if len(raw) > _SUB_MAX_BYTES:
+        _log.warning("sottotitolo oltre %d byte: scartato", _SUB_MAX_BYTES)
+        return None
+    if url.endswith(".gz") or raw[:2] == b"\x1f\x8b":
+        try:
+            with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+                out = gz.read(_SUB_MAX_DECODED + 1)
+        except (OSError, EOFError):
+            return raw if raw[:2] != b"\x1f\x8b" else None
+        if len(out) > _SUB_MAX_DECODED:
+            _log.warning("sottotitolo decompresso oltre %d byte: scartato", _SUB_MAX_DECODED)
+            return None
+        raw = out
+    return raw
+
+
 def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
     url = sub.get("url")
     if not url:
         return None
+    cached = _sub_cache_path(url)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": api.UA})
-        with urllib.request.urlopen(req, timeout=api.TIMEOUT) as resp:
-            raw = resp.read()
+        raw: bytes | None = cached.read_bytes()
     except OSError:
-        notices.emit("download sottotitolo fallito")
-        return None
-    if url.endswith(".gz") or raw[:2] == b"\x1f\x8b":
+        raw = _fetch_subtitle(url)
+        if raw is None:
+            notices.emit("download sottotitolo fallito")
+            return None
         with contextlib.suppress(OSError):
-            raw = gzip.decompress(raw)
-    # Written into the per-play temp dir so it is cleaned up with everything else.
+            util.atomic_write_bytes(cached, raw, prefix=".sub-")
+            util.prune_lru(
+                cached.parent, max_files=_SUB_CACHE_MAX_FILES, max_bytes=_SUB_CACHE_MAX_BYTES
+            )
+    # A per-play copy in the temp dir: retiming rewrites it in place, the cache stays pristine.
     # `lang` comes from the OpenSubtitles response (external data): keep only alnum
     # chars so a hostile value can't inject path separators / traversal into the prefix.
     lang = "".join(c for c in sub.get("lang", "") if c.isalnum()) or "sub"

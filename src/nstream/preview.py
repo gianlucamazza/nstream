@@ -240,27 +240,9 @@ def _cached_poster(url: str) -> Path | None:
 
 
 def _prune_posters(cache_dir: Path) -> None:
-    """Best-effort: evict the oldest posters (by mtime) until the cache is back under
-    `_POSTER_CACHE_MAX_FILES` / `_POSTER_CACHE_MAX_BYTES`. Called only after writing a
+    """Evict the oldest posters back under the cache bounds. Called only after writing a
     new poster (cache miss), so cache hits — the per-row hot path — pay nothing."""
-    entries = []
-    with contextlib.suppress(OSError):
-        for p in cache_dir.iterdir():
-            with contextlib.suppress(OSError):
-                if p.is_file():
-                    entries.append((p, p.stat()))
-    count = len(entries)
-    total = sum(st.st_size for _, st in entries)
-    if count <= _POSTER_CACHE_MAX_FILES and total <= _POSTER_CACHE_MAX_BYTES:
-        return
-    entries.sort(key=lambda e: e[1].st_mtime)  # oldest first; the just-written file is last
-    for p, st in entries:
-        if count <= _POSTER_CACHE_MAX_FILES and total <= _POSTER_CACHE_MAX_BYTES:
-            break
-        with contextlib.suppress(OSError):
-            p.unlink()
-            count -= 1
-            total -= st.st_size
+    util.prune_lru(cache_dir, max_files=_POSTER_CACHE_MAX_FILES, max_bytes=_POSTER_CACHE_MAX_BYTES)
 
 
 _POSTER_MAX_BYTES = 5 * 1024 * 1024

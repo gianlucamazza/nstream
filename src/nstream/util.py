@@ -160,6 +160,27 @@ def atomic_write_bytes(path: Path, data: bytes, *, prefix: str, mode: int = 0o60
         raise
 
 
+def prune_lru(cache_dir: Path, *, max_files: int, max_bytes: int) -> None:
+    """Best-effort: evict the oldest files (by mtime) of a flat cache dir until it is back
+    under `max_files` / `max_bytes`. Errors are swallowed — a cache never costs its user."""
+    entries = []
+    with contextlib.suppress(OSError):
+        for p in cache_dir.iterdir():
+            with contextlib.suppress(OSError):
+                if p.is_file():
+                    entries.append((p, p.stat()))
+    count = len(entries)
+    total = sum(st.st_size for _, st in entries)
+    entries.sort(key=lambda e: e[1].st_mtime)  # oldest first
+    for p, st in entries:
+        if count <= max_files and total <= max_bytes:
+            break
+        with contextlib.suppress(OSError):
+            p.unlink()
+            count -= 1
+            total -= st.st_size
+
+
 def load_json[T](path: Path, fallback: T) -> T:
     """Parse JSON from `path`, returning `fallback` if the file is missing, unreadable,
     corrupt, or of a different top-level type than the fallback (e.g. a list where a dict

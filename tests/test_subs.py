@@ -114,7 +114,7 @@ def test_download_subtitle_sanitizes_external_lang(monkeypatch, tmp_path):
     escape the per-play work dir (it lands in the mkstemp prefix)."""
 
     class _Resp:
-        def read(self):
+        def read(self, n=-1):
             return b"1\n00:00:00,000 --> 00:00:01,000\nhi\n"
 
         def __enter__(self):
@@ -133,7 +133,7 @@ def test_download_subtitle_sanitizes_external_lang(monkeypatch, tmp_path):
 
 def test_download_subtitle_all_bad_chars_falls_back_to_sub(monkeypatch, tmp_path):
     class _Resp:
-        def read(self):
+        def read(self, n=-1):
             return b"data"
 
         def __enter__(self):
@@ -145,6 +145,59 @@ def test_download_subtitle_all_bad_chars_falls_back_to_sub(monkeypatch, tmp_path
     monkeypatch.setattr(subs.urllib.request, "urlopen", lambda req, timeout: _Resp())
     out = subs._download_subtitle({"lang": "../", "url": "http://x/s.srt"}, str(tmp_path))
     assert out is not None and Path(out).name.startswith("sub-")
+
+
+class _Body:
+    def __init__(self, data: bytes):
+        self.data = data
+        self.calls = 0
+
+    def __call__(self, req, timeout):
+        self.calls += 1
+        return self
+
+    def read(self, n=-1):
+        return self.data if n < 0 else self.data[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_download_subtitle_caches_by_url(monkeypatch, tmp_path):
+    """A second download of the same URL (re-cast, alignment alternates) hits the cache,
+    and each call gets its own work-dir copy (retime rewrites it in place)."""
+    body = _Body(b"1\n00:00:00,000 --> 00:00:01,000\nhi\n")
+    monkeypatch.setattr(subs.urllib.request, "urlopen", body)
+    sub: Subtitle = {"lang": "ita", "url": "http://x/s.srt"}
+    a = subs._download_subtitle(sub, str(tmp_path))
+    b = subs._download_subtitle(sub, str(tmp_path))
+    assert body.calls == 1
+    assert a and b and a != b and Path(a).read_bytes() == Path(b).read_bytes() == body.data
+
+
+def test_download_subtitle_rejects_oversize(monkeypatch, tmp_path):
+    monkeypatch.setattr(subs, "_SUB_MAX_BYTES", 10)
+    monkeypatch.setattr(subs.urllib.request, "urlopen", _Body(b"x" * 11))
+    assert subs._download_subtitle({"url": "http://x/big.srt"}, str(tmp_path)) is None
+
+
+def test_download_subtitle_rejects_gzip_bomb(monkeypatch, tmp_path):
+    import gzip
+
+    monkeypatch.setattr(subs, "_SUB_MAX_DECODED", 1000)
+    monkeypatch.setattr(subs.urllib.request, "urlopen", _Body(gzip.compress(b"\0" * 5000)))
+    assert subs._download_subtitle({"url": "http://x/s.srt.gz"}, str(tmp_path)) is None
+
+
+def test_download_subtitle_gunzips(monkeypatch, tmp_path):
+    import gzip
+
+    monkeypatch.setattr(subs.urllib.request, "urlopen", _Body(gzip.compress(b"hello")))
+    out = subs._download_subtitle({"url": "http://x/s.gz"}, str(tmp_path))
+    assert out is not None and Path(out).read_bytes() == b"hello"
 
 
 def test_available_subtitle_langs_network_error(monkeypatch):
