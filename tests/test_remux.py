@@ -1043,3 +1043,14 @@ def test_live_job_copies_stereo_aac_and_downmixes_the_rest():
     job = remux._live_job("u", _cfg(), eac3, 1, 90.0)
     assert job.audio_map == "0:a:1" and job.head_s == 90.0
     assert job.audio_args == ("-c:a", "aac", "-ac", "2", "-b:a", "192k")
+
+
+def test_cast_live_ignores_the_custom_receiver(monkeypatch):
+    """The custom receiver refuses HLS (LOAD_FAILED, field 2026-10-01): live always LOADs
+    on the Default Media Receiver."""
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    remux.cast_live(
+        _cfg(cast_receiver_app_id="CA5T0001"), "T", "http://debrid/x",
+        device="10.0.0.5", audio_index=0, follow=False,
+    )  # fmt: skip
+    assert "app_id" not in seen["kwargs"]

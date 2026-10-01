@@ -958,9 +958,11 @@ def cast_live(
         )
         teardown()
         return None
-    kwargs = _bridge_meta_kwargs(
-        title, meta or caster.CastMeta(), head, app_id=(cfg.cast_receiver_app_id or "").strip()
-    )
+    # Always the Default Media Receiver: the custom receiver (cast_receiver_app_id, ADR 0013)
+    # refuses an HLS LOAD outright — LOAD_FAILED without fetching the playlist (field,
+    # 2026-10-01: app CA5T0001 failed; the default app played the same url, also with a
+    # start offset).
+    kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), head)
     kwargs["content_type"] = _HLS_TYPE
     if vtt:
         kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
