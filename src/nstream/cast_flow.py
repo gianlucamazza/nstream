@@ -25,6 +25,7 @@ What stays in the callers: device resolution, the headless volume guard (gated o
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from . import (
@@ -156,6 +157,169 @@ class CastOutcome:
     audio_degraded: bool = False
 
 
+def _defer_to_instant(
+    cfg: Config,
+    results: list[Stream],
+    opts: PlayOpts,
+    plan: cast_vet.CastAudioPlan,
+    target_lang: str,
+    *,
+    exact: int,
+    expected_s: float,
+) -> tuple[cast_vet.CastAudioPlan, str | None, bool]:
+    """ADR 0035: a soft language preference must not force a full-file fetch when a verified
+    direct cast exists at this quality. Explicit `--audio-lang` stays hard. Headless takes the
+    direct cast and reports it; a TUI asks once before dropping the primary dub.
+
+    Returns (plan, notice, safety_subs): `safety_subs` = the direct cast plays another dub, so
+    target-language subtitles become the safety net."""
+    if opts.audio_lang or not target_lang or not _cast_would_wait(cfg, plan):
+        return plan, None, False
+    instant = cast_vet.find_instant_direct(
+        cfg, results, tuple(cfg.audio_langs), exact_resolution=exact, expected_s=expected_s
+    )
+    if instant is None or instant.stream is plan.stream:
+        return plan, None, False
+    take = instant.real_lang == target_lang
+    if not take:
+        if opts.interactive and opts.confirm is not None:
+            take = opts.confirm(
+                f"«{target_lang}» solo dopo il download completo. "
+                f"Parto subito in {instant.real_lang}?",
+                True,
+            )
+        else:
+            take = True
+    if not take:
+        return plan, None, False
+    if instant.real_lang != target_lang:
+        notice = cast_vet.instant_defer_notice(plan, instant, target_lang)
+        print(f"nstream: {notice}", file=sys.stderr)
+        return instant, notice, True
+    print("nstream: release diretta nella stessa lingua, salto il remux", file=sys.stderr)
+    return instant, None, False
+
+
+@dataclass(frozen=True)
+class _Settled:
+    """The stream the delivery will use, and what it needs (see `_settle`)."""
+
+    plan: cast_vet.CastAudioPlan
+    chosen: Stream
+    bad_video: str
+    container: str
+    needs_rewrap: bool
+    needs_remux: bool
+    refused_mirror: str  # the remux refusal the mirror stands in for ("" = none)
+    notice: str | None  # set when a direct release replaced a refused remux
+
+
+def _settle(
+    cfg: Config,
+    results: list[Stream],
+    opts: PlayOpts,
+    plan: cast_vet.CastAudioPlan,
+    chosen: Stream,
+    bad_video: str,
+    *,
+    exact: int,
+    expected_s: float,
+) -> _Settled:
+    """Settle the stream and decide what delivering it needs, feasibility included.
+
+    The language reselect only offers video-castable candidates (its guard shares the video
+    vetting), so a swap clears the bad-video verdict along with the stream. Once settled,
+    every branch dereferences `chosen["url"]`: asserted once, honestly (ADR 0031 appendix —
+    the KeyError: 'url' crash site). Remux is a codec decision orthogonal to language: an
+    `absent` fallback whose default track is Dolby/DTS must be remuxed too (`needs_remux`),
+    and a DMR-incompatible container on the SETTLED stream forces the Tier-2 rewrap to MP4
+    (ADR 0022). Feasibility is decided BEFORE committing to a whole-file prepare (ADR 0036):
+    the mirror stands in, else a verified direct release, else `CastRemuxInfeasible`."""
+    if plan.stream is not chosen:
+        bad_video = ""
+    chosen = plan.stream
+    if not chosen.get("url"):
+        raise CastStreamUnresolved()
+    container = cast_vet.cast_container(cfg, chosen)
+    needs_rewrap = not quality.container_castable(container)
+    needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
+    refused_mirror, notice = "", None
+    if needs_remux and not opts.mirror:
+        why = remux.refusal(cfg, quality.parse_stream(chosen).size_gb, interactive=opts.interactive)
+        if why:
+            mirror_ok_now = mirror.available()
+            if opts.mirror is None and mirror_ok_now:
+                refused_mirror = why
+            else:
+                langs = (opts.audio_lang,) if opts.audio_lang else tuple(cfg.audio_langs)
+                alt = cast_vet.find_instant_direct(
+                    cfg, results, langs, exact_resolution=exact, expected_s=expected_s
+                )
+                if alt is None or alt.stream is chosen:
+                    if not mirror_ok_now and opts.mirror is None:
+                        why = f"{why}; mirror non disponibile ({mirror.unavailable_reason()})"
+                    raise CastRemuxInfeasible(why)
+                notice = f"{why} → cast diretto {alt.real_lang or '?'}"
+                print(f"nstream: {notice}", file=sys.stderr)
+                plan, chosen, bad_video = alt, alt.stream, ""
+                if not chosen.get("url"):
+                    raise CastStreamUnresolved()
+                container = cast_vet.cast_container(cfg, chosen)
+                needs_rewrap = needs_remux = False
+    return _Settled(
+        plan, chosen, bad_video, container, needs_rewrap, needs_remux, refused_mirror, notice
+    )
+
+
+def _mirror_choice(
+    cfg: Config,
+    opts: PlayOpts,
+    info: quality.StreamInfo,
+    *,
+    needs_remux: bool,
+    bad_video: str,
+    refused_mirror: str,
+    available: Callable[[], bool],
+) -> tuple[bool, str | None, bool]:
+    """Whether to deliver through the mirror, with its notice and whether the notice is
+    also a status line. Pure apart from the `available` probe (called lazily, only when a
+    mirror is in play).
+
+    The DMR plays AAC/HEVC/4K/HDR natively and instantly — strictly better than the mirror
+    (1080p SDR re-encode, latency) — so mirroring only helps when the DMR can't take the file:
+    - `bad_video` (ADR 0017) or a refused remux (ADR 0036): mpv decodes locally, the only way
+      left to show the title;
+    - an explicit `--mirror` (ADR 0023) forces it even for a decodable title;
+    - with NO per-invocation preference (`opts.mirror is None`, ADR 0021), a remux that would
+      be a pathological multi-GB fetch auto-switches to it (ADR 0015)."""
+    force = bool(bad_video) or bool(refused_mirror)
+    if not ((needs_remux or force or opts.mirror is True) and available()):
+        return False, None, False
+    auto = opts.mirror is None and _remux_is_pathological(info, cfg.cast_mirror_over_remux_gb)
+    if not (opts.mirror is True or auto or force):
+        return False, None, False
+    if refused_mirror and not bad_video:
+        return True, f"{refused_mirror} → mirror 1080p (decodifica locale)", False
+    if force:
+        return (
+            True,
+            f"video {bad_video.upper()} non decodificabile dal TV"
+            " → mirror 1080p (decodifica locale)",
+            False,
+        )
+    if auto:
+        size = f" (~{info.size_gb:.0f} GB)" if info.size_gb else ""
+        return (
+            True,
+            (
+                f"remux troppo pesante{size} → mirror 1080p SDR "
+                f"(soglia {cfg.cast_mirror_over_remux_gb} GB; avvio immediato)"
+            ),
+            True,
+        )
+    return True, None, False
+
+
 @log.phase("run_cast")
 def run_cast(
     cfg: Config,
@@ -223,83 +387,18 @@ def run_cast(
     # verified direct cast exists at this quality. Explicit `--audio-lang` stays hard.
     # Headless takes the direct cast and reports it; a TUI asks once before dropping
     # the primary dub.
-    notice_defer: str | None = None
-    if not opts.audio_lang and target_lang and _cast_would_wait(cfg, plan):
-        instant = cast_vet.find_instant_direct(
-            cfg,
-            results,
-            tuple(cfg.audio_langs),
-            exact_resolution=exact,
-            expected_s=expected_runtime_s,
-        )
-        if instant is not None and instant.stream is not plan.stream:
-            take = instant.real_lang == target_lang
-            if not take:
-                if opts.interactive and opts.confirm is not None:
-                    take = opts.confirm(
-                        f"«{target_lang}» solo dopo il download completo. "
-                        f"Parto subito in {instant.real_lang}?",
-                        True,
-                    )
-                else:
-                    take = True
-            if take:
-                if instant.real_lang != target_lang:
-                    notice_defer = cast_vet.instant_defer_notice(plan, instant, target_lang)
-                    print(f"nstream: {notice_defer}", file=sys.stderr)
-                    if not opts.sub_lang:
-                        safety_sub_lang = target_lang
-                else:
-                    print(
-                        "nstream: release diretta nella stessa lingua, salto il remux",
-                        file=sys.stderr,
-                    )
-                plan = instant
-    if plan.stream is not chosen:
-        # The language reselect only offers video-castable candidates (its guard shares
-        # this vetting), so a swap clears the bad-video verdict along with the stream.
-        bad_video = ""
-    chosen = plan.stream
-    # The stream has settled: from here every branch dereferences `chosen["url"]`. Assert it
-    # once, honestly, instead of four `.get()`s that would each cast a url-less stream a
-    # different wrong way (ADR 0031 appendix — this is the KeyError: 'url' crash site).
-    if not chosen.get("url"):
-        raise CastStreamUnresolved()
-    # Remux is a codec decision, orthogonal to language availability: `remux` mode selects a
-    # target-language track, but an `absent` fallback whose default track is Dolby/DTS must be
-    # remuxed too, or it casts silent (the DMR can't decode it). `plan.needs_remux` carries that.
-    # A DMR-incompatible container (.mkv) on the SETTLED stream also forces the Tier-2 rewrap to
-    # MP4 (ADR 0022) — the guarantee that no path hands the DMR an .mkv LOAD, whichever release
-    # the audio reselect landed on. A decodable-audio rewrap is `-c:v copy -c:a copy` (remux.py).
-    final_container = cast_vet.cast_container(cfg, chosen)
-    needs_rewrap = not quality.container_castable(final_container)
-    needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
-    # Decide feasibility BEFORE committing to a whole-file prepare: a refused remux used to
-    # degrade to a direct cast of the undecodable file (mute TV, `ok: true`). Order of
-    # stand-ins: the mirror (decodes locally), a verified direct release, else fail honestly.
-    refused_mirror = ""
-    if needs_remux and not opts.mirror:
-        why = remux.refusal(cfg, quality.parse_stream(chosen).size_gb, interactive=opts.interactive)
-        if why:
-            mirror_ok_now = mirror.available()
-            if opts.mirror is None and mirror_ok_now:
-                refused_mirror = why
-            else:
-                langs = (opts.audio_lang,) if opts.audio_lang else tuple(cfg.audio_langs)
-                alt = cast_vet.find_instant_direct(
-                    cfg, results, langs, exact_resolution=exact, expected_s=expected_runtime_s
-                )
-                if alt is None or alt.stream is chosen:
-                    if not mirror_ok_now and opts.mirror is None:
-                        why = f"{why}; mirror non disponibile ({mirror.unavailable_reason()})"
-                    raise CastRemuxInfeasible(why)
-                notice_defer = f"{why} → cast diretto {alt.real_lang or '?'}"
-                print(f"nstream: {notice_defer}", file=sys.stderr)
-                plan, chosen, bad_video = alt, alt.stream, ""
-                if not chosen.get("url"):
-                    raise CastStreamUnresolved()
-                final_container = cast_vet.cast_container(cfg, chosen)
-                needs_rewrap = needs_remux = False
+    plan, notice_defer, safety_from_defer = _defer_to_instant(
+        cfg, results, opts, plan, target_lang, exact=exact, expected_s=expected_runtime_s
+    )
+    if safety_from_defer and not opts.sub_lang:
+        safety_sub_lang = target_lang
+    st = _settle(
+        cfg, results, opts, plan, chosen, bad_video, exact=exact, expected_s=expected_runtime_s
+    )
+    plan, chosen, bad_video = st.plan, st.chosen, st.bad_video
+    final_container, needs_rewrap, needs_remux = st.container, st.needs_rewrap, st.needs_remux
+    refused_mirror = st.refused_mirror
+    notice_defer = st.notice or notice_defer
     # No dub carries the target language: cast the best pick anyway, with target-language
     # subtitles as a safety net (mirrors the local guard). Printed on both paths (norm. 1).
     # An EXPLICIT `--sub-lang` wins over this primary-language safety default: the user asked
@@ -335,38 +434,17 @@ def run_cast(
     # a 30-60 GB fetch, at the cost of 1080p SDR. Below the size threshold the remux still wins
     # (native video/HDR). An EXPLICIT `--mirror` now forces the mirror even for a decodable
     # title (ADR 0023): the manual intent wins, mirroring how `--no-mirror` suppresses it.
-    info = quality.parse_stream(chosen)
-    # `bad_video` forces the mirror regardless of audio: mpv decodes the legacy video
-    # locally, the only remaining way to show this title on the TV (availability was
-    # already vetted above — reaching here with `bad_video` implies mirror.available()).
-    force_mirror = bool(bad_video) or bool(refused_mirror)
-    mirror_ok = (needs_remux or force_mirror or opts.mirror is True) and mirror.available()
-    # Tri-state opts.mirror (ADR 0021): the ADR-0015 auto-switch applies only when the
-    # user expressed NO per-invocation preference (None); --no-mirror (False) suppresses
-    # it without touching the global config knob.
-    auto_mirror = (
-        mirror_ok
-        and opts.mirror is None
-        and _remux_is_pathological(info, cfg.cast_mirror_over_remux_gb)
-    )
-    if mirror_ok and (opts.mirror is True or auto_mirror or force_mirror):
-        if refused_mirror and not bad_video:
-            notice = f"{refused_mirror} → mirror 1080p (decodifica locale)"
+    use_mirror, mirror_notice, loud = _mirror_choice(
+        cfg, opts, quality.parse_stream(chosen),
+        needs_remux=needs_remux, bad_video=bad_video, refused_mirror=refused_mirror,
+        available=mirror.available,
+    )  # fmt: skip
+    if use_mirror:
+        if mirror_notice:
+            notice = mirror_notice
             print(f"nstream: {notice}", file=sys.stderr)
-        elif force_mirror:
-            notice = (
-                f"video {bad_video.upper()} non decodificabile dal TV"
-                " → mirror 1080p (decodifica locale)"
-            )
-            print(f"nstream: {notice}", file=sys.stderr)
-        elif auto_mirror:
-            size = f" (~{info.size_gb:.0f} GB)" if info.size_gb else ""
-            notice = (
-                f"remux troppo pesante{size} → mirror 1080p SDR "
-                f"(soglia {cfg.cast_mirror_over_remux_gb} GB; avvio immediato)"
-            )
-            print(f"nstream: {notice}", file=sys.stderr)
-            ui.status(notice, kind="tv")
+            if loud:
+                ui.status(notice, kind="tv")
         delivery = mirror.cast_via_mirror(
             cfg, title, chosen["url"],
             device=device, start=start, sub_paths=sub_paths, follow=follow,

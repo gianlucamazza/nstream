@@ -1028,3 +1028,41 @@ def test_failed_remux_reports_audio_unverified(monkeypatch):
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     out = _run(_opts(mirror=None), stream)
     assert out.audio_lang is None and out.audio_verified is False
+
+
+# --- _mirror_choice: the pure mirror decision (ADR 0015/0017/0021/0023/0036) -------------
+
+
+def _info(size_gb=0.0, resolution=1080):
+    return cast_flow.quality.StreamInfo(size_gb=size_gb, resolution=resolution)
+
+
+@pytest.mark.parametrize(
+    ("kw", "mirror_opt", "available", "expect"),
+    [
+        ({"needs_remux": False}, None, True, False),  # decodable title: DMR wins
+        ({"needs_remux": False}, True, True, True),  # explicit --mirror forces it
+        ({"needs_remux": True}, None, False, False),  # mirror unavailable
+        ({"needs_remux": True, "info": _info(55.0, 2160)}, None, True, True),  # pathological
+        ({"needs_remux": True, "info": _info(55.0, 2160)}, False, True, False),  # --no-mirror
+        ({"needs_remux": True, "info": _info(8.0)}, None, True, False),  # modest remux
+        ({"needs_remux": False, "bad_video": "mpeg4"}, None, True, True),  # undecodable video
+        ({"needs_remux": True, "refused_mirror": "spazio"}, None, True, True),  # ADR 0036
+    ],
+)
+def test_mirror_choice(kw, mirror_opt, available, expect):
+    info = kw.pop("info", _info())
+    use, _notice, _loud = cast_flow._mirror_choice(
+        Config(torrentio_base="tb"), _opts(mirror=mirror_opt), info,
+        needs_remux=kw.get("needs_remux", False), bad_video=kw.get("bad_video", ""),
+        refused_mirror=kw.get("refused_mirror", ""), available=lambda: available,
+    )  # fmt: skip
+    assert use is expect
+
+
+def test_mirror_choice_probes_availability_lazily():
+    use, _, _ = cast_flow._mirror_choice(
+        Config(torrentio_base="tb"), _opts(), _info(),
+        needs_remux=False, bad_video="", refused_mirror="", available=_boom("not needed"),
+    )  # fmt: skip
+    assert use is False
