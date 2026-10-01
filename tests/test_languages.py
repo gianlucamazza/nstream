@@ -69,3 +69,9 @@ def test_track_lang_from_title_when_untagged():
     assert languages.track_lang("und", "English (United States) [Audio Description]") == "eng"
     assert languages.track_lang("und", "Audio Latino 5.1") == "spa"  # LAT-family token
     assert languages.track_lang("und", "Commentary track") is None  # no language named
+
+
+def test_bcp47_prefers_two_letter_alias():
+    assert languages.bcp47("ita") == "it"
+    assert languages.bcp47("multi") == "multi"
+    assert languages.bcp47("xyz") == "xyz"

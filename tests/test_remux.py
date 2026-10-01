@@ -814,8 +814,9 @@ def test_stop_tears_down_tracked_server(monkeypatch, tmp_path):
 
 
 def test_cast_file_detached_copies_srt_out_of_workdir(monkeypatch, tmp_path):
-    """follow=False: the srt lives in the caller's dying temp dir → copied beside the
-    remux (same GC/teardown lifecycle) and catt is pointed at the copy."""
+    """follow=False: the subtitle lives in the caller's dying temp dir → converted to our
+    cleaned WebVTT, copied beside the remux (same GC/teardown lifecycle) and catt is
+    pointed at the copy (catt's own SRT reader mangles CP1252 text)."""
     f = _tmp_remux(tmp_path)
     sub = tmp_path / "workdir-sub.srt"
     sub.write_text("1\n00:00:00,000 --> 00:00:01,000\nciao\n")
@@ -824,8 +825,9 @@ def test_cast_file_detached_copies_srt_out_of_workdir(monkeypatch, tmp_path):
         _cfg(), "T", str(f), device="10.0.0.5", sub_paths=(str(sub),), follow=False
     )
     assert (out.pos, out.dur, out.subs_delivered) == (0.0, 0.0, True)
-    sidecar = tmp_path / "cast-x.mp4.srt"
-    assert sidecar.exists() and sidecar.read_text() == sub.read_text()
+    sidecar = tmp_path / "cast-x.mp4.vtt"
+    assert sidecar.exists() and sidecar.read_text().startswith("WEBVTT")
+    assert "00:00:00.000 --> 00:00:01.000\nciao" in sidecar.read_text()
     args, _kw = rec["popen"][0]
     assert args[-2:] == ["-s", str(sidecar)]
 

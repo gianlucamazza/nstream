@@ -41,22 +41,30 @@ def test_failed_after_started_is_no_fallback(monkeypatch):
     assert (out.pos, out.dur) == (10.0, 100.0)
 
 
-def test_tracks_position_and_finish_heuristic(monkeypatch):
+def test_tracks_position_and_confirmed_tracks(monkeypatch):
     out = _drive(
         monkeypatch,
         [
-            {"kind": "started"},
-            {"kind": "playing", "position": 50.0, "duration": 100.0},
+            {"kind": "started", "tracks": [1]},
+            {"kind": "playing", "position": 50.0, "duration": 100.0, "tracks": []},
             {"kind": "ended", "position": 98.0, "duration": 100.0},
         ],
     )
-    assert out == cast_delivery.BridgeOutcome(98.0, 100.0, True, True, False)
-    # a stop mid-runtime is NOT finished (no binge-ahead on a manual stop)
-    out = _drive(
-        monkeypatch,
-        [{"kind": "started"}, {"kind": "ended", "position": 20.0, "duration": 100.0}],
-    )
-    assert out is not None and out.finished is False
+    # an empty echo never erases a confirmation already seen
+    assert out == cast_delivery.BridgeOutcome(98.0, 100.0, True, False, tracks=(1,))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "tracks", "expected"),
+    [
+        ({}, (), False),  # nothing side-loaded
+        ({"subtitle_url": "u"}, (), True),  # receiver reports nothing: unknown, not a downgrade
+        ({"subtitle_url": "u"}, (1,), True),  # confirmed
+        ({"subtitle_url": "u"}, (2,), False),  # receiver activated something else
+    ],
+)
+def test_caption_active(kwargs, tracks, expected):
+    assert cast_delivery.caption_active(kwargs, tracks) is expected
 
 
 def test_on_started_fires_once(monkeypatch):
@@ -94,7 +102,7 @@ def test_disconnect_hook_breaks_and_flags(monkeypatch):
     )
     assert out is not None and out.disconnected and out.pos == 42.0
     assert told == [42.0]
-    assert out.finished is False  # the ended event after the break was not consumed
+    assert out.pos != 99.0  # the ended event after the break was not consumed
 
 
 def test_disconnect_without_hook_keeps_following(monkeypatch):
@@ -107,7 +115,7 @@ def test_disconnect_without_hook_keeps_following(monkeypatch):
         ],
     )
     assert out is not None and out.disconnected is False  # stream left to end on its own
-    assert out.pos == 99.0 and out.finished
+    assert out.pos == 99.0 and cast_delivery.is_finished(out.pos, out.dur)
 
 
 def _interrupting_load(events_before_interrupt):

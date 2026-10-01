@@ -63,16 +63,31 @@ class CastResult(NamedTuple):
 
 
 class BridgeOutcome(NamedTuple):
-    """What one bridge cast did. `finished` is the advance heuristic (ended at ≥
-    CAST_DONE of the runtime); `disconnected` means the daemon socket died mid-cast
-    (NOT a playback end — the receiver may still be streaming)."""
+    """What one bridge cast did. `disconnected` means the daemon socket died mid-cast
+    (NOT a playback end — the receiver may still be streaming); `tracks` are the active
+    track ids the receiver last confirmed (ADR 0016, empty = not reported). The advance
+    decision is `is_finished(pos, dur)`, taken by `cast_flow` (ADR 0029)."""
 
     pos: float
     dur: float
     started: bool
-    finished: bool
     disconnected: bool
     error: str | None = None  # "receiver_error" when the TV refused the media pre-start
+    tracks: tuple[int, ...] = ()
+
+
+# castbridge gives the side-loaded caption track this id (cast repo,
+# native/castbridge/media_receiver_client.cc) and lists it in the LOAD's activeTrackIds.
+CAPTION_TRACK_ID = 1
+
+
+def caption_active(load_kwargs: dict, tracks: tuple[int, ...]) -> bool:
+    """Whether the caption track a LOAD side-loaded is really on screen: sent, and either
+    confirmed active by the receiver or not reported at all (a receiver that echoes no
+    `activeTrackIds` is 'unknown', never a downgrade of what was sent — ADR 0016)."""
+    if not load_kwargs.get("subtitle_url"):
+        return False
+    return not tracks or CAPTION_TRACK_ID in tracks
 
 
 def drive_bridge(
@@ -107,8 +122,8 @@ def drive_bridge(
       the default when no hook is given).
     """
     started = False
-    finished = False
     disconnected = False
+    tracks: tuple[int, ...] = ()
     pos = dur = 0.0
     events = bridge.cast_load(device, url, follow=follow, **load_kwargs)
     try:
@@ -120,7 +135,7 @@ def drive_bridge(
                     # The TV reached and refused the media: catt would hand it the same
                     # url and report a false start. Only transport failures fall back.
                     _log.warning("ricevitore ha rifiutato il media: %s", ev.get("message") or "?")
-                    return BridgeOutcome(pos, dur, False, False, False, error=err)
+                    return BridgeOutcome(pos, dur, False, False, error=err)
                 _log.warning(
                     "castbridge non partito (%s: %s) → fallback catt",
                     err,
@@ -131,13 +146,13 @@ def drive_bridge(
                 started = True
                 if on_started:
                     on_started()
+            if isinstance(ev.get("tracks"), list) and ev["tracks"]:
+                tracks = tuple(ev["tracks"])
             if on_event:
                 on_event(ev)
             if kind in ("playing", "paused", "ended", "disconnected"):
                 pos = float(ev.get("position") or pos)
                 dur = float(ev.get("duration") or dur)
-            if kind == "ended":
-                finished = is_finished(pos, dur)
             if kind == "disconnected" and on_disconnect is not None:
                 on_disconnect(pos)
                 disconnected = True
@@ -148,4 +163,4 @@ def drive_bridge(
             raise
     finally:
         events.close()
-    return BridgeOutcome(pos, dur, started, finished, disconnected)
+    return BridgeOutcome(pos, dur, started, disconnected, tracks=tracks)

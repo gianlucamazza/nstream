@@ -367,15 +367,24 @@ def _cast_via_bridge(
         kwargs["app_id"] = app_id
         notices.emit(f"ricevitore custom {app_id}")
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
-    sub_shutdown, sub_delivered = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
+    sub_shutdown = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
 
     def announce() -> None:
         # Title already printed as the play banner in the interactive path; keep it for
         # Alt-C / paths that jump straight to cast without that banner.
         ui.cast_live(device, follow=follow)
 
-    # Shared driver (ADR 0011). No on_interrupt hook: interactive semantics — Ctrl-C
-    # stops following (the driver already stopped the receiver) and keeps the result.
+    def abort(started: bool) -> bool:
+        # Fire-and-return (headless) Ctrl-C is a user abort, like the Tier-2 path: drop the
+        # detached subtitle server and re-raise, so `cast` does not fall back to catt
+        # re-casting what was just cancelled (the swallowed interrupt used to do exactly
+        # that). Following (interactive) keeps the "stop following" semantics.
+        if follow:
+            return False
+        serve.reap_sub_server()
+        return True
+
+    # Shared driver (ADR 0011).
     try:
         out = cast_delivery.drive_bridge(
             device,
@@ -384,6 +393,7 @@ def _cast_via_bridge(
             load_kwargs=kwargs,
             on_event=on_event,
             on_started=announce,
+            on_interrupt=abort,
         )
     finally:
         if sub_shutdown is not None:  # in-process (follow) server: tear down with the cast
@@ -392,7 +402,7 @@ def _cast_via_bridge(
         return None
     # The bridge reached the receiver: `out.started` is an observation, not an assumption.
     return cast_delivery.CastResult(
-        out.pos, out.dur, sub_delivered,
+        out.pos, out.dur, cast_delivery.caption_active(kwargs, out.tracks),
         started=out.started,
         error=None if out.started else (out.error or "cast_never_started"),
     )  # fmt: skip
@@ -400,35 +410,39 @@ def _cast_via_bridge(
 
 def _serve_subtitle(
     vtt: str | None, device: str, sub_lang: str | None, follow: bool, kwargs: dict
-) -> tuple[Callable[[], None] | None, bool]:
-    """Serve `vtt` (if any) for a Tier-1 direct cast and add its URL to `kwargs`. Returns
-    `(shutdown_callable_or_None, subs_delivered)`. `follow` → an in-process server whose
-    `shutdown` the caller must call; fire-and-return → a detached single-slot server (no
-    shutdown callable — reaped by the next cast / `--stop`)."""
+) -> Callable[[], None] | None:
+    """Serve `vtt` (if any) for a Tier-1 direct cast and add its caption-track args to
+    `kwargs` (their presence is what `caption_active` reads). `follow` → an in-process
+    server whose returned `shutdown` the caller must call; fire-and-return → a detached
+    single-slot server (None returned — reaped by the next cast / `--stop`)."""
     if not vtt:
-        return None, False
+        return None
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
     serve.reap_sub_server()  # only one cast plays at a time → drop any leftover VTT server
     if follow:
         server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt)
-        kwargs["subtitle_url"] = serve.served_sub_url(bind_ip, port, server.token)
-        if sub_lang:
-            kwargs["subtitle_lang"] = sub_lang
-        return server.shutdown, True
+        kwargs.update(serve.caption_kwargs(bind_ip, port, server.token, sub_lang))
+        return server.shutdown
     # The VTT lives in the per-play work_dir, which dies with this process, while the
     # detached server opens it PER REQUEST and the receiver re-fetches the track (seek):
     # serve a persisted copy instead, reaped together with the server.
     persisted = serve.persist_sub(vtt)
     spawned = serve.spawn_detached(bind_ip, sub_path=persisted or vtt)
     if spawned is None:
-        return None, False
+        return None
     pid, port, token = spawned
     serve.register_sub_server(pid, persisted)
-    kwargs["subtitle_url"] = serve.served_sub_url(bind_ip, port, token)
-    if sub_lang:
-        kwargs["subtitle_lang"] = sub_lang
-    return None, True
+    kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
+    return None
+
+
+def catt_sub(sub_path: str) -> str:
+    """The subtitle file to hand catt: our cleaned UTF-8 WebVTT. catt's own SRT path reads
+    the file as UTF-8-or-ISO-8859-15 (curly quotes and ellipses of a CP1252 file turn into
+    garbage) and converts by regex, keeping the ASS/`<font>` tags a receiver shows or
+    chokes on. Falls back to the original file when the conversion fails."""
+    return srt.to_vtt(sub_path) or sub_path
 
 
 def _emit(on_event: EventCb | None, kind: str, **fields) -> None:
@@ -464,7 +478,7 @@ def _cast_via_catt(
     if start and start > 1:
         launch += ["-t", str(int(start))]
     if sub_paths:  # catt takes a single subtitle file
-        launch += ["-s", sub_paths[0]]
+        launch += ["-s", catt_sub(sub_paths[0])]
     dest = device or "Chromecast"
     # Never log the URL itself: the redaction regexes cover the known token carriers, but a
     # signed native-CDN link (TorBox/Premiumize requestdl) is a capability in its own right

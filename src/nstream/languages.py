@@ -77,6 +77,14 @@ def name(code: str) -> str:
     return lang.name if lang else code.upper()
 
 
+def bcp47(code: str) -> str:
+    """The BCP-47 tag a Cast receiver expects for a caption track (`ita` → `it`): the
+    two-letter alias when one exists, else the code unchanged."""
+    lang = by_code.get(code)
+    two = next((a for a in lang.aliases if len(a) == 2), None) if lang else None
+    return two or code
+
+
 def normalize(tag: str) -> str | None:
     """Map any language tag (ISO-639-1/2, release token, or name) to the canonical code,
     or None if unknown. Used to match ffprobe track tags (often 2-letter, e.g. `it`/`en`)

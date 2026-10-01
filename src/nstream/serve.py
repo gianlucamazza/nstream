@@ -43,7 +43,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import log, util
+from . import languages, log, util
 
 _log = log.get_logger("serve")
 
@@ -94,6 +94,17 @@ def served_url(ip: str, port: int, token: str) -> str:
 
 def served_sub_url(ip: str, port: int, token: str) -> str:
     return f"http://{ip}:{port}{sub_url_path(token)}"
+
+
+def caption_kwargs(bind_ip: str, port: int, token: str, lang: str | None) -> dict[str, str]:
+    """The `bridge.cast_load` args side-loading the served WebVTT as a caption track: its
+    url, the BCP-47 language the receiver expects and a display name for its track menu.
+    The one place both cast tiers (direct and Tier-2) build them."""
+    out = {"subtitle_url": served_sub_url(bind_ip, port, token)}
+    if lang:
+        out["subtitle_lang"] = languages.bcp47(lang)
+        out["subtitle_name"] = languages.name(lang)
+    return out
 
 
 def _lan_subnet(host_ip: str) -> str:

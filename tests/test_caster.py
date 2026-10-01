@@ -4,6 +4,7 @@ loop (resume/auto-advance), and the in-cast audio-language switch."""
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -697,3 +698,57 @@ def test_status_asks_the_receiver_once(monkeypatch):
     monkeypatch.setattr(caster, "_bridge_track_info", lambda dev: ([], None))
     st = caster.status("10.0.0.9")
     assert calls == ["10.0.0.9"] and st["player_state"] == "IDLE" and st["volume"] is None
+
+
+def test_headless_bridge_ctrl_c_aborts_without_catt_fallback(monkeypatch):
+    """Fire-and-return Ctrl-C during the LOAD is a user abort: it re-raises (no catt
+    re-cast of what was just cancelled) and reaps the detached subtitle server."""
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(caster.bridge, "stop", lambda device: None)
+
+    def fake_load(ip, url, *, follow=True, **meta):
+        raise KeyboardInterrupt
+        yield {}
+
+    monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
+    monkeypatch.setattr(caster, "_cast_via_catt", lambda *a, **k: pytest.fail("no fallback"))
+    reaped = []
+    monkeypatch.setattr(caster.serve, "reap_sub_server", lambda: reaped.append(1) or True)
+    with pytest.raises(KeyboardInterrupt):
+        caster.cast(CFG, "Dune", "http://x", device="1.2.3.4", follow=False)
+    assert reaped
+
+
+def test_bridge_subs_delivered_reads_receiver_confirmation(monkeypatch, tmp_path):
+    """`subs_delivered` follows the receiver's activeTrackIds, not the intent: a caption
+    track the TV did not activate is not reported as delivered."""
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(caster.serve, "lan_ip", lambda device: "127.0.0.1")
+    monkeypatch.setattr(caster.serve, "ensure_firewall", lambda ip: None)
+    sub = tmp_path / "s.srt"
+    sub.write_text("1\n00:00:00,000 --> 00:00:01,000\nciao\n")
+    seen: dict = {}
+
+    def run(tracks):
+        def fake_load(ip, url, *, follow=True, **meta):
+            seen.update(meta)
+            yield {"kind": "started", "title": "Dune", "tracks": tracks}
+            yield {"kind": "ended", "position": 1.0, "duration": 1.0}
+
+        monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
+        return caster.cast(
+            CFG, "Dune", "http://x", device="1.2.3.4", sub_paths=(str(sub),), sub_lang="ita"
+        )
+
+    assert run([1]).subs_delivered is True
+    assert seen["subtitle_lang"] == "it" and seen["subtitle_name"] == "Italiano"
+    assert run([2]).subs_delivered is False
+
+
+def test_catt_gets_the_cleaned_webvtt(tmp_path):
+    sub = tmp_path / "s.srt"
+    sub.write_bytes("1\n00:00:00,000 --> 00:00:01,000\n{\\an8}\x93ciao\x94\n".encode("latin-1"))
+    out = caster.catt_sub(str(sub))
+    assert out.endswith(".vtt")
+    assert "“ciao”" in Path(out).read_text(encoding="utf-8")
+    assert caster.catt_sub("/nonexistent.srt") == "/nonexistent.srt"

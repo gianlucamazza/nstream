@@ -529,12 +529,14 @@ def cast_file(
         if result is not None:
             return result
         # castbridge couldn't start → fall back to catt serving+casting below.
+    if sub_paths:
+        sub_paths = (caster.catt_sub(sub_paths[0]),)
     if sub_paths and not follow:
-        # The srt lives in the caller's per-play temp dir, which is deleted as soon as a
-        # headless fire-and-return returns — under a detached catt that may still have to
-        # serve it. Keep a copy beside the remux (`<file_path>.srt`), on the same
+        # The subtitle lives in the caller's per-play temp dir, which is deleted as soon as
+        # a headless fire-and-return returns — under a detached catt that may still have to
+        # serve it. Keep a copy beside the remux (`<file_path>.vtt`), on the same
         # teardown/GC lifecycle as the mp4.
-        sub_copy = f"{file_path}.srt"
+        sub_copy = f"{file_path}{os.path.splitext(sub_paths[0])[1] or '.srt'}"
         with contextlib.suppress(OSError):
             shutil.copyfile(sub_paths[0], sub_copy)
             sub_paths = (sub_copy,)
@@ -668,11 +670,8 @@ def _cast_file_via_bridge(
             _rm(vtt_persist)
             return None
         pid, port, token = spawned
-        sub_url = serve.served_sub_url(bind_ip, port, token) if vtt_persist else ""
-        if sub_url:
-            kwargs["subtitle_url"] = sub_url
-            if sub_lang:
-                kwargs["subtitle_lang"] = sub_lang
+        if vtt_persist:
+            kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
 
         def abort(started: bool) -> bool:
             # User abort during the headless startup wait — the driver already stopped
@@ -700,17 +699,16 @@ def _cast_file_via_bridge(
             return None
         _write_state(pid, file_path, device, mode="serve")
         ui.cast_live(device, follow=False)
-        return cast_delivery.CastResult(0.0, 0.0, bool(sub_url), started=True)
+        return cast_delivery.CastResult(
+            0.0, 0.0, cast_delivery.caption_active(kwargs, out.tracks), started=True
+        )
 
     # follow: in-process server (a daemon thread, dies with us); wait for playback to end.
     # The vtt lives in the caller's per-play temp dir, held open for the whole follow, so the
     # in-process server can read it live (no persist copy needed, unlike the detached path).
     server, port, _thread = serve.serve_file(file_path, bind_ip, sub_path=vtt)
-    sub_url = serve.served_sub_url(bind_ip, port, server.token) if vtt else ""
-    if sub_url:
-        kwargs["subtitle_url"] = sub_url
-        if sub_lang:
-            kwargs["subtitle_lang"] = sub_lang
+    if vtt:
+        kwargs.update(serve.caption_kwargs(bind_ip, port, server.token, sub_lang))
 
     def announce() -> None:
         ui.cast_live(device, follow=True)
@@ -762,7 +760,8 @@ def _cast_file_via_bridge(
         return cast_delivery.CastResult(0.0, 0.0, False, started=False, error=out.error)
     if not out.started:
         return None  # never started → let the caller fall back to catt
-    return cast_delivery.CastResult(out.pos, out.dur, bool(sub_url), started=True)
+    delivered = cast_delivery.caption_active(kwargs, out.tracks)
+    return cast_delivery.CastResult(out.pos, out.dur, delivered, started=True)
 
 
 def _log_catt_stderr(path: str) -> None:
