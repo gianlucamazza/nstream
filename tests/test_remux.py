@@ -1146,3 +1146,13 @@ def test_cast_live_follow_events_speak_film_time(monkeypatch, tmp_path):
     )  # fmt: skip
     assert events == [{"kind": "playing", "position": 3012.0, "duration": 6000.0}]
     assert seen["job"].ss_s == 3001.0
+
+
+def test_report_rate_records_the_link_and_warns_when_slow(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(remux.state_throughput, "record", lambda h, b: recorded.append((h, b)))
+    with remux.notices.capture() as bag:
+        remux._report_rate("http://abc.download.real-debrid.com/x", {"rate": 0.9, "bps": 2.4e6})
+        remux._report_rate("http://abc.download.real-debrid.com/x", {"rate": 8.0, "bps": 2.4e6})
+    assert recorded == [("real-debrid.com", 2.4e6)] * 2
+    assert [n.code for n in bag] == ["live_slow"]

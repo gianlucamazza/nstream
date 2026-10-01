@@ -413,6 +413,7 @@ def _lang_switch(
 
 
 @log.phase("run_cast")
+@stream_select.with_ranking_runtime
 def run_cast(
     cfg: Config,
     results: list[Stream],

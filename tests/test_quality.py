@@ -1154,3 +1154,26 @@ def test_hardsub_release_is_demoted_unless_cjk_is_preferred():
     assert playable[0].stream is clean and hard in [r.stream for r in playable]
     playable, _ = quality.rank_streams([hard, clean], _CAPS_HW, FilterSpec(audio_langs=("zho",)))
     assert playable[0].stream is hard
+
+
+def test_live_bitrate_fit_replaces_the_resolution_cap(monkeypatch):
+    """With a measured link, a remux candidate is judged by its bitrate, not by the fixed
+    1080p cap: a 6.7 GB 4K Dolby release fits a 2.4 MB/s link over 164 min, a 67 GB one
+    does not (field 2026-10-01)."""
+    monkeypatch.setattr(quality.throughput, "latest", lambda: 2.4e6)
+    cfg = Config(torrentio_base="tb", cast_remux_max_resolution=1080, audio_langs=["ita"])
+    fits: Stream = {"name": "Torrentio\n2160p", "title": "Film.2017.2160p.ITA.AC3.HEVC\n💾 6.7 GB"}
+    huge: Stream = {
+        "name": "Torrentio\n2160p",
+        "title": "Film.2017.2160p.ITA.TrueHD.REMUX\n💾 67 GB",
+    }
+    spec = FilterSpec.from_config(cfg, cast_audio=True, runtime_s=9840.0)
+    assert spec.remux_bitrate_cap == pytest.approx(0.8 * 2.4e6)
+    terms = quality.spec_components(quality.parse_stream(fits), spec)
+    assert terms["remux_within_cap"] is True and terms["remux_within_size"] is True
+    terms = quality.spec_components(quality.parse_stream(huge), spec)
+    assert terms["remux_within_cap"] is False
+    # no runtime known → the configured cap (4K Dolby over 1080 → outside)
+    plain = FilterSpec.from_config(cfg, cast_audio=True)
+    assert plain.remux_bitrate_cap == 0.0
+    assert quality.spec_components(quality.parse_stream(fits), plain)["remux_within_cap"] is False

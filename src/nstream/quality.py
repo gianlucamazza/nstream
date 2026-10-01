@@ -22,6 +22,7 @@ from pathlib import Path
 from . import config as config_mod
 from . import languages, sources, util
 from .config import Config
+from .state import throughput
 from .types import Stream
 
 _CACHE_VERSION = 2
@@ -192,6 +193,9 @@ def _cast_audio_rank(info: StreamInfo) -> int:
 # "UHD Blu-ray disc" with no codec in its name ranked first for cast, and sailed past the
 # remux size budget because nothing marked it as needing a remux.
 _DISC_SIZE_GB = 30.0
+_GIB = 1024**3
+# A live source must arrive this much faster than its bitrate (bursts, other traffic).
+_LIVE_HEADROOM = 0.8
 
 
 def _likely_needs_remux(info: StreamInfo) -> bool:
@@ -589,6 +593,12 @@ class FilterSpec:
     # Hard-filter to this exact resolution (e.g. 1080). 0 = no exact filter. Distinct from
     # `max_resolution` (hardware safety ceiling): this is a per-session quality choice.
     exact_resolution: int = 0
+    # Live Tier-2 (ADR 0039): a converted release must arrive faster than it plays. With a
+    # measured link (bytes/s) and the title's runtime, a remux candidate "fits" when its
+    # average bitrate is under the cap — replacing the fixed resolution/size budgets, which
+    # stood for the whole-file download the live tier no longer does. 0 = not measured.
+    remux_bitrate_cap: float = 0.0
+    runtime_s: float = 0.0
 
     @classmethod
     def from_config(
@@ -599,6 +609,7 @@ class FilterSpec:
         lang_filter: bool | None = None,
         title: str = "",
         exact_resolution: int = 0,
+        runtime_s: float = 0.0,
     ) -> FilterSpec:
         """Derive a spec from the user config. `cast_audio`/`lang_filter`/`exact_resolution`
         override per call (the cast path ranks against the receiver and ignores the language
@@ -618,6 +629,12 @@ class FilterSpec:
             cast_remux_max_size=remux_size_budget(cfg) if cast_audio else 0,
             title=title,
             exact_resolution=exact_resolution,
+            remux_bitrate_cap=(
+                _LIVE_HEADROOM * throughput.latest()
+                if cast_audio and cfg.cast_remux and cfg.cast_live and runtime_s > 0
+                else 0.0
+            ),
+            runtime_s=runtime_s,
         )
 
 
@@ -769,6 +786,8 @@ def score_components(
     cast_remux_cap: int = 0,
     cast_remux_size: int = 0,
     title: str = "",
+    remux_bitrate_cap: float = 0.0,
+    runtime_s: float = 0.0,
 ) -> dict[str, float | int | bool]:
     """The labelled score terms in precedence order (highest first). `_score` is just the
     tuple of these values; `explain` renders the dict — keeping both here keeps the
@@ -811,6 +830,10 @@ def score_components(
         within_remux_size = (
             not needs_remux or cast_remux_size == 0 or info.size_gb <= cast_remux_size
         )
+        if needs_remux and remux_bitrate_cap and runtime_s and info.size_gb:
+            # Live: the cost is the bitrate against the link, not the size or resolution.
+            fits = info.size_gb * _GIB / runtime_s <= remux_bitrate_cap
+            within_remux_cap = within_remux_size = fits
         return {
             "title_match": _title_guard(info, title, audio_langs),
             "no_hardsub": no_hardsub(info, audio_langs),
@@ -871,6 +894,8 @@ def spec_components(info: StreamInfo, spec: FilterSpec) -> dict[str, float | int
         cast_remux_cap=spec.cast_remux_max_resolution,
         cast_remux_size=spec.cast_remux_max_size,
         title=spec.title,
+        remux_bitrate_cap=spec.remux_bitrate_cap,
+        runtime_s=spec.runtime_s,
     )
 
 

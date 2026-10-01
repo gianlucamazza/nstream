@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
@@ -42,6 +43,7 @@ from typing import BinaryIO
 from . import bridge, cast_delivery, caster, live, log, notices, serve, srt, ui, urlproxy, util
 from . import config as config_mod
 from .config import Config
+from .state import throughput as state_throughput
 
 _log = log.get_logger("remux")
 
@@ -869,18 +871,34 @@ def _live_job(url: str, cfg: Config, audio: list, audio_index: int, head_s: floa
     return live.Job(url, amap, args, head_s=head_s)
 
 
-def _await_live(out_dir: str, target_s: float, *, failed: Callable[[], bool], label: str) -> bool:
+def _await_live(
+    out_dir: str,
+    target_s: float,
+    *,
+    failed: Callable[[], bool],
+    label: str,
+    measure: dict | None = None,
+) -> bool:
     """Wait until the playlist covers `target_s` (the resume point plus two segments).
-    False when the producer fails or makes no progress for `_LIVE_STALL_S`."""
+    False when the producer fails or makes no progress for `_LIVE_STALL_S`. `measure`
+    receives the production `rate` (media seconds per wall second, from the first segment
+    on — ffmpeg's start-up is not the link) and `bps` (segment bytes per wall second)."""
     g = ui.g().tv
     last, last_change = -1.0, time.monotonic()
     shown = -1
+    first: tuple[float, float, int] | None = None  # (wall, produced, bytes) at 1st segment
     while True:
         done = live.produced_s(out_dir)
+        now = time.monotonic()
+        if done > 0 and first is None:
+            first = (now, done, _segment_bytes(out_dir))
         if done >= target_s:
             ui.progress_done()
+            if measure is not None and first is not None and now - first[0] > 0.2:
+                dt = now - first[0]
+                measure["rate"] = (done - first[1]) / dt
+                measure["bps"] = (_segment_bytes(out_dir) - first[2]) / dt
             return True
-        now = time.monotonic()
         if done > last:
             last, last_change = done, now
         if failed() or now - last_change > _LIVE_STALL_S:
@@ -891,6 +909,35 @@ def _await_live(out_dir: str, target_s: float, *, failed: Callable[[], bool], la
             shown = pct
             ui.progress(f"{g} audio in diretta  {pct:3d}%{label}")
         time.sleep(_LIVE_POLL_S)
+
+
+def _report_rate(url: str, measure: dict) -> None:
+    """Keep the measured link throughput for the ranking (`state.throughput`) and say so
+    when the source runs too close to real time to play without stalls."""
+    rate, bps = measure.get("rate"), measure.get("bps")
+    if bps:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        state_throughput.record(".".join(host.split(".")[-2:]), bps)
+    if rate is not None and rate < _LIVE_SLOW_RATE:
+        notices.emit(
+            f"la sorgente arriva a {rate:.1f}× il tempo reale: possibili interruzioni "
+            "— prova --quality 1080",
+            code="live_slow",
+        )
+
+
+def _segment_bytes(out_dir: str) -> int:
+    total = 0
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(out_dir):
+            if entry.name.endswith(".ts"):
+                with contextlib.suppress(OSError):
+                    total += entry.stat().st_size
+    return total
+
+
+# Below this production rate a live cast will stall: the link can't feed the bitrate.
+_LIVE_SLOW_RATE = 1.2
 
 
 @log.phase("cast_live")
@@ -980,7 +1027,8 @@ def cast_live(
     label = f"  → {int(head) // 60}:{int(head) % 60:02d}" if head > 60 else ""
     try:
         target = (0.0 if fast else head) + 2 * live.SEGMENT_S
-        ready = _await_live(out_dir, target, failed=failed, label=label)
+        measure: dict = {}
+        ready = _await_live(out_dir, target, failed=failed, label=label, measure=measure)
     except BaseException:
         teardown()
         raise
@@ -991,6 +1039,7 @@ def cast_live(
         )
         teardown()
         return None
+    _report_rate(url, measure)
     # Always the Default Media Receiver: the custom receiver (cast_receiver_app_id, ADR 0013)
     # refuses an HLS LOAD outright — LOAD_FAILED without fetching the playlist (field,
     # 2026-10-01: app CA5T0001 failed; the default app played the same url, also with a

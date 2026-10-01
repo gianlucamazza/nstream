@@ -1468,3 +1468,20 @@ def test_reselects_rank_like_the_pick():
     reselect = stream_select.cast_playable(cfg, [junk, real], title="I.S.S.")
     assert pick[0] is real
     assert [r.stream for r in reselect] == pick
+
+
+def test_ranking_runtime_reaches_every_rank_of_the_play(monkeypatch):
+    """Parity by construction: whatever ranks inside a decorated play sees its runtime."""
+    seen = []
+
+    @stream_select.with_ranking_runtime
+    def play(*, expected_runtime_s: float = 0.0):
+        monkeypatch.setattr(
+            stream_select.quality.FilterSpec, "from_config",
+            classmethod(lambda cls, cfg, **k: seen.append(k["runtime_s"]) or cls()),
+        )  # fmt: skip
+        stream_select._rank(Config(torrentio_base="tb"), [], cast=True)
+
+    play(expected_runtime_s=6480.0)
+    assert seen == [6480.0]
+    assert stream_select._RUNTIME.get() == 0.0  # reset after the play

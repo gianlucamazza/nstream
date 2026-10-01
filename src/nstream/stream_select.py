@@ -9,6 +9,8 @@ Cast-path vetting: `cast_vet`."""
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import functools
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -283,6 +285,33 @@ def _pick_stream(
     return menu(StreamMenu(playable, excluded, notice, cfg.max_streams))
 
 
+# The title's expected runtime for the live bitrate fit (ADR 0039): set once per play by
+# `prepare_stream` / `cast_flow.run_cast`, so every ranking of the session — pick, listings
+# and every reselect — sees the same value without threading it through each call.
+_RUNTIME: contextvars.ContextVar[float] = contextvars.ContextVar("rank_runtime_s", default=0.0)
+
+
+@contextlib.contextmanager
+def ranking_runtime(runtime_s: float):
+    token = _RUNTIME.set(max(float(runtime_s or 0.0), 0.0))
+    try:
+        yield
+    finally:
+        _RUNTIME.reset(token)
+
+
+def with_ranking_runtime[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Run `fn` under `ranking_runtime(<its expected_runtime_s keyword>)`."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        runtime = kwargs.get("expected_runtime_s")
+        with ranking_runtime(runtime if isinstance(runtime, int | float) else 0.0):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def _rank(
     cfg: Config,
     results: list[Stream],
@@ -291,6 +320,7 @@ def _rank(
     title: str = "",
     exact_resolution: int = 0,
     lang_filter: bool = True,
+    runtime_s: float = 0.0,
 ) -> tuple[list[quality.RankedStream], list[quality.RankedStream]]:
     """THE ranking spec of a session: target profile (Chromecast or local GPU), the searched
     `title` (demotes a release Torrentio mapped under the wrong id) and the per-session
@@ -301,7 +331,7 @@ def _rank(
     caps = quality.cast_caps() if cast else quality.detect_caps()
     spec = quality.FilterSpec.from_config(
         cfg, cast_audio=cast, title=title, exact_resolution=exact_resolution,
-        lang_filter=lang_filter,
+        lang_filter=lang_filter, runtime_s=runtime_s or _RUNTIME.get(),
     )  # fmt: skip
     return quality.rank_streams(results, caps, spec)
 
@@ -798,6 +828,7 @@ class VettedStream:
 
 
 @log.phase("selection")
+@with_ranking_runtime
 def prepare_stream(
     cfg: Config, results: list[Stream], opts: PlayOpts, *,
     auto: bool, reselect_on_wrong_audio: bool, title: str = "",
