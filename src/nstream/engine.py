@@ -23,7 +23,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -32,7 +31,7 @@ import urllib.request
 from pathlib import Path
 
 from . import config as config_mod
-from . import log, ui
+from . import log, notices, ui
 from .config import Config
 from .types import Stream
 
@@ -355,18 +354,19 @@ def _p2p_gate(cfg: Config) -> None:
             # discard EngineUnavailable silently, and an invisible refusal reads as "no sources".
             if not _p2p_gate_said:
                 _p2p_gate_said = True
-                print(
-                    "nstream: nessuna VPN rilevata e p2p_require_vpn=true — streaming P2P "
+                notices.emit(
+                    "nessuna VPN rilevata e p2p_require_vpn=true — streaming P2P "
                     "bloccato.\n         Attiva la VPN, oppure usa un provider debrid.",
-                    file=sys.stderr,
+                    code="p2p_blocked",
+                    level="fail",
                 )
             raise P2PBlocked(blocked)
         if not _p2p_gate_said:
             _p2p_gate_said = True
-            print(
-                f"nstream: {ui.g().warn} nessuna VPN rilevata — "
+            notices.emit(
+                f"{ui.g().warn} nessuna VPN rilevata — "
                 "in P2P il tuo IP è visibile ai peer del torrent.",
-                file=sys.stderr,
+                code="p2p_no_vpn",
             )
     _p2p_notice_once(cfg)
 
@@ -376,10 +376,9 @@ def _p2p_notice_once(cfg: Config) -> None:
     client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback."""
     if cfg.p2p_ack:
         return
-    print(
-        "nstream: streaming P2P locale attivo — il tuo IP è visibile ai peer del torrent.\n"
+    notices.emit(
+        "streaming P2P locale attivo — il tuo IP è visibile ai peer del torrent.\n"
         "         Valuta una VPN se è una preoccupazione. (avviso mostrato una sola volta)",
-        file=sys.stderr,
     )
     with contextlib.suppress(config_mod.ConfigError, OSError):
         config_mod.save({"p2p_ack": True})
@@ -450,7 +449,6 @@ def _wait_buffer(base: str, file_hash: str) -> None:
         return
     if preloaded <= 0:  # dead torrent: never a single byte → let the caller degrade
         raise EngineUnavailable(f"nessun peer / buffer vuoto dopo {_BUFFER_TIMEOUT:.0f}s di attesa")
-    print(
-        f"nstream: {ui.g().warn} buffer parziale dopo il timeout, provo comunque…",
-        file=sys.stderr,
+    notices.emit(
+        f"{ui.g().warn} buffer parziale dopo il timeout, provo comunque…",
     )

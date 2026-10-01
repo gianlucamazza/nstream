@@ -27,6 +27,7 @@ from . import (
     headless_play,
     log,
     mirror,
+    notices,
     remux,
     series,
     state,
@@ -139,14 +140,15 @@ def run(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     (which would break the agent parsing stdout)."""
     from .playback import PlaybackError
 
-    try:
-        return run_auto(cfg, args, opts)
-    except PlaybackError as e:
-        _emit_json({"ok": False, "error": e.code, "message": str(e)})
-        return 1
-    except api.NetworkError as e:
-        _emit_json({"ok": False, "error": "network", "message": str(e)})
-        return 1
+    with notices.capture():  # domain notices reach the JSON as `notices` (ADR 0037)
+        try:
+            return run_auto(cfg, args, opts)
+        except PlaybackError as e:
+            _emit_json({"ok": False, "error": e.code, "message": str(e)})
+            return 1
+        except api.NetworkError as e:
+            _emit_json({"ok": False, "error": "network", "message": str(e)})
+            return 1
 
 
 def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:

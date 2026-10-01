@@ -36,6 +36,7 @@ from . import (
     languages,
     log,
     mirror,
+    notices,
     quality,
     remux,
     state,
@@ -194,9 +195,9 @@ def _defer_to_instant(
         return plan, None, False
     if instant.real_lang != target_lang:
         notice = cast_vet.instant_defer_notice(plan, instant, target_lang)
-        print(f"nstream: {notice}", file=sys.stderr)
+        notices.emit(f"{notice}")
         return instant, notice, True
-    print("nstream: release diretta nella stessa lingua, salto il remux", file=sys.stderr)
+    notices.emit("release diretta nella stessa lingua, salto il remux")
     return instant, None, False
 
 
@@ -260,7 +261,7 @@ def _settle(
                         why = f"{why}; mirror non disponibile ({mirror.unavailable_reason()})"
                     raise CastRemuxInfeasible(why)
                 notice = f"{why} → cast diretto {alt.real_lang or '?'}"
-                print(f"nstream: {notice}", file=sys.stderr)
+                notices.emit(f"{notice}")
                 plan, chosen, bad_video = alt, alt.stream, ""
                 if not chosen.get("url"):
                     raise CastStreamUnresolved()
@@ -437,7 +438,7 @@ def run_cast(
             safety_sub_lang = target_lang
         # The audio fact is known here; the safety-net subtitle outcome is not, and is
         # reported by `subs.report_safety_subs` below (same rule as the local path).
-        print(f"nstream: audio {target_lang} non disponibile{real}", file=sys.stderr)
+        notices.emit(f"audio {target_lang} non disponibile{real}", code="audio_lang_absent")
     # Exactly one auto_subs call, with the effective safety language (normalization 2).
     # The resolved url/filename enable the exact-file hash match (ADR 0018).
     subs_pick = subs.auto_subs(
@@ -470,7 +471,7 @@ def run_cast(
     if use_mirror:
         if mirror_notice:
             notice = mirror_notice
-            print(f"nstream: {notice}", file=sys.stderr)
+            notices.emit(f"{notice}")
             if loud:
                 ui.status(notice, kind="tv")
         delivery = mirror.cast_via_mirror(
@@ -517,7 +518,7 @@ def run_cast(
             # missing) and the DMR refuses this .mkv LOAD — mirror it (mpv decodes any
             # container) instead of a silent black direct cast.
             notice = "rewrap non disponibile → mirror 1080p (il TV non carica questo container)"
-            print(f"nstream: {notice}", file=sys.stderr)
+            notices.emit(f"{notice}")
             delivery = mirror.cast_via_mirror(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, follow=follow,
@@ -534,7 +535,7 @@ def run_cast(
                     "remux non riuscito → cast diretto: l'audio potrebbe "
                     "risultare muto o in un'altra lingua"
                 )
-                print(f"nstream: {ui.g().warn} {notice}", file=sys.stderr)
+                notices.emit(notice, code="remux_failed", render=f"nstream: {ui.g().warn} {notice}")
                 degraded_audio = True
             meta = _with_container_mime(meta, final_container)
             langs, resolver, choose_lang = _lang_switch(
@@ -551,9 +552,9 @@ def run_cast(
     if sub_paths and not subs_delivered:
         # Honesty over silence: the subtitles were fetched but not attached to the cast
         # (e.g. WebVTT conversion/serving failed, or the mirror path with no burn-in).
-        print(
-            f"nstream: {ui.g().warn} sottotitoli scaricati ma non caricati sul TV",
-            file=sys.stderr,
+        notices.emit(
+            f"{ui.g().warn} sottotitoli scaricati ma non caricati sul TV",
+            code="subs_not_delivered",
         )
     if not follow:
         # Fire-and-return handoff: a pure-torrent stream is served by the TorrServer we may

@@ -34,7 +34,8 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
   (renders a `stream_select.StreamMenu`), `caster.resolve_device(confirm=, picker=)`,
   `caster.cast(choose_lang=)`. Domain modules never import `picker`/`labels`
   (`tests/test_architecture.py`, no exceptions left)
-- Machine output: every `--json` object goes through `log.emit_json` (scrubbed)
+- Machine output: every `--json` object goes through `log.emit_json` (scrubbed); domain
+  notices go through `notices.emit` (stderr unchanged) and ride along as `notices` (ADR 0037)
 - Menus: `menus` (frontend tier) holds the TUI menus over domain data — `choose_tracks`,
   `choose_stream`
 - Failures: `failures.describe` maps a domain exception to one `Failure(code, message, hint,

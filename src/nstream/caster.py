@@ -21,7 +21,7 @@ import tty
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import bridge, cast_delivery, discovery, languages, log, serve, srt, ui, util
+from . import bridge, cast_delivery, discovery, languages, log, notices, serve, srt, ui, util
 from .config import Config
 
 _log = log.get_logger("cast")
@@ -254,7 +254,7 @@ def _switch_cast_audio(
     print(f"{ui.g().tv} cambio audio: {languages.name(lang)}…", file=sys.stderr)
     new = resolve_lang(lang)
     if not new:
-        print(f"nstream: nessuno stream {lang} compatibile col Chromecast", file=sys.stderr)
+        notices.emit(f"nessuno stream {lang} compatibile col Chromecast")
         return
     print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
@@ -365,7 +365,7 @@ def _cast_via_bridge(
     }
     if app_id:
         kwargs["app_id"] = app_id
-        print(f"nstream: ricevitore custom {app_id}", file=sys.stderr)
+        notices.emit(f"ricevitore custom {app_id}")
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
     sub_shutdown, sub_delivered = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
 
@@ -477,19 +477,19 @@ def _cast_via_catt(
             launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT
         )
     except FileNotFoundError:
-        print("nstream: catt non trovato", file=sys.stderr)
+        notices.emit("catt non trovato")
         _emit(on_event, "failed", error="catt_missing", message="catt non trovato")
         return cast_delivery.CastResult(0.0, 0.0, error="catt_missing")
     except subprocess.TimeoutExpired:
         # A catt hung on a half-dead device must not block the caller forever.
         _log.warning("catt cast bloccato oltre %.0fs → annullato", util.CATT_CAST_TIMEOUT)
-        print("nstream: cast non riuscito (timeout)", file=sys.stderr)
+        notices.emit("cast non riuscito (timeout)")
         _emit(on_event, "failed", error="cast_timeout", message="cast non riuscito (timeout)")
         return cast_delivery.CastResult(0.0, 0.0, error="cast_timeout")
     if proc.returncode != 0:
         # catt prints the cause (e.g. device unreachable); never echo the URL/token.
         _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
-        print("nstream: cast non riuscito", file=sys.stderr)
+        notices.emit("cast non riuscito")
         _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
         return cast_delivery.CastResult(0.0, 0.0, error="cast_failed")
 
@@ -534,7 +534,7 @@ def _cast_via_catt(
                     break  # went away after playing → ended
                 idle += 1
                 if idle >= _CAST_GIVEUP:
-                    print("nstream: il cast non è partito", file=sys.stderr)
+                    notices.emit("il cast non è partito")
                     break
                 continue
             pos, dur, pstate = _cast_progress(info)
@@ -545,9 +545,8 @@ def _cast_via_catt(
             # A device left at volume 0 plays silently — explain it once.
             if not warned_vol and not info.get("volume_muted") and info.get("volume_level") == 0:
                 warned_vol = True
-                print(
-                    "nstream: volume del Chromecast a 0 — alza col telecomando o 'catt volume N'",
-                    file=sys.stderr,
+                notices.emit(
+                    "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'",
                 )
             if pstate in ("PLAYING", "PAUSED", "BUFFERING") or pos > 0:
                 if not started:
@@ -559,7 +558,7 @@ def _cast_via_catt(
             else:  # not started yet, receiver idle → wait, but not forever
                 idle += 1
                 if idle >= _CAST_GIVEUP:
-                    print("nstream: il cast non è partito", file=sys.stderr)
+                    notices.emit("il cast non è partito")
                     break
     except KeyboardInterrupt:
         with contextlib.suppress(OSError, subprocess.SubprocessError):

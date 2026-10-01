@@ -11,11 +11,10 @@ Public: `source_key`, `prune_dead`, `probe_stream`, `probe_url`, `drop_unusable`
 
 from __future__ import annotations
 
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import log, net, quality, state, tracks, util
+from . import log, net, notices, quality, state, tracks, util
 from .config import Config
 from .types import Stream
 
@@ -76,7 +75,7 @@ def remember_dead(stream: Stream, probe: net.Probe) -> None:
     if not key or state.is_dead(key):
         return
     name_line = next(iter((stream.get("name") or "").splitlines()), "") or key
-    print(f"nstream: sorgente non più disponibile ({probe.reason}) — {name_line}", file=sys.stderr)
+    notices.emit(f"sorgente non più disponibile ({probe.reason}) — {name_line}")
     _log.info("sorgente morta: %s (%s)", key, probe.reason)
     state.mark_dead(key, probe.reason)
 

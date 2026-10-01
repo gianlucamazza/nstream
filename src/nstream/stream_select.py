@@ -23,6 +23,7 @@ from . import (
     engine,
     languages,
     log,
+    notices,
     quality,
     sources,
     tracks,
@@ -491,21 +492,21 @@ def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
     if chosen.get("url"):
         return chosen  # debrid/cached: ready to play
     if not chosen.get("infoHash"):
-        print("nstream: stream privo di url e infoHash, salto", file=sys.stderr)
+        notices.emit("stream privo di url e infoHash, salto")
         return None
     native = _native_resolve(cfg, chosen)
     if native:
         chosen["url"] = native
         return chosen
     if cfg.playback_backend == "native":  # native asked but unavailable → say we degrade
-        print("nstream: risoluzione debrid nativa non riuscita, ripiego su P2P…", file=sys.stderr)
+        notices.emit("risoluzione debrid nativa non riuscita, ripiego su P2P…")
     try:
         # The privacy gate runs inside engine.resolve (ADR 0032), so every resolve path —
         # including `playable_url`, which the whole cast vetting runs on — is covered.
         chosen["url"] = engine.resolve(cfg, chosen)
         return chosen
     except engine.EngineUnavailable as e:
-        print(f"nstream: {e}", file=sys.stderr)
+        notices.emit(f"{e}")
         _log.info("engine P2P non disponibile: %s", e)
         return None
 
@@ -665,7 +666,7 @@ def _ensure_playable(
     url = chosen.get("url")
     if not url or availability.probe_stream(chosen).usable:
         return chosen
-    print("nstream: la sorgente «cached» non risponde, ripiego…", file=sys.stderr)
+    notices.emit("la sorgente «cached» non risponde, ripiego…")
     if chosen.get("infoHash"):
         with contextlib.suppress(engine.EngineUnavailable):
             chosen["url"] = engine.resolve(cfg, chosen)
@@ -718,7 +719,7 @@ def vet_duration(
     verdict = _duration_ok(cfg, chosen, expected_s)
     if verdict.ok:
         return chosen
-    print(f"nstream: sorgente troncata ({verdict.reason}), ne cerco un'altra…", file=sys.stderr)
+    notices.emit(f"sorgente troncata ({verdict.reason}), ne cerco un'altra…")
     short = [chosen]
     last = verdict
     tried = 0
@@ -907,18 +908,15 @@ def prepare_stream(
                 # subtitle was actually acquired is an outcome of `subs.auto_subs`, reported
                 # by `subs.report_safety_subs` once the SubsPick exists — announcing it from
                 # this decision site printed a promise the fetch could then contradict.
-                print(
-                    f"nstream: audio non disponibile in {primary} (disponibili: {have})",
-                    file=sys.stderr,
+                notices.emit(
+                    f"audio non disponibile in {primary} (disponibili: {have})",
                 )
             else:
                 # No preferred language at all: warn and (when interactive) let the user
                 # pick another source with full track control.
                 have = "/".join(sorted(avail)) or "?"
-                print(
-                    f"nstream: nessuna traccia audio {','.join(cfg.audio_langs)} "
-                    f"(disponibili: {have})",
-                    file=sys.stderr,
+                notices.emit(
+                    f"nessuna traccia audio {','.join(cfg.audio_langs)} (disponibili: {have})",
                 )
                 if reselect_on_wrong_audio:
                     auto = False  # let choose_tracks give track control on the manual pick

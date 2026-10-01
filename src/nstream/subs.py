@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import gzip
 import os
-import sys
 import tempfile
 import urllib.parse
 import urllib.request
@@ -17,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import api, log, oshash, srt, subalign, tracks
+from . import api, log, notices, oshash, srt, subalign, tracks
 from .config import Config, PlayOpts
 from .types import Stream, Subtitle
 
@@ -52,7 +51,7 @@ def report_safety_subs(pick: SubsPick, lang: str | None) -> None:
     itself, so nothing is printed for them here.
     """
     if lang and pick.paths:
-        print(f"nstream: sottotitoli {lang} attivati", file=sys.stderr)
+        notices.emit(f"sottotitoli {lang} attivati")
 
 
 def stream_filename(stream: Stream) -> str | None:
@@ -72,7 +71,7 @@ def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
         with urllib.request.urlopen(req, timeout=api.TIMEOUT) as resp:
             raw = resp.read()
     except OSError:
-        print("nstream: download sottotitolo fallito", file=sys.stderr)
+        notices.emit("download sottotitolo fallito")
         return None
     if url.endswith(".gz") or raw[:2] == b"\x1f\x8b":
         with contextlib.suppress(OSError):
@@ -145,10 +144,10 @@ def _pick(
             video_hash=video_hash, video_size=video_size, filename=filename,
         )  # fmt: skip
     except api.NetworkError as e:
-        print(f"nstream: {e}", file=sys.stderr)
+        notices.emit(f"{e}")
         return SubsPick()
     if not subs:
-        print("nstream: nessun sottotitolo", file=sys.stderr)
+        notices.emit("nessun sottotitolo")
         return SubsPick()
     langs = [lang] if lang else cfg.subtitle_langs
     pref = {code: i for i, code in enumerate(langs)}
@@ -173,7 +172,7 @@ def _pick(
     # (ADR 0020) runs later, against the local media file, in align_local().
     pick = _choose(subs, pref, work_dir)
     if pick is None:
-        print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
+        notices.emit("nessun sottotitolo nelle lingue preferite")
         return SubsPick()
     return pick
 
@@ -200,7 +199,7 @@ def _choose(subs: list[Subtitle], pref: dict[str, int], work_dir: str) -> SubsPi
         path = _download_subtitle(pool[0], work_dir)
         if not path:
             return SubsPick()
-        print("nstream: sottotitoli sincronizzati al file (hash-match)", file=sys.stderr)
+        notices.emit("sottotitoli sincronizzati al file (hash-match)")
         return SubsPick((path,), "hash")
     path = _download_subtitle(pool[0], work_dir)
     if not path:
@@ -267,9 +266,8 @@ def align_local(
         offset = verdict.offset_s
         if abs(offset) >= 0.5 and not srt.retime(path, offset, 1.0):
             continue
-        print(
-            f"nstream: sottotitoli allineati all'audio del file (offset {offset:+.1f}s)",
-            file=sys.stderr,
+        notices.emit(
+            f"sottotitoli allineati all'audio del file (offset {offset:+.1f}s)",
         )
         return SubsPick((path,), "audio", offset_s=offset)
     return pick
@@ -302,10 +300,9 @@ def auto_subs(
     if pick.paths and (opts.sub_offset or opts.sub_scale != 1.0):
         for p in pick.paths:
             retime_srt(p, opts.sub_offset, opts.sub_scale)
-        print(
-            f"nstream: sottotitoli ritimati (offset {opts.sub_offset:+.2f}s"
+        notices.emit(
+            f"sottotitoli ritimati (offset {opts.sub_offset:+.2f}s"
             + (f", scala {opts.sub_scale:.4f}" if opts.sub_scale != 1.0 else "")
             + ")",
-            file=sys.stderr,
         )
     return pick

@@ -60,6 +60,13 @@ def emit_json(obj: dict) -> None:
     url/token scrub."""
     import json
 
+    from . import notices
+
+    # Domain notices collected during this --json run (ADR 0037) ride along on the result
+    # object; per-event JSONL lines (`--follow`) don't repeat them.
+    bag = notices.collected()
+    if bag is not None and "notices" not in obj and "event" not in obj:
+        obj = {**obj, "notices": bag}
     sys.stdout.write(json.dumps(public_value(obj), ensure_ascii=False) + "\n")
     sys.stdout.flush()
 

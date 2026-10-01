@@ -37,7 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
-from . import bridge, cast_delivery, caster, log, serve, srt, ui, util
+from . import bridge, cast_delivery, caster, log, notices, serve, srt, ui, util
 from . import config as config_mod
 from .config import Config
 
@@ -410,10 +410,9 @@ def remux_to_file(
             _log.warning(
                 "spazio insufficiente per il remux: %.1fGB liberi < ~%.1fGB", free, size_gb
             )
-            print(
-                f"nstream: spazio disco insufficiente per il remux "
+            notices.emit(
+                f"spazio disco insufficiente per il remux "
                 f"(~{size_gb:.0f}GB, {free:.0f}GB liberi) — cast diretto",
-                file=sys.stderr,
             )
             return None
         cap = cfg.cast_remux_max_size_gb
@@ -422,7 +421,7 @@ def remux_to_file(
             # than starting an unattended tens-of-GB fetch.
             ask = f"il cast richiede di scaricare+remuxare ~{size_gb:.0f}GB (cap {cap}GB)"
             if not (confirm is not None and confirm(f"{ask} — procedo?", False)):
-                print("nstream: remux annullato", file=sys.stderr)
+                notices.emit("remux annullato")
                 return None
     elif free and free < _MIN_FREE_GB:
         # Unknown source size: no proportional check possible, but ffmpeg still fetches
@@ -433,9 +432,8 @@ def remux_to_file(
             free,
             _MIN_FREE_GB,
         )
-        print(
-            f"nstream: spazio disco quasi esaurito ({free:.1f}GB liberi) — cast diretto",
-            file=sys.stderr,
+        notices.emit(
+            f"spazio disco quasi esaurito ({free:.1f}GB liberi) — cast diretto",
         )
         return None
     if n_video >= 2:
@@ -558,7 +556,7 @@ def cast_file(
             launch, stdout=subprocess.DEVNULL, stderr=err_fd, start_new_session=True
         )
     except (OSError, FileNotFoundError):
-        print("nstream: catt non trovato", file=sys.stderr)
+        notices.emit("catt non trovato")
         _rm(file_path)
         _rm(f"{file_path}.srt")
         _rm(err_path)
@@ -572,7 +570,7 @@ def cast_file(
     if not _await_start(device):
         _log.warning("il cast remux non è partito entro %ss", _START_TIMEOUT)
         _log_catt_stderr(err_path)
-        print("nstream: il cast non è partito", file=sys.stderr)
+        notices.emit("il cast non è partito")
         if device:  # most common cause for a served file: the TV can't reach us (firewall)
             print(serve.firewall_hint(serve.lan_ip(device)), file=sys.stderr)
         _teardown(proc.pid, file_path)
@@ -651,7 +649,7 @@ def _cast_file_via_bridge(
     bind_ip = serve.lan_ip(device)
     kwargs = _bridge_meta_kwargs(title, meta, start, app_id=app_id)
     if app_id:
-        print(f"nstream: ricevitore custom {app_id}", file=sys.stderr)
+        notices.emit(f"ricevitore custom {app_id}")
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
 
     if not follow:
@@ -726,10 +724,9 @@ def _cast_file_via_bridge(
         # daemon thread, so it still dies when this nstream process exits — the
         # least-harmful option without re-architecting (vs. tearing it down NOW).
         _log.warning("daemon castbridge disconnesso a metà cast (pos=%.0fs)", pos)
-        print(
-            "nstream: daemon castbridge disconnesso; la riproduzione sul TV "
+        notices.emit(
+            "daemon castbridge disconnesso; la riproduzione sul TV "
             "potrebbe interrompersi all'uscita di nstream",
-            file=sys.stderr,
         )
 
     def abort(started: bool) -> bool:

@@ -14,11 +14,10 @@ a dead-swarm candidate sails through every gate and reaches the backends with no
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import availability, languages, log, quality, remux, stream_select, tracks
+from . import availability, languages, log, notices, quality, remux, stream_select, tracks
 from .config import Config
 from .types import Stream
 
@@ -147,7 +146,7 @@ def vet_cast_video(
         if not stream_select.playable_url(cfg, s):
             continue
         if _video_castable(cfg, s) and _duration_castable(cfg, s, expected_s):
-            print(f"nstream: {why} → altra release", file=sys.stderr)
+            notices.emit(f"{why} → altra release")
             return s, ""
     return chosen, bad
 
@@ -222,9 +221,8 @@ def vet_cast_container(
         if not target_lang or (
             plan.mode == "direct" and plan.verified and plan.real_lang == target_lang
         ):
-            print(
-                "nstream: container non caricabile dal TV → altra release MP4 (stessa lingua)",
-                file=sys.stderr,
+            notices.emit(
+                "container non caricabile dal TV → altra release MP4 (stessa lingua)",
             )
             return s, False
     return chosen, True

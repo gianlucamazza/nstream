@@ -89,6 +89,9 @@ Always pass `--json`. Quote the title.
 
 ### Parsing
 
+`notices` (every result/error) carries what stderr said; act on coded ones (`p2p_blocked`,
+`p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`) and relay the rest.
+
 Read `ok`. On success surface `title`, `action`, `device`, short `stream` summary, and when
 relevant: `quality`, `available_resolutions`, `audio_lang` / `available_audio` /
 `audio_verified`, `duration_verified`, `reencoded`, `selection` (`exact`|`year`|`first`).

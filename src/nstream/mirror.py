@@ -35,7 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import cast_delivery, log, player, ui, util
+from . import cast_delivery, log, notices, player, ui, util
 from .config import Config
 
 _log = log.get_logger(__name__)
@@ -315,9 +315,8 @@ def cast_via_mirror(
     tear everything down. `follow=False` (headless): leave mpv + sender detached and return;
     `stop()` (CLI `--stop`) tears them down."""
     if not available():
-        print(
-            "nstream: sender mirror non disponibile (build openscreen / $CAST_MIRROR_BIN)",
-            file=sys.stderr,
+        notices.emit(
+            "sender mirror non disponibile (build openscreen / $CAST_MIRROR_BIN)",
         )
         return cast_delivery.CastResult(0.0, 0.0, error="mirror_unavailable")
 
@@ -337,7 +336,7 @@ def cast_via_mirror(
         state["sink_module"] = _load_null_sink()
         headless = _create_headless()
         if not headless:
-            print("nstream: impossibile creare l'output headless", file=sys.stderr)
+            notices.emit("impossibile creare l'output headless")
             _teardown(state)
             return cast_delivery.CastResult(0.0, 0.0, error="headless_output_failed")
         state["headless"] = headless
@@ -352,14 +351,14 @@ def cast_via_mirror(
         except OSError:
             # Not just FileNotFoundError: a PermissionError/other OSError from Popen
             # must also unwind the already-mounted sink + headless output.
-            print("nstream: mpv non trovato", file=sys.stderr)
+            notices.emit("mpv non trovato")
             _teardown(state)
             return cast_delivery.CastResult(0.0, 0.0, error="mpv_missing")
         state["mpv_pid"] = proc.pid
 
         addr = _await_window(proc.pid)
         if not addr:
-            print("nstream: la finestra mpv non è comparsa", file=sys.stderr)
+            notices.emit("la finestra mpv non è comparsa")
             _kill(proc.pid)
             _teardown(state)
             return cast_delivery.CastResult(0.0, 0.0, error="mpv_window_missing")
@@ -376,7 +375,7 @@ def cast_via_mirror(
 
         sender_pid = _launch_sender(cfg, device, addr)
         if sender_pid is None:
-            print("nstream: avvio sender mirror fallito", file=sys.stderr)
+            notices.emit("avvio sender mirror fallito")
             _kill(proc.pid)
             _teardown(state)
             return cast_delivery.CastResult(0.0, 0.0, error="sender_launch_failed")
