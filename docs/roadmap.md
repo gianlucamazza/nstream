@@ -21,6 +21,7 @@ date, or reject via a superseding ADR.
 | [0008](adr/0008-castbridge-socket-activation.md) | castbridge systemd socket activation | Interim: `systemd-run` transient unit in `bridge.ensure_daemon`. Full socket activation still **Proposed** — blocked on castbridge graduating from WIP packaging. |
 | [0013](adr/0013-custom-cast-receiver.md) | Custom CAF receiver | Would reduce Tier-2 remux and unlock track switching. Large external build; remains **Proposed**. |
 | [0040](adr/0040-subtitles-off-the-start-path.md) | Subtitles off the cast start path | Embedded text track first; alignment from the producer pass after the start; `--sub-shift` during the cast. Phase 0: three gates on the TV. |
+| [0042](adr/0042-embedded-subtitles-on-the-live-path.md) | Embedded subtitles on the live path | Revises 0040 for ADR 0039: embedded text track as an HLS WebVTT rendition; castbridge text-track activation. Phase 0: three gates on the TV. |
 
 ## Possible product extensions
 
