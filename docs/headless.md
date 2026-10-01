@@ -79,7 +79,7 @@ Common fields:
 | `selection`                                          | Title pick: `exact` \| `year` \| `first`                                                                                                                     |
 | `subtitles` / `subtitles_match` / `subtitles_offset` | Sub lang and evidence tier                                                                                                                                   |
 | `volume` / `muted` / `notice`                        | Cast audio state. `audio_lang` is the dub that started. When the preferred language would need a full-file remux and a direct MP4/WebM exists in a later `audio_langs` entry, headless starts that direct cast and `notice` says why (ADR 0035). `--audio-lang` does not take this shortcut. |
-| `notices` | Domain notices of this run (ADR 0037) — what stderr says, as `[{text, code, level}]`, on every result and error object (not on `--follow` event lines). `code` is stable when set: `p2p_blocked`, `p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`; `""` = informational |
+| `notices` | Domain notices of this run (ADR 0037) — what stderr says, as `[{text, code, level}]`, on every result and error object (not on `--follow` event lines). `code` is stable when set: `p2p_blocked`, `p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`, `volume_zero`; `""` = informational. Note: `volume` in JSON is the receiver level 0–1, while `--volume` takes 0–100 |
 
 `--status` adds `player_state`, `position`, `duration`, `active_tracks`, `receiver_error`.
 

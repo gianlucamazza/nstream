@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, replace
 
 from . import (
@@ -18,6 +19,7 @@ from . import (
     caster,
     failures,
     log,
+    notices,
     quality,
     state,
     stream_select,
@@ -31,6 +33,8 @@ from .config import Config, PlayOpts
 from .player import play
 from .subs import auto_subs
 from .types import HistoryEntry, Stream
+
+_VOLUME_RECHECK_S = 1.5
 
 
 def emit_json(obj: dict) -> None:
@@ -366,12 +370,17 @@ def auto_play(
                 # Fire-and-return skips the poll loop's volume guard — read it once so a muted
                 # or zero-volume receiver (a silent cast that looks fine) is surfaced.
                 volume, muted = device_volume(device)
+                if volume == 0 and not muted:
+                    # Right after a LOAD the receiver can report 0 for a moment: read again
+                    # before warning about a silent cast.
+                    time.sleep(_VOLUME_RECHECK_S)
+                    volume, muted = device_volume(device)
                 if muted or volume == 0:
                     vol_notice = (
                         "volume del Chromecast a 0 — alza col telecomando o 'catt volume N'"
                     )
                     notice = f"{notice}; {vol_notice}" if notice else vol_notice
-                    print(f"nstream: {vol_notice}", file=sys.stderr)
+                    notices.emit(vol_notice, code="volume_zero")
         else:
             result = application.play_local(
                 cfg,

@@ -34,8 +34,10 @@ CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
 @pytest.fixture(autouse=True)
 def _hermetic_remux_feasibility(monkeypatch):
-    """Remux feasibility reads the real disk (tests run on tmpfs): off unless a test opts in."""
+    """Remux feasibility reads the real disk (tests run on tmpfs): off unless a test opts in.
+    The zero-volume recheck doesn't wait in tests."""
     monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: None)
+    monkeypatch.setattr(headless_play, "_VOLUME_RECHECK_S", 0.0)
 
 
 def _cast_opts(**kw):
@@ -1715,3 +1717,16 @@ def test_cast_device_resolved_before_any_stream_work(monkeypatch, capsys):
     )
     out = json.loads(capsys.readouterr().out)
     assert rc == 1 and out["error"] == "device_not_found"
+
+
+def test_zero_volume_is_rechecked_before_warning(monkeypatch, capsys):
+    # Right after a LOAD the receiver can report 0 for a moment: read again before warning.
+    reads = iter([(0.0, False), (0.35, False)])
+    _wire_movie(monkeypatch)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
+    monkeypatch.setattr(headless_play, "device_volume", lambda device: next(reads))
+    headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["volume"] == 0.35 and out["notice"] is None
