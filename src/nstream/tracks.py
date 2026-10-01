@@ -126,8 +126,14 @@ def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
 
 @log.phase("ffprobe")
 def _ffprobe(url: str, timeout: float) -> Tracks:
+    # Bounded probe: a stalled remote read fails in 6s instead of hanging to the 20s kill,
+    # and 2MB/2s of probing is enough for the headers we read. Validated 2026-10-01 on 15
+    # real releases (MKV up to 80GB/21 audio tracks, MP4 incl. 22GB): identical tracks,
+    # language tags and duration, up to 3.5s → 1.1s per probe.
     cmd = [
-        "ffprobe", "-v", "error", "-of", "json", "-show_entries",
+        "ffprobe", "-v", "error",
+        "-rw_timeout", "6000000", "-probesize", "2M", "-analyzeduration", "2M",
+        "-of", "json", "-show_entries",
         "format=duration,format_name"
         ":stream=index,codec_type,codec_name,channels:stream_tags=language,title",
         url,

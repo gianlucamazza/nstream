@@ -157,3 +157,15 @@ def test_probe_tracks_requests_format_name(monkeypatch):
     tracks.probe_tracks("http://x/a.mkv")
     entries = seen["cmd"][seen["cmd"].index("-show_entries") + 1]
     assert "format_name" in entries
+
+
+def test_probe_tracks_is_bounded(monkeypatch):
+    # P3: a stalled remote read must fail fast, and probing stays on the headers.
+    seen = []
+    monkeypatch.setattr(tracks.util, "run_cmd", lambda cmd, **k: seen.append(cmd))
+    tracks._cache.clear()
+    tracks.probe_tracks("http://x/bounded.mkv")
+    cmd = seen[0]
+    assert cmd[cmd.index("-rw_timeout") + 1] == "6000000"
+    assert cmd[cmd.index("-probesize") + 1] == "2M"
+    assert cmd.index("-rw_timeout") < cmd.index("http://x/bounded.mkv")
