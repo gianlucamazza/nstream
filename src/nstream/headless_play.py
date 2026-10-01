@@ -16,6 +16,7 @@ from . import (
     application,
     cast_flow,
     caster,
+    failures,
     log,
     quality,
     state,
@@ -37,22 +38,10 @@ def emit_json(obj: dict) -> None:
     log.emit_json(obj)
 
 
-def emit_truncated(e: stream_select.ContentTooShort, title: str) -> None:
-    """Report a proven placeholder/sample (ADR 0028). A distinct code from
-    `no_playable_stream` on purpose: that one is documented as worth retrying later, while a
-    truncated file is what the source *contains* — the same command will fail identically.
-    Both measures go out in clear so an implausible expected runtime is visible at a glance."""
-    emit_json(
-        {
-            "ok": False,
-            "error": "sources_truncated",
-            "message": f"le sorgenti per «{title}» contengono un file troppo corto "
-            f"({e.verdict.reason}): placeholder o sample, non il video",
-            "duration_s": round(e.verdict.duration, 1) or None,
-            "expected_runtime_s": round(e.verdict.expected, 1) or None,
-            "truncated_sources": e.count,
-        }
-    )
+def emit_failure(exc: BaseException, title: str = "", **ctx) -> int:
+    """Emit the JSON error for a known domain failure (`failures.describe`); returns 1."""
+    emit_json(failures.describe(exc, title=title, **ctx).payload())
+    return 1
 
 
 def _emit_unplayable(
@@ -83,15 +72,7 @@ def _emit_unplayable(
         return 1
     # Quality filter may have emptied the set even if the pre-check passed (e.g. HW).
     if exact:
-        emit_json(
-            {
-                "ok": False,
-                "error": "quality_unavailable",
-                "message": f"nessuno stream {exact}p riproducibile per «{title}»",
-                "available_resolutions": available_resolutions,
-            }
-        )
-        return 1
+        return emit_failure(stream_select.QualityUnavailable(exact, available_resolutions), title)
     emit_json(
         {
             "ok": False,
@@ -186,15 +167,7 @@ def auto_play(
 
     # Hard quality filter: fail fast with the available tiers (like audio_lang_unavailable).
     if exact and exact not in available_resolutions:
-        emit_json(
-            {
-                "ok": False,
-                "error": "quality_unavailable",
-                "message": f"nessuno stream {exact}p per «{title}»",
-                "available_resolutions": available_resolutions,
-            }
-        )
-        return 1
+        return emit_failure(stream_select.QualityUnavailable(exact, available_resolutions), title)
 
     audio_verified: bool | None = None
     # Keys, not just a count: after the verification runs, `sources_removed` must rest on
@@ -208,33 +181,15 @@ def auto_play(
             cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title,
             expected_runtime_s=expected_s,
         )  # fmt: skip
-    except stream_select.QualityUnavailable as e:
-        emit_json(
-            {
-                "ok": False,
-                "error": "quality_unavailable",
-                "message": f"nessuno stream {e.quality}p riproducibile per «{title}»",
-                "available_resolutions": e.available or available_resolutions,
-            }
-        )
-        return 1
-    except stream_select.AudioLangUnavailable as e:
-        emit_json(
-            {
-                "ok": False,
-                "error": "audio_lang_unavailable",
-                "message": (
-                    f"audio «{e.lang}» assente dalle tracce reali di «{title}»"
-                    if e.real_tracks
-                    else f"audio «{e.lang}» non disponibile per «{title}»"
-                ),
-                "available_audio": list(e.available) if e.available else list(available_audio),
-            }
-        )
-        return 1
-    except stream_select.ContentTooShort as e:
-        emit_truncated(e, title)
-        return 1
+    except (
+        stream_select.QualityUnavailable,
+        stream_select.AudioLangUnavailable,
+        stream_select.ContentTooShort,
+    ) as e:
+        return emit_failure(
+            e, title,
+            available_audio=available_audio, available_resolutions=available_resolutions,
+        )  # fmt: skip
     except stream_select.NoPlayableStream as e:
         return _emit_unplayable(
             title,
@@ -295,8 +250,7 @@ def auto_play(
             try:
                 device = _resolve_device(cfg, headless=True, prefer=args.device)
             except CastUnavailable as e:
-                emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
-                return 1
+                return emit_failure(e)
             device_name = args.device or cfg.cast_device or device
 
             def on_cast_event(ev: dict) -> None:
@@ -325,45 +279,13 @@ def auto_play(
                     safety_sub_lang=vetted.safety_sub_lang,
                     expected_runtime_s=expected_s,
                 )  # fmt: skip
-            except stream_select.ContentTooShort as e:
-                emit_truncated(e, title)
-                return 1
-            except cast_flow.CastStreamUnresolved:
-                # Retry-worthy, unlike the "proven gone" codes: a `[RD download]` release
-                # becomes playable once the provider finishes fetching it (ADR 0031 appendix).
-                emit_json(
-                    {
-                        "ok": False,
-                        "error": "no_playable_stream",
-                        "message": "nessuna sorgente castabile risolvibile ora (swarm senza "
-                        "peer, o file non ancora trasferito dal debrid); riprova più tardi, "
-                        "o prova --local / un'altra qualità (--quality)",
-                    }
-                )
-                return 1
-            except cast_flow.CastRemuxInfeasible as e:
-                emit_json(
-                    {
-                        "ok": False,
-                        "error": "remux_infeasible",
-                        "message": f"l'audio di questa release va convertito ma {e.reason}; "
-                        "libera spazio, prova --quality 1080 o --local",
-                        "reason": e.reason,
-                    }
-                )
-                return 1
-            except cast_flow.CastVideoUnsupported as e:
-                emit_json(
-                    {
-                        "ok": False,
-                        "error": "video_codec_unsupported",
-                        "message": f"video {e.codec} non decodificabile dal Chromecast e "
-                        "nessuna release alternativa castabile; riprova con --local "
-                        "o con un'altra qualità (--quality)",
-                        "video_codec": e.codec,
-                    }
-                )
-                return 1
+            except (
+                stream_select.ContentTooShort,
+                cast_flow.CastStreamUnresolved,
+                cast_flow.CastRemuxInfeasible,
+                cast_flow.CastVideoUnsupported,
+            ) as e:
+                return emit_failure(e, title)
             if not outcome.started:
                 # ADR 0031: a cast that never began used to reach the terminal `ok: true`
                 # emit, because a failed backend returned the same (0.0, 0.0) a legitimate

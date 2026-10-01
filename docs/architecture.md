@@ -34,6 +34,8 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
   pre-0037 edges (fzf menus in `caster`, `stream_select`, `subs`) are listed in
   `tests/test_architecture.py::_KNOWN_DEBT`, which may only shrink
 - Machine output: every `--json` object goes through `log.emit_json` (scrubbed)
+- Failures: `failures.describe` maps a domain exception to one `Failure(code, message, hint,
+  fields)` for both the TUI notice and the `--json` error (orchestration tier, frontends only)
 - Candidate pass shared by play, `--explain`, `--probe`: `stream_select.prepare_candidates`
 - `cast_vet` → `stream_select` helpers (`playable_url`, `cast_playable`, `audio_languages`; public since 2026-10-01 — older ADRs cite them as `_playable_url` / `_cast_playable`)
 - `availability` is a leaf under selection (probe + denylist); `stream_select` orchestrates targets

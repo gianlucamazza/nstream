@@ -25,6 +25,7 @@ from . import (
     discovery,
     doctor,
     explain,
+    failures,
     headless,
     log,
     preview,
@@ -159,29 +160,21 @@ def _play_video(
             title=title,
             expected_runtime_s=expected_s,
         )
-    except stream_select.AudioLangUnavailable as e:
-        have = ", ".join(e.available) or "—"
-        notice = f"audio «{e.lang}» non disponibile (disponibili: {have})"
-        ui.status(notice, kind="fail")
-        print(f"nstream: {notice}", file=sys.stderr)
-        return (notice, False, opts.quality if opts.quality is not None else 0)
     except stream_select.QualityUnavailable as e:
-        have = ", ".join(f"{r}p" for r in e.available) or "—"
-        notice = f"nessuno stream {e.quality}p (disponibili: {have})"
+        notice = failures.describe(e, title=title).message
         ui.status(notice, kind="fail")
         print(f"nstream: {notice}", file=sys.stderr)
         return (notice, False, e.quality)
+    except (stream_select.AudioLangUnavailable, stream_select.ContentTooShort) as e:
+        notice = failures.describe(e, title=title).message
+        ui.status(notice, kind="fail")
+        print(f"nstream: {notice}", file=sys.stderr)
+        return (notice, False, opts.quality if opts.quality is not None else 0)
     except stream_select.NoPlayableStream as e:
         # The reason returns as the notice so it reaches the fzf header: stderr scrolls away
         # under the menu's fullscreen redraw, and a silent return reads as "nothing happened".
         ui.status(e.reason, kind="fail")
         return (e.reason, False, opts.quality if opts.quality is not None else 0)
-    except stream_select.ContentTooShort as e:
-        # Every probed source is a placeholder, not the video: say so instead of playing
-        # 30 seconds of "removed for copyright". Retrying wouldn't change the file.
-        notice = f"sorgenti troncate per «{title}» ({e.verdict.reason}) — prova un'altra qualità"
-        ui.status(notice, kind="fail")
-        return (notice, False, opts.quality if opts.quality is not None else 0)
     if vetted is None:
         # Backed out of a (re)selection / quality picker, or no playable without a hard tier.
         return (None, False, opts.quality if opts.quality is not None else 0)
@@ -273,24 +266,14 @@ def _play_on_cast(
             allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
             expected_runtime_s=expected_runtime_s,
         )  # fmt: skip
-    except cast_flow.CastStreamUnresolved:
-        # Same class as the black-screen guard below: back out to the list rather than
-        # crashing on a url-less stream (ADR 0031 appendix).
-        msg = "nessuna sorgente castabile risolvibile ora — riprova o scegli un'altra release"
-        print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
-        return (0.0, 0.0, False, msg)
-    except cast_flow.CastRemuxInfeasible as e:
-        # Casting the undecodable file anyway plays mute: back out with the reason.
-        msg = f"cast annullato — {e}"
-        print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
-        return (0.0, 0.0, False, msg)
-    except cast_flow.CastVideoUnsupported as e:
-        # Casting anyway would show a black screen (ADR 0017): back out to the list with
-        # an honest message instead. Local mpv decodes anything → suggest it.
-        msg = (
-            f"video {e.codec.upper()} non decodificabile dal TV e nessuna alternativa "
-            "castabile — riproduci in locale o scegli un'altra release"
-        )
+    except (
+        cast_flow.CastStreamUnresolved,
+        cast_flow.CastRemuxInfeasible,
+        cast_flow.CastVideoUnsupported,
+    ) as e:
+        # Back out to the list with the reason: casting anyway would play black, mute or
+        # crash on a url-less stream (ADR 0017/0031/0036). Same wording as --json.
+        msg = failures.describe(e, title=title).message
         print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
         return (0.0, 0.0, False, msg)
     if not outcome.started:
@@ -386,21 +369,13 @@ def _move_to_cast(
             allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
             expected_runtime_s=expected_runtime_s,
         )  # fmt: skip
-    except cast_flow.CastStreamUnresolved:
-        print(
-            f"nstream: {ui.g().warn} nessuna sorgente castabile risolvibile ora — resto in locale",
-            file=sys.stderr,
-        )
-        return (pos, dur, False)
-    except cast_flow.CastRemuxInfeasible as e:
-        print(f"nstream: {ui.g().warn} {e} — resto in locale", file=sys.stderr)
-        return (pos, dur, False)
-    except cast_flow.CastVideoUnsupported as e:
-        print(
-            f"nstream: {ui.g().warn} video {e.codec.upper()} non decodificabile dal TV — "
-            "resto in locale",
-            file=sys.stderr,
-        )
+    except (
+        cast_flow.CastStreamUnresolved,
+        cast_flow.CastRemuxInfeasible,
+        cast_flow.CastVideoUnsupported,
+    ) as e:
+        msg = failures.describe(e, title=title).message
+        print(f"nstream: {ui.g().warn} {msg} — resto in locale", file=sys.stderr)
         return (pos, dur, False)
     if not outcome.started:
         # ADR 0031: the TV never took over, so the local position is still the resume point.
