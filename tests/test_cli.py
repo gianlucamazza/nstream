@@ -1052,7 +1052,7 @@ def test_play_on_cast_remux_success_uses_cast_file(monkeypatch):
     seen = _wire_cast_tree(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: (
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: (
             seen.update(remux_url=url, idx=audio_index) or "/tmp/out.mp4"
         ),
     )  # fmt: skip

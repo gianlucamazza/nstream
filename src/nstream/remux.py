@@ -37,7 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
-from . import bridge, cast_delivery, caster, log, picker, serve, srt, ui, util
+from . import bridge, cast_delivery, caster, log, serve, srt, ui, util
 from . import config as config_mod
 from .config import Config
 
@@ -101,7 +101,14 @@ def _probe_meta(url: str):
     return t, t.n_video, t.duration
 
 
-def remux_for_cast(url: str, cfg: Config, *, audio_index: int, size_gb: float = 0.0) -> str | None:
+def remux_for_cast(
+    url: str,
+    cfg: Config,
+    *,
+    audio_index: int,
+    size_gb: float = 0.0,
+    confirm: Callable[[str, bool], bool] | None = None,
+) -> str | None:
     """Remux `url` to a complete temp MP4 keeping the audio track at `audio_index` (the cast
     decision in `cast_vet.vet_cast_audio` picks it by language), and return the temp
     path — or None on failure / a refused size guard (caller then degrades to a direct cast).
@@ -113,7 +120,7 @@ def remux_for_cast(url: str, cfg: Config, *, audio_index: int, size_gb: float = 
     t, n_video, duration = _probe_meta(url)
     return remux_to_file(
         url, cfg, audio_index=audio_index, audio=t.audio,
-        n_video=n_video, duration=duration, size_gb=size_gb,
+        n_video=n_video, duration=duration, size_gb=size_gb, confirm=confirm,
     )  # fmt: skip
 
 
@@ -294,13 +301,6 @@ def _free_gb(path: Path) -> float:
     return util.free_gib(path)
 
 
-def _confirm(msg: str) -> bool:
-    """Ask yes/no via the shared fzf confirm (stays in the TUI chrome). Headless (no
-    tty) → proceed without blocking: the release was the only castable option, and a
-    JSON/auto caller must not hang on input."""
-    return picker.confirm(f"{msg} — procedo?", default_yes=False, non_tty_default=True)
-
-
 def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tuple[int | None, str]:
     """Run the ffmpeg remux, rendering a single in-place progress line from its
     `-progress` stream. Returns `(returncode, stderr)`; rc is None if ffmpeg couldn't
@@ -378,6 +378,7 @@ def remux_to_file(
     n_video: int = 0,
     duration: float = 0.0,
     size_gb: float = 0.0,
+    confirm: Callable[[str, bool], bool] | None = None,
 ) -> str | None:
     """Remux `url` to a complete temp MP4 (video `-c copy`, the chosen audio track kept or
     transcoded to a DMR-decodable codec, `+faststart`) on disk. Blocks until done — this DMR
@@ -416,8 +417,10 @@ def remux_to_file(
             return None
         cap = cfg.cast_remux_max_size_gb
         if cap and size_gb > cap:
+            # Over the cap only a person may say yes (ADR 0037): headless refuses rather
+            # than starting an unattended tens-of-GB fetch.
             ask = f"il cast richiede di scaricare+remuxare ~{size_gb:.0f}GB (cap {cap}GB)"
-            if not _confirm(ask):
+            if not (confirm is not None and confirm(f"{ask} — procedo?", False)):
                 print("nstream: remux annullato", file=sys.stderr)
                 return None
     elif free and free < _MIN_FREE_GB:

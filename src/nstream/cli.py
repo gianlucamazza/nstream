@@ -55,6 +55,7 @@ from .labels import (
     meta_label,
 )
 from .picker import ask_query, fzf, fzf_key
+from .picker import confirm as _fzf_confirm
 from .playback import PlaybackError
 from .player import play
 from .subs import auto_subs, choose_tracks  # re-export: tests + _play_on_mpv
@@ -395,6 +396,11 @@ def _move_to_cast(
         )
         return (pos, dur, False)
     return (outcome.pos, outcome.dur, False)
+
+
+def _confirm(question: str, default_yes: bool) -> bool:
+    """`PlayOpts.confirm` for the TUI: the fzf yes/no inside the picker chrome."""
+    return _fzf_confirm(question, default_yes=default_yes, non_tty_default=default_yes)
 
 
 def _series_player(cfg: Config) -> series.PlayVideo:
@@ -1152,6 +1158,8 @@ def main() -> int:
         quality=quality,
         sub_offset=args.sub_offset or 0.0,
         sub_scale=sub_scale,
+        interactive=not args.json,
+        confirm=None if args.json else _confirm,
     )
     try:
         return _dispatch(cfg, args, opts)

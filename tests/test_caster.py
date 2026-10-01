@@ -138,10 +138,11 @@ def test_confirm_device_refusal_not_latched(monkeypatch):
     assert caster._cast_confirmed is False  # a refusal is per-play, asked again next time
 
 
-def test_confirm_device_non_tty_passes(monkeypatch):
-    # Headless/piped callers must never block on confirm (no fzf).
+def test_resolve_device_headless_never_confirms(monkeypatch):
+    # ADR 0037: headless callers don't pass confirm=True, so no prompt can fire.
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("TV1", "10.0.0.9")]))
     monkeypatch.setattr(caster, "_confirm", lambda *a, **k: pytest.fail("must not prompt"))
-    assert caster._confirm_device("TV1", "10.0.0.9") is True
+    assert caster.resolve_device(Config(torrentio_base="tb"), headless=True) == "10.0.0.9"
 
 
 def test_resolve_device_multiple_prompts_ip(monkeypatch):

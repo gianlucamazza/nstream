@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,12 @@ class PlayOpts:
     # Offset fixes a constant shift; scale fixes framerate drift (--sub-fps SRC:DST).
     sub_offset: float = 0.0
     sub_scale: float = 1.0
+    # May this run ask the user anything (ADR 0037)? Set by the frontend — the TUI True,
+    # `--json` False — never inferred from a TTY: agents run `--json` under a pty.
+    interactive: bool = False
+    # The frontend's yes/no prompt `(question, default_yes) -> bool`, injected so domain
+    # code never imports the fzf picker (ADR 0037). None on non-interactive runs.
+    confirm: Callable[[str, bool], bool] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

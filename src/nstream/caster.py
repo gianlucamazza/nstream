@@ -61,9 +61,10 @@ _cast_confirmed = False
 def _confirm_device(name: str, ip: str) -> bool:
     """Confirm the auto-resolved cast target on an interactive tty (fzf Sì/No, default
     yes), so a `prefer_cast` route to the TV is announced instead of silent.
-    Non-interactive callers and an already-confirmed session always pass."""
+    Only reached with `confirm=True`, which only the interactive TUI passes (ADR 0037); an
+    already-confirmed session always passes."""
     global _cast_confirmed
-    if _cast_confirmed or not (sys.stdin.isatty() and sys.stderr.isatty()):
+    if _cast_confirmed:
         return True
     ok = _confirm(
         f"{ui.g().tv} Chromecast trovato: {name} ({ip}) — casto lì?",

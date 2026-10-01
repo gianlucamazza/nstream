@@ -7,7 +7,6 @@ module attributes cast_flow re-imports: `cast_flow.cast_vet` / `remux` / `mirror
 
 from __future__ import annotations
 
-import sys
 from dataclasses import replace
 
 import pytest
@@ -115,7 +114,7 @@ def test_remux_success_uses_cast_file(monkeypatch):
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: (
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: (
             seen.update(remux_url=url, idx=audio_index) or "/tmp/out.mp4"
         ),
     )  # fmt: skip
@@ -189,22 +188,23 @@ def test_tty_can_keep_the_remux(monkeypatch):
     stream: Stream = _STREAM.copy()
     eng: Stream = {"url": "http://u/eng.mp4"}
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
     monkeypatch.setattr(
         cast_flow.cast_vet,
         "find_instant_direct",
         lambda *a, **k: _plan("direct", eng, real_lang="eng"),
     )
-    monkeypatch.setattr(cast_flow.picker, "confirm", lambda *a, **k: False)
+
     monkeypatch.setattr(
         cast_flow.remux,
         "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: seen.update(remux=True) or "/tmp/out.mp4",
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: (
+            seen.update(remux=True) or "/tmp/out.mp4"
+        ),
     )
     monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
     monkeypatch.setattr(cast_flow.caster, "cast", _boom("declined instant cast must remux"))
-    out = _run(_opts(), stream)
+    # ADR 0037: the mode plus the frontend's injected prompt, never a TTY probe.
+    out = _run(_opts(interactive=True, confirm=lambda q, d: False), stream)
     assert seen["remux"] is True and out.reencoded is True and out.notice is None
 
 
@@ -220,7 +220,7 @@ def test_explicit_audio_lang_does_not_search_instant(monkeypatch):
     monkeypatch.setattr(
         cast_flow.remux,
         "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: "/tmp/out.mp4",
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: "/tmp/out.mp4",
     )
     monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
     _run(_opts(audio_lang="ita"), stream)
@@ -261,7 +261,7 @@ def test_absent_dolby_still_remuxes_with_safety_subs(monkeypatch, capsys):
     seen = _wire(monkeypatch, _plan("absent", stream, real_lang="eng", needs_remux=True))
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: (
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: (
             seen.update(remux_url=url, idx=audio_index) or "/tmp/out.mp4"
         ),
     )  # fmt: skip
@@ -708,7 +708,7 @@ def test_remux_path_runs_align_local_on_remux_output(monkeypatch):
     monkeypatch.setattr(
         cast_flow.remux,
         "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: "/tmp/out.mp4",
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: "/tmp/out.mp4",
     )
     aligned = subs.SubsPick(("/tmp/ita-aligned.srt",), "audio", offset_s=-7.5)
     calls = []
@@ -809,7 +809,7 @@ def test_no_mirror_suppresses_pathological_auto_switch(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
-        lambda url, cfg, *, audio_index, size_gb=0.0: "/tmp/out.mp4",
+        lambda url, cfg, *, audio_index, size_gb=0.0, **_k: "/tmp/out.mp4",
     )  # fmt: skip
     monkeypatch.setattr(cast_flow.subs, "align_local", lambda cfg, pick, m, wd, o: pick)
     monkeypatch.setattr(

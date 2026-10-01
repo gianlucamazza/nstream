@@ -142,14 +142,20 @@ def test_remux_for_cast_threads_index_and_meta(monkeypatch):
     )  # fmt: skip
     seen = {}
 
-    def fake_remux(url, cfg, *, audio_index, audio, n_video, duration, size_gb):
-        seen.update(audio_index=audio_index, n_video=n_video, duration=duration, size_gb=size_gb)
+    def fake_remux(url, cfg, *, audio_index, audio, n_video, duration, size_gb, confirm):
+        seen.update(
+            audio_index=audio_index, n_video=n_video, duration=duration, size_gb=size_gb,
+            confirm=confirm,
+        )  # fmt: skip
         return "/tmp/cast-x.mp4"
 
     monkeypatch.setattr(remux, "remux_to_file", fake_remux)
-    out = remux.remux_for_cast("http://x", _cfg(), audio_index=3, size_gb=12.0)
+    ask = lambda q, d: True  # noqa: E731
+    out = remux.remux_for_cast("http://x", _cfg(), audio_index=3, size_gb=12.0, confirm=ask)
     assert out == "/tmp/cast-x.mp4"
-    assert seen == {"audio_index": 3, "n_video": 2, "duration": 99.0, "size_gb": 12.0}
+    assert seen == {
+        "audio_index": 3, "n_video": 2, "duration": 99.0, "size_gb": 12.0, "confirm": ask,
+    }  # fmt: skip
 
 
 # --- _audio_bitrate -------------------------------------------------------
@@ -230,10 +236,12 @@ def test_remux_to_file_aborts_on_insufficient_disk(monkeypatch):
 def test_remux_to_file_size_cap_confirm_declined(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_free_gb", lambda _p: 500.0)
-    monkeypatch.setattr(remux, "_confirm", lambda _m: False)
     ran = []
     monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a, **k: ran.append(1) or (0, ""))
-    assert remux.remux_to_file("http://x", _cfg(cast_remux_max_size_gb=10), size_gb=30.0) is None
+    out = remux.remux_to_file(
+        "http://x", _cfg(cast_remux_max_size_gb=10), size_gb=30.0, confirm=lambda q, d: False
+    )
+    assert out is None
     assert ran == []
 
 
@@ -241,11 +249,21 @@ def test_remux_to_file_size_cap_confirm_accepted(monkeypatch):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
     monkeypatch.setattr(remux, "_free_gb", lambda _p: 500.0)
-    monkeypatch.setattr(remux, "_confirm", lambda _m: True)
     seen = {}
     monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
-    out = remux.remux_to_file("http://x", _cfg(cast_remux_max_size_gb=10), size_gb=30.0)
+    out = remux.remux_to_file(
+        "http://x", _cfg(cast_remux_max_size_gb=10), size_gb=30.0, confirm=lambda q, d: True
+    )
     assert out and "cmd" in seen
+
+
+def test_remux_to_file_size_cap_headless_refuses(monkeypatch):
+    # ADR 0037: over the cap only a person may say yes; headless never auto-accepts.
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_gc_stale", lambda: None)
+    monkeypatch.setattr(remux, "_free_gb", lambda _p: 500.0)
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda *a, **k: pytest.fail("must not fetch"))
+    assert remux.remux_to_file("http://x", _cfg(cast_remux_max_size_gb=10), size_gb=30.0) is None
 
 
 def test_remux_to_file_unknown_size_refused_on_low_disk(monkeypatch):

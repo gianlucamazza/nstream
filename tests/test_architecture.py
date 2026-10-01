@@ -62,3 +62,35 @@ def test_import_graph_has_no_cycles():
 
     for module in graph:
         visit(module, [])
+
+
+# ADR 0037: domain modules decide; frontends (cli, headless, settings, series' TUI flow)
+# render and prompt. The domain must not import the fzf picker or TUI labels.
+_DOMAIN = {
+    "api", "addons", "availability", "bridge", "cast_delivery", "cast_flow", "cast_vet",
+    "caster", "debrid", "discovery", "engine", "mirror", "quality", "remux", "serve",
+    "stream_select", "subs", "subalign", "tracks",
+}  # fmt: skip
+_TUI = {"picker", "labels"}
+# Edges that predate ADR 0037 and are being removed (prompter injection). The set may only
+# shrink: a new edge fails, and a fixed one must be deleted from here.
+_KNOWN_DEBT = {
+    ("caster", "picker"),
+    ("stream_select", "picker"),
+    ("stream_select", "labels"),
+    ("subs", "picker"),
+    ("subs", "labels"),
+}
+
+
+def test_domain_does_not_import_the_tui():
+    found = set()
+    for module, edges in _graph().items():
+        name = module.removeprefix("nstream.")
+        if name not in _DOMAIN:
+            continue
+        for tui in _TUI:
+            if f"nstream.{tui}" in edges:
+                found.add((name, tui))
+    assert found - _KNOWN_DEBT == set(), "new domain→TUI import (ADR 0037)"
+    assert _KNOWN_DEBT - found == set(), "debt paid: remove it from _KNOWN_DEBT"

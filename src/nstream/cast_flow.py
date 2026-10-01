@@ -34,7 +34,6 @@ from . import (
     engine,
     log,
     mirror,
-    picker,
     quality,
     remux,
     state,
@@ -108,10 +107,6 @@ class CastRemuxInfeasible(Exception):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(f"remux non fattibile: {reason}")
-
-
-def _interactive() -> bool:
-    return sys.stdin.isatty() and sys.stderr.isatty()
 
 
 # Resolution (px height) at/above which a release is 4K/UHD: a remux of one is a tens-of-GB
@@ -238,12 +233,11 @@ def run_cast(
         if instant is not None and instant.stream is not plan.stream:
             take = instant.real_lang == target_lang
             if not take:
-                if sys.stdin.isatty() and sys.stderr.isatty():
-                    take = picker.confirm(
+                if opts.interactive and opts.confirm is not None:
+                    take = opts.confirm(
                         f"«{target_lang}» solo dopo il download completo. "
                         f"Parto subito in {instant.real_lang}?",
-                        default_yes=True,
-                        non_tty_default=True,
+                        True,
                     )
                 else:
                     take = True
@@ -283,7 +277,7 @@ def run_cast(
     # stand-ins: the mirror (decodes locally), a verified direct release, else fail honestly.
     refused_mirror = ""
     if needs_remux and not opts.mirror:
-        why = remux.refusal(cfg, quality.parse_stream(chosen).size_gb, interactive=_interactive())
+        why = remux.refusal(cfg, quality.parse_stream(chosen).size_gb, interactive=opts.interactive)
         if why:
             mirror_ok_now = mirror.available()
             if opts.mirror is None and mirror_ok_now:
@@ -391,6 +385,7 @@ def run_cast(
                 cfg,
                 audio_index=plan.audio_index,
                 size_gb=quality.parse_stream(chosen).size_gb,
+                confirm=opts.confirm if opts.interactive else None,
             )  # fmt: skip
             if needs_remux
             else None
