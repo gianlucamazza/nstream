@@ -27,18 +27,25 @@ VERIFY_CAP = 5  # top-N candidates to probe before committing the auto-pick
 
 
 def source_key(stream: Stream) -> str:
-    """Stable identity of a release across addons (ADR 0025): infoHash first (the same torrent
-    served by Torrentio and Comet keys identically), then the filename hint, then the display
-    name. Empty when the row carries none of them — such a stream is simply never denylisted."""
+    """Denylist identity of what a probe of this row would prove gone (ADR 0038, amending
+    0025). A row carrying a ready url (a debrid link) keys on the addon that produced the
+    link plus the file — a provider's 404 proves *that link* gone, not the torrent, which
+    stays playable via P2P or another provider. A pure-torrent row keys on its infoHash.
+    Never a display name: those are shared across releases ("[RD+] Torrentio 4k"). Empty
+    when the row carries no identity — such a stream is simply never denylisted."""
     ih = (stream.get("infoHash") or "").strip().lower()
-    if ih:
-        return ih
     hints = stream.get("behaviorHints") or {}
     filename = (hints.get("filename") or "").strip() if isinstance(hints, dict) else ""
-    if filename:
-        return f"file:{filename}"
-    name = " ".join((stream.get("name") or "").split())
-    return f"name:{name}" if name else ""
+    if stream.get("url"):
+        ident = ih or (f"file:{filename}" if filename else "")
+        if not ident:
+            return ""
+        idx = stream.get("fileIdx")
+        file_part = filename or (str(idx) if idx is not None else "")
+        return f"url:{stream.get('addon') or '?'}:{ident}:{file_part}"
+    if ih:
+        return ih
+    return f"file:{filename}" if filename else ""
 
 
 def expected_bytes(stream: Stream) -> int:

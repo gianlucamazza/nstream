@@ -180,6 +180,8 @@ Probe (`net.probe_url`) is **classified, not boolean**:
 
 Size mismatch never escalates to `gone` (in-flight `[RD download]` vs emptied file).
 
+Key (ADR 0038): a debrid-url row → `url:<addon>:<infoHash|file:name>:<file>` (that link only); a pure-torrent row → its infoHash; never a display name.
+
 `gone` → `XDG_STATE_HOME/nstream/dead-sources.json` (TTL 30 days, 500 max) → `prune_dead`
 pre-ranking. `nstream --forget-dead` clears. Headless `sources_removed` only when the denylist
 accounts for **every** candidate; empty merely-not-ready set is `no_playable_stream`.

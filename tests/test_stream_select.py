@@ -1131,9 +1131,8 @@ def test_vet_duration_passes_plausible_chosen_through(monkeypatch):
 def test_source_key_prefers_infohash():
     assert availability.source_key({"infoHash": "ABC123"}) == "abc123"
     assert availability.source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
-    assert (
-        availability.source_key({"name": "[RD+] Torrentio\n1080p"}) == "name:[RD+] Torrentio 1080p"
-    )
+    # ADR 0038: a shared display name is never a key.
+    assert availability.source_key({"name": "[RD+] Torrentio\n1080p"}) == ""
     assert availability.source_key({}) == ""
 
 
@@ -1150,7 +1149,7 @@ def test_probe_marks_gone_source_dead(monkeypatch, capsys):
     )
     stream: Stream = {"url": "https://rd/x", "infoHash": "DEAD01", "name": "[RD+] x\n1080p"}
     assert availability.probe_stream(stream).dead is True
-    assert state.is_dead("dead01") is True  # remembered across runs
+    assert state.is_dead(availability.source_key(stream)) is True  # remembered across runs
     assert "non più disponibile" in capsys.readouterr().err
 
 
@@ -1158,13 +1157,13 @@ def test_probe_does_not_denylist_transient_failure(monkeypatch):
     monkeypatch.setattr(availability.net, "probe_url", lambda u, **k: net.Probe(net.UNKNOWN))
     stream: Stream = {"url": "https://rd/x", "infoHash": "FLAKY1"}
     assert availability.probe_stream(stream).usable is False
-    assert state.is_dead("flaky1") is False  # a hiccup must never ban a source
+    assert state.is_dead(availability.source_key(stream)) is False  # a hiccup never bans
 
 
 def test_prune_dead_filters_known_removed():
-    state.mark_dead("abc123", "HTTP 404")
     alive: Stream = {"infoHash": "ZZZ", "url": "https://rd/ok"}
     dead: Stream = {"infoHash": "ABC123", "url": "https://rd/gone"}
+    state.mark_dead(availability.source_key(dead), "HTTP 404")
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     kept, dropped = availability.prune_dead(cfg, [dead, alive])
     assert kept == [alive] and dropped == 1
@@ -1192,7 +1191,8 @@ def test_verify_drops_gone_and_denylists(monkeypatch):
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     out = stream_select._verify_availability(cfg, results, cast=False, title="")
     assert out == [live] and results == [live]  # dropped, not merely demoted
-    assert state.is_dead("g1") and not state.is_dead("l1")
+    assert state.is_dead(availability.source_key(gone))
+    assert not state.is_dead(availability.source_key(live))
 
 
 def test_prepare_stream_raises_when_all_sources_removed(monkeypatch):
@@ -1298,8 +1298,8 @@ def test_pick_stream_raises_on_empty_ranking(monkeypatch):
 
 
 def test_prepare_stream_prunes_denylisted_before_ranking(monkeypatch):
-    state.mark_dead("old1", "HTTP 404")
     dead: Stream = {"infoHash": "OLD1", "url": "https://rd/old"}
+    state.mark_dead(availability.source_key(dead), "HTTP 404")
     live: Stream = {"infoHash": "NEW1", "url": "https://rd/new"}
     results = [dead, live]
     seen: list[list[Stream]] = []

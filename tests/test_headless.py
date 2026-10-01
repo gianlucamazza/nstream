@@ -1379,7 +1379,9 @@ def test_run_auto_sources_removed_when_denylisted(monkeypatch, capsys, tmp_path)
     caller doesn't suggest a pointless retry."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "DEAD9", "url": "http://rd/x"})
-    state.mark_dead("dead9", "HTTP 404")
+    state.mark_dead(
+        availability.source_key({"infoHash": "DEAD9", "url": "http://rd/x"}), "HTTP 404"
+    )
     monkeypatch.setattr(
         headless_play, "play", lambda *a, **k: (_ for _ in ()).throw(AssertionError("played"))
     )
@@ -1397,7 +1399,9 @@ def test_run_auto_sources_removed_when_verification_proves_them_gone(monkeypatch
     _wire_movie(monkeypatch, stream={"name": "x\n1080p", "infoHash": "G7", "url": "http://rd/x"})
 
     def prep(cfg, results, opts, *, auto, reselect_on_wrong_audio, title="", **_kw):
-        state.mark_dead("g7", "HTTP 404")  # what _verify_availability does on a `gone` verdict
+        state.mark_dead(
+            availability.source_key({"infoHash": "G7", "url": "http://rd/x"}), "HTTP 404"
+        )  # what _verify_availability does on a `gone` verdict
         results[:] = []
         return None
 

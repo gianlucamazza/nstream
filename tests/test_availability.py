@@ -32,9 +32,8 @@ def _probe(monkeypatch, duration, calls=None):
 def test_source_key_prefers_infohash():
     assert availability.source_key({"infoHash": "ABC123"}) == "abc123"
     assert availability.source_key({"behaviorHints": {"filename": "M.mkv"}}) == "file:M.mkv"
-    assert (
-        availability.source_key({"name": "[RD+] Torrentio\n1080p"}) == "name:[RD+] Torrentio 1080p"
-    )
+    # ADR 0038: a shared display name is never a key.
+    assert availability.source_key({"name": "[RD+] Torrentio\n1080p"}) == ""
     assert availability.source_key({}) == ""
 
 
@@ -45,9 +44,9 @@ def test_expected_bytes_from_announced_size():
 
 def test_prune_dead_filters_known_removed(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    state.mark_dead("abc", "gone")
     dead: Stream = {"infoHash": "abc", "url": "http://d"}
     alive: Stream = {"infoHash": "xyz", "url": "http://a"}
+    state.mark_dead(availability.source_key(dead), "gone")
     cfg = Config(torrentio_base="tb", playback_backend="debrid")
     kept, dropped = availability.prune_dead(cfg, [dead, alive])
     assert dropped == 1 and kept == [alive]
@@ -131,3 +130,20 @@ def test_drop_streams_removes_by_identity():
     results: list[Stream] = [a, b]
     availability.drop_streams(results, [a])
     assert len(results) == 1 and results[0] is b
+
+
+def test_debrid_link_death_does_not_ban_the_torrent(monkeypatch):
+    # ADR 0038: a provider's 404 proves its link gone, not the torrent — the P2P row (and
+    # another provider's link) for the same infoHash must survive prune_dead.
+    from nstream.config import Config
+
+    debrid: Stream = {"infoHash": "AA", "url": "https://rd/x", "addon": "Torrentio",
+              "behaviorHints": {"filename": "M.mkv"}}  # fmt: skip
+    other: Stream = {**debrid, "url": "https://tb/x", "addon": "Comet"}
+    p2p: Stream = {"infoHash": "AA", "behaviorHints": {"filename": "M.mkv"}}
+    key = availability.source_key(debrid)
+    assert key == "url:Torrentio:aa:M.mkv"
+    monkeypatch.setattr(availability.state, "dead_sources", lambda: {key: {"ts": 1}})
+    cfg = Config(torrentio_base="tb", playback_backend="debrid")
+    kept, dropped = availability.prune_dead(cfg, [debrid, other, p2p])
+    assert dropped == 1 and kept == [other, p2p]

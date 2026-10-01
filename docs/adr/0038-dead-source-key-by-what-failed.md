@@ -1,6 +1,6 @@
 # 0038. A dead source is keyed by what failed, never by a shared display name
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-01
 - **Deciders:** maintainer
 - **Amends:** 0025 (key derivation only; the `gone`-only persistence rule stands)
@@ -23,7 +23,7 @@ audit:
 
 The denylist key names what the probe actually proved gone:
 
-- **Debrid url probe:** `<provider>:<infoHash>:<fileIdx|filename>`. It bans that
+- **Debrid url probe:** `url:<addon>:<infoHash or file:<filename>>:<filename|fileIdx>` — the addon that produced the link stands for the provider route. It bans that
   provider's link to that file only.
 - **Pure-torrent probe** (engine or swarm): `<infoHash>`, as today.
 - **No `name:` key.** A row with neither an infoHash nor a filename is never denylisted, the
