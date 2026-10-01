@@ -550,3 +550,9 @@ def test_cast_load_receiver_error_before_start_fails(monkeypatch):
     finally:
         server.close()
     assert events == [{"kind": "failed", "error": "receiver_error", "message": "LOAD_FAILED"}]
+
+
+def test_media_load_args_text_language():
+    args = bridge._media_load_args("ip", "url", text_language="it")
+    assert args["textLanguage"] == "it"
+    assert "textLanguage" not in bridge._media_load_args("ip", "url")

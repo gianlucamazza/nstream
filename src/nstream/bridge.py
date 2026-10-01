@@ -239,11 +239,14 @@ def _media_load_args(
     subtitle_lang: str = "",
     subtitle_name: str = "",
     app_id: str = "",
+    text_language: str = "",
 ) -> dict:
     """Build the `media-load` args, omitting empty optional fields so the daemon picks the
     right metadata block (TvShow if seriesTitle, else Movie if poster/subtitle, else title).
     `subtitle_url` (a WebVTT URL the receiver fetches) adds a side-loaded, auto-activated caption
     track — distinct from `subtitle`, which is Movie-metadata text (a tagline), not a track.
+    `text_language` (BCP-47) activates an in-manifest text track once loaded — an HLS
+    rendition (ADR 0042); needs a castbridge with `textLanguage`.
     `app_id` (empty → Default Media Receiver) launches a custom Cast receiver instead.
     `cfg.cast_receiver_app_id` is the nstream path that sets it (ADR 0013)."""
     args: dict = {"ip": ip, "url": url}
@@ -269,6 +272,8 @@ def _media_load_args(
             args["subtitleLang"] = subtitle_lang
         if subtitle_name:
             args["subtitleName"] = subtitle_name
+    if text_language:
+        args["textLanguage"] = text_language
     if app_id:
         args["appId"] = app_id
     return args
