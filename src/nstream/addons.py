@@ -34,6 +34,10 @@ class Addon:
     # (type, id, display name) — name falls back to id when the manifest omits it.
     catalogs: tuple[tuple[str, str, str], ...] = ()
     builtin: bool = False
+    # (type, id) of the catalogs that declare the `search` extra. Only these may be
+    # queried with `search=`: an addon ignores the extra on any other catalog and answers
+    # with unrelated rows (anime-kitsu returned "Hong Gil Dong 2084" for "Il grande Gatsby").
+    search_catalogs: tuple[tuple[str, str], ...] = ()
     manifest_url: str = ""
 
 
@@ -75,6 +79,18 @@ def _base_of(manifest_url: str) -> str:
     return manifest_url.rstrip("/")
 
 
+def _declares_search(catalog: dict) -> bool:
+    """True if a manifest catalog accepts the `search` extra (current `extra` list or the
+    legacy `extraSupported` form)."""
+    extra = catalog.get("extra")
+    if isinstance(extra, list) and any(
+        isinstance(e, dict) and e.get("name") == "search" for e in extra
+    ):
+        return True
+    legacy = catalog.get("extraSupported")
+    return isinstance(legacy, list) and "search" in legacy
+
+
 def _parse_manifest(manifest_url: str, data: dict) -> Addon:
     if not isinstance(data, dict):  # guard against a corrupt/partial cache entry
         data = {}
@@ -90,6 +106,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
                 "idPrefixes": list(r.get("idPrefixes", m_idp)),
             }
     catalogs: list[tuple[str, str, str]] = []
+    search_catalogs: list[tuple[str, str]] = []
     for c in data.get("catalogs", []):
         if not isinstance(c, dict):
             continue
@@ -99,6 +116,8 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
         typ = str(c.get("type") or "")
         name = str(c.get("name") or cat_id).strip() or cat_id
         catalogs.append((typ, cat_id, name))
+        if _declares_search(c):
+            search_catalogs.append((typ, cat_id))
     base = _base_of(manifest_url)
     return Addon(
         base=base,
@@ -106,6 +125,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
         resources=resources,
         catalogs=tuple(catalogs),
         manifest_url=manifest_url,
+        search_catalogs=tuple(search_catalogs),
     )
 
 
@@ -171,6 +191,7 @@ def _builtins(cfg: Config) -> list[Addon]:
             catalogs=tuple(
                 (t, c, c) for c in ("top", "year", "imdbRating") for t in ("movie", "series")
             ),
+            search_catalogs=(("movie", "top"), ("series", "top")),
         ),
     ]
     # Torrentio is optional: when disabled, stream discovery is only from cfg.addons
@@ -209,6 +230,11 @@ def effective_addons(cfg: Config) -> list[Addon]:
             seen.add(addon.base)
             out.append(addon)
     return out
+
+
+def search_catalog(addon: Addon, typ: str) -> str | None:
+    """Id of the first catalog of `typ` that `addon` declares searchable, else None."""
+    return next((c for t, c in addon.search_catalogs if t == typ), None)
 
 
 def has_catalog(addon: Addon, typ: str, cat: str) -> bool:

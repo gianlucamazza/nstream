@@ -51,12 +51,15 @@ def _clear_meta_cache():
     api.clear_cache()
 
 
-def _addon(name, base, resource, types=("movie",), idp=("tt",), catalogs=()):
+def _addon(name, base, resource, types=("movie",), idp=("tt",), catalogs=(), search=None):
+    if search is None:  # a catalog addon searchable on its `top` catalog, like Cinemeta
+        search = tuple((t, "top") for t in types) if resource == "catalog" else ()
     return addons.Addon(
         base=base,
         name=name,
         resources={resource: {"types": list(types), "idPrefixes": list(idp)}},
         catalogs=catalogs,
+        search_catalogs=search,
     )
 
 
@@ -483,7 +486,7 @@ def test_search_ranks_exact_and_accent_insensitive_match(monkeypatch):
     assert [m["id"] for m in api.search(CFG, "Matrix", typ="movie")] == ["tt1", "tt3", "tt2"]
 
 
-def test_search_normalizes_punctuation_and_alphabetic_ties(monkeypatch):
+def test_search_ties_keep_addon_order(monkeypatch):
     cine = _addon("Cine", "http://cine", "catalog", types=("movie",))
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
 
@@ -498,7 +501,45 @@ def test_search_normalizes_punctuation_and_alphabetic_ties(monkeypatch):
         }
 
     monkeypatch.setattr(api, "http_get_json", fake_get)
-    assert [m["id"] for m in api.search(CFG, "Spider", typ="movie")] == ["tt1", "tt2", "tt4", "tt3"]
+    assert [m["id"] for m in api.search(CFG, "Spider", typ="movie")] == ["tt2", "tt1", "tt3", "tt4"]
+
+
+def test_search_skips_addons_without_a_searchable_catalog(monkeypatch):
+    # Regression (2026-10-01): anime-kitsu serves `catalog` for movie but only declares
+    # search on an anime catalog; querying `movie/top/search=` returned fuzzy anime rows.
+    cine = _addon("Cine", "http://cine", "catalog", types=("movie",))
+    kitsu = _addon("Kitsu", "http://kitsu", "catalog", types=("anime", "movie"),
+                   search=(("anime", "kitsu-anime-list"),))  # fmt: skip
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine, kitsu])
+    seen = []
+
+    def fake_get(url, **k):
+        seen.append(url)
+        return {"metas": [{"id": "tt1343092", "name": "The Great Gatsby"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    api.search(CFG, "Il grande Gatsby", typ="movie")
+    assert seen == ["http://cine/catalog/movie/top/search=Il%20grande%20Gatsby.json"]
+
+
+def test_search_localized_query_keeps_cinemeta_order(monkeypatch):
+    # The Italian query shares no exact/prefix match with any English name: the old
+    # alphabetical tie-break put "Hong Gil Dong 2084" first. Word overlap + addon order
+    # keep Cinemeta's own relevance.
+    cine = _addon("Cine", "http://cine", "catalog", types=("movie",))
+    other = _addon("Other", "http://other", "catalog", types=("movie",))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine, other])
+
+    def fake_get(url, **k):
+        if url.startswith("http://cine"):
+            return {"metas": [{"id": "tt1343092", "name": "The Great Gatsby"},
+                              {"id": "tt0071577", "name": "The Great Gatsby"}]}  # fmt: skip
+        return {"metas": [{"id": "kitsu:10670", "name": "Hong Gil Dong 2084"}]}
+
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+    ids = [m["id"] for m in api.search(CFG, "Il grande Gatsby", typ="movie")]
+    assert ids[0] == "tt1343092"
+    assert ids[-1] == "kitsu:10670"
 
 
 def test_catalog_caches_within_ttl(monkeypatch):

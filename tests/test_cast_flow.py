@@ -73,6 +73,8 @@ def _wire(monkeypatch, plan, *, langs=("ita",)):
     monkeypatch.setattr(cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: plan)
     # ADR 0035 stays opt-in per test: the real search ffprobes URLs.
     monkeypatch.setattr(cast_flow.cast_vet, "find_instant_direct", lambda *a, **k: None)
+    # Remux feasibility reads the real disk; tests opt into a refusal explicitly.
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: None)
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages",
         lambda cfg, results, exact_resolution=0, **_kw: langs,
@@ -968,3 +970,61 @@ def test_run_cast_raises_when_settled_stream_unresolved(monkeypatch):
     # No backend runs, which is the guarantee that matters.
     with pytest.raises(cast_flow.CastStreamUnresolved):
         _run(_opts(), stream)
+
+
+# --- remux feasibility before the prepare (2026-10-01 incident) -----------
+
+
+def test_refused_remux_without_mirror_or_alternative_fails_honestly(monkeypatch):
+    """66GB remux, 52GB free, no mirror, no direct release: raise instead of casting the
+    undecodable file mute with `ok: true`."""
+    stream: Stream = _STREAM_4K.copy()
+    _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: "spazio disco insufficiente")
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.mirror, "unavailable_reason", lambda: "richiede Hyprland")
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no prepare after a refusal"))
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("no mute direct cast"))
+    with pytest.raises(cast_flow.CastRemuxInfeasible) as e:
+        _run(_opts(mirror=None), stream)
+    assert "spazio disco" in e.value.reason and "Hyprland" in e.value.reason
+
+
+def test_refused_remux_prefers_mirror(monkeypatch):
+    stream: Stream = _STREAM.copy()  # below the auto-mirror size threshold
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    _wire_mirror(monkeypatch, seen)
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: "spazio disco insufficiente")
+    out = _run(_opts(mirror=None), stream)
+    assert out.action == "mirror"
+    assert out.notice and "spazio disco" in out.notice
+
+
+def test_refused_remux_takes_verified_direct_release(monkeypatch):
+    stream: Stream = _STREAM_4K.copy()
+    alt: Stream = {**_STREAM, "url": "http://alt"}
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: "spazio disco insufficiente")
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.mirror, "unavailable_reason", lambda: "x")
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "find_instant_direct",
+        lambda *a, **k: _plan("direct", alt, real_lang="eng"),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no prepare after a refusal"))
+    monkeypatch.setattr(
+        cast_flow.caster, "cast", lambda cfg, title, url, **k: seen.update(url=url) or _ok()
+    )
+    out = _run(_opts(mirror=None), stream)
+    assert seen["url"] == "http://alt"
+    assert out.audio_lang == "eng" and out.reencoded is False
+
+
+def test_failed_remux_reports_audio_unverified(monkeypatch):
+    stream: Stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: None)  # ffmpeg died
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
+    out = _run(_opts(mirror=None), stream)
+    assert out.audio_lang is None and out.audio_verified is False

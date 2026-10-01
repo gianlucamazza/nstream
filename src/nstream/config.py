@@ -284,6 +284,13 @@ def dead_sources_path() -> Path:
     return Path(base) / "nstream" / "dead-sources.json"
 
 
+def remux_dir() -> Path:
+    """Where Tier-2 cast remuxes are written (`$XDG_CACHE_HOME/nstream/remux`). Shared by
+    `remux` (writes) and `quality` (ranks against the free space there)."""
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return Path(base) / "nstream" / "remux"
+
+
 def _bounded_int(raw: dict, key: str, default: int) -> int:
     """Coerce a config int, falling back to `default` on a bad value and clamping to the
     field's INT_BOUNDS range (so out-of-range values can't break ranking/overlay)."""

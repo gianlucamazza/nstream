@@ -343,6 +343,17 @@ def auto_play(
                     }
                 )
                 return 1
+            except cast_flow.CastRemuxInfeasible as e:
+                emit_json(
+                    {
+                        "ok": False,
+                        "error": "remux_infeasible",
+                        "message": f"l'audio di questa release va convertito ma {e.reason}; "
+                        "libera spazio, prova --quality 1080 o --local",
+                        "reason": e.reason,
+                    }
+                )
+                return 1
             except cast_flow.CastVideoUnsupported as e:
                 emit_json(
                     {
@@ -373,7 +384,7 @@ def auto_play(
                 return 1
             chosen = outcome.stream
             stream_block = describe_stream(cfg, chosen)  # may have been reselected
-            if outcome.audio_lang:
+            if outcome.audio_lang or outcome.audio_degraded:
                 cast_audio_lang, cast_audio_verified = outcome.audio_lang, outcome.audio_verified
             cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang
             sub_paths = outcome.sub_paths

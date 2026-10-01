@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import config as config_mod
 from . import languages, util
 from .config import Config
 from .types import Stream
@@ -120,12 +121,14 @@ _CAMRIP_SOURCES = frozenset({"cam", "ts", "tc", "scr", "dcp"})
 # receiver plays the headline (lossless) track, so it's the one that decides Cast
 # compatibility. First match wins.
 _AUDIO_PATTERNS = (
-    ("truehd", re.compile(r"\bTRUE-?HD\b", re.I)),
-    ("dtshd", re.compile(r"\bDTS-?HD\b|\bDTS-?MA\b|\bDTS:?X\b", re.I)),
-    ("dts", re.compile(r"\bDTS\b", re.I)),
-    ("eac3", re.compile(r"\bE-?AC-?3\b|\bDD\+|\bDDP|\bDOLBY\s?DIGITAL\s?PLUS\b", re.I)),
-    ("ac3", re.compile(r"\bAC-?3\b|\bDD5\.1\b|\bDOLBY\s?DIGITAL\b", re.I)),
-    ("aac", re.compile(r"\bAAC\b", re.I)),
+    ("truehd", re.compile(r"\bTRUE-?HD(?![A-Za-z])", re.I)),
+    ("dtshd", re.compile(r"\bDTS-?HD(?![A-Za-z])|\bDTS-?MA(?![A-Za-z])|\bDTS:?X\b", re.I)),
+    ("dts", re.compile(r"\bDTS(?![A-Za-z])", re.I)),
+    ("eac3", re.compile(r"\bE-?AC-?3(?![A-Za-z])|\bDD\+|\bDDP|\bDOLBY\s?DIGITAL\s?PLUS\b", re.I)),
+    ("ac3", re.compile(r"\bAC-?3(?![A-Za-z])|\bDD5\.1\b|\bDOLBY\s?DIGITAL\b", re.I)),
+    # `(?![A-Za-z])` instead of a trailing \b: release names glue the channel layout to
+    # the codec ("AAC2.0", "DTS5.1", "TrueHD7.1"), where \b never matches.
+    ("aac", re.compile(r"\bAAC(?![A-Za-z])", re.I)),
 )
 # Audio the Chromecast Default Media Receiver never decodes → excluded for cast (silent).
 _CAST_LOSSLESS = frozenset({"truehd", "dtshd", "dts"})
@@ -561,10 +564,20 @@ class FilterSpec:
             cast_audio=cast_audio,
             cast_remux=cast_audio and cfg.cast_remux,
             cast_remux_max_resolution=cfg.cast_remux_max_resolution if cast_audio else 0,
-            cast_remux_max_size=cfg.cast_remux_max_size_gb if cast_audio else 0,
+            cast_remux_max_size=remux_size_budget(cfg) if cast_audio else 0,
             title=title,
             exact_resolution=exact_resolution,
         )
+
+
+def remux_size_budget(cfg: Config) -> int:
+    """GiB a cast remux may download: `cast_remux_max_size_gb`, tightened by the free space
+    in the remux dir (with the 10% headroom `remux.remux_to_file` demands). Ranking against
+    the disk keeps a pick the cast-time guard would refuse from winning (2026-10-01: a 66GB
+    remux chosen with 52GB free fell back to a silent direct cast). 0 = unbounded."""
+    free = util.free_gib(config_mod.remux_dir())  # 0.0 = unknown → don't tighten
+    limits = [x for x in (cfg.cast_remux_max_size_gb, int(free / 1.1)) if x > 0]
+    return min(limits) if limits else 0
 
 
 def unsupported_reason(info: StreamInfo, caps: HwCaps, spec: FilterSpec) -> str | None:
@@ -666,6 +679,17 @@ def _norm_title(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", s.lower())
 
 
+def _title_guard(info: StreamInfo, title: str, audio_langs: tuple[str, ...]) -> bool:
+    """`title_match` term. The searched title is the English catalog name, so two real
+    releases would otherwise sink: a localized-title release ("Il.Grande.Gatsby.iTALiAN" vs
+    "The Great Gatsby") — accepted when tagged with the primary audio language, the dub the
+    user searched in — and every episode release, because callers pass the display title
+    ("Fargo · S01E01 · Name", `labels.display_title`): only the part before " · " is matched."""
+    if audio_langs and audio_langs[0] in info.languages:
+        return True
+    return _title_matches(info.release_name, title.split(" · ", 1)[0])
+
+
 def _title_matches(release_name: str, title: str) -> bool:
     """Whether `release_name` plausibly belongs to the searched `title`. Guards against an
     unrelated torrent Torrentio maps under the wrong IMDb id (e.g. a "Charlie Brown" pack
@@ -712,10 +736,12 @@ def score_components(
     the smaller file (faster start) among equals.
 
     Cast (`cast=True`): models the Default Media Receiver, not the TV's decoder. After
-    cached, prefer audio the receiver decodes natively (AAC… over AC-3/E-AC-3) — so a
-    no-remux AAC release wins and the Tier-2 remux (a prepare wait) only triggers when no
-    AAC release exists. The receiver plays HEVC/4K/HDR natively, so resolution ranks next;
-    H.264 is only a tie-breaker (both decode here), not a constraint.
+    cached and the remux size budget: the preferred audio language (the receiver can't
+    switch tracks, so a wrong-language pick costs a remux later); then `direct_cast` — a
+    release that plays as-is (decodable container, no remux-bound audio) beats one that
+    needs a whole-file Tier-2 prepare; then audio the receiver decodes natively (AAC… over
+    AC-3/E-AC-3). The receiver plays HEVC/4K/HDR natively, so resolution only ranks after
+    these; H.264 is a tie-breaker (both decode here), not a constraint.
 
     `cast_remux_cap` (>0): among releases that need a host remux (Dolby/DTS), prefer those at
     or below this resolution — a remux downloads the whole file, so a 4K Dolby release is a
@@ -739,20 +765,21 @@ def score_components(
             not needs_remux or cast_remux_size == 0 or info.size_gb <= cast_remux_size
         )
         return {
-            "title_match": _title_matches(info.release_name, title),
+            "title_match": _title_guard(info, title, audio_langs),
             "cached": info.cached,
             "remux_within_size": within_remux_size,
+            "lang": _lang_rank(info, audio_langs),
+            "direct_cast": not needs_remux,
             "cast_audio": _cast_audio_rank(info),
             "remux_within_cap": within_remux_cap,
             "resolution": info.resolution,
-            "lang": _lang_rank(info, audio_langs),
             "source": _source_rank(info.source),
             "cast_h264": info.codec == "h264",
             "seeders": min(info.seeders, _SEED_BUCKET),
             "size": -info.size_gb,
         }
     return {
-        "title_match": _title_matches(info.release_name, title),
+        "title_match": _title_guard(info, title, audio_langs),
         "cached": info.cached,
         "resolution": info.resolution,
         "lang": _lang_rank(info, audio_langs),

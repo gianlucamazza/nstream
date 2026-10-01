@@ -983,3 +983,64 @@ def test_dedup_key_matches_the_api_join_key():
     headline: Stream = {"name": "b\n1080p", "title": "the.film.2024.1080p\n\U0001f464 9"}
     assert api._filename(with_ext) == api._filename(headline)
     assert util.release_key(quality.parse_stream(with_ext).release_name) == api._filename(headline)
+
+
+@pytest.mark.parametrize(
+    ("name", "audio"),
+    [
+        ("Movie.2013.1080p.WEB-DL.AAC2.0.H.264", "aac"),
+        ("Movie.2013.1080p.BluRay.DTS5.1.x264", "dts"),
+        ("Movie.2013.2160p.TrueHD7.1.Atmos", "truehd"),
+        ("Movie.2013.1080p.AC3.5.1", "ac3"),
+        ("Movie.2013.AACX", ""),
+    ],
+)
+def test_audio_codec_glued_to_channel_layout(name, audio):
+    # Regression (2026-10-01): a trailing \b never matched "AAC2.0", so AAC releases read
+    # as untagged and lost the cast "prefer AAC" ranking.
+    assert quality.parse_stream(_mk(name)).audio == audio
+
+
+def _disk_cast_spec(monkeypatch, free_gib=500.0, **cfg):
+    monkeypatch.setattr(quality.util, "free_gib", lambda _p: free_gib)
+    return quality.FilterSpec.from_config(Config(torrentio_base="tb", **cfg), cast_audio=True)
+
+
+def test_cast_prefers_direct_mp4_over_4k_mkv_remux(monkeypatch):
+    streams: list[Stream] = [
+        {**_mk("[RD+] T\n2160p\nGatsby.2013.2160p.BluRay.REMUX.HEVC.TrueHD.mkv"),
+         "behaviorHints": {"filename": "Gatsby.2013.2160p.REMUX.mkv"}},
+        {**_mk("[RD+] T\n1080p\nGatsby.2013.1080p.BluRay.x264.AAC2.0.mp4"),
+         "behaviorHints": {"filename": "Gatsby.2013.1080p.mp4"}},
+    ]  # fmt: skip
+    playable, _ = quality.rank_streams(streams, quality.cast_caps(), _disk_cast_spec(monkeypatch))
+    assert quality.parse_stream(playable[0].stream).resolution == 1080
+
+
+def test_cast_preferred_language_beats_resolution(monkeypatch):
+    streams = [
+        _mk("[RD+] T\n2160p\nGatsby.2013.2160p.WEB-DL.ENG.AAC.mp4"),
+        _mk("[RD+] T\n1080p\nGatsby.2013.1080p.WEB-DL.iTA.AAC.mp4"),
+    ]
+    spec = _disk_cast_spec(monkeypatch, audio_langs=["ita", "eng"])
+    playable, _ = quality.rank_streams(streams, quality.cast_caps(), spec)
+    assert "ita" in quality.parse_stream(playable[0].stream).languages
+
+
+def test_remux_size_budget_tightened_by_free_disk(monkeypatch):
+    cfg = Config(torrentio_base="tb", cast_remux_max_size_gb=100)
+    monkeypatch.setattr(quality.util, "free_gib", lambda _p: 52.0)
+    assert quality.remux_size_budget(cfg) == 47  # 52 / 1.1 headroom
+    monkeypatch.setattr(quality.util, "free_gib", lambda _p: 0.0)  # unknown → cap only
+    assert quality.remux_size_budget(cfg) == 100
+
+
+def test_title_guard_accepts_localized_primary_language_release():
+    info = quality.parse_stream(_mk("Il.Grande.Gatsby.2013.iTALiAN.1080p.AAC"))
+    assert quality._title_guard(info, "The Great Gatsby", ("ita", "eng")) is True
+    assert quality._title_guard(info, "The Great Gatsby", ("eng",)) is False
+
+
+def test_title_guard_matches_series_name_not_episode_title():
+    info = quality.parse_stream(_mk("Fargo.S01E01.1080p.WEB-DL.AAC"))
+    assert quality._title_guard(info, "Fargo · S01E01 · The Crocodile's Dilemma", ()) is True

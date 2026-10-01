@@ -143,3 +143,26 @@ def test_cache_file_has_no_token(tmp_path, monkeypatch):
     addons.load_addon("https://torrentio.strem.fun/realdebrid=SECRETTOK/manifest.json")
     cache_text = (tmp_path / "nstream" / "manifests.json").read_text()
     assert "SECRETTOK" not in cache_text
+
+
+def test_parse_manifest_search_catalogs():
+    data = {
+        "resources": ["catalog"],
+        "types": ["anime", "movie"],
+        "catalogs": [
+            {"type": "anime", "id": "kitsu-anime-list", "extra": [{"name": "search"}]},
+            {"type": "movie", "id": "trending", "extra": [{"name": "genre"}]},
+            {"type": "movie", "id": "legacy", "extraSupported": ["search"]},
+        ],
+    }
+    a = addons._parse_manifest("https://k/manifest.json", data)
+    assert a.search_catalogs == (("anime", "kitsu-anime-list"), ("movie", "legacy"))
+    assert addons.search_catalog(a, "movie") == "legacy"
+    assert addons.search_catalog(a, "series") is None
+
+
+def test_cinemeta_builtin_is_searchable(monkeypatch):
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: None)
+    cine = addons.effective_addons(CFG)[0]
+    assert addons.search_catalog(cine, "movie") == "top"
+    assert addons.search_catalog(cine, "series") == "top"

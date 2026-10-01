@@ -322,20 +322,22 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
         )
 
         started = False
+        load_ok = False  # the daemon acknowledged our media-load
         last_state = ""
         pos = dur = 0.0
         title = str(meta.get("title") or "")
         deadline = time.monotonic() + _LOAD_TIMEOUT
         for msg in _messages(sock):
+            # Bound the pre-start wait on EVERY message, not only on read-timeout ticks: a
+            # steady stream of unrelated events would otherwise postpone it forever.
+            if not started and time.monotonic() > deadline:
+                yield {
+                    "kind": "failed",
+                    "error": "cast_startup_failed",
+                    "message": "il cast non è partito",
+                }
+                return
             if msg is None:
-                # Read timeout tick: bound the pre-start wait; once started, keep following.
-                if not started and time.monotonic() > deadline:
-                    yield {
-                        "kind": "failed",
-                        "error": "cast_startup_failed",
-                        "message": "il cast non è partito",
-                    }
-                    return
                 if started and not follow:
                     break
                 continue
@@ -351,6 +353,7 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
                         "message": err.get("message", "media-load fallito"),
                     }
                     return
+                load_ok = True
                 sock.settimeout(_FOLLOW_TIMEOUT)
                 continue
 
@@ -411,9 +414,16 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
         # still-playing TV and make the --follow JSONL lie.
         if started:
             yield {"kind": "disconnected", "position": round(pos, 1), "duration": round(dur, 1)}
-        elif not follow:
-            # Non-follow that never observed a state but loaded ok: best-effort started.
+        elif not follow and load_ok:
+            # Non-follow that never observed a state but the load was acknowledged:
+            # best-effort started. Without that ack nothing proves a handoff (ADR 0031).
             yield {"kind": "started", "title": title}
+        else:
+            yield {
+                "kind": "failed",
+                "error": "cast_startup_failed",
+                "message": "castbridge chiuso prima della conferma del caricamento",
+            }
     finally:
         with contextlib.suppress(OSError):
             sock.close()

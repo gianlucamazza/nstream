@@ -465,6 +465,19 @@ def test_cast_load_eof_before_any_state_no_follow_yields_started(monkeypatch):
     assert events == [{"kind": "started", "title": "Dune"}]
 
 
+def test_cast_load_eof_without_load_ack_is_not_started(monkeypatch):
+    """No media-load ack and no state before EOF: nothing proves a handoff (ADR 0031), so
+    a fire-and-return caller gets a failure, never an invented `started`."""
+    server = _fake_daemon(monkeypatch, [])
+    server.shutdown(socket.SHUT_WR)
+    try:
+        events = list(bridge.cast_load("ip", "http://x", follow=False, title="Dune"))
+    finally:
+        server.close()
+    assert [e["kind"] for e in events] == ["failed"]
+    assert events[0]["error"] == "cast_startup_failed"
+
+
 def test_cast_load_paused_then_resumed_transitions(monkeypatch):
     """State transitions after `started`: PLAYING→PAUSED emits `paused`, PAUSED→PLAYING
     emits `playing` again, then the inactive media session ends the follow."""

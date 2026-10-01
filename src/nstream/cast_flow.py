@@ -98,6 +98,22 @@ class CastVideoUnsupported(Exception):
         )
 
 
+class CastRemuxInfeasible(Exception):
+    """The pick needs a Tier-2 remux (undecodable audio / .mkv), the remux would be refused
+    (disk, size cap, ffmpeg, config), and neither the mirror nor a verified direct release
+    can stand in. Casting the file as-is plays mute or not at all, yet used to report
+    `ok: true` (2026-10-01) — the callers surface this instead (headless:
+    `remux_infeasible`)."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"remux non fattibile: {reason}")
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
 # Resolution (px height) at/above which a release is 4K/UHD: a remux of one is a tens-of-GB
 # fetch regardless of the parsed size, so it trips the mirror-over-remux rule even when the
 # size is unlabelled. Matches the cast resolution ceiling (`quality.cast_caps`).
@@ -139,6 +155,9 @@ class CastOutcome:
     subs_delivered: bool  # False when the delivery couldn't attach them (castbridge LOAD)
     started: bool  # the backend observed the handoff (ADR 0031) — `ok: true` requires it
     cast_error: str | None  # backend failure code when not started ("cast_failed", …)
+    # The planned remux failed and the file went out as-is: what plays is unknown (maybe
+    # mute). Callers must not fall back to a pre-cast language guess.
+    audio_degraded: bool = False
 
 
 def run_cast(
@@ -259,6 +278,32 @@ def run_cast(
     final_container = cast_vet.cast_container(cfg, chosen)
     needs_rewrap = not quality.container_castable(final_container)
     needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
+    # Decide feasibility BEFORE committing to a whole-file prepare: a refused remux used to
+    # degrade to a direct cast of the undecodable file (mute TV, `ok: true`). Order of
+    # stand-ins: the mirror (decodes locally), a verified direct release, else fail honestly.
+    refused_mirror = ""
+    if needs_remux and not opts.mirror:
+        why = remux.refusal(cfg, quality.parse_stream(chosen).size_gb, interactive=_interactive())
+        if why:
+            mirror_ok_now = mirror.available()
+            if opts.mirror is None and mirror_ok_now:
+                refused_mirror = why
+            else:
+                langs = (opts.audio_lang,) if opts.audio_lang else tuple(cfg.audio_langs)
+                alt = cast_vet.find_instant_direct(
+                    cfg, results, langs, exact_resolution=exact, expected_s=expected_runtime_s
+                )
+                if alt is None or alt.stream is chosen:
+                    if not mirror_ok_now and opts.mirror is None:
+                        why = f"{why}; mirror non disponibile ({mirror.unavailable_reason()})"
+                    raise CastRemuxInfeasible(why)
+                notice_defer = f"{why} → cast diretto {alt.real_lang or '?'}"
+                print(f"nstream: {notice_defer}", file=sys.stderr)
+                plan, chosen, bad_video = alt, alt.stream, ""
+                if not chosen.get("url"):
+                    raise CastStreamUnresolved()
+                final_container = cast_vet.cast_container(cfg, chosen)
+                needs_rewrap = needs_remux = False
     # No dub carries the target language: cast the best pick anyway, with target-language
     # subtitles as a safety net (mirrors the local guard). Printed on both paths (norm. 1).
     # An EXPLICIT `--sub-lang` wins over this primary-language safety default: the user asked
@@ -284,6 +329,7 @@ def run_cast(
 
     notice: str | None = notice_defer
     reencoded = False
+    degraded_audio = False
     # Backend strategy. The DMR plays AAC/HEVC/4K/HDR natively and instantly — strictly better
     # than the mirror (1080p SDR re-encode, latency) — so mirroring only helps when the audio is
     # one the DMR can't decode (`needs_remux`): there mpv decodes Dolby/DTS locally and starts
@@ -297,7 +343,7 @@ def run_cast(
     # `bad_video` forces the mirror regardless of audio: mpv decodes the legacy video
     # locally, the only remaining way to show this title on the TV (availability was
     # already vetted above — reaching here with `bad_video` implies mirror.available()).
-    force_mirror = bool(bad_video)
+    force_mirror = bool(bad_video) or bool(refused_mirror)
     mirror_ok = (needs_remux or force_mirror or opts.mirror is True) and mirror.available()
     # Tri-state opts.mirror (ADR 0021): the ADR-0015 auto-switch applies only when the
     # user expressed NO per-invocation preference (None); --no-mirror (False) suppresses
@@ -308,7 +354,10 @@ def run_cast(
         and _remux_is_pathological(info, cfg.cast_mirror_over_remux_gb)
     )
     if mirror_ok and (opts.mirror is True or auto_mirror or force_mirror):
-        if force_mirror:
+        if refused_mirror and not bad_video:
+            notice = f"{refused_mirror} → mirror 1080p (decodifica locale)"
+            print(f"nstream: {notice}", file=sys.stderr)
+        elif force_mirror:
             notice = (
                 f"video {bad_video.upper()} non decodificabile dal TV"
                 " → mirror 1080p (decodifica locale)"
@@ -375,13 +424,15 @@ def run_cast(
             action = "mirror"
         else:
             if needs_remux:
-                # remux refused (size guard) or failed → direct cast of a file whose first
-                # audio track is Dolby (silent on the DMR) or the wrong dub.
+                # remux failed mid-way (ffmpeg error, or a guard tripped after `refusal`)
+                # → direct cast of a file whose first audio track is Dolby (silent on the
+                # DMR) or the wrong dub. The planned track no longer describes what plays.
                 notice = (
                     "remux non riuscito → cast diretto: l'audio potrebbe "
                     "risultare muto o in un'altra lingua"
                 )
                 print(f"nstream: {ui.g().warn} {notice}", file=sys.stderr)
+                degraded_audio = True
             # Declare the container's MIME on the LOAD instead of leaving the DMR to sniff
             # (ADR 0022): reaching a direct cast means the container is DMR-compatible
             # (mp4/webm) or unknown; set contentType when known so the receiver doesn't guess.
@@ -426,8 +477,11 @@ def run_cast(
         pos=pos, dur=dur, advance=advance, action=action, stream=chosen,
         started=delivery.started, cast_error=delivery.error,
         reencoded=reencoded, notice=notice,
-        audio_lang=plan.real_lang, audio_verified=plan.verified,
+        # After a failed remux the plan's track is NOT what plays (the DMR takes track 0,
+        # possibly undecodable): report the language as unknown, never as verified.
+        audio_lang=None if degraded_audio else plan.real_lang,
+        audio_verified=plan.verified and not degraded_audio,
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
         sub_match=subs_pick.match, sub_offset=subs_pick.offset_s,
-        subs_delivered=subs_delivered,
+        subs_delivered=subs_delivered, audio_degraded=degraded_audio,
     )  # fmt: skip

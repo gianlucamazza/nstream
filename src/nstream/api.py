@@ -85,7 +85,10 @@ def norm_text(value: object) -> str:
     return " ".join("".join(chars).split())
 
 
-def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, str]:
+def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, int]:
+    """Relevance of a search row, higher is better. Ties keep addon order (the sort is
+    stable), so Cinemeta's own relevance ranking survives for localized queries whose
+    words do not appear in the English catalog name."""
     wanted = norm_text(query)
     name = norm_text(meta.get("name"))
     info = norm_text(meta.get("releaseInfo"))
@@ -93,7 +96,10 @@ def _search_score(meta: Meta, query: str) -> tuple[int, int, int, int, str]:
     prefix = int(name.startswith(wanted) and bool(wanted))
     words = int(bool(wanted) and wanted in name)
     year = int(bool(info) and info in wanted)
-    return (exact, prefix, words, year, name)
+    imdb = int(str(meta.get("id", "")).startswith("tt"))
+    # No partial word-overlap term: it scored "Il grande spirito" above The Great Gatsby
+    # for "il grande gatsby" (live probe 2026-10-01). Cinemeta's own order is better.
+    return (exact, prefix, words, year, imdb)
 
 
 @log.phase("gather")
@@ -265,21 +271,20 @@ def _cached_json(url: str, *, what: str) -> dict:
     return data
 
 
-def _catalog_tasks(
-    cfg: Config, typ: str, path: str, what: str
+def _search_tasks(
+    cfg: Config, typ: str, q: str
 ) -> tuple[list[Callable[[], list]], list[str], list[str]]:
-    """Build one cached fetch task per addon serving `catalog` for this type.
-
-    Returns (tasks, labels, keys) for breaker-aware gather (ADR 0027)."""
+    """One fetch per addon that declares a searchable catalog for `typ` (ADR 0024)."""
     tasks: list[Callable[[], list]] = []
     labels: list[str] = []
     keys: list[str] = []
     for addon in addons.effective_addons(cfg):
-        if not addons.serves(addon, "catalog", typ):
+        cat = addons.search_catalog(addon, typ)
+        if cat is None or not addons.serves(addon, "catalog", typ):
             continue
-        url = f"{addon.base}/catalog/{typ}/{path}.json"
+        url = f"{addon.base}/catalog/{typ}/{cat}/search={q}.json"
         tasks.append(
-            lambda url=url, name=addon.name: _cached_json(url, what=f"{what} ({name})").get(
+            lambda url=url, name=addon.name: _cached_json(url, what=f"ricerca {typ} ({name})").get(
                 "metas", []
             )
         )
@@ -295,23 +300,14 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     labels: list[str] = []
     keys: list[str] = []
     for t in (typ,) if typ else ("movie", "series"):
-        t_tasks, t_labels, t_keys = _catalog_tasks(cfg, t, f"top/search={q}", f"ricerca {t}")
+        t_tasks, t_labels, t_keys = _search_tasks(cfg, t, q)
         tasks += t_tasks
         labels += t_labels
         keys += t_keys
     results = _dedup(_gather(tasks, labels=labels, keys=keys), lambda m: m.get("id") or id(m))
-    # Rank flags descending while keeping equal-score titles alphabetic and
-    # deterministic, independent of addon response order.
-    return sorted(
-        results,
-        key=lambda m: (
-            -_search_score(m, query)[0],
-            -_search_score(m, query)[1],
-            -_search_score(m, query)[2],
-            -_search_score(m, query)[3],
-            _search_score(m, query)[4],
-        ),
-    )
+    # Stable sort on relevance only: equal scores keep the addons' own order (Cinemeta
+    # first), never an alphabetical tie-break that would float an unrelated title up.
+    return sorted(results, key=lambda m: tuple(-x for x in _search_score(m, query)))
 
 
 def _catalog_addon_tasks(

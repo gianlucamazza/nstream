@@ -79,6 +79,12 @@ Always pass `--json`. Quote the title.
 
 - Dolby/DTS-only → host remux when `cast_remux` on; JSON `reencoded: true`. Prefer AAC picks.
 - Large remux may auto-switch to mirror (`cast_mirror_over_remux_gb`); `--no-mirror` suppresses.
+  The mirror needs Hyprland; `--doctor` says when it's off.
+- `remux_infeasible` (ADR 0036): the remux would be refused (`reason`: disk/cap/ffmpeg) and no
+  mirror or direct release could replace it. Don't retry unchanged — suggest `--quality 1080`,
+  freeing disk, or `--local`.
+- `audio_verified: false` with `audio_lang: null` after a cast = the remux failed mid-way and
+  the file went out as-is: warn the user the audio may be missing.
 - Details: `docs/user/cast.md`, `docs/headless.md`.
 
 ### Parsing
@@ -89,7 +95,7 @@ relevant: `quality`, `available_resolutions`, `audio_lang` / `available_audio` /
 
 Full error table and recovery: **`docs/headless.md`** (codes include `no_result`,
 `no_stream_sources`, `no_streams`, `no_playable_stream`, `cast_failed`, `sources_removed`,
-`sources_truncated`, `video_codec_unsupported`, `audio_lang_unavailable`,
+`sources_truncated`, `video_codec_unsupported`, `remux_infeasible`, `audio_lang_unavailable`,
 `quality_unavailable`, `episode_not_found`, `series_completed`, `device_not_found`,
 `network`, `usage`, `config`).
 

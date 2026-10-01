@@ -63,14 +63,25 @@ def _sender_bin() -> str:
     )
 
 
-def available() -> bool:
-    """True when the mirror backend can run: the sender binary is executable and the
-    Wayland/PipeWire helpers it needs are present. A clean guard so the caller can degrade
-    to the DMR path with a clear message instead of failing mid-cast."""
+def unavailable_reason() -> str | None:
+    """Why the mirror backend can't run here, or None when it can. The headless output
+    and window placement are Hyprland IPC (`hyprctl`), so under another compositor the
+    mirror is off — said out loud, because it silently disables the ADR 0015/0022
+    fallbacks a huge or .mkv remux relies on."""
     bin_path = _sender_bin()
     if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
-        return False
-    return bool(shutil.which("hyprctl") and shutil.which("pactl"))
+        return "cast_sender non installato"
+    if not shutil.which("hyprctl"):
+        return "richiede Hyprland (hyprctl)"
+    if not shutil.which("pactl"):
+        return "pactl assente"
+    return None
+
+
+def available() -> bool:
+    """True when the mirror backend can run (see `unavailable_reason`). A clean guard so the
+    caller can degrade to the DMR path with a clear message instead of failing mid-cast."""
+    return unavailable_reason() is None
 
 
 # --- low-level helpers ----------------------------------------------------

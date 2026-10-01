@@ -72,6 +72,7 @@ class BridgeOutcome(NamedTuple):
     started: bool
     finished: bool
     disconnected: bool
+    error: str | None = None  # "receiver_error" when the TV refused the media pre-start
 
 
 def drive_bridge(
@@ -87,9 +88,11 @@ def drive_bridge(
 ) -> BridgeOutcome | None:
     """Consume one `bridge.cast_load` event stream and apply the shared policy.
 
-    Returns **None** when the LOAD failed before `started` — the caller falls back to
-    catt (a media error the receiver reports *after* started ends the cast without a
-    fallback: catt wouldn't fare better). Otherwise returns the `BridgeOutcome`; the
+    Returns **None** when the LOAD failed before `started` for a transport reason — the
+    caller falls back to catt. A `receiver_error` (the TV refused the media) returns a
+    not-started outcome with `error` set instead: catt would load the same media and its
+    exit code would read as a start. A media error *after* started ends the cast without a
+    fallback either. Otherwise returns the `BridgeOutcome`; the
     caller decides what a never-started-but-not-failed stream means for its delivery.
 
     Hooks (all optional):
@@ -112,9 +115,15 @@ def drive_bridge(
         for ev in events:
             kind = ev.get("kind")
             if kind == "failed" and not started:
+                err = ev.get("error") or "?"
+                if err == "receiver_error":
+                    # The TV reached and refused the media: catt would hand it the same
+                    # url and report a false start. Only transport failures fall back.
+                    _log.warning("ricevitore ha rifiutato il media: %s", ev.get("message") or "?")
+                    return BridgeOutcome(pos, dur, False, False, False, error=err)
                 _log.warning(
                     "castbridge non partito (%s: %s) → fallback catt",
-                    ev.get("error") or "?",
+                    err,
                     ev.get("message") or "?",
                 )
                 return None

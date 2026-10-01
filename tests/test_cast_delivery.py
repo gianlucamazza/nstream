@@ -20,6 +20,14 @@ def test_failed_before_started_returns_none(monkeypatch):
     assert out is None  # caller falls back to catt
 
 
+def test_receiver_error_before_started_is_not_a_fallback(monkeypatch):
+    # The TV refused the media: catt would load the same url and its exit code would read
+    # as a start (false `ok: true`). Report a not-started outcome instead.
+    out = _drive(monkeypatch, [{"kind": "failed", "error": "receiver_error", "message": "x"}])
+    assert out is not None and not out.started
+    assert out.error == "receiver_error"
+
+
 def test_failed_after_started_is_no_fallback(monkeypatch):
     out = _drive(
         monkeypatch,

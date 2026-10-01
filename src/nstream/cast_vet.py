@@ -285,8 +285,10 @@ def _reselect_cast_for_lang(
     the wrong-language pick the caller would otherwise cast. This mirrors the benefit of the
     doubt `pick_audio_stream_verified` already gives the forced `--audio-lang` path."""
     remux_fallback: CastAudioPlan | None = None
+    remux_oversized: CastAudioPlan | None = None
     tagged_guess: CastAudioPlan | None = None
     direct_bad_container: CastAudioPlan | None = None
+    budget = quality.remux_size_budget(cfg)
     probed = 0
     for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
@@ -322,7 +324,13 @@ def _reselect_cast_for_lang(
             if direct_bad_container is None:
                 direct_bad_container = plan
         elif plan.mode == "remux" and remux_fallback is None:
-            remux_fallback = plan  # remember, but keep looking for a direct one
+            # Remember, but keep looking for a direct one. A remux over the size/disk budget
+            # is a last resort only: the cast-time guard would refuse it (2026-10-01: the
+            # first ITA remux in rank order was a 66GB file with 52GB free).
+            if budget and r.info.size_gb > budget:
+                remux_oversized = remux_oversized or plan
+            else:
+                remux_fallback = plan
         elif (
             plan.mode == "direct"
             and not plan.verified
@@ -332,7 +340,7 @@ def _reselect_cast_for_lang(
             # Unprobeable but explicitly target-tagged → a benefit-of-the-doubt last resort,
             # kept only if no verified option turns up (below any remux_fallback).
             tagged_guess = plan
-    return remux_fallback or direct_bad_container or tagged_guess
+    return remux_fallback or direct_bad_container or tagged_guess or remux_oversized
 
 
 def find_instant_direct(

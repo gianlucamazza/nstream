@@ -401,7 +401,8 @@ def _cast_via_bridge(
     # The bridge reached the receiver: `out.started` is an observation, not an assumption.
     return cast_delivery.CastResult(
         out.pos, out.dur, sub_delivered,
-        started=out.started, error=None if out.started else "cast_never_started",
+        started=out.started,
+        error=None if out.started else (out.error or "cast_never_started"),
     )  # fmt: skip
 
 

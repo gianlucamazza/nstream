@@ -276,6 +276,10 @@ def _play_on_cast(
             file=sys.stderr,
         )
         return (0.0, 0.0, False)
+    except cast_flow.CastRemuxInfeasible as e:
+        # Casting the undecodable file anyway plays mute: back out with the reason.
+        print(f"nstream: {ui.g().warn} cast annullato — {e}", file=sys.stderr)
+        return (0.0, 0.0, False)
     except cast_flow.CastVideoUnsupported as e:
         # Casting anyway would show a black screen (ADR 0017): back out to the list with
         # an honest message instead. Local mpv decodes anything → suggest it.
@@ -379,6 +383,9 @@ def _move_to_cast(
             f"nstream: {ui.g().warn} nessuna sorgente castabile risolvibile ora — resto in locale",
             file=sys.stderr,
         )
+        return (pos, dur, False)
+    except cast_flow.CastRemuxInfeasible as e:
+        print(f"nstream: {ui.g().warn} {e} — resto in locale", file=sys.stderr)
         return (pos, dur, False)
     except cast_flow.CastVideoUnsupported as e:
         print(

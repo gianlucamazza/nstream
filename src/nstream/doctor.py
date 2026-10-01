@@ -8,7 +8,7 @@ import shutil
 import stat
 import sys
 
-from . import __version__
+from . import __version__, mirror
 from .config import ConfigError, config_path, load
 
 
@@ -22,6 +22,13 @@ def inspect() -> dict:
                 "status": "ok" if shutil.which(name) else "missing",
             }
         )
+    # Not required, but its absence silently disables the mirror fallbacks for huge or
+    # .mkv remuxes (ADR 0015/0022), so name the reason.
+    why = mirror.unavailable_reason()
+    mirror_check = {"name": "mirror", "required": False, "status": "missing" if why else "ok"}
+    if why:
+        mirror_check["detail"] = why
+    checks.append(mirror_check)
     try:
         load(secure_permissions=False)
         private = stat.S_IMODE(config_path().stat().st_mode) & 0o077 == 0
@@ -49,6 +56,7 @@ def run(*, json_mode: bool = False) -> int:
     else:
         print(f"nstream {report['version']} — diagnostica locale")
         for check in report["checks"]:
-            print(f"{check['name']}: {check['status']}")
+            detail = f" ({check['detail']})" if check.get("detail") else ""
+            print(f"{check['name']}: {check['status']}{detail}")
         print("Rete, protezione VPN e riproduzione non verificate.")
     return 0 if report["ok"] else 1

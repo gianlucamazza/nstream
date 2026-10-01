@@ -16,6 +16,7 @@ import json
 import os
 import random
 import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -200,6 +201,19 @@ class RunState:
     def clear(self) -> None:
         with contextlib.suppress(OSError):
             self.path.unlink(missing_ok=True)
+
+
+def free_gib(path: Path) -> float:
+    """Free space on the filesystem holding `path` (or its nearest existing parent), in
+    GiB — the scale release sizes are parsed in. 0.0 = couldn't be determined."""
+    for p in (path, *path.parents):
+        try:
+            return shutil.disk_usage(p).free / 1024**3
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return 0.0
+    return 0.0
 
 
 def pid_alive(pid: int | None) -> bool:

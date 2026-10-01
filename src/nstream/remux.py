@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from . import bridge, cast_delivery, caster, log, picker, serve, srt, ui, util
+from . import config as config_mod
 from .config import Config
 
 _log = log.get_logger("remux")
@@ -115,12 +116,35 @@ def remux_for_cast(url: str, cfg: Config, *, audio_index: int, size_gb: float = 
     )  # fmt: skip
 
 
+def refusal(cfg: Config, size_gb: float, *, interactive: bool) -> str | None:
+    """Why a Tier-2 remux of a `size_gb` release would be refused, or None if it can run.
+
+    The decision-time twin of the guards inside `remux_to_file`: `cast_flow` asks BEFORE
+    committing to a whole-file prepare, so a refusal can reselect or fail honestly instead
+    of degrading to a silent direct cast (2026-10-01: 66GB remux, 52GB free → mute TV).
+    Over the size cap only refuses when nobody can confirm (`interactive=False`)."""
+    if not cfg.cast_remux:
+        return "remux disattivato (cast_remux)"
+    if not available():
+        return "ffmpeg assente"
+    _gc_stale()
+    free = _free_gb(_cache_dir())  # 0.0 = couldn't stat → don't block (best-effort)
+    if size_gb > 0:
+        if free and free < size_gb * 1.1:
+            return f"spazio disco insufficiente (~{size_gb:.0f}GB, {free:.0f}GB liberi)"
+        cap = cfg.cast_remux_max_size_gb
+        if cap and size_gb > cap and not interactive:
+            return f"~{size_gb:.0f}GB oltre il limite cast_remux_max_size_gb ({cap}GB)"
+    elif free and free < _MIN_FREE_GB:
+        return f"spazio disco quasi esaurito ({free:.1f}GB liberi)"
+    return None
+
+
 # --- temp file + state tracking -------------------------------------------
 
 
 def _cache_dir() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    d = Path(base) / "nstream" / "remux"
+    d = config_mod.remux_dir()
     with contextlib.suppress(OSError):
         d.mkdir(parents=True, exist_ok=True)
     return d
@@ -264,11 +288,9 @@ def _audio_bitrate(channels: int | None) -> str:
 
 
 def _free_gb(path: Path) -> float:
-    """Free space (GB) on the filesystem holding `path`, or 0.0 if it can't be determined."""
-    try:
-        return shutil.disk_usage(path).free / 1e9
-    except OSError:
-        return 0.0
+    """Free space (GiB, the release-size scale) on the filesystem holding `path`, or 0.0
+    if it can't be determined."""
+    return util.free_gib(path)
 
 
 def _confirm(msg: str) -> bool:
@@ -359,7 +381,9 @@ def remux_to_file(
         return None
     # Free-disk pre-check always runs (CLAUDE.md). `free == 0.0` is _free_gb's
     # "couldn't stat" sentinel, NOT a really-full disk: indeterminate must not block
-    # the cast (best-effort), so both branches gate on a truthy `free`.
+    # the cast (best-effort), so both branches gate on a truthy `free`. Stale remuxes are
+    # reaped first: a leftover file from a previous cast must not cause the refusal.
+    _gc_stale()
     free = _free_gb(_cache_dir())
     if size_gb > 0:
         if free and free < size_gb * 1.1:
@@ -643,6 +667,9 @@ def _cast_file_via_bridge(
             device, serve.served_url(bind_ip, port, token), follow=False,
             load_kwargs=kwargs, on_event=on_event, on_interrupt=abort,
         )  # fmt: skip
+        if out is not None and out.error == "receiver_error":
+            _kill(pid)  # the TV refused the media: catt would get the same refusal
+            return cast_delivery.CastResult(0.0, 0.0, False, started=False, error=out.error)
         if out is None or not out.started:
             if out is not None:
                 _log.warning("castbridge: LOAD senza evento started → fallback catt")
@@ -710,6 +737,8 @@ def _cast_file_via_bridge(
             _rm(file_path)
     if out is None:
         return None  # failed before started → keep the temp file for the catt fallback
+    if out.error == "receiver_error":
+        return cast_delivery.CastResult(0.0, 0.0, False, started=False, error=out.error)
     if not out.started:
         return None  # never started → let the caller fall back to catt
     return cast_delivery.CastResult(out.pos, out.dur, bool(sub_url), started=True)

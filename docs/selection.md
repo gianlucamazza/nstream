@@ -83,33 +83,41 @@ Language filter only excludes a stream **tagged exclusively with non-preferred l
 ### 3. Score (`quality.score_components` / `_score`, highest precedence first)
 
 ```
-(cached, resolution, lang, source, hevc, seeders_bucketed, -size)
+(title_match, cached, resolution, lang, source, hevc, seeders_bucketed, -size)
 ```
 
-| term         | meaning                                                                            |
-| ------------ | ---------------------------------------------------------------------------------- |
-| `cached`     | instant debrid stream ranks first                                                  |
-| `resolution` | higher wins                                                                        |
-| `lang`       | 2 = preferred (or multi), 1 = untagged, 0 = non-preferred only                     |
-| `source`     | remux(6) > bluray(5) > webdl(4) > unknown(3) > webrip(2) > hdtv/dvd(1) > camrip(0) |
-| `hevc`       | HEVC over H.264 at equal source                                                    |
-| `seeders`    | capped at 40 (`_SEED_BUCKET`)                                                      |
-| `-size`      | smaller among equals                                                               |
+| term          | meaning                                                                            |
+| ------------- | ---------------------------------------------------------------------------------- |
+| `title_match` | demote a release unrelated to the title (Torrentio mis-mapping); see below         |
+| `cached`      | instant debrid stream ranks first                                                  |
+| `resolution`  | higher wins                                                                        |
+| `lang`        | 2 = preferred (or multi), 1 = untagged, 0 = non-preferred only                     |
+| `source`      | remux(6) > bluray(5) > webdl(4) > unknown(3) > webrip(2) > hdtv/dvd(1) > camrip(0) |
+| `hevc`        | HEVC over H.264 at equal source                                                    |
+| `seeders`     | capped at 40 (`_SEED_BUCKET`)                                                      |
+| `-size`       | smaller among equals                                                               |
 
 `cached` and `resolution` stay dominant (no surprising resolution downgrade for language).
+`title_match` compares against the series name (the part of the display title before
+` · `) and always accepts a release tagged with the primary audio language — the catalog
+name is English, so a localized-title release would otherwise sink.
 
 **Cast score** (`cast=True`, models the Default Media Receiver, not the GPU):
 
 ```
-(cached, remux_within_size, cast_audio, remux_within_cap, resolution, lang, source, cast_h264, seeders_bucketed, -size)
+(title_match, cached, remux_within_size, lang, direct_cast, cast_audio, remux_within_cap, resolution, source, cast_h264, seeders_bucketed, -size)
 ```
 
-| term                | meaning                                                          |
-| ------------------- | ---------------------------------------------------------------- |
-| `remux_within_size` | demote likely-remux releases above `cast_remux_max_size_gb`      |
-| `cast_audio`        | 2 = DMR-native audio, 1 = untagged, 0 = Dolby/DTS (needs Tier-2) |
-| `remux_within_cap`  | prefer remux candidates ≤ `cast_remux_max_resolution`            |
-| `cast_h264`         | weak tie-breaker (receiver also plays HEVC)                      |
+| term                | meaning                                                                                       |
+| ------------------- | --------------------------------------------------------------------------------------------- |
+| `remux_within_size` | demote likely-remux releases above the budget: `cast_remux_max_size_gb`, tightened by free disk in the remux dir (÷1.1 headroom) |
+| `lang`              | the receiver can't switch tracks, so the dub ranks above resolution                          |
+| `direct_cast`       | plays as-is (castable container, no remux-bound audio) over a whole-file Tier-2 prepare       |
+| `cast_audio`        | 2 = DMR-native audio, 1 = untagged, 0 = Dolby/DTS (needs Tier-2)                              |
+| `remux_within_cap`  | prefer remux candidates ≤ `cast_remux_max_resolution`                                         |
+| `cast_h264`         | weak tie-breaker (receiver also plays HEVC)                                                   |
+
+Audio tags glued to the channel layout (`AAC2.0`, `DTS5.1`, `TrueHD7.1`) are recognized.
 
 After ranking, cast picks pass `cast_vet` (next section). **Mirror-over-remux (ADR 0015):**
 when a remux would exceed `cast_mirror_over_remux_gb` (default 10) and the mirror sender is
