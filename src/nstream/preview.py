@@ -263,10 +263,15 @@ def _prune_posters(cache_dir: Path) -> None:
             total -= st.st_size
 
 
+_POSTER_MAX_BYTES = 5 * 1024 * 1024
+
+
 def _download(url: str) -> bytes | None:
     req = urllib.request.Request(url, headers={"User-Agent": api.UA})
     try:
         with urllib.request.urlopen(req, timeout=_POSTER_TIMEOUT) as resp:
-            return resp.read()
+            data = resp.read(_POSTER_MAX_BYTES + 1)
     except (OSError, urllib.error.URLError, ValueError):
         return None
+    # A poster is tens of KB; anything past the cap is not one (and must not fill memory).
+    return data if len(data) <= _POSTER_MAX_BYTES else None

@@ -870,3 +870,23 @@ def test_gather_probe_cut_by_quorum_counts_as_failure(monkeypatch):
     finally:
         release.set()
     assert ("f", "http://dead") in records
+
+
+def test_gather_never_started_task_has_no_breaker_effect(monkeypatch):
+    from concurrent.futures import Future
+
+    from nstream.state import breaker
+
+    records = []
+    monkeypatch.setattr(breaker, "admit", lambda key: "normal")
+    monkeypatch.setattr(breaker, "record_failure", lambda key, **k: records.append(("f", key)))
+    monkeypatch.setattr(breaker, "record_success", lambda key: records.append(("s", key)))
+    monkeypatch.setattr(api, "_GATHER_BUDGET", 0.05)
+
+    class _StuckPool:  # every worker busy: the task stays queued, never runs
+        def submit(self, fn, *args):
+            return Future()
+
+    monkeypatch.setattr(api, "_addon_pool", _StuckPool())
+    assert api._gather([lambda: [1]], keys=["http://healthy"]) == []
+    assert records == []

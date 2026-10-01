@@ -242,9 +242,14 @@ def _gather(
         # Stragglers: empty. Past the full budget they count as a breaker timeout; cut by
         # the quorum grace they don't (slow is not down).
         for f in pending:
-            f.cancel()
+            never_started = f.cancel()  # True only for a task still queued in the pool
             i, lab, key, _is_prim = fut_map[f]
             results_by_i.setdefault(i, [])
+            if never_started:
+                # The addon was never asked (the pool was busy, e.g. workers stuck in DNS):
+                # no verdict on it — counting a timeout would open breakers on healthy addons.
+                _log.info("addon mai interrogato (pool occupato) → nessun effetto (%s)", lab)
+                continue
             if quorum_cut and key not in probe_keys:
                 _log.info("addon lento, risultati principali già arrivati → salto (%s)", lab)
                 continue

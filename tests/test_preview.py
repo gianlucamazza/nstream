@@ -272,3 +272,18 @@ def test_run_layout_never_raises(monkeypatch, capsys):
     monkeypatch.setattr(preview.ui, "detect_caps", boom)
     assert preview.run_layout() == 0
     assert capsys.readouterr().out == ""  # empty output = fzf no-op, pane untouched
+
+
+def test_poster_download_is_size_capped(monkeypatch):
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b"x" * (n if n > 0 else 10**9)
+
+    monkeypatch.setattr(preview.urllib.request, "urlopen", lambda *a, **k: _Resp())
+    assert preview._download("http://img.example/p.jpg") is None
