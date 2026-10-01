@@ -12,11 +12,11 @@ src/nstream/
 ├── orchestration    cli · cli_args · headless · headless_play · application · series · settings · doctor
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
-│                    · remux · mirror · bridge · serve · discovery
-├── subs             subs · subalign · srt · oshash · (_bench dev-only)
+│                    · remux · mirror · bridge · serve · urlproxy · discovery
+├── subs             subs · subalign · srt · oshash · (_bench · _subalign_remote dev-only)
 ├── playback         playback · player · labels · picker · preview · ui · explain
 ├── discovery/API    api · addons · net
-└── foundation       config · types · state/ · log · util · languages
+└── foundation       config · types · state/ · log · util · languages · providers · notices
 ```
 
 Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
@@ -115,16 +115,18 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `mirror` | Realtime 1080p path |
 | `bridge` | castbridge IPC client + daemon ensure |
 | `discovery` | Non-blocking Chromecast discovery |
+| `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv |
 
 ### Subs
 
 | Module | Role |
 |--------|------|
 | `subs` | OpenSubtitles fetch/rank/download + pre-play `choose_tracks` |
-| `subalign` | Native sparse-evidence alignment (ADR 0020) |
+| `subalign` | Local-file audio alignment engine (ADR 0020): `probe_local` + pure `align` |
 | `srt` | SRT / WebVTT helpers |
 | `oshash` | OpenSubtitles file hash |
 | `_bench` | Dev-only alignment benchmarks (not shipped behaviour) |
+| `_subalign_remote` | Dev-only sparse remote probing used by `_bench` (not shipped) |
 
 ### Playback / TUI
 
@@ -150,7 +152,8 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 breaker outcomes; HTTP work inherits its monotonic deadline. `util.state_update`
 serializes best-effort store updates with bounded locks and corrupt-file recovery.
 `tests/test_architecture.py` enforces: stdlib-only runtime, nothing imports `cli`, no import
-cycles, and no domain→TUI edge. Other rules on this page are review-enforced.
+cycles, no domain→TUI edge, and a bottom tier (`util`, `log`, `notices`, `languages`, `srt`,
+`providers`) that imports only itself. Other rules on this page are review-enforced.
 
 ### Foundation
 
@@ -159,7 +162,8 @@ cycles, and no domain→TUI edge. Other rules on this page are review-enforced.
 | `types` | `Meta`, `Video`, `Stream`, `Subtitle`, `HistoryEntry` |
 | `config` | `Config`, `PlayOpts`, load/save, path helpers |
 | `state/` | history + library (`resumable`, `is_watched`, watchlist/recent), cast session, dead-sources, breaker |
-| `log` / `util` / `languages` | logging+redaction, atomic I/O, language tokens |
+| `log` / `util` / `languages` | logging+redaction, atomic I/O + text folding, language tokens |
+| `providers` | Debrid provider keys (leaf: `log` builds its redaction from them) |
 
 **State files:** `history.json` (progress), `library.json` (recent queries + metadata-only
 watchlist — no stream URLs), `dead-sources.json` (ADR 0025), `addon-breakers.json` (ADR 0027).

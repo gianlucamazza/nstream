@@ -20,6 +20,7 @@ def main():
         with zipfile.ZipFile(wheel) as archive:
             assert "nstream/nstream.lua" in archive.namelist()
             assert "nstream/_bench.py" not in archive.namelist()
+            assert "nstream/_subalign_remote.py" not in archive.namelist()
         with tarfile.open(source) as archive:
             assert any(name.endswith("src/nstream/nstream.lua") for name in archive.getnames())
         environment = root / "env"

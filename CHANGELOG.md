@@ -7,6 +7,57 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.39.0] — 2026-10-01
+
+### Fixed
+
+- **ADR 0036 Accepted:** remux feasibility (disk, size budget) is decided before the
+  prepare, never after a multi-GB download; an infeasible conversion fails as
+  `remux_infeasible` instead of a mute direct cast. Search, cast ranking and disc-sized
+  releases fixed from the 2026-10-01 incident.
+- **ADR 0038 Accepted:** a dead source is keyed by what failed, never by a shared
+  display name.
+- Debrid tokens no longer appear in child-process argv: ffmpeg/ffprobe read through a
+  loopback proxy (`urlproxy`), mpv through a private playlist file.
+- Subtitles: local audio alignment works (it had failed every time since July: mono
+  16 kHz analysis, runtime-based timeout). One cue model (`srt`): CP1252/UTF-16 decoding,
+  valid WebVTT (3-digit ms, ASS/`<font>` tags removed, `<`/`&` escaped), cues before 0
+  dropped instead of piled at 00:00. A failed download tries the next candidate.
+  Downloads are size-capped (gzip bombs) and cached by URL. catt receives the cleaned
+  WebVTT. `subs_delivered` follows the receiver's confirmed active tracks; the caption
+  track carries a BCP-47 language and a display name.
+- Reselects (dub, MP4 twin, castable video, in-cast switch, forced `--audio-lang`) rank
+  with the searched title like the initial pick. Accented titles ("Léon") no longer
+  demote their own releases.
+- Lifecycle: no signal to a reused pid; detached servers and ffmpeg are reclaimed; the
+  remux prepare lock is published only once held; the previous cast session is kept
+  until a new cast really starts; headless Ctrl-C on a direct cast aborts instead of
+  re-casting through catt.
+- `--doctor` detects castbridge; series resume follows the next episode with autoplay
+  off; headless resolves the TV before any stream work; a zero receiver volume is
+  re-read before warning; short language codes ("Chi", "Por") count only in capitals;
+  untagged MP4/WebM releases are considered for an instant direct cast; never-started
+  addon tasks no longer trip breakers; poster downloads are capped; the P2P privacy
+  notice shows once per process.
+
+### Changed
+
+- **ADR 0037 Accepted:** interactivity is an explicit mode; menus and confirmations are
+  injected by the frontend, and the domain never opens fzf. One failure table
+  (`failures.describe`) for the TUI and `--json`; domain notices reach `--json` as
+  `notices` with stable codes (`remux_infeasible`, `subs_unverified`, `volume_zero`, …).
+- Performance: cold search 25.6 s → 0.1–1.6 s (bounded half-open probes, search quorum,
+  stale-while-revalidate manifests); bounded ffprobe; subtitles are fetched while the
+  Tier-2 remux runs.
+- Configurable custom receiver app id (ADR 0013).
+- The bench-only sparse alignment moved to `_subalign_remote` (not shipped); debrid
+  provider keys live in the `providers` leaf; the bottom import tier is test-enforced.
+
+### Proposed
+
+- ADR 0039 (Tier-2 as live HLS-TS; receiver gate 3 passed: 62 min, 0 stalls) and
+  ADR 0040 (subtitles off the cast start path).
+
 ## [1.38.0] — 2026-09-25
 
 ### Added
