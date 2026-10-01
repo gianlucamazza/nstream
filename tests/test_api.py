@@ -901,3 +901,28 @@ def test_dedup_by_release_keeps_a_cjk_name_as_evidence():
     loser: Stream = {"name": "TorrentsDB", "title": "暖暖内含光\n👤 1", "behaviorHints": dict(fn)}
     out = api._dedup_by_release([loser, winner])
     assert len(out) == 1 and out[0].get("cjk_alias") is True
+
+
+def _cinemeta(fake_get, monkeypatch):
+    from dataclasses import replace
+
+    cine = replace(_addon("Cinemeta", "http://cine", "catalog", types=("movie",)), builtin=True)
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
+    monkeypatch.setattr(api, "http_get_json", fake_get)
+
+
+def test_search_with_a_silent_catalog_is_a_network_error(monkeypatch):
+    """#4: Cinemeta over budget used to read as `no_result` ("nessun film") — a title that
+    exists, reported as missing, so nobody retried."""
+
+    def down(url, **k):
+        raise api.NetworkError("timeout")
+
+    _cinemeta(down, monkeypatch)
+    with pytest.raises(api.NetworkError, match="non ha risposto"):
+        api.search(CFG, "children of men", typ="movie")
+
+
+def test_search_with_an_answering_catalog_may_be_empty(monkeypatch):
+    _cinemeta(lambda url, **k: {"metas": []}, monkeypatch)
+    assert api.search(CFG, "zzzz no such film", typ="movie") == []

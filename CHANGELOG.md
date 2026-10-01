@@ -27,6 +27,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `urlproxy` resumes dropped upstream reads and never prints tracebacks (#5).
 - Releases with burned-in CJK subtitles are demoted (CJK-script name on any addon, HC/CHS
   tags) and never picked for an instant direct cast (#6).
+- A search whose catalog (Cinemeta) never answered is a `network` error to retry, not
+  `no_result` (#4).
 
 ## [1.39.0] — 2026-10-01
 

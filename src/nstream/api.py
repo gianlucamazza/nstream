@@ -106,6 +106,7 @@ def _gather(
     labels: list[str] | None = None,
     keys: list[str] | None = None,
     primary: list[bool] | None = None,
+    outcome: dict | None = None,
 ) -> list:
     """Run per-addon/per-type fetch tasks concurrently, flattening results in task
     order (so the built-in providers keep priority for dedup). A task raising
@@ -124,6 +125,10 @@ def _gather(
     finished, the others get a short grace — `max(_QUORUM_GRACE_S, 2× primary latency)` —
     and are then dropped without a breaker effect (slow is not down).
 
+    `outcome` (optional) receives `primary` (authoritative tasks requested) and `primary_ok`
+    (how many of them answered): an empty result is "nothing exists" only when the
+    authority answered (#4).
+
     On a TTY, multi-task gathers update progress as futures *complete* (not submit order)."""
     from concurrent.futures import as_completed
 
@@ -136,6 +141,9 @@ def _gather(
     names = labels if labels and len(labels) == n else [f"#{i + 1}" for i in range(n)]
     bases = keys if keys and len(keys) == n else [""] * n
     prim = primary if primary and len(primary) == n else [False] * n
+    primary_ok = 0
+    if outcome is not None:
+        outcome.update(primary=sum(prim), primary_ok=0)
 
     # One breaker decision per addon per gather (ADR 0027): movie + series search share a
     # key. A Half-Open key sends a single bounded probe; its siblings wait for the verdict.
@@ -230,6 +238,7 @@ def _gather(
             if sys.stderr.isatty():
                 ui.progress(f"fonti {done}/{len(active)} · {lab}")
             if is_prim:
+                primary_ok += status == "ok"
                 primary_left -= 1
                 if primary_left == 0 and pending:
                     # Quorum: the authority answered; the rest get a short grace only.
@@ -276,6 +285,8 @@ def _gather(
             msg += f" · {skipped} breaker"
         ui.progress_done(msg)
 
+    if outcome is not None:
+        outcome["primary_ok"] = primary_ok
     # Preserve original task order for dedup priority
     out: list = []
     for i in range(n):
@@ -344,8 +355,13 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
         labels += t_labels
         keys += t_keys
         primary += t_primary
-    gathered = _gather(tasks, labels=labels, keys=keys, primary=primary)
+    outcome: dict = {}
+    gathered = _gather(tasks, labels=labels, keys=keys, primary=primary, outcome=outcome)
     results = _dedup(gathered, lambda m: m.get("id") or id(m))
+    if not results and outcome.get("primary") and not outcome.get("primary_ok"):
+        # The catalog authority never answered (timeout, network, breaker): "no result"
+        # would tell the caller the title doesn't exist, and nobody would retry (#4).
+        raise NetworkError("il catalogo (Cinemeta) non ha risposto in tempo — riprova")
     # Stable sort on relevance only: equal scores keep the addons' own order (Cinemeta
     # first), never an alphabetical tie-break that would float an unrelated title up.
     return sorted(results, key=lambda m: tuple(-x for x in _search_score(m, query)))
