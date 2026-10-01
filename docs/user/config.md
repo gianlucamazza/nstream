@@ -92,6 +92,7 @@ primary audio → try next source or play fallback with primary-language safety 
 | --- | ---- | ------- | ----- |
 | `prefer_cast` | bool | `false` | Default destination Chromecast instead of mpv |
 | `cast_device` | str | `""` | Preferred device **name**; dynamic discovery (ADR 0010) |
+| `cast_receiver_app_id` | str | `""` | Custom Cast application id (ADR 0013). Empty keeps the Default Media Receiver `CC1AD845`. |
 | `cast_mode` | enum | `dmr` | `dmr` \| `mirror` |
 | `cast_remux` | bool | `true` | Tier-2 host remux for Dolby/DTS (ADR 0005) |
 | `cast_audio_codec` | str | `aac` | Remux target audio |

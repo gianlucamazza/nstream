@@ -317,6 +317,7 @@ def cast(
             on_event=on_event,
             sub_paths=sub_paths,
             sub_lang=sub_lang,
+            app_id=(cfg.cast_receiver_app_id or "").strip(),
         )
         if result is not None:
             return result  # else castbridge couldn't start → fall back to catt below
@@ -348,6 +349,7 @@ def _cast_via_bridge(
     on_event: EventCb | None,
     sub_paths: tuple[str, ...] = (),
     sub_lang: str | None = None,
+    app_id: str = "",
 ) -> cast_delivery.CastResult | None:
     """Cast via castbridge with metadata, forwarding normalized events to `on_event`. Returns
     a `CastResult`, or **None** when the cast never started
@@ -369,6 +371,9 @@ def _cast_via_bridge(
         "content_type": meta.content_type,
         "current_time": float(start or 0.0),
     }
+    if app_id:
+        kwargs["app_id"] = app_id
+        print(f"nstream: ricevitore custom {app_id}", file=sys.stderr)
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
     sub_shutdown, sub_delivered = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
 

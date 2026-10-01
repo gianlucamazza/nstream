@@ -478,6 +478,7 @@ def cast_file(
             title, file_path, device=device, start=start,
             meta=meta or caster.CastMeta(), follow=follow, on_event=on_event,
             sub_paths=sub_paths, sub_lang=sub_lang,
+            app_id=(cfg.cast_receiver_app_id or "").strip(),
         )  # fmt: skip
         if result is not None:
             return result
@@ -556,9 +557,11 @@ def cast_file(
     return cast_delivery.CastResult(pos, dur, bool(sub_paths), started=True)
 
 
-def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) -> dict:
+def _bridge_meta_kwargs(
+    title: str, meta: caster.CastMeta, start: float | None, *, app_id: str = ""
+) -> dict:
     """Metadata args for `bridge.cast_load` from a CastMeta (content type is always MP4 here)."""
-    return {
+    kwargs = {
         "title": title,
         "poster": meta.poster,
         "subtitle": meta.subtitle,
@@ -568,6 +571,9 @@ def _bridge_meta_kwargs(title: str, meta: caster.CastMeta, start: float | None) 
         "content_type": "video/mp4",
         "current_time": float(start or 0.0),
     }
+    if app_id:
+        kwargs["app_id"] = app_id
+    return kwargs
 
 
 def _cast_file_via_bridge(
@@ -581,6 +587,7 @@ def _cast_file_via_bridge(
     on_event: caster.EventCb | None,
     sub_paths: tuple[str, ...] = (),
     sub_lang: str | None = None,
+    app_id: str = "",
 ) -> cast_delivery.CastResult | None:
     """Serve the remux via the stdlib Range server and cast its URL with metadata via castbridge.
     Returns a `CastResult`, or **None** when the cast never started, so `cast_file`
@@ -594,7 +601,9 @@ def _cast_file_via_bridge(
     A Ctrl-C during the startup wait is a *user abort*, not a bridge failure: it tears down and
     re-raises so `cast_file` does NOT fall back to catt re-casting what was just cancelled."""
     bind_ip = serve.lan_ip(device)
-    kwargs = _bridge_meta_kwargs(title, meta, start)
+    kwargs = _bridge_meta_kwargs(title, meta, start, app_id=app_id)
+    if app_id:
+        print(f"nstream: ricevitore custom {app_id}", file=sys.stderr)
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
 
     if not follow:

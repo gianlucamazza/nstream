@@ -27,6 +27,7 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.auto_play is True
     assert cfg.prefer_cast is False
     assert cfg.cast_device == ""
+    assert cfg.cast_receiver_app_id == ""
     assert cfg.autoplay is True
     assert cfg.autoplay_lead == 15
     assert cfg.lang_filter is True

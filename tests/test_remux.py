@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from nstream import remux
+from nstream import caster, remux
 from nstream.config import Config
 from nstream.tracks import Track, Tracks
 
@@ -39,6 +39,12 @@ def _state(tmp_path, monkeypatch):
 
 def _cfg(**kw) -> Config:
     return Config(torrentio_base="tb", **kw)
+
+
+def test_bridge_meta_kwargs_forwards_app_id():
+    meta = caster.CastMeta()
+    assert "app_id" not in remux._bridge_meta_kwargs("T", meta, None)
+    assert remux._bridge_meta_kwargs("T", meta, None, app_id="CA5T0001")["app_id"] == "CA5T0001"
 
 
 def _meta(audio=(), n_video=1, duration=0.0):

@@ -12,6 +12,7 @@
   "auto_play": true,
   "prefer_cast": false,
   "cast_device": "",
+  "cast_receiver_app_id": "",
   "cast_remux": true,
   "cast_audio_codec": "aac",
   "cast_remux_max_resolution": 1080,

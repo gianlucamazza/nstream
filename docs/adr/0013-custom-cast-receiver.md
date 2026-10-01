@@ -85,8 +85,10 @@ the remaining work is exactly the operator steps, not code:
 - **castbridge** (`cast` repo): `media-load` accepts an optional, validated `appId`
   (`daemon.cc::IsOptionalAppId`), forwarded to `MediaReceiverClient::app_id()` — empty →
   `kDefaultMediaReceiverAppId` (`CC1AD845`, back-compat). Built clean, native tests pass.
-- **nstream**: `bridge._media_load_args(app_id=...)` forwards it; **no nstream path sets it yet**
-  (default receiver unchanged). Tested (`test_media_load_args_app_id`).
+- **nstream**: `bridge._media_load_args(app_id=...)` forwards it. `cast_receiver_app_id` in
+  config is the operator knob (empty → Default Media Receiver). Capability-gated remux still
+  waits on a live receiver report. Tested (`test_media_load_args_app_id`,
+  `test_cast_forwards_custom_receiver_app_id`).
 - **receiver artifact + runbook**: `cast/native/receiver/index.html` (a minimal CAF v3 receiver
   that probes the device with `canDisplayType()` on READY and broadcasts a `capabilities` message
   on `urn:x-cast:example.castbridge`) + `cast/native/receiver/README.md` (the operator

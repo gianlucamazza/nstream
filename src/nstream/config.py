@@ -83,6 +83,9 @@ class Config:
     # `catt -d`; empty = resolve per-LAN via a fresh `catt scan` (see caster.py).
     prefer_cast: bool = False
     cast_device: str = ""
+    # Registered Cast application id (Custom Receiver). Empty keeps the Default Media
+    # Receiver (`CC1AD845`). A non-empty value is forwarded on media-load (ADR 0013).
+    cast_receiver_app_id: str = ""
     # Tier-2 cast: when the chosen stream's audio is one the Chromecast Default Media
     # Receiver can't decode (AC-3/E-AC-3/DTS/TrueHD → silent), remux on the host (video
     # `-c copy`, audio → cast_audio_codec) to a complete temp file and let catt serve it,
@@ -360,6 +363,9 @@ def load(*, secure_permissions: bool = True) -> Config:
         auto_play=bool(raw.get("auto_play", Config.auto_play)),
         prefer_cast=bool(raw.get("prefer_cast", Config.prefer_cast)),
         cast_device=str(raw.get("cast_device", Config.cast_device) or ""),
+        cast_receiver_app_id=str(
+            raw.get("cast_receiver_app_id", Config.cast_receiver_app_id) or ""
+        ),
         cast_remux=bool(raw.get("cast_remux", Config.cast_remux)),
         cast_audio_codec=str(raw.get("cast_audio_codec", Config.cast_audio_codec) or "aac"),
         cast_remux_max_resolution=_bounded_int(

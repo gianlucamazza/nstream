@@ -17,6 +17,10 @@ See [selection.md](../selection.md) for scoring and cast vetting.
 Without castbridge, nstream falls back to `catt` (same cast, no now-playing metadata / rich
 events). Without the mirror binary, `--mirror` / auto mirror-over-remux is unavailable.
 
+A registered Custom Receiver is optional (`cast_receiver_app_id` in config). Empty keeps
+Google's Default Media Receiver. An unpublished id only launches on devices registered in
+the Cast Developer Console (ADR 0013).
+
 ## How to cast
 
 | Action | How |

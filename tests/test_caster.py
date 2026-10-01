@@ -657,6 +657,21 @@ def test_cast_prefers_bridge_with_metadata(monkeypatch):
     assert [e["kind"] for e in seen] == ["started", "playing", "ended"]
 
 
+def test_cast_forwards_custom_receiver_app_id(monkeypatch):
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
+    seen: dict = {}
+
+    def fake_load(ip, url, *, follow=True, **meta):
+        seen.update(meta)
+        yield {"kind": "started", "title": "Dune"}
+        yield {"kind": "ended", "position": 1.0, "duration": 1.0}
+
+    monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
+    cfg = Config(torrentio_base="tb", cast_receiver_app_id="CA5T0001")
+    caster.cast(cfg, "Dune", "http://x", device="1.2.3.4")
+    assert seen.get("app_id") == "CA5T0001"
+
+
 def test_cast_falls_back_to_catt_when_bridge_never_starts(monkeypatch):
     monkeypatch.setattr(caster.bridge, "bridge_available", lambda: True)
 

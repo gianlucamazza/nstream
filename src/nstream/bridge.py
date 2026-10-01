@@ -244,9 +244,8 @@ def _media_load_args(
     right metadata block (TvShow if seriesTitle, else Movie if poster/subtitle, else title).
     `subtitle_url` (a WebVTT URL the receiver fetches) adds a side-loaded, auto-activated caption
     track — distinct from `subtitle`, which is Movie-metadata text (a tagline), not a track.
-    `app_id` (empty → Default Media Receiver) launches a custom Cast receiver instead — the
-    dormant enabling hook for ADR 0013 (a registered receiver with Dolby passthrough); no nstream
-    path sets it yet."""
+    `app_id` (empty → Default Media Receiver) launches a custom Cast receiver instead.
+    `cfg.cast_receiver_app_id` is the nstream path that sets it (ADR 0013)."""
     args: dict = {"ip": ip, "url": url}
     if content_type:
         args["contentType"] = content_type
