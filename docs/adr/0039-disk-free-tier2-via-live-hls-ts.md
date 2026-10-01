@@ -114,6 +114,15 @@ On the TV, from `fix`/`feat` commits on top of the acceptance:
   +6 ms — is the offset nstream adds to positions, seeks and the caption track.
 - **History:** a live playlist reports duration −1, which history rejected; the probed
   duration is kept in the live state.
+- **Film time on screen (2026-10-02):** after a fast resume or a restart the TV clock read
+  0:00. serve now prepends an `EXT-X-GAP` placeholder covering 0..base, then a
+  discontinuity, to every live playlist it serves. The TV shows and reports film time (50:00
+  after a seek to 50:00, confirmed by the viewer). It keeps re-reading the growing playlist
+  with the original target duration: played to 52:06 past the 51:13 listed at LOAD.
+- **Seek anywhere (2026-10-02):** a seek outside the producer's window restarts it at the
+  target as a new generation. +50 min landed in 8.5 s, then back to 30:00 in 7.3 s. A
+  restart run from a short-lived thread lost its ffmpeg: PR_SET_PDEATHSIG follows the
+  spawning thread.
 
 ## References
 
