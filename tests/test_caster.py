@@ -716,3 +716,12 @@ def test_fire_and_return_reports_started(monkeypatch):
     r = caster.cast(CFG, "M", "http://u", device="TV", follow=False)
     assert (r.pos, r.dur) == (0.0, 0.0)
     assert r.started is True and r.error is None
+
+
+def test_status_asks_the_receiver_once(monkeypatch):
+    # P5: an unreachable TV used to cost two `catt info` timeouts per --status/--stop.
+    calls = []
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: calls.append(dev) or {})
+    monkeypatch.setattr(caster, "_bridge_track_info", lambda dev: ([], None))
+    st = caster.status("10.0.0.9")
+    assert calls == ["10.0.0.9"] and st["player_state"] == "IDLE" and st["volume"] is None

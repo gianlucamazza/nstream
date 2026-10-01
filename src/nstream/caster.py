@@ -607,13 +607,7 @@ def device_volume(device: str | None) -> tuple[float | None, bool]:
     """Best-effort (volume_level, volume_muted) from one `catt info -j`. For headless
     fire-and-return casts that skip the poll loop and would otherwise miss a muted or
     zero-volume receiver (a silent cast that looks fine). Never raises."""
-    info = receiver_info(device)
-    raw = info.get("volume_level")
-    try:
-        vol = float(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        vol = None
-    return (vol, bool(info.get("volume_muted")))
+    return _vol_muted(receiver_info(device))
 
 
 def _bridge_track_info(device: str | None) -> tuple[list[int], str | None]:
@@ -641,7 +635,10 @@ def status(device: str | None) -> dict:
     info = receiver_info(device)
     pos, dur, state = _cast_progress(info)
     title = (info.get("media_metadata") or {}).get("title") or info.get("title") or None
-    vol, muted = device_volume(device) if not info else _vol_muted(info)
+    # One `catt info` per status: an empty answer means unreachable/idle, and asking again
+    # (the old `device_volume` retry) only doubled the wait — up to CATT_INFO_TIMEOUT more
+    # on an unreachable TV, paid by every --status and --stop.
+    vol, muted = _vol_muted(info)
     active_tracks, receiver_error = _bridge_track_info(device)
     return {
         "player_state": state or "IDLE",
