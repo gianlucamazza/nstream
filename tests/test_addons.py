@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
+
 from nstream import addons
 from nstream.config import Config
 
@@ -181,3 +183,27 @@ def test_load_addon_negative_caches_a_failed_fetch(monkeypatch):
     assert addons.load_addon(url) is None
     assert addons.load_addon(url) is None
     assert len(calls) == 1  # second call served by the negative cache
+
+
+def test_stale_manifest_served_without_blocking(monkeypatch):
+    # P2: a stale manifest used to be refreshed synchronously on the critical path.
+    url = "https://slow.example/manifest.json"
+    key = addons.hashlib.sha256(url.encode()).hexdigest()
+    old = {"ts": 0, "manifest": {"name": "Slow", "resources": ["stream"], "types": ["movie"]}}
+    monkeypatch.setattr(addons, "_load_cache", lambda: {key: dict(old)})
+    refreshed = []
+    monkeypatch.setattr(addons, "_refresh_in_background", lambda u, k: refreshed.append(u))
+    monkeypatch.setattr(
+        addons.net, "http_get_json", lambda *a, **k: (_ for _ in ()).throw(AssertionError("sync"))
+    )
+    a = addons.load_addon(url)
+    assert a is not None and a.name == "Slow" and refreshed == [url]
+
+
+def test_recent_refresh_failure_suppresses_retry(monkeypatch):
+    url = "https://down.example/manifest.json"
+    key = addons.hashlib.sha256(url.encode()).hexdigest()
+    entry = {"ts": 0, "fail_ts": int(addons.time.time()), "manifest": {"name": "Down"}}
+    monkeypatch.setattr(addons, "_load_cache", lambda: {key: entry})
+    monkeypatch.setattr(addons, "_refresh_in_background", lambda u, k: pytest.fail("retry"))
+    assert addons.load_addon(url) is not None

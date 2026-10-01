@@ -15,6 +15,7 @@ import contextlib
 import hashlib
 import json
 import os
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -134,25 +135,70 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
 
 
 def load_addon(manifest_url: str, *, use_cache: bool = True) -> Addon | None:
-    """Fetch+parse a user addon manifest (cached). Returns None if unreachable."""
+    """Fetch+parse a user addon manifest (cached). Returns None if unreachable.
+
+    A stale cached manifest is served immediately and refreshed on a background thread:
+    a synchronous refresh sat on every cold run's critical path, outside any gather budget
+    (~24s once a down addon's manifest passed its TTL). A failed refresh is remembered in
+    the cache (`fail_ts`) so later processes don't retry it for FAIL_TTL."""
     key = hashlib.sha256(manifest_url.encode()).hexdigest()
-    cache = _load_cache() if use_cache else {}
+    if not use_cache:
+        return _fetch_manifest(manifest_url, key, {})
+    cache = _load_cache()
     entry = cache.get(key)
-    if entry and (time.time() - entry.get("ts", 0)) < CACHE_TTL:
+    if entry and "manifest" in entry:
+        fresh = (time.time() - entry.get("ts", 0)) < CACHE_TTL
+        failed_recently = (time.time() - entry.get("fail_ts", 0)) < FAIL_TTL
+        if not fresh and not failed_recently:
+            _refresh_in_background(manifest_url, key)
         return _parse_manifest(manifest_url, entry["manifest"])
-    if use_cache and time.monotonic() - _failed_at.get(key, -FAIL_TTL) < FAIL_TTL:
-        return _parse_manifest(manifest_url, entry["manifest"]) if entry else None
+    if time.monotonic() - _failed_at.get(key, -FAIL_TTL) < FAIL_TTL:
+        return None
+    return _fetch_manifest(manifest_url, key, cache)
+
+
+def _fetch_manifest(manifest_url: str, key: str, cache: dict) -> Addon | None:
     try:
         # One try only: a dead user addon must not stall the flow for ~60s.
         data = net.http_get_json(manifest_url, what="manifest addon", retries=1)
     except net.NetworkError:
         _failed_at[key] = time.monotonic()
-        # Fall back to a stale copy rather than dropping the addon entirely.
-        return _parse_manifest(manifest_url, entry["manifest"]) if entry else None
+        return None
     _failed_at.pop(key, None)
     cache[key] = {"ts": int(time.time()), "manifest": data}
     _store_cache(cache)
     return _parse_manifest(manifest_url, data)
+
+
+_refreshing: set[str] = set()
+_refresh_lock = threading.Lock()
+
+
+def _refresh_in_background(manifest_url: str, key: str) -> None:
+    """Best-effort refresh of a stale manifest; the process may exit before it lands."""
+    with _refresh_lock:
+        if key in _refreshing:
+            return
+        _refreshing.add(key)
+
+    def run() -> None:
+        try:
+            data = net.http_get_json(manifest_url, what="manifest addon", retries=1)
+        except net.NetworkError:
+            data = None
+        cache = _load_cache()
+        entry = dict(cache.get(key) or {})
+        if data is None:
+            entry["fail_ts"] = int(time.time())
+        else:
+            entry = {"ts": int(time.time()), "manifest": data}
+        if "manifest" in entry:
+            cache[key] = entry
+            _store_cache(cache)
+        with _refresh_lock:
+            _refreshing.discard(key)
+
+    threading.Thread(target=run, name="manifest-refresh", daemon=True).start()
 
 
 # --- built-ins + dispatch ------------------------------------------------
