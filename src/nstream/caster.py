@@ -637,8 +637,11 @@ def status(device: str | None) -> dict:
     receiver is idle/unreachable. Never raises."""
     info = receiver_info(device)
     pos, dur, state = _cast_progress(info)
+    offset, live_dur = cast_delivery.live_timeline(device)  # live cast (ADR 0039)
     if pos:
-        pos += cast_delivery.live_offset(device)  # a live cast resumed mid-film (ADR 0039)
+        pos += offset
+    if dur <= 0 and live_dur:
+        dur = live_dur
     title = (info.get("media_metadata") or {}).get("title") or info.get("title") or None
     # One `catt info` per status: an empty answer means unreachable/idle, and asking again
     # (the old `device_volume` retry) only doubled the wait — up to CATT_INFO_TIMEOUT more

@@ -752,3 +752,16 @@ def test_catt_gets_the_cleaned_webvtt(tmp_path):
     assert out.endswith(".vtt")
     assert "“ciao”" in Path(out).read_text(encoding="utf-8")
     assert caster.catt_sub("/nonexistent.srt") == "/nonexistent.srt"
+
+
+def test_status_reports_film_time_and_probed_duration_on_a_live_cast(monkeypatch):
+    """A live playlist reports playlist time and duration -1 (history rejects it): status
+    adds the fast-resume offset and takes the probed duration (ADR 0039)."""
+    monkeypatch.setattr(
+        caster, "receiver_info",
+        lambda d: {"player_state": "PLAYING", "current_time": 100.0, "duration": -1.0},
+    )  # fmt: skip
+    monkeypatch.setattr(caster, "_bridge_track_info", lambda d: ([], None))
+    monkeypatch.setattr(caster.cast_delivery, "live_timeline", lambda d: (3000.0, 6472.0))
+    st = caster.status("10.0.0.5")
+    assert st["position"] == 3100.0 and st["duration"] == 6472.0

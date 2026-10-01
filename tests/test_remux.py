@@ -1019,7 +1019,7 @@ def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
     assert seen["job"].audio_args[:2] == ("-c:a", "aac") and "-ac" in seen["job"].audio_args
     assert remux._read_state() == {
         "pid": 4242, "file": seen["dir"], "device": "10.0.0.5", "mode": "live",
-        "url": seen["url"], "title": "T", "offset": 0.0,
+        "url": seen["url"], "title": "T", "offset": 0.0, "duration": 6000.0,
     }  # fmt: skip
 
 

@@ -30,19 +30,25 @@ EventCb = Callable[[dict], None]
 CAST_DONE = 0.97
 
 
-def live_offset(device: str | None) -> float:
-    """Film time at which the active live cast's playlist starts (ADR 0039 fast resume), or
-    0. The receiver reports playlist time; every reader of its position adds this. Read
-    from the `remux` run state (no import of `remux`: it sits above this module)."""
+def live_timeline(device: str | None) -> tuple[float, float]:
+    """(offset, duration) of the active live cast (ADR 0039), or (0, 0). The receiver
+    reports playlist time — from 0 when a fast resume started mid-film — and duration -1
+    for a growing playlist, which history rejects: every reader of its position adds the
+    offset and takes the probed duration instead. Read from the `remux` run state (no
+    import of `remux`: it sits above this module)."""
     st = util.RunState("remux").read()
     if not st or st.get("mode") != "live" or not util.pid_alive(st.get("pid")):
-        return 0.0
+        return 0.0, 0.0
     if device and st.get("device") != device:
-        return 0.0
+        return 0.0, 0.0
     try:
-        return float(st.get("offset") or 0.0)
+        return float(st.get("offset") or 0.0), float(st.get("duration") or 0.0)
     except (TypeError, ValueError):
-        return 0.0
+        return 0.0, 0.0
+
+
+def live_offset(device: str | None) -> float:
+    return live_timeline(device)[0]
 
 
 def is_finished(pos: float, dur: float) -> bool:

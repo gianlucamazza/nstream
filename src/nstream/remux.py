@@ -1031,6 +1031,7 @@ def cast_live(
         _write_state(
             pid or 0, out_dir, device, mode="live",
             url=serve.served_hls_url(bind_ip, port, token), title=title, offset=offset,
+            duration=duration,
         )  # fmt: skip
         return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
     dur = out.dur if out.dur > 0 else duration
