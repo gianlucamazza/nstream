@@ -320,6 +320,34 @@ def _mirror_choice(
     return True, None, False
 
 
+def _with_container_mime(meta: caster.CastMeta | None, container: str) -> caster.CastMeta | None:
+    """Declare the container's MIME on the LOAD instead of leaving the DMR to sniff (ADR
+    0022): reaching a direct cast means the container is DMR-compatible (mp4/webm) or
+    unknown; set contentType when known so the receiver doesn't guess."""
+    mime = quality.container_mime(container)
+    if mime and not (meta and meta.content_type):
+        return replace(meta or caster.CastMeta(), content_type=mime)
+    return meta
+
+
+def _lang_switch(
+    cfg: Config, results: list[Stream], opts: PlayOpts, *, exact: int, allowed: bool
+) -> tuple[tuple[str, ...], Callable[[str], str | None] | None, caster.ChooseLang | None]:
+    """The in-cast audio switch ('a'): (dubs, resolver, menu). Only an interactive caller
+    with a frontend menu pays the extra rank passes (ADR 0037); headless leaves it off."""
+    if not allowed or opts.choose is None:
+        return (), None, None
+    menu = opts.choose
+
+    def choose_lang(codes: tuple[str, ...]) -> str | None:
+        return menu([(languages.name(c), c) for c in codes], "audio> ")
+
+    cast_langs = cast_vet.cast_languages(cfg, results, exact_resolution=exact)
+    if len(cast_langs) <= 1:
+        return (), None, choose_lang
+    return cast_langs, cast_vet.cast_resolver(cfg, results, exact_resolution=exact), choose_lang
+
+
 @log.phase("run_cast")
 def run_cast(
     cfg: Config,
@@ -508,26 +536,10 @@ def run_cast(
                 )
                 print(f"nstream: {ui.g().warn} {notice}", file=sys.stderr)
                 degraded_audio = True
-            # Declare the container's MIME on the LOAD instead of leaving the DMR to sniff
-            # (ADR 0022): reaching a direct cast means the container is DMR-compatible
-            # (mp4/webm) or unknown; set contentType when known so the receiver doesn't guess.
-            mime = quality.container_mime(final_container)
-            if mime and not (meta and meta.content_type):
-                meta = replace(meta or caster.CastMeta(), content_type=mime)
-            # In-cast audio switch ('a'): only the interactive path pays the extra rank
-            # passes; headless callers leave allow_lang_switch False.
-            langs: tuple[str, ...] = ()
-            resolver = None
-            choose_lang = None
-            if allow_lang_switch and opts.choose is not None:
-                menu = opts.choose
-                choose_lang = lambda codes: menu(  # noqa: E731
-                    [(languages.name(c), c) for c in codes], "audio> "
-                )
-                cast_langs = cast_vet.cast_languages(cfg, results, exact_resolution=exact)
-                if len(cast_langs) > 1:
-                    langs = cast_langs
-                    resolver = cast_vet.cast_resolver(cfg, results, exact_resolution=exact)
+            meta = _with_container_mime(meta, final_container)
+            langs, resolver, choose_lang = _lang_switch(
+                cfg, results, opts, exact=exact, allowed=allow_lang_switch
+            )
             delivery = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,

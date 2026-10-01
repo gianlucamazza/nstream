@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from . import (
     api,
@@ -108,25 +108,23 @@ def describe_stream(cfg: Config, chosen: Stream) -> dict:
     }
 
 
-def auto_play(
-    cfg: Config,
-    args: argparse.Namespace,
-    opts: PlayOpts,
-    typ: str,
-    video_id: str,
-    title: str,
-    imdb_id: str,
-    season: int | None,
-    episode: int | None,
-    selection: str,
-    cast_meta: caster.CastMeta | None = None,
-    *,
-    name: str | None = None,
-) -> int:
-    """Resolve the best stream for one video and play/cast it headlessly, then emit JSON.
-    Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
-    auto_subs → play/cast) but never opens fzf (auto=True, reselect_on_wrong_audio=False)
-    and never silently falls back to local when a requested cast device is missing."""
+@dataclass(frozen=True)
+class _Selected:
+    """Outcome of `_select`: the vetted pick and what the JSON reports about the set."""
+
+    results: list[Stream]
+    opts: PlayOpts
+    vetted: stream_select.VettedStream
+    expected_s: float
+    available_audio: tuple[str, ...]
+    available_resolutions: list[int]
+    audio_verified: bool | None
+
+
+def _select(cfg: Config, opts: PlayOpts, typ: str, video_id: str, title: str) -> _Selected | int:
+    """Fetch, prune and vet the streams for one video; on failure emit the JSON error and
+    return the exit code. Same primitives as the TUI (api.streams → prepare_stream), never
+    a menu (auto=True, reselect_on_wrong_audio=False)."""
     print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
     results = api.streams(cfg, typ, video_id)
     if not results:
@@ -212,6 +210,37 @@ def auto_play(
             exact=exact,
             available_resolutions=available_resolutions,
         )
+    return _Selected(
+        results, opts, vetted, expected_s, tuple(available_audio), available_resolutions,
+        audio_verified,
+    )  # fmt: skip
+
+
+def auto_play(
+    cfg: Config,
+    args: argparse.Namespace,
+    opts: PlayOpts,
+    typ: str,
+    video_id: str,
+    title: str,
+    imdb_id: str,
+    season: int | None,
+    episode: int | None,
+    selection: str,
+    cast_meta: caster.CastMeta | None = None,
+    *,
+    name: str | None = None,
+) -> int:
+    """Resolve the best stream for one video and play/cast it headlessly, then emit JSON.
+    Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
+    auto_subs → play/cast) but never opens fzf (auto=True, reselect_on_wrong_audio=False)
+    and never silently falls back to local when a requested cast device is missing."""
+    sel = _select(cfg, opts, typ, video_id, title)
+    if isinstance(sel, int):
+        return sel
+    results, vetted, expected_s = sel.results, sel.vetted, sel.expected_s
+    available_audio, available_resolutions = sel.available_audio, sel.available_resolutions
+    audio_verified, opts = sel.audio_verified, sel.opts
     chosen = vetted.stream
     stream_block = describe_stream(cfg, chosen)
     # ADR 0021: resolve the per-invocation quality into opts — the cast decision tree
