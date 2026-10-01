@@ -7,7 +7,6 @@ Lifecycle actions (--stop/--status/…) and title selection stay in `headless`.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import tempfile
 from dataclasses import replace
@@ -23,6 +22,7 @@ from . import (
     stream_select,
     tracks,
     ui,
+    util,
 )
 from .caster import CastUnavailable, device_volume
 from .caster import resolve_device as _resolve_device
@@ -263,7 +263,7 @@ def auto_play(
     # threads it through every reselect path.
     opts = replace(opts, quality=vetted.quality)
 
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    runtime = str(util.runtime_dir())
     device_name: str | None = None
     volume: float | None = None
     muted: bool | None = None

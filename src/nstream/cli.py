@@ -33,6 +33,7 @@ from . import (
     state,
     stream_select,
     ui,
+    util,
 )
 from . import (
     quality as quality_mod,
@@ -191,7 +192,7 @@ def _play_video(
     # relies on the same replace() for the binge sticky).
     opts = replace(opts, quality=quality_choice)
 
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    runtime = str(util.runtime_dir())
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = state.resume_position(cfg, video_id) if opts.history else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "") or "sorgente"
@@ -397,6 +398,14 @@ def _move_to_cast(
     except cast_flow.CastVideoUnsupported as e:
         print(
             f"nstream: {ui.g().warn} video {e.codec.upper()} non decodificabile dal TV — "
+            "resto in locale",
+            file=sys.stderr,
+        )
+        return (pos, dur, False)
+    if not outcome.started:
+        # ADR 0031: the TV never took over, so the local position is still the resume point.
+        print(
+            f"nstream: {ui.g().warn} il cast non è partito ({outcome.cast_error or '?'}) — "
             "resto in locale",
             file=sys.stderr,
         )

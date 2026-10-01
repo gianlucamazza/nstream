@@ -259,7 +259,7 @@ ISO tags (and track titles when `und`).
 
 ## Resolve & P2P privacy (ADR 0032)
 
-Any path that joins a torrent swarm (primary resolve, cast `_playable_url` reselects, cached
+Any path that joins a torrent swarm (primary resolve, cast `playable_url` reselects, cached
 fallback) must pass the P2P privacy gate when `p2p_require_vpn` is set — not a single call
 site. Debrid-only URLs do not join the swarm.
 

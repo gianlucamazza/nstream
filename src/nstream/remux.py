@@ -83,7 +83,7 @@ def available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _decodable(codec: str) -> bool:
+def dmr_decodable(codec: str) -> bool:
     """True when `codec` is one the DMR plays natively (so no remux, and we can skip the probe)."""
     return (codec or "").lower() in _DMR_DECODABLE
 
@@ -450,7 +450,7 @@ def remux_to_file(
     # bad index errors out instead of silently producing a mute file.
     sel = audio[audio_index] if 0 <= audio_index < len(audio) else (audio[0] if audio else None)
     amap = f"0:a:{audio_index}" if audio_index > 0 else "0:a:0?"
-    if sel is not None and _decodable(sel.codec):
+    if sel is not None and dmr_decodable(sel.codec):
         acodec = ["-c:a", "copy"]  # already DMR-decodable → keep it (no re-encode)
     else:
         codec = cfg.cast_audio_codec or "aac"
@@ -785,7 +785,7 @@ def _await_start(device: str | None) -> bool:
     deadline = time.monotonic() + _START_TIMEOUT
     seen: list[str] = []
     while time.monotonic() < deadline:
-        info = caster._raw_info(device)
+        info = caster.receiver_info(device)
         state = str(info.get("player_state") or "") if info else ""
         if state in ("PLAYING", "PAUSED", "BUFFERING"):
             return True

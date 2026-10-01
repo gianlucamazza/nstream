@@ -21,7 +21,7 @@ import time
 from collections.abc import Iterator
 from importlib import resources
 
-from . import log, quality
+from . import log, quality, util
 from .config import Config
 from .playback import PlaybackError, PlaybackOutcome, require_started
 
@@ -276,7 +276,7 @@ def play(
     holder = {"position": 0.0, "duration": 0.0}
     with contextlib.ExitStack() as stack:
         if work_dir is None:
-            runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+            runtime = str(util.runtime_dir())
             work_dir = stack.enter_context(
                 tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime)
             )

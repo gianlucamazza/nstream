@@ -35,9 +35,6 @@ _log = log.get_logger("api")
 
 __all__ = ["TIMEOUT", "UA", "NetworkError", "http_get_json", "url_playable"]
 
-# Same family as quality._CACHED_RE (keep the two in sync) — kept local so api stays above
-# quality in the graph. Matches both addon dialects for a cached debrid row: [RD+] and [RD⚡].
-_CACHED_NAME_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
 
 _MAX_WORKERS = 8
 _addon_pool = net.AddonPool(workers=_MAX_WORKERS)
@@ -704,7 +701,7 @@ def _merge_hybrid(debrid: list[Stream], torrents: list[Stream]) -> list[Stream]:
 
 def _release_rank(s: Stream) -> tuple[int, int, int]:
     """Preference for cross-addon release collapse: cached marker > has url > has infoHash."""
-    cached = 1 if _CACHED_NAME_RE.search(s.get("name") or "") else 0
+    cached = 1 if sources.CACHED_MARKER_RE.search(s.get("name") or "") else 0
     has_url = 1 if s.get("url") else 0
     has_hash = 1 if s.get("infoHash") else 0
     return (cached, has_url, has_hash)

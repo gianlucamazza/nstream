@@ -52,7 +52,7 @@ def _meta(audio=(), n_video=1, duration=0.0):
     return Tracks(audio=list(audio)), n_video, duration
 
 
-# --- needs_remux / _decodable ---------------------------------------------
+# --- needs_remux / dmr_decodable ---------------------------------------------
 
 
 @pytest.mark.parametrize("codec", ["ac3", "eac3", "dts", "dtshd", "truehd", "AC3", "TrueHD"])
@@ -67,7 +67,7 @@ def test_needs_remux_false_for_decodable(codec):
 
 @pytest.mark.parametrize("codec,ok", [("aac", True), ("opus", True), ("ac3", False), ("", False)])
 def test_decodable(codec, ok):
-    assert remux._decodable(codec) is ok
+    assert remux.dmr_decodable(codec) is ok
 
 
 # --- _probe_meta ----------------------------------------------------------
@@ -718,14 +718,14 @@ def test_spawn_server_kills_on_bad_announcement(monkeypatch):
 
 def test_await_start_true_once_receiver_plays(monkeypatch):
     states = iter([None, {"player_state": "BUFFERING"}])
-    monkeypatch.setattr(remux.caster, "_raw_info", lambda dev: next(states))
+    monkeypatch.setattr(remux.caster, "receiver_info", lambda dev: next(states))
     monkeypatch.setattr(remux.time, "sleep", lambda s: None)
     assert remux._await_start("10.0.0.5") is True
 
 
 def test_await_start_false_when_receiver_stays_idle(monkeypatch):
     """Timeout path: the states observed are logged so the failure is reconstructable."""
-    monkeypatch.setattr(remux.caster, "_raw_info", lambda dev: {"player_state": "IDLE"})
+    monkeypatch.setattr(remux.caster, "receiver_info", lambda dev: {"player_state": "IDLE"})
     monkeypatch.setattr(remux, "_START_TIMEOUT", 0.02)
     monkeypatch.setattr(remux, "_START_POLL", 0.0)
     warns: list[str] = []

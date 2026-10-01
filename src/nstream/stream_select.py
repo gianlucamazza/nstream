@@ -296,7 +296,7 @@ def _playable_set(
     return playable
 
 
-def _cast_playable(
+def cast_playable(
     cfg: Config, results: list[Stream], *, exact_resolution: int = 0
 ) -> list[quality.RankedStream]:
     """Streams the Chromecast can play (cast profile + Cast-compatible audio).
@@ -333,7 +333,7 @@ def pick_audio_stream(
 ) -> Stream | None:
     """The best playable stream whose audio includes `lang` (url resolved), or None."""
     for r in _playable_set(cfg, results, cast=cast, exact_resolution=exact_resolution):
-        if lang in r.info.languages and _playable_url(cfg, r.stream):
+        if lang in r.info.languages and playable_url(cfg, r.stream):
             return r.stream
     return None
 
@@ -367,10 +367,10 @@ def pick_audio_stream_verified(
         if lang not in r.info.languages:
             continue
         if probed >= probe_cap:
-            # Cap checked BEFORE resolving: `_playable_url` on an over-cap candidate can
+            # Cap checked BEFORE resolving: `playable_url` on an over-cap candidate can
             # cost a P2P buffering wait (or a debrid add) for a stream we'd discard anyway.
             break
-        url = _playable_url(cfg, r.stream)
+        url = playable_url(cfg, r.stream)
         if not url:
             continue
         probed += 1
@@ -412,7 +412,7 @@ def _native_resolve(cfg: Config, stream: Stream) -> str | None:
         return None
 
 
-def _playable_url(cfg: Config, stream: Stream) -> str | None:
+def playable_url(cfg: Config, stream: Stream) -> str | None:
     """Ready url for a stream, resolving a pure-torrent (infoHash) one through the native
     debrid API (native backend) or the P2P engine on demand. Best-effort and silent: returns
     None if neither can serve it (the caller already has a user-facing fallback).
@@ -467,7 +467,7 @@ def stream_audio_langs(cfg: Config, chosen: Stream) -> frozenset[str] | None:
     None when unverifiable — no url, ffprobe missing/empty, or no identifiable track language
     (e.g. a single `und` track) — so the caller treats it as 'can't tell' and doesn't block,
     matching the local guard's benefit-of-the-doubt. Used to confirm a forced cast dub."""
-    url = _playable_url(cfg, chosen)
+    url = playable_url(cfg, chosen)
     if not url:
         return None
     tr = tracks.probe_tracks(url)
@@ -495,7 +495,7 @@ def _resolve_stream(cfg: Config, chosen: Stream) -> Stream | None:
         print("nstream: risoluzione debrid nativa non riuscita, ripiego su P2P…", file=sys.stderr)
     try:
         # The privacy gate runs inside engine.resolve (ADR 0032), so every resolve path —
-        # including `_playable_url`, which the whole cast vetting runs on — is covered.
+        # including `playable_url`, which the whole cast vetting runs on — is covered.
         chosen["url"] = engine.resolve(cfg, chosen)
         return chosen
     except engine.EngineUnavailable as e:
@@ -682,7 +682,7 @@ def _duration_ok(cfg: Config, stream: Stream, expected_s: float) -> availability
     unresolvable candidate is somebody else's problem (it simply passes here)."""
     if expected_s <= 0:
         return availability.DurationVerdict(True)
-    url = _playable_url(cfg, stream)
+    url = playable_url(cfg, stream)
     if not url:
         return availability.DurationVerdict(True, expected=expected_s)
     return availability.vet_duration(url, expected_s)

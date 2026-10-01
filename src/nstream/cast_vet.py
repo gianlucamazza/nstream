@@ -2,7 +2,7 @@
 
 Owns cast-stack policy (cast_flow → cast_vet → backends). `stream_select` keeps
 prepare_stream / ranking / URL resolution and exposes helpers this module uses
-(`_playable_url`, `_cast_playable`, `audio_languages`).
+(`playable_url`, `cast_playable`, `audio_languages`).
 
 Invariant every candidate loop here upholds: **a candidate that cannot be resolved to a url
 is ineligible, not unprobeable.** Each loop resolves once (after the probe-cap break, so an
@@ -35,14 +35,14 @@ def cast_resolver(
 ) -> Callable[[str], str | None]:
     """Return a fn picking the best Cast-compatible stream URL for a language, or None.
     Closes over the already-fetched `results` so switching needs no extra network call."""
-    playable = stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution)
+    playable = stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution)
 
     def resolve(lang: str) -> str | None:
         for r in playable:  # already ranked best-first
             if lang in r.info.languages:
                 # An unresolvable best match is not an answer for the language: keep walking
                 # instead of reporting the dub missing (ADR 0031 appendix).
-                url = stream_select._playable_url(cfg, r.stream)
+                url = stream_select.playable_url(cfg, r.stream)
                 if url:
                     return url
         return None
@@ -78,14 +78,14 @@ class CastAudioPlan:
 def _cast_audio_tracks(cfg: Config, stream: Stream) -> list[tracks.Track]:
     """Probed audio tracks of `stream` (url resolved first), or [] when resolved but
     unprobeable — the loops above gate out unresolvable candidates first."""
-    url = stream_select._playable_url(cfg, stream)
+    url = stream_select.playable_url(cfg, stream)
     return list(tracks.probe_tracks(url).audio) if url else []
 
 
 def _cast_video_codec(cfg: Config, stream: Stream) -> str:
     """REAL video codec of `stream` per ffprobe, "" when unprobeable. Memoized with the
     audio probe (same url, same call) — the video vetting costs no extra network read."""
-    url = stream_select._playable_url(cfg, stream)
+    url = stream_select.playable_url(cfg, stream)
     return tracks.probe_tracks(url).video_codec if url else ""
 
 
@@ -103,7 +103,7 @@ def _duration_castable(cfg: Config, stream: Stream, expected_s: float) -> bool:
     probe the audio/video checks around it already pay — no extra network read."""
     if expected_s <= 0:
         return True
-    url = stream_select._playable_url(cfg, stream)
+    url = stream_select.playable_url(cfg, stream)
     return availability.vet_duration(url or "", expected_s).ok
 
 
@@ -134,7 +134,7 @@ def vet_cast_video(
         return chosen, ""
     why = f"video {bad.upper()} non decodificabile dal TV" if bad else "sorgente non risolvibile"
     probed = 0
-    for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
         if s is chosen or s.get("url") == chosen.get("url"):
             continue
@@ -144,7 +144,7 @@ def vet_cast_video(
         # Resolved AFTER the cap break and the budget spend: resolving an over-cap candidate
         # would cost a P2P buffering wait for a stream we'd discard (stream_select doctrine),
         # and an unresolvable one must consume budget like any other probe.
-        if not stream_select._playable_url(cfg, s):
+        if not stream_select.playable_url(cfg, s):
             continue
         if _video_castable(cfg, s) and _duration_castable(cfg, s, expected_s):
             print(f"nstream: {why} → altra release", file=sys.stderr)
@@ -162,7 +162,7 @@ def cast_container(cfg: Config, stream: Stream) -> str:
     Public (ADR 0022): `cast_flow` reads it for the settled-stream rewrap verdict and the
     LOAD contentType, so it must not be a leading-underscore reach-through."""
     ext = quality.parse_stream(stream).container
-    url = stream_select._playable_url(cfg, stream)
+    url = stream_select.playable_url(cfg, stream)
     probed = quality.container_from_format(tracks.probe_tracks(url).container, ext) if url else ""
     return probed or ext
 
@@ -196,7 +196,7 @@ def vet_cast_container(
     if _container_castable(cfg, chosen):
         return chosen, False
     probed = 0
-    for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
         if s is chosen or s.get("url") == chosen.get("url"):
             continue
@@ -208,7 +208,7 @@ def vet_cast_container(
         probed += 1
         # Eligibility, not castability: an unresolvable candidate can't be probed and can't be
         # cast, and every gate below would wave it through on the benefit of the doubt.
-        if not stream_select._playable_url(cfg, s):
+        if not stream_select.playable_url(cfg, s):
             continue
         if not (
             _container_castable(cfg, s)
@@ -250,7 +250,7 @@ def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) 
         # The codec still decides direct vs remux.
         mode = "remux" if remux.needs_remux(c0) else "direct"
         return CastAudioPlan(mode, stream, 0, target_lang or None, verified=False)
-    if codes[0] == target_lang and remux._decodable(c0):
+    if codes[0] == target_lang and remux.dmr_decodable(c0):
         return CastAudioPlan("direct", stream, 0, target_lang, verified=True)
     k = next((i for i, c in enumerate(codes) if c == target_lang), None)
     if k is not None:
@@ -259,7 +259,7 @@ def _cast_plan_for(stream: Stream, audio: list[tracks.Track], target_lang: str) 
     # default track still has to be DECODABLE — a Dolby/DTS first track would go out silent on
     # a direct cast — so flag a remux of track 0, orthogonally to the language being absent.
     return CastAudioPlan(
-        "absent", stream, 0, codes[0], verified=True, needs_remux=not remux._decodable(c0)
+        "absent", stream, 0, codes[0], verified=True, needs_remux=not remux.dmr_decodable(c0)
     )
 
 
@@ -291,7 +291,7 @@ def _reselect_cast_for_lang(
     direct_bad_container: CastAudioPlan | None = None
     budget = quality.remux_size_budget(cfg)
     probed = 0
-    for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
         s = r.stream
         if s is current or s.get("url") == current.get("url"):
             continue
@@ -304,7 +304,7 @@ def _reselect_cast_for_lang(
         # Unresolvable → ineligible, before any gate. Otherwise its `[]` tracks read as
         # "unprobeable", `_cast_plan_for` returns an unverified direct plan, and it wins the
         # `tagged_guess` tier below — the candidate behind the KeyError: 'url' crash.
-        if not stream_select._playable_url(cfg, s):
+        if not stream_select.playable_url(cfg, s):
             continue
         # A dub with video the DMR can't render is not a candidate: reselecting it trades
         # silent-wrong-language for a black screen (the live failure behind ADR 0017 —
@@ -366,7 +366,7 @@ def find_instant_direct(
     best: CastAudioPlan | None = None
     best_rank = len(wanted)
     probed = 0
-    for r in stream_select._cast_playable(cfg, results, exact_resolution=exact_resolution):
+    for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
         named = r.info.languages
         if not (named & wanted_set or "multi" in named):
             continue
@@ -374,7 +374,7 @@ def find_instant_direct(
             break
         probed += 1
         s = r.stream
-        if not stream_select._playable_url(cfg, s):
+        if not stream_select.playable_url(cfg, s):
             continue
         if not (_video_castable(cfg, s) and _duration_castable(cfg, s, expected_s)):
             continue
@@ -384,7 +384,7 @@ def find_instant_direct(
         if not audio:
             continue
         code = languages.track_lang(audio[0].lang, audio[0].title)
-        if code not in wanted_set or not remux._decodable(audio[0].codec):
+        if code not in wanted_set or not remux.dmr_decodable(audio[0].codec):
             continue
         rank = wanted.index(code)
         if rank < best_rank:

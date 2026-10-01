@@ -1513,3 +1513,20 @@ def test_play_on_cast_not_started_returns_header_notice(monkeypatch):
     pos, dur, advance, notice = _call_cast(_cast_opts(), stream)
     assert (pos, dur, advance) == (0.0, 0.0, False)
     assert notice and "receiver_error" in notice
+
+
+def test_move_to_cast_not_started_keeps_local_position(monkeypatch):
+    # ADR 0031: Alt-C to a TV that never starts must keep the mpv position as resume point.
+    stream: Stream = {"name": "[RD+] Torrentio\n1080p", "url": "http://u/dune.mkv"}
+    _wire_cast_tree(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cli, "_resolve_device", lambda cfg, **k: "192.168.1.5")
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, False, error="receiver_error"),
+    )  # fmt: skip
+    out = cli._move_to_cast(
+        CFG, [stream], stream, "/tmp", "Dune", 1234.0, 5000.0,
+        typ="movie", video_id="tt1", opts=_cast_opts(),
+    )  # fmt: skip
+    assert out == (1234.0, 5000.0, False)

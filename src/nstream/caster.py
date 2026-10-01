@@ -1,8 +1,9 @@
 """Chromecast playback via `catt`: device resolution, launching the cast, polling its
 status for resume/auto-advance, and the in-cast audio-language switch.
 
-Imports the fzf picker from `picker` (not cli) so there's no import cycle; cli calls
-`cast()`, `resolve_device()` and `CastUnavailable`. catt is invoked with subprocess
+Still imports the fzf picker for the device and in-cast audio menus — pre-ADR 0037 debt
+tracked in `tests/test_architecture.py::_KNOWN_DEBT`. cli calls `cast()`,
+`resolve_device()` and `CastUnavailable`. catt is invoked with subprocess
 directly (the poll loop needs returncode/stderr and a per-iteration process).
 """
 
@@ -589,7 +590,7 @@ def _cast_via_catt(
 
 
 @log.phase("catt_info")
-def _raw_info(device: str | None) -> dict:
+def receiver_info(device: str | None) -> dict:
     """One `catt info -j`, parsed; {} on any failure (best-effort, never raises)."""
     base = ["catt", *(["-d", device] if device else [])]
     try:
@@ -606,7 +607,7 @@ def device_volume(device: str | None) -> tuple[float | None, bool]:
     """Best-effort (volume_level, volume_muted) from one `catt info -j`. For headless
     fire-and-return casts that skip the poll loop and would otherwise miss a muted or
     zero-volume receiver (a silent cast that looks fine). Never raises."""
-    info = _raw_info(device)
+    info = receiver_info(device)
     raw = info.get("volume_level")
     try:
         vol = float(raw) if raw is not None else None
@@ -637,7 +638,7 @@ def status(device: str | None) -> dict:
     player_state, title, position, duration, volume, muted, plus the receiver's confirmed
     active_tracks + receiver_error (from castbridge, ADR 0016). Empty player_state when the
     receiver is idle/unreachable. Never raises."""
-    info = _raw_info(device)
+    info = receiver_info(device)
     pos, dur, state = _cast_progress(info)
     title = (info.get("media_metadata") or {}).get("title") or info.get("title") or None
     vol, muted = device_volume(device) if not info else _vol_muted(info)

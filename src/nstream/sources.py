@@ -13,11 +13,20 @@ can share the catalog without cycles.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import urlsplit
 
 from .types import Stream
+
+# Addons mark an instantly-available (cached) debrid stream with a per-provider prefix whose
+# glyph differs by addon dialect: Torrentio writes [RD+] / [AD+] / [PM+] / [TB+] ("+" =
+# cached, vs "[RD download]"), Comet writes [RD⚡] (vs [RD⬇️] to download). Provider code and
+# glyph are matched generically so no addon or debrid is special-cased; the optional
+# variation selector keeps emoji-presentation variants ("⚡\ufe0f") matching. One definition
+# for `api` (dedup priority) and `quality` (the cached score term).
+CACHED_MARKER_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
 
 
 def normalize_stream(value: object) -> Stream | None:

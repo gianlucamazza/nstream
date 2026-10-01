@@ -326,7 +326,7 @@ def cast_via_mirror(
     if old:
         _teardown(old)
 
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    runtime = str(util.runtime_dir())
     work_dir = tempfile.mkdtemp(prefix="nstream-mirror-", dir=runtime)
     sock_path = os.path.join(work_dir, "mpv.sock")
     # The work dir travels in the state so `stop()` (detached path) and `_teardown`

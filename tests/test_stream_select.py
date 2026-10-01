@@ -174,7 +174,7 @@ def test_playable_url_native(monkeypatch):
     monkeypatch.setattr(
         stream_select.debrid, "get_resolver", lambda cfg: _FakeResolver(resolved="http://cdn/p.mkv")
     )
-    assert stream_select._playable_url(_native_cfg(), {"infoHash": "aaaa"}) == "http://cdn/p.mkv"
+    assert stream_select.playable_url(_native_cfg(), {"infoHash": "aaaa"}) == "http://cdn/p.mkv"
 
 
 # --- audio language probing ------------------------------------------------
@@ -856,7 +856,7 @@ def _rstream(url, langs):
 
 
 def test_pick_audio_verified_cap_checked_before_resolving(monkeypatch):
-    """The probe cap must be enforced BEFORE `_playable_url`: resolving an over-cap
+    """The probe cap must be enforced BEFORE `playable_url`: resolving an over-cap
     candidate can cost a P2P buffering wait / a debrid add for a stream we discard."""
     cfg = Config(torrentio_base="tb")
     playable = [_rstream(f"u{i}", {"ita"}) for i in range(6)]
@@ -864,7 +864,7 @@ def test_pick_audio_verified_cap_checked_before_resolving(monkeypatch):
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
     resolved = []
     monkeypatch.setattr(
-        stream_select, "_playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
+        stream_select, "playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
     )
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
     stream, verified = stream_select.pick_audio_stream_verified(
@@ -888,7 +888,7 @@ def test_pick_audio_stream_returns_first_with_lang(monkeypatch):
     playable = [_rstream("u1", {"eng"}), _rstream("u2", {"ita"})]
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     selected = stream_select.pick_audio_stream(cfg, [], "ita", cast=False)
     assert selected is not None and selected["url"] == "u2"
 
@@ -898,7 +898,7 @@ def test_pick_audio_stream_none_when_absent(monkeypatch):
     playable = [_rstream("u1", {"eng"})]
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     assert stream_select.pick_audio_stream(cfg, [], "jpn", cast=False) is None
 
 
@@ -908,7 +908,7 @@ def test_pick_audio_stream_none_when_absent(monkeypatch):
 def test_stream_audio_langs_probes(monkeypatch):
     from nstream import tracks as tr
 
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: "http://u")
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: "http://u")
     monkeypatch.setattr(
         stream_select.tracks, "probe_tracks",
         lambda url: tr.Tracks(audio=[tr.Track(1, "ita"), tr.Track(2, "eng")]),
@@ -920,7 +920,7 @@ def test_stream_audio_langs_probes(monkeypatch):
 def test_stream_audio_langs_none_when_und(monkeypatch):
     from nstream import tracks as tr
 
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: "http://u")
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: "http://u")
     monkeypatch.setattr(
         stream_select.tracks, "probe_tracks", lambda url: tr.Tracks(audio=[tr.Track(1, "und")])
     )
@@ -933,7 +933,7 @@ def test_pick_audio_stream_verified_confirms(monkeypatch):
     playable = [_rstream("u1", {"eng"}), _rstream("u2", {"ita"})]
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     # real tracks of u2 confirm ita
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"ita"}))
     stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
@@ -946,7 +946,7 @@ def test_pick_audio_stream_verified_rejects_mistag(monkeypatch):
     playable = [_rstream("u1", {"ita"})]  # name tags ita…
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     # …but the real tracks are eng only → mistag → no verified match
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
     stream, verified = stream_select.pick_audio_stream_verified(cfg, [], "ita", cast=False)
@@ -972,7 +972,7 @@ def test_pick_audio_verified_skips_short_file(monkeypatch):
     playable = [_rstream("fake", {"eng"}), _rstream("real", {"eng"})]
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: None)  # und tracks
     _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
     stream, verified = stream_select.pick_audio_stream_verified(
@@ -989,7 +989,7 @@ def test_pick_audio_verified_raises_when_all_short(monkeypatch):
     playable = [_rstream("f1", {"eng"}), _rstream("f2", {"eng"})]
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"eng"}))
     _durations(monkeypatch, {"f1": 30.0, "f2": 12.0})
     with pytest.raises(stream_select.ContentTooShort) as e:
@@ -1004,7 +1004,7 @@ def test_pick_audio_verified_no_expected_keeps_current_behaviour(monkeypatch):
     playable = [_rstream("u1", {"ita"})]
     monkeypatch.setattr(stream_select.quality, "detect_caps", lambda: object())
     monkeypatch.setattr(stream_select.quality, "rank_streams", lambda *a, **k: (playable, []))
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     monkeypatch.setattr(stream_select, "stream_audio_langs", lambda cfg, s: frozenset({"ita"}))
     monkeypatch.setattr(
         stream_select.availability.tracks,
@@ -1022,7 +1022,7 @@ def test_vet_duration_reselects_next_candidate(monkeypatch):
     real: Stream = {"url": "real"}
     results: list[Stream] = [fake, real]
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, real])
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
     picked = stream_select.vet_duration(cfg, results, fake, expected_s=3300.0, cast=False)
     assert picked is real
@@ -1036,7 +1036,7 @@ def test_vet_duration_respects_probe_cap(monkeypatch):
     resolved = []
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: streams)
     monkeypatch.setattr(
-        stream_select, "_playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
+        stream_select, "playable_url", lambda cfg, s: resolved.append(s["url"]) or s["url"]
     )
     _durations(monkeypatch, {s["url"]: 30.0 for s in streams})
     with pytest.raises(stream_select.ContentTooShort):
@@ -1049,7 +1049,7 @@ def test_vet_duration_unverifiable_candidate_accepted(monkeypatch):
     fake: Stream = {"url": "fake"}
     unknown: Stream = {"url": "unknown"}
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, unknown])
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     _durations(monkeypatch, {"fake": 30.0})  # "unknown" probes to 0 → benefit of the doubt
     assert stream_select.vet_duration(
         cfg, [fake, unknown], fake, expected_s=3300.0, cast=False
@@ -1064,7 +1064,7 @@ def test_prepare_stream_vets_duration_on_local_backend(monkeypatch):
     monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: fake)
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, real])
     monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: None)
     _durations(monkeypatch, {"fake": 30.0, "real": 3180.0})
     cfg = Config(torrentio_base="tb", playback_backend="local")
@@ -1083,7 +1083,7 @@ def test_prepare_stream_duration_guard_before_audio_guard(monkeypatch):
     monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: fake)
     monkeypatch.setattr(stream_select, "_auto_candidates", lambda *a, **k: [fake, real])
     monkeypatch.setattr(stream_select, "_resolve_stream", lambda cfg, s: s)
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     monkeypatch.setattr(
         stream_select, "_audio_langs_of", lambda cfg, ch: seen.append(ch["url"]) or {"ita"}
     )
@@ -1120,7 +1120,7 @@ def test_vet_duration_passes_plausible_chosen_through(monkeypatch):
     monkeypatch.setattr(
         stream_select, "_auto_candidates", lambda *a, **k: pytest.fail("no reselect needed")
     )
-    monkeypatch.setattr(stream_select, "_playable_url", lambda cfg, s: s.get("url"))
+    monkeypatch.setattr(stream_select, "playable_url", lambda cfg, s: s.get("url"))
     _durations(monkeypatch, {"good": 3180.0})
     assert stream_select.vet_duration(cfg, [good], good, expected_s=3300.0, cast=False) is good
 
@@ -1364,9 +1364,9 @@ def test_playable_url_memoizes_the_failure(monkeypatch):
         stream_select.engine, "resolve",
         lambda c, s: calls.append(s["infoHash"]) or _raise_unavailable(),
     )  # fmt: skip
-    assert stream_select._playable_url(cfg, stream) is None
-    assert stream_select._playable_url(cfg, stream) is None
-    assert stream_select._playable_url(cfg, stream) is None
+    assert stream_select.playable_url(cfg, stream) is None
+    assert stream_select.playable_url(cfg, stream) is None
+    assert stream_select.playable_url(cfg, stream) is None
     assert calls == ["deadbeef"]
     assert stream["unresolvable"] is True
 
@@ -1376,7 +1376,7 @@ def _raise_unavailable():
 
 
 def test_playable_url_is_covered_by_the_privacy_gate(monkeypatch, capsys):
-    """The live 2026-08-08 exposure. `_playable_url` is the resolver the WHOLE cast vetting
+    """The live 2026-08-08 exposure. `playable_url` is the resolver the WHOLE cast vetting
     runs on, and it was the one path `_p2p_guard` never protected: with p2p_require_vpn set
     and no VPN up, casting joined the swarm and exposed the real IP (ADR 0032)."""
     cfg = Config(torrentio_base="tb", p2p_require_vpn=True, p2p_ack=True)
@@ -1388,7 +1388,7 @@ def test_playable_url_is_covered_by_the_privacy_gate(monkeypatch, capsys):
         lambda cfg: pytest.fail("cast path joined the swarm despite p2p_require_vpn"),
     )  # fmt: skip
     stream: Stream = {"infoHash": "deadbeef"}
-    assert stream_select._playable_url(cfg, stream) is None
+    assert stream_select.playable_url(cfg, stream) is None
     assert "bloccato" in capsys.readouterr().err
     # Memoised like any other failed resolve: the vetting probes many candidates and must not
     # re-enter the gate (nor reprint) for each one.
@@ -1404,7 +1404,7 @@ def test_native_debrid_resolve_is_not_gated(monkeypatch):
     monkeypatch.setattr(
         stream_select.engine, "resolve", lambda cfg, s: pytest.fail("engine used for a debrid url")
     )
-    assert stream_select._playable_url(cfg, {"infoHash": "aaaa"}) == "http://rd/x.mkv"
+    assert stream_select.playable_url(cfg, {"infoHash": "aaaa"}) == "http://rd/x.mkv"
 
 
 def test_prepare_candidates_matches_play_defaults():

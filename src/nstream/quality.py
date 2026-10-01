@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config as config_mod
-from . import languages, util
+from . import languages, sources, util
 from .config import Config
 from .types import Stream
 
@@ -185,13 +185,8 @@ def _likely_needs_remux(info: StreamInfo) -> bool:
     )
 
 
-# Addons mark an instantly-available (cached) debrid stream with a per-provider prefix,
-# but the glyph differs by addon dialect: Torrentio writes [RD+] / [AD+] / [PM+] / [TB+]
-# ("+" = cached, vs "[RD download]"), Comet writes [RD⚡] (vs [RD⬇️] to download, [RD🔄]
-# syncing, [TORRENT🧲] pure P2P). Both the provider code and the glyph are matched
-# generically so no addon or debrid is special-cased. The optional variation selector
-# keeps emoji-presentation variants ("⚡\ufe0f") matching too.
-_CACHED_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
+# Shared with `api` (single definition in `sources`).
+_CACHED_RE = sources.CACHED_MARKER_RE
 
 
 # Subtitle-language tags ("SUB.ITA", "Subs ENG FRE") name the subtitles, not the audio:

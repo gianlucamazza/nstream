@@ -180,7 +180,7 @@ def _pick(
     # Loopback = the local P2P gateway (TorrServer): a tail Range read there forces the
     # torrent's LAST piece at startup, the exact anti-pattern piece-deadline scheduling
     # avoids. Hash only direct (debrid/CDN) urls, where a ranged read is cheap.
-    if video_url and not _is_loopback(video_url) and (hashed := oshash.hash_url(video_url)):
+    if video_url and not subalign.is_loopback(video_url) and (hashed := oshash.hash_url(video_url)):
         video_hash, video_size = hashed
     try:
         subs = api.subtitles(
@@ -219,11 +219,6 @@ def _pick(
         print("nstream: nessun sottotitolo nelle lingue preferite", file=sys.stderr)
         return SubsPick()
     return pick
-
-
-def _is_loopback(url: str) -> bool:
-    host = urllib.parse.urlsplit(url).hostname or ""
-    return host in ("127.0.0.1", "::1", "localhost")
 
 
 # Same-language candidates kept for the local-alignment fallback (downloads are KB).

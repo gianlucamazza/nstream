@@ -170,6 +170,12 @@ def load_json[T](path: Path, fallback: T) -> T:
     return data if isinstance(data, type(fallback)) else fallback
 
 
+def runtime_dir() -> Path:
+    """Per-user runtime directory (`$XDG_RUNTIME_DIR`, tmpfs, per boot), falling back to the
+    system temp dir — where per-play work dirs and detached-helper state live."""
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+
+
 class RunState:
     """Tiny JSON state file tracking a detached helper process across nstream runs
     (`$XDG_RUNTIME_DIR/nstream-<name>.json`, falling back to the system temp dir) —
@@ -180,8 +186,7 @@ class RunState:
     raise."""
 
     def __init__(self, name: str) -> None:
-        base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
-        self.path = Path(base) / f"nstream-{name}.json"
+        self.path = runtime_dir() / f"nstream-{name}.json"
 
     def read(self) -> dict | None:
         """The stored state, with every recorded pid (`pid` / `*_pid`) whose process start

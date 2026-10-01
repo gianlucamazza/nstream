@@ -400,5 +400,5 @@ def test_resolve_refuses_before_touching_the_swarm(monkeypatch):
 
 def test_p2p_blocked_is_an_engine_unavailable():
     """A subclass, so every existing `except EngineUnavailable` degrades correctly without
-    knowing the gate exists — including `_playable_url`, which memoises it as unresolvable."""
+    knowing the gate exists — including `playable_url`, which memoises it as unresolvable."""
     assert issubclass(engine.P2PBlocked, engine.EngineUnavailable)

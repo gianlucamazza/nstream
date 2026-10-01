@@ -418,7 +418,7 @@ def test_stop_and_volume_timeout_degrade(monkeypatch):
     monkeypatch.setattr(caster.subprocess, "run", hang)
     assert caster.stop("1.2.3.4") is False
     assert caster.set_volume("1.2.3.4", 50) is False
-    assert caster.status("1.2.3.4")["player_state"] == "IDLE"  # _raw_info degrades too
+    assert caster.status("1.2.3.4")["player_state"] == "IDLE"  # receiver_info degrades too
 
 
 def test_cast_prints_preparing_before_launch(monkeypatch, capsys):

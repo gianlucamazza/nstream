@@ -35,7 +35,7 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
   `tests/test_architecture.py::_KNOWN_DEBT`, which may only shrink
 - Machine output: every `--json` object goes through `log.emit_json` (scrubbed)
 - Candidate pass shared by play, `--explain`, `--probe`: `stream_select.prepare_candidates`
-- `cast_vet` → `stream_select` helpers (`_playable_url`, `_cast_playable`, `audio_languages`)
+- `cast_vet` → `stream_select` helpers (`playable_url`, `cast_playable`, `audio_languages`; public since 2026-10-01 — older ADRs cite them as `_playable_url` / `_cast_playable`)
 - `availability` is a leaf under selection (probe + denylist); `stream_select` orchestrates targets
 - Domain payloads: import from `nstream.types`, not `config`
 - State: `from nstream import state` (package public API); stores live in `state.history` /

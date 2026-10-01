@@ -1,7 +1,7 @@
 """Shared cast decision tree: vet the audio plan, then mirror / Tier-2 remux / direct cast.
 
 `run_cast` is the single body behind the interactive cast (`cli._play_on_cast`) and the
-headless `--json --cast` branch (`cli._auto_play`), which used to carry two hand-synced
+headless `--json --cast` branch (`headless_play.auto_play`), which used to carry two hand-synced
 copies of the same vet → mirror-gate → remux → direct sequence. Same tier as
 `stream_select`: sits below `cli` (never imports it) and orchestrates the cast backends.
 
