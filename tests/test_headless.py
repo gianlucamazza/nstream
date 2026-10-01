@@ -1675,3 +1675,17 @@ def test_resume_without_a_cast_session_asks_no_receiver(monkeypatch, tmp_path):
     _spy_auto_play(monkeypatch, played)
     assert headless.run_auto(CFG, _hns(cont=True, query=["film"]), _hopts()) == 0
     assert played == {"video_id": "tt9", "selection": "resume"}
+
+
+def test_run_auto_stop_unreachable_device_reclaims_remux(monkeypatch, capsys):
+    def boom(cfg, **k):
+        raise headless.CastUnavailable("nessun Chromecast")
+
+    calls: list = []
+    monkeypatch.setattr(headless, "_resolve_device", boom)
+    monkeypatch.setattr(headless.mirror, "stop", lambda: False)
+    monkeypatch.setattr(headless.remux, "stop", lambda dev: calls.append(dev) or True)
+    rc = headless.run_auto(CFG, _hns(stop=True), _hopts(cast=True))
+    out = json.loads(capsys.readouterr().out)  # exactly one JSON object
+    assert calls == [None]
+    assert rc == 0 and out["ok"] is True and out["action"] == "stop"

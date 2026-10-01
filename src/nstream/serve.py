@@ -37,11 +37,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import log
+from . import log, util
 
 _log = log.get_logger("serve")
 
@@ -228,6 +229,13 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         path, content_type = target
+        self.server.touch(+1)
+        try:
+            self._serve_target(path, content_type, write_body=write_body)
+        finally:
+            self.server.touch(-1)
+
+    def _serve_target(self, path: str, content_type: str, *, write_body: bool) -> None:
         try:
             size = os.path.getsize(path)
         except OSError:
@@ -308,6 +316,21 @@ class _FileServer(ThreadingHTTPServer):
         self.url_path = url_path(self.token)
         self.sub_url_path = sub_url_path(self.token)
         self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
+        # Idle tracking for the detached server's exit (`_main`): only requests that hit
+        # the token paths count, so LAN scanners can't keep a finished cast's file pinned.
+        self._activity_lock = threading.Lock()
+        self._in_flight = 0
+        self._last_activity = time.monotonic()
+
+    def touch(self, delta: int) -> None:
+        with self._activity_lock:
+            self._in_flight += delta
+            self._last_activity = time.monotonic()
+
+    def idle_for(self) -> float:
+        """Seconds since the last served request ended; 0 while one is in flight."""
+        with self._activity_lock:
+            return 0.0 if self._in_flight else time.monotonic() - self._last_activity
 
 
 def _make_server(
@@ -416,8 +439,11 @@ def kill_detached(pid: int | None) -> None:
 # from the same server as the media; that lifecycle stays in `remux`.)
 
 
-def _sub_server_state() -> Path:
-    return _cache_dir() / "sub-server.pid"
+def _sub_server_state() -> util.RunState:
+    # Runtime dir (tmpfs, per boot), not the cache: a pid that survived a reboot in
+    # ~/.cache could name an unrelated process the next reap would SIGTERM. RunState also
+    # records the process start time, so a reused pid within a boot reads back as None.
+    return util.RunState("sub-server")
 
 
 def persist_sub(vtt_path: str) -> str | None:
@@ -440,26 +466,44 @@ def persist_sub(vtt_path: str) -> str | None:
 def register_sub_server(pid: int, persist_path: str | None = None) -> None:
     """Record the detached standalone subtitle server (and its persisted VTT copy, if any)
     so a later cast / `--stop` can reap both."""
-    with contextlib.suppress(OSError):
-        _sub_server_state().write_text(f"{pid}\n{persist_path or ''}")
+    _sub_server_state().write({"pid": pid, "persist": persist_path or ""})
 
 
 def reap_sub_server() -> bool:
     """Kill and forget a leftover standalone subtitle server, removing its persisted VTT
     copy. True if there was one (best-effort, idempotent)."""
-    p = _sub_server_state()
-    try:
-        lines = p.read_text().splitlines()
-        pid = int(lines[0].strip())
-    except (OSError, ValueError, IndexError):
+    with contextlib.suppress(OSError):  # pre-1.39 location: may predate a reboot, never trusted
+        _legacy_sub_state().unlink(missing_ok=True)
+    st = _sub_server_state()
+    data = st.read()
+    if data is None:
         return False
-    kill_detached(pid)
-    if len(lines) > 1 and lines[1].strip():
+    kill_detached(data.get("pid"))
+    if data.get("persist"):
         with contextlib.suppress(OSError):
-            os.unlink(lines[1].strip())
-    with contextlib.suppress(OSError):
-        p.unlink()
+            os.unlink(data["persist"])
+    st.clear()
     return True
+
+
+def _legacy_sub_state() -> Path:
+    return _cache_dir() / "sub-server.pid"
+
+
+# A detached server with no served request for this long exits: the cast ended (or the TV
+# was switched off) without a `--stop`, and the process would otherwise pin a multi-GB remux
+# file forever (`remux._gc_stale` keeps any file whose server is alive). Long enough to
+# survive a paused film; the receiver re-requests with Range on resume while it's up.
+IDLE_EXIT_S = 3 * 3600.0
+
+
+def _exit_when_idle(server: _FileServer, idle_s: float) -> None:
+    while True:
+        time.sleep(min(60.0, idle_s / 4))
+        if server.idle_for() >= idle_s:
+            _log.info("serve: inattivo da %.0fs → esco", idle_s)
+            server.shutdown()
+            return
 
 
 def _main(argv: list[str] | None = None) -> int:
@@ -473,6 +517,7 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--subs")  # optional side-loaded WebVTT caption track
+    ap.add_argument("--idle-exit", type=float, default=IDLE_EXIT_S)
     args = ap.parse_args(argv)
     # Detached process: nothing has configured logging (cli._entry does it for the TUI), so
     # without this the first-request INFO — the network-vs-media discriminator on a Tier-2
@@ -492,6 +537,8 @@ def _main(argv: list[str] | None = None) -> int:
     # The parent reads exactly these two lines to learn port+token, then leaves us running.
     sys.stdout.write(f"PORT={port}\nTOKEN={server.token}\n")
     sys.stdout.flush()
+    if args.idle_exit > 0:
+        threading.Thread(target=_exit_when_idle, args=(server, args.idle_exit), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

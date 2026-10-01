@@ -473,11 +473,16 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     # A mirror cast is self-contained (sender + headless mpv + null sink, no DMR session):
     # tear it down first, independent of DMR device resolution.
     mirror_stopped = mirror.stop()
-    device = _headless_device(cfg, args)
-    if device is None:
-        if mirror_stopped:
+    try:
+        device = _resolve_device(cfg, headless=True, prefer=args.device)
+    except CastUnavailable as e:
+        # The TV is off/unreachable: still reclaim the local side (detached remux server,
+        # its multi-GB temp file, a subtitle server) — it would otherwise pin disk forever.
+        # Exactly one JSON object either way.
+        if remux.stop(None) or mirror_stopped:
             _emit_json({"ok": True, "action": "stop", "device": None, "error": None})
             return 0
+        _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
         return 1
     # Read the receiver position BEFORE stopping: it's the resume point of a
     # fire-and-return cast, merged into history via the cast session below.

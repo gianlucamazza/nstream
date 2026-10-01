@@ -206,3 +206,24 @@ def test_runstate_write_0600(tmp_path, monkeypatch):
     rs.write({"a": 1})
     assert rs.read() == {"a": 1}
     assert stat.S_IMODE(rs.path.stat().st_mode) == 0o600
+
+
+def test_runstate_drops_reused_pid(tmp_path, monkeypatch):
+    # A pid recorded for one process and later reused by another must read back as None:
+    # callers SIGTERM what they read (the stale sub-server pid hazard).
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    starts = {42: "100"}
+    monkeypatch.setattr(util, "proc_start", lambda pid: starts.get(pid))
+    st = util.RunState("demo")
+    st.write({"pid": 42, "mpv_pid": 42, "file": "/x"})
+    assert st.read() == {"pid": 42, "mpv_pid": 42, "file": "/x"}
+    starts[42] = "999"  # same pid, different process
+    assert st.read() == {"pid": None, "mpv_pid": None, "file": "/x"}
+
+
+def test_proc_start_of_self_and_missing():
+    import os
+
+    assert util.proc_start(os.getpid())
+    assert util.proc_start(0) is None
+    assert util.proc_start(2**22 + 12345) is None

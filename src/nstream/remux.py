@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -320,34 +321,51 @@ def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tup
     with tempfile.TemporaryFile() as err:
         try:
             proc = subprocess.Popen(  # noqa: S603
-                cmd, stdout=subprocess.PIPE, stderr=err, text=True
-            )
+                cmd, stdout=subprocess.PIPE, stderr=err, text=True,
+                preexec_fn=util.die_with_parent,  # noqa: PLW1509 — awaited by this thread
+            )  # fmt: skip
         except (OSError, subprocess.SubprocessError) as e:
             return None, str(e)
-        pct = -1
-        # A tty redraws in place (every percent). A pipe still needs the wait to be
-        # visible (ADR 0035): one line up front, then each 10% — `ui.progress` already
-        # prints a plain newline when stderr is not a tty.
-        bucket = 1 if sys.stderr.isatty() else 10
-        ui.progress(_frame(0 if duration > 0 else None))
-        pct = 0 if duration > 0 else -1
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                if duration > 0 and line.startswith("out_time_us="):
-                    try:
-                        cur = int(line.split("=", 1)[1]) / 1_000_000
-                    except ValueError:
-                        continue
-                    shown = (min(99, int(cur / duration * 100)) // bucket) * bucket
-                    if shown != pct:
-                        pct = shown
-                        ui.progress(_frame(pct))
-        proc.wait()
-        if sys.stderr.isatty():
-            # Clear the progress line; the cast "in onda" line is the next status.
-            ui.progress_done()
-        err.seek(0)
-        stderr = err.read().decode("utf-8", errors="replace")
+        try:
+            return _await_ffmpeg(proc, err, duration, _frame)
+        except BaseException:
+            # Ctrl-C / abort: stop ffmpeg BEFORE the caller deletes the partial file, or it
+            # keeps writing (and downloading) into an unlinked inode.
+            proc.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=5)
+            if proc.poll() is None:
+                proc.kill()
+            raise
+
+
+def _await_ffmpeg(
+    proc: subprocess.Popen, err: BinaryIO, duration: float, _frame: Callable[[int | None], str]
+) -> tuple[int | None, str]:
+    """Drain `-progress` into the in-place progress line, then wait and read stderr."""
+    # A tty redraws in place (every percent). A pipe still needs the wait to be
+    # visible (ADR 0035): one line up front, then each 10% — `ui.progress` already
+    # prints a plain newline when stderr is not a tty.
+    bucket = 1 if sys.stderr.isatty() else 10
+    ui.progress(_frame(0 if duration > 0 else None))
+    pct = 0 if duration > 0 else -1
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            if duration > 0 and line.startswith("out_time_us="):
+                try:
+                    cur = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                shown = (min(99, int(cur / duration * 100)) // bucket) * bucket
+                if shown != pct:
+                    pct = shown
+                    ui.progress(_frame(pct))
+    proc.wait()
+    if sys.stderr.isatty():
+        # Clear the progress line; the cast "in onda" line is the next status.
+        ui.progress_done()
+    err.seek(0)
+    stderr = err.read().decode("utf-8", errors="replace")
     return proc.returncode, stderr
 
 
@@ -436,7 +454,8 @@ def remux_to_file(
     path = _new_remux_temp()
     cmd = [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
-        "-i", url,
+        # A stalled source must fail the remux, not hang it forever (30s, microseconds).
+        "-rw_timeout", "30000000", "-i", url,
         "-map", "0:v:0", "-map", amap,
         "-c:v", "copy", *acodec,
         "-movflags", "+faststart", path,

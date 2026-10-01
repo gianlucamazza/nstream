@@ -879,3 +879,39 @@ def test_cast_file_follow_catt_reports_progress(monkeypatch, tmp_path):
         False,
     )  # last known position wins, no subs
     assert rec["killed"] == [4242] and not f.exists()  # teardown unchanged
+
+
+def test_run_ffmpeg_abort_terminates_child(monkeypatch):
+    # Ctrl-C mid-prepare: the child must be stopped before the caller deletes the partial
+    # file, or it keeps downloading into an unlinked inode.
+    import subprocess as sp
+    import sys
+
+    spawned: list = []
+    real_popen = sp.Popen
+
+    def popen(*a, **k):
+        proc = real_popen(*a, **k)
+        spawned.append(proc)
+        return proc
+
+    def interrupt(_msg):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(remux.subprocess, "Popen", popen)
+    monkeypatch.setattr(remux.ui, "progress", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        remux._run_ffmpeg([sys.executable, "-c", "import time; time.sleep(30)"], 10.0)
+    assert spawned and spawned[0].poll() is not None
+
+
+def test_remux_cmd_bounds_stalled_source(monkeypatch, tmp_path):
+    seen: list = []
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_free_gb", lambda _p: 500.0)
+    monkeypatch.setattr(remux, "_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda cmd, d, **k: seen.append(cmd) or (1, "x"))
+    remux.remux_to_file("http://src", Config(torrentio_base="tb"), size_gb=1.0)
+    cmd = seen[0]
+    assert cmd[cmd.index("-rw_timeout") + 1] == "30000000"
+    assert cmd.index("-rw_timeout") < cmd.index("-i")

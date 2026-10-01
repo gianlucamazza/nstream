@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -351,3 +352,35 @@ def test_reap_sub_server_backcompat_pid_only(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "kill_detached", lambda pid: killed.append(pid))
     serve.register_sub_server(999)
     assert serve.reap_sub_server() is True and killed == [999]
+
+
+def test_reap_sub_server_ignores_legacy_cache_pid(tmp_path, monkeypatch):
+    # The pre-1.39 pid file lived in ~/.cache and survived reboots: never kill from it.
+    killed: list = []
+    monkeypatch.setattr(serve, "kill_detached", lambda pid: killed.append(pid))
+    legacy = serve._legacy_sub_state()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("4242\n")
+    assert serve.reap_sub_server() is False
+    assert killed == [] and not legacy.exists()
+
+
+def test_detached_server_exits_when_idle(tmp_path):
+    f = tmp_path / "m.mp4"
+    f.write_bytes(b"x" * 10)
+    server = serve._make_server("127.0.0.1", str(f))
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        assert server.idle_for() >= 0
+        server.touch(+1)
+        assert server.idle_for() == 0.0  # in flight: never idle
+        server.touch(-1)
+        watchdog = threading.Thread(target=serve._exit_when_idle, args=(server, 0.05), daemon=True)
+        watchdog.start()
+        watchdog.join(timeout=5)
+        assert not watchdog.is_alive()
+        t.join(timeout=5)
+        assert not t.is_alive()  # serve_forever returned
+    finally:
+        server.server_close()

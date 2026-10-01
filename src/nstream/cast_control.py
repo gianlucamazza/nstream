@@ -25,8 +25,11 @@ def stop_cast(cfg: Config, *, device: str | None = None) -> tuple[bool, str]:
     mirror_stopped = mirror.stop()
     dev = resolve_session_device(device)
     if dev is None:
-        if mirror_stopped:
-            return True, "mirror fermato"
+        # No (or expired) session: still reclaim a detached remux/subtitle server left by
+        # an earlier cast — remux.stop falls back to the device it recorded.
+        local_stopped = remux.stop(None)
+        if mirror_stopped or local_stopped:
+            return True, "mirror fermato" if mirror_stopped else "server locale fermato"
         return False, "nessun cast attivo"
     st = caster.status(dev)
     ok = caster.stop(dev)

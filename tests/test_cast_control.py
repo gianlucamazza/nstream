@@ -141,3 +141,16 @@ def test_media_control_seek_catt_fallback(monkeypatch):
     ok, msg = cast_control.media_control("seek", value=90.0)
     assert ok and "90" in msg
     assert seen["argv"][:4] == ["catt", "-d", "tv", "seek"]
+
+
+def test_stop_cast_no_session_still_reclaims_local_server(monkeypatch):
+    # The session expired (or the TV is off) but a detached remux server still pins a
+    # multi-GB temp file: stop must reclaim it rather than answer "nessun cast attivo".
+    calls: list = []
+    monkeypatch.setattr(cast_control.state, "expire_cast_session", lambda: None)
+    monkeypatch.setattr(cast_control.state, "cast_session_device", lambda: None)
+    monkeypatch.setattr(cast_control.mirror, "stop", lambda: False)
+    monkeypatch.setattr(cast_control.remux, "stop", lambda dev: calls.append(dev) or True)
+    ok, msg = cast_control.stop_cast(Config())
+    assert ok is True and calls == [None]
+    assert "server locale" in msg

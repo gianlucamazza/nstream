@@ -184,15 +184,27 @@ class RunState:
         self.path = Path(base) / f"nstream-{name}.json"
 
     def read(self) -> dict | None:
+        """The stored state, with every recorded pid (`pid` / `*_pid`) whose process start
+        time no longer matches set to None: a reused pid belongs to an unrelated process,
+        and callers SIGTERM what they read here."""
         with contextlib.suppress(OSError, ValueError, UnicodeError):
             if self.path.is_symlink() or self.path.stat().st_uid != os.getuid():
                 return None
             data = json.loads(self.path.read_text())
-            return data if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return None
+            for key in _pid_keys(data):
+                start = data.pop(f"{key}_start", None)
+                if start is not None and proc_start(data[key]) != start:
+                    data[key] = None
+            return data
         return None
 
     def write(self, data: dict) -> None:
         # Private atomic replacement never follows a pre-planted destination symlink.
+        data = dict(data)
+        for key in _pid_keys(data):
+            data[f"{key}_start"] = proc_start(data[key])
         with contextlib.suppress(OSError):
             if self.path.is_symlink():
                 return
@@ -201,6 +213,26 @@ class RunState:
     def clear(self) -> None:
         with contextlib.suppress(OSError):
             self.path.unlink(missing_ok=True)
+
+
+def _pid_keys(data: dict) -> list[str]:
+    return [
+        k for k, v in data.items()
+        if (k == "pid" or k.endswith("_pid")) and isinstance(v, int) and not isinstance(v, bool)
+    ]  # fmt: skip
+
+
+def proc_start(pid: int | None) -> str | None:
+    """Kernel start time of `pid` (`/proc/<pid>/stat` field 22), or None when it isn't
+    running or /proc is unavailable. (pid, start) identifies a process across pid reuse."""
+    if not pid:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2 :].split()  # comm may contain spaces/parens
+    return fields[19] if len(fields) > 19 else None
 
 
 def free_gib(path: Path) -> float:
@@ -214,6 +246,17 @@ def free_gib(path: Path) -> float:
         except OSError:
             return 0.0
     return 0.0
+
+
+def die_with_parent() -> None:
+    """`preexec_fn` for a child that must not outlive nstream (Linux PR_SET_PDEATHSIG):
+    a headless run killed by an agent's timeout would otherwise leave ffmpeg fetching tens
+    of GB. Best-effort no-op where prctl is unavailable. Only for children awaited by the
+    thread that spawns them — the signal fires when that thread exits."""
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
 
 
 def pid_alive(pid: int | None) -> bool:
