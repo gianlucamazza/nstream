@@ -217,6 +217,7 @@ class Producer:
     job: Job | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
+    _pending: tuple[float, int] | None = None
 
     @classmethod
     def start(cls, job: Job, out_dir: str, gen: int = 0) -> Producer | None:
@@ -224,6 +225,14 @@ class Producer:
         if proc is None:
             return None
         return cls(out_dir, proc, newest_s=job.head_s, gen=gen, job=job)
+
+    def request_restart(self, ss_s: float, gen: int) -> None:
+        """Queue a restart for the pacing thread. ffmpeg is spawned with PR_SET_PDEATHSIG,
+        which fires when the spawning THREAD exits: a restart run from a short-lived
+        thread (the SIGUSR1 handler's) had its new ffmpeg killed while opening the source
+        (field 2026-10-02: "Immediate exit requested")."""
+        with self._lock:
+            self._pending = (ss_s, gen)
 
     def restart(self, ss_s: float, gen: int) -> bool:
         """Stop this producer and start generation `gen` at film time `ss_s` (fast-resume
@@ -300,8 +309,12 @@ class Producer:
 
         def loop() -> None:
             while not self._stopped:
+                with self._lock:
+                    pending, self._pending = self._pending, None
+                if pending is not None:
+                    self.restart(*pending)
                 self.tick()
-                time.sleep(interval)
+                time.sleep(interval if self._pending is None else 0.0)
 
         t = threading.Thread(target=loop, name="nstream-live-pacing", daemon=True)
         t.start()

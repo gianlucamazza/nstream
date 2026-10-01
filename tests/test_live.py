@@ -239,7 +239,7 @@ def test_serve_restart_request_reaches_the_producer(tmp_path):
     seen = []
 
     class _P:
-        def restart(self, ss, gen):
+        def request_restart(self, ss, gen):
             seen.append((ss, gen))
 
     (tmp_path / serve.RESTART_REQUEST).write_text('{"ss": 1200.5, "gen": 2}')
@@ -247,3 +247,25 @@ def test_serve_restart_request_reaches_the_producer(tmp_path):
     (tmp_path / serve.RESTART_REQUEST).write_text("garbage")
     serve._restart_from_request(cast(Any, _P()), str(tmp_path))  # logged, not raised
     assert seen == [(1200.5, 2)]
+
+
+def test_restart_runs_on_the_long_lived_pacing_thread(tmp_path, monkeypatch):
+    """PR_SET_PDEATHSIG follows the spawning thread: the restart must run on the pacing
+    thread (alive as long as the producer), never on the short signal-handler thread."""
+    import threading
+    import time
+
+    _playlist(tmp_path, 3)
+    threads = []
+    monkeypatch.setattr(
+        live, "_spawn", lambda job, out, gen: threads.append(threading.current_thread()) or _Proc()
+    )
+    monkeypatch.setattr(live, "_terminate", lambda proc: None)
+    p = live.Producer(str(tmp_path), cast(Any, _Proc()), job=live.Job("u"))
+    pacing = p.run_pacing(interval=0.05)
+    p.request_restart(1800.0, 1)
+    deadline = time.monotonic() + 2
+    while not threads and time.monotonic() < deadline:
+        time.sleep(0.02)
+    p._stopped = True
+    assert threads == [pacing] and p.gen == 1

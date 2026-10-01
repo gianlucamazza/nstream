@@ -605,7 +605,7 @@ def _restart_from_request(producer: live.Producer, hls_dir: str) -> None:
     try:
         with open(os.path.join(hls_dir, RESTART_REQUEST), encoding="utf-8") as f:
             req = json.load(f)
-        producer.restart(float(req["ss"]), int(req["gen"]))
+        producer.request_restart(float(req["ss"]), int(req["gen"]))
     except (OSError, ValueError, KeyError, TypeError) as e:
         _log.warning("serve: richiesta di riavvio live non valida (%s)", type(e).__name__)
 
