@@ -173,13 +173,13 @@ def test_is_finished(pos, dur, expected):
     assert cast_delivery.is_finished(pos, dur) is expected
 
 
-def test_live_offset_reads_the_live_state(monkeypatch):
+def test_live_duration_reads_the_live_state(monkeypatch):
     from nstream import util
 
     st = util.RunState("remux")
-    st.write({"pid": 4242, "file": "/x", "device": "10.0.0.5", "mode": "live", "offset": 3000.0})
+    st.write({"pid": 4242, "file": "/x", "device": "10.0.0.5", "mode": "live", "duration": 6472.0})
     monkeypatch.setattr(cast_delivery.util, "pid_alive", lambda pid: pid == 4242)
-    assert cast_delivery.live_offset("10.0.0.5") == 3000.0
-    assert cast_delivery.live_offset("10.0.0.9") == 0.0  # another TV
+    assert cast_delivery.live_duration("10.0.0.5") == 6472.0
+    assert cast_delivery.live_duration("10.0.0.9") == 0.0  # another TV
     st.write({"pid": 4242, "file": "/x", "device": "10.0.0.5", "mode": "serve"})
-    assert cast_delivery.live_offset("10.0.0.5") == 0.0
+    assert cast_delivery.live_duration("10.0.0.5") == 0.0

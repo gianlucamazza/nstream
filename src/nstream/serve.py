@@ -280,7 +280,29 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         if producer is not None and write_body:
             producer.on_request(os.path.basename(path))
 
+    def _serve_playlist(self, path: str, *, write_body: bool) -> None:
+        """A live playlist, in film time (`live.film_time_playlist`): small and growing, so
+        always whole (no Range) and never cached."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        body = live.film_time_playlist(text, self.server.playlist_base(path)).encode()
+        self.send_response(HTTPStatus.OK)
+        self._send_cors()
+        self.send_header("Content-Type", _HLS_PLAYLIST_TYPE)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if write_body:
+            self.wfile.write(body)
+
     def _serve_target(self, path: str, content_type: str, *, write_body: bool) -> None:
+        if content_type == _HLS_PLAYLIST_TYPE:
+            self._serve_playlist(path, write_body=write_body)
+            return
         try:
             size = os.path.getsize(path)
         except OSError:
@@ -372,6 +394,22 @@ class _FileServer(ThreadingHTTPServer):
         self._activity_lock = threading.Lock()
         self._in_flight = 0
         self._last_activity = time.monotonic()
+        self._bases: dict[str, float] = {}  # live playlist → film time of its first segment
+
+    def playlist_base(self, path: str) -> float:
+        """Film time at which a live playlist's first segment starts (cached per playlist;
+        0 when unknown or from the very start)."""
+        name = os.path.basename(path)
+        with self._activity_lock:
+            if name in self._bases:
+                return self._bases[name]
+        gen = 0 if name == live.PLAYLIST else int(name[1:].split(".")[0] or 0)
+        base = live.first_pts(os.path.dirname(path), gen)
+        if base is None:
+            return 0.0
+        with self._activity_lock:
+            self._bases[name] = base
+        return base
 
     def touch(self, delta: int) -> None:
         with self._activity_lock:

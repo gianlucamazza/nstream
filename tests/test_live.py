@@ -269,3 +269,31 @@ def test_restart_runs_on_the_long_lived_pacing_thread(tmp_path, monkeypatch):
         time.sleep(0.02)
     p._stopped = True
     assert threads == [pacing] and p.gen == 1
+
+
+def test_film_time_playlist_prepends_a_gap_up_to_the_base():
+    """The TV showed 0:00 after every resume/seek (field 2026-10-02): the served playlist
+    starts with an EXT-X-GAP covering 0..base, so its timeline is film time."""
+    text = (
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-PLAYLIST-TYPE:EVENT\n"
+        "#EXTINF:10.4,\ng2_0.ts\n#EXTINF:2.6,\ng2_1.ts\n"
+    )
+    out = live.film_time_playlist(text, 1795.606).splitlines()
+    i = out.index("#EXT-X-GAP")
+    assert out[i : i + 5] == [
+        "#EXT-X-GAP",
+        "#EXTINF:1795.606,",
+        "gap.ts",
+        "#EXT-X-DISCONTINUITY",
+        "#EXTINF:10.4,",
+    ]
+    assert "#EXT-X-VERSION:8" in out and out.index("#EXT-X-PLAYLIST-TYPE:EVENT") < i
+    assert live.film_time_playlist(text, 1.4) == text  # from the start: mux delay only
+
+
+def test_served_live_playlist_is_film_time(hls_server, monkeypatch):
+    base, _ = hls_server
+    monkeypatch.setattr(serve.live, "first_pts", lambda d, gen=0: 600.0)
+    with urllib.request.urlopen(base + live.PLAYLIST, timeout=5) as r:
+        body = r.read().decode()
+    assert "#EXT-X-GAP" in body and "#EXTINF:600.000," in body

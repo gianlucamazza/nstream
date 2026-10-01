@@ -754,14 +754,15 @@ def test_catt_gets_the_cleaned_webvtt(tmp_path):
     assert caster.catt_sub("/nonexistent.srt") == "/nonexistent.srt"
 
 
-def test_status_reports_film_time_and_probed_duration_on_a_live_cast(monkeypatch):
-    """A live playlist reports playlist time and duration -1 (history rejects it): status
-    adds the fast-resume offset and takes the probed duration (ADR 0039)."""
+def test_status_reports_the_probed_duration_on_a_live_cast(monkeypatch):
+    """A growing live playlist reports duration -1 (history rejects it): status takes the
+    probed runtime (ADR 0039). Positions are already film time (the served playlist
+    starts with a gap covering what the producer skipped)."""
     monkeypatch.setattr(
         caster, "receiver_info",
-        lambda d: {"player_state": "PLAYING", "current_time": 100.0, "duration": -1.0},
+        lambda d: {"player_state": "PLAYING", "current_time": 3100.0, "duration": -1.0},
     )  # fmt: skip
     monkeypatch.setattr(caster, "_bridge_track_info", lambda d: ([], None))
-    monkeypatch.setattr(caster.cast_delivery, "live_timeline", lambda d: (3000.0, 6472.0))
+    monkeypatch.setattr(caster.cast_delivery, "live_duration", lambda d: 6472.0)
     st = caster.status("10.0.0.5")
     assert st["position"] == 3100.0 and st["duration"] == 6472.0

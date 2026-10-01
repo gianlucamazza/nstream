@@ -45,6 +45,32 @@ _SEGMENT = re.compile(r"(?:index|g(\d+)_)(\d+)\.ts$")
 _PLAYLIST_NAME = re.compile(r"(?:index|g\d+)\.m3u8")
 
 
+# A playlist from the film's start begins at ffmpeg's mux delay (~1.4 s), not 0: below
+# this, no placeholder (fast resumes start past 60 s anyway).
+_GAP_MIN_S = 5.0
+
+
+def film_time_playlist(text: str, base: float) -> str:
+    """The playlist as served to the receiver: when it starts mid-film (`base` > 1 s, a
+    fast resume or a restart), an `EXT-X-GAP` placeholder covering 0..base comes first, so
+    the receiver's timeline — its clock, its progress bar, the positions it reports — is
+    film time. Without it the TV showed 0:00 after every resume/seek (field 2026-10-02);
+    verified on the 43PUS9235 that it plays and reports film time. The placeholder is
+    never fetched (a discontinuity follows)."""
+    if base <= _GAP_MIN_S:
+        return text
+    out: list[str] = []
+    placed = False
+    for line in text.splitlines():
+        if line.startswith("#EXT-X-VERSION:"):
+            line = "#EXT-X-VERSION:8"  # EXT-X-GAP
+        if not placed and (line.startswith("#EXTINF") or (line and not line.startswith("#"))):
+            out += ["#EXT-X-GAP", f"#EXTINF:{base:.3f},", "gap.ts", "#EXT-X-DISCONTINUITY"]
+            placed = True
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
 def playlist_name(gen: int) -> str:
     return PLAYLIST if gen == 0 else f"g{gen}.m3u8"
 

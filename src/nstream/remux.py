@@ -812,15 +812,13 @@ _LIVE_POLL_S = 0.5
 _LIVE_FAST_RESUME_S = 60.0
 
 
-def _live_vtt(sub_path: str, out_dir: str, offset: float) -> bool:
-    """Write the caption track for a live cast to `out_dir/subs.vtt`, shifted by `-offset`
-    when the playlist starts mid-film (the receiver's timeline then begins at 0)."""
+def _live_vtt(sub_path: str, out_dir: str) -> bool:
+    """Write the caption track for a live cast to `out_dir/subs.vtt` (cleaned WebVTT, film
+    time: the served playlist keeps the receiver's timeline in film time)."""
     tmp = os.path.join(out_dir, "subs.srt")
     try:
         shutil.copyfile(sub_path, tmp)
     except OSError:
-        return False
-    if offset and not srt.retime(tmp, -offset, 1.0):
         return False
     vtt = srt.to_vtt(tmp)
     if not vtt:
@@ -977,7 +975,8 @@ def cast_live(
         head = 0.0
     # Fast resume: past a minute in, the producer opens the source AT the resume point
     # (seconds to start) instead of producing everything before it (223 s for 50 min,
-    # field 2026-10-01). The receiver then counts from 0: `offset` maps it back.
+    # field 2026-10-01). serve prepends a gap covering 0..base to the playlist
+    # (`live.film_time_playlist`), so the receiver still speaks film time.
     fast = head > _LIVE_FAST_RESUME_S
     job = _live_job(url, cfg, t.audio, audio_index, 0.0 if fast else head)
     if fast:
@@ -989,11 +988,10 @@ def cast_live(
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
     out_dir = _new_remux_temp(".hls")
-    # The caption track lives in out_dir (it dies with it, and a headless return removes the
-    # work dir). Written now unshifted — the detached server needs the file to exist — and
-    # rewritten once the offset is known.
+    # The caption track lives in out_dir: it dies with it, and a headless return removes the
+    # work dir.
     vtt = None
-    if sub_paths and _live_vtt(sub_paths[0], out_dir, 0.0):
+    if sub_paths and _live_vtt(sub_paths[0], out_dir):
         vtt = os.path.join(out_dir, "subs.vtt")
     producer: live.Producer | None = None
     server = None
@@ -1047,12 +1045,10 @@ def cast_live(
     # refuses an HLS LOAD outright — LOAD_FAILED without fetching the playlist (field,
     # 2026-10-01: app CA5T0001 failed; the default app played the same url, also with a
     # start offset).
-    offset = 0.0
-    if fast:
-        offset = live.first_pts(out_dir) or head  # the keyframe the playlist starts at
-        if vtt:
-            _live_vtt(sub_paths[0], out_dir, offset)
-    kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), 0.0 if fast else head)
+    # Film time where the playlist's first segment starts (the keyframe at or before the
+    # resume point): internal playlist arithmetic only — the receiver sees film time.
+    base = (live.first_pts(out_dir) or head) if fast else 0.0
+    kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), head)
     kwargs["content_type"] = _HLS_TYPE
     if vtt:
         kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
@@ -1069,8 +1065,6 @@ def cast_live(
         if on_event is None:
             return
         ev = dict(ev)
-        if isinstance(ev.get("position"), (int, float)):
-            ev["position"] = round(ev["position"] + offset, 1)
         if "duration" in ev and not (ev.get("duration") or 0) > 0 and duration:
             ev["duration"] = round(duration, 1)
         on_event(ev)
@@ -1094,12 +1088,12 @@ def cast_live(
     if not follow:
         _write_state(
             pid or 0, out_dir, device, mode="live",
-            url=serve.served_hls_url(bind_ip, port, token), title=title, offset=offset,
+            url=serve.served_hls_url(bind_ip, port, token), title=title, base=base,
             duration=duration,
         )  # fmt: skip
         return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
     dur = out.dur if out.dur > 0 else duration
-    return cast_delivery.CastResult(out.pos + offset, dur, delivered, started=True)
+    return cast_delivery.CastResult(out.pos, dur, delivered, started=True)
 
 
 # The receiver honours a seek on the live playlist only a little past where it plays
@@ -1123,25 +1117,25 @@ def live_seek(device: str | None, target: float) -> bool | None:
     dev = device or st.get("device")
     if not dev or dev != st.get("device"):
         return None
-    offset = float(st.get("offset") or 0.0)
+    base = float(st.get("base") or 0.0)  # film time of the playlist's first segment
     gen = int(st.get("gen") or 0)
-    pos = float(caster.status(dev).get("position") or 0.0)  # film time (status adds offset)
+    pos = float(caster.status(dev).get("position") or 0.0)  # film time
     out_dir = str(st.get("file") or "")
-    want = target - offset
+    want = target - base  # in the producer's playlist time
     tl = live.timeline(out_dir, gen)
     kept = [t for i, t, _ in tl if os.path.exists(os.path.join(out_dir, live.segment_name(gen, i)))]
     if want < 0 or (kept and want < kept[0]):
         return _live_restart(st, dev, target)
     need = want + 2 * live.SEGMENT_S
     if need > live.produced_s(out_dir, gen):
-        within_reach = want - (pos - offset) <= live.AHEAD_MAX_S
+        within_reach = want - (pos - base) <= live.AHEAD_MAX_S
         if not within_reach or not _await_live(
             out_dir, need, failed=lambda: False, label="", gen=gen
         ):
             return _live_restart(st, dev, target)
     if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
-        return bridge.control(dev, "seek", want) if offset else None
-    return _live_load(dev, str(st["url"]), str(st.get("title") or ""), want)
+        return None  # the receiver's own seek, in film time
+    return _live_load(dev, str(st["url"]), str(st.get("title") or ""), target)
 
 
 def _live_load(dev: str, url: str, title: str, at: float) -> bool:
@@ -1162,7 +1156,7 @@ def _live_load(dev: str, url: str, title: str, at: float) -> bool:
 def _live_restart(st: dict, dev: str, target: float) -> bool:
     """Ask the detached serve to restart its producer at film time `target` as a new
     generation (a 0600 request file + SIGUSR1), wait for its first segments, then LOAD the
-    new playlist from 0 with the new offset recorded in the state."""
+    new playlist at `target` (film time) with the new base recorded in the state."""
     out_dir = str(st.get("file") or "")
     pid = st.get("pid")
     gen = int(st.get("gen") or 0) + 1
@@ -1180,10 +1174,10 @@ def _live_restart(st: dict, dev: str, target: float) -> bool:
         out_dir, 2 * live.SEGMENT_S, failed=lambda: not _pid_alive(pid), label="", gen=gen
     ):
         return False
-    offset = live.first_pts(out_dir, gen) or target
+    base = live.first_pts(out_dir, gen) or target
     url = f"{str(st['url']).rsplit('/', 1)[0]}/{live.playlist_name(gen)}"
-    _runstate().write({**st, "url": url, "offset": offset, "gen": gen})
-    return _live_load(dev, url, str(st.get("title") or ""), 0.0)
+    _runstate().write({**st, "url": url, "base": base, "gen": gen})
+    return _live_load(dev, url, str(st.get("title") or ""), max(target, base))
 
 
 def _log_catt_stderr(path: str) -> None:

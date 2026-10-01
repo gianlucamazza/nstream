@@ -1019,7 +1019,7 @@ def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
     assert seen["job"].audio_args[:2] == ("-c:a", "aac") and "-ac" in seen["job"].audio_args
     assert remux._read_state() == {
         "pid": 4242, "file": seen["dir"], "device": "10.0.0.5", "mode": "live",
-        "url": seen["url"], "title": "T", "offset": 0.0, "duration": 6000.0,
+        "url": seen["url"], "title": "T", "base": 0.0, "duration": 6000.0,
     }  # fmt: skip
 
 
@@ -1098,7 +1098,7 @@ def test_live_seek_before_the_playlist_start_restarts(monkeypatch, tmp_path):
     """A fast resume at 50 min, then a seek back to 20 min: nothing was produced there."""
     _live_state(monkeypatch, tmp_path, pos=3100.0)
     st = remux._read_state() or {}
-    remux._write_state(4242, st["file"], "10.0.0.5", mode="live", url=st["url"], offset=3000.0)
+    remux._write_state(4242, st["file"], "10.0.0.5", mode="live", url=st["url"], base=3000.0)
     restarts = []
     monkeypatch.setattr(remux, "_live_restart", lambda st, dev, t: restarts.append(t) or True)
     assert remux.live_seek("10.0.0.5", 1200.0) is True and restarts == [1200.0]
@@ -1123,8 +1123,8 @@ def test_live_restart_requests_a_generation_and_loads_it(monkeypatch, tmp_path):
     assert remux._live_restart(st, "10.0.0.5", 1200.0) is True
     assert sent and sent[0][1] == remux.signal.SIGUSR1
     new = remux._read_state() or {}
-    assert new["gen"] == 1 and new["offset"] == 1197.5 and new["url"].endswith("/g1.m3u8")
-    assert loads[-1] == ("http://h/g1.m3u8", 0.0, "application/vnd.apple.mpegurl")
+    assert new["gen"] == 1 and new["base"] == 1197.5 and new["url"].endswith("/g1.m3u8")
+    assert loads[-1] == ("http://h/g1.m3u8", 1200.0, "application/vnd.apple.mpegurl")
 
 
 def test_live_seek_is_none_without_a_live_cast(monkeypatch):
@@ -1133,8 +1133,8 @@ def test_live_seek_is_none_without_a_live_cast(monkeypatch):
 
 def test_cast_live_fast_resume_starts_the_producer_at_the_resume_point(monkeypatch, tmp_path):
     """Resume at 50 min used to produce 50 min first (223 s, field 2026-10-01). Now the
-    producer opens the source there, the LOAD starts at playlist 0, and the measured
-    keyframe offset maps the receiver's timeline (and the subtitles) back to the film."""
+    producer opens the source there; the LOAD seeks to the resume point in film time (the
+    served playlist starts with a gap up to `base`), and subtitles stay in film time."""
     seen = _live_wiring(monkeypatch, writes_segments=True)
     monkeypatch.setattr(remux.live, "first_pts", lambda d: 3027.125)
     sub = tmp_path / "s.srt"
@@ -1145,34 +1145,30 @@ def test_cast_live_fast_resume_starts_the_producer_at_the_resume_point(monkeypat
     )  # fmt: skip
     assert out is not None and out.started
     assert seen["job"].ss_s == 3030.5 and seen["job"].head_s == 0.0
-    assert seen["kwargs"]["current_time"] == 0.0
-    assert (remux._read_state() or {})["offset"] == 3027.125
+    assert seen["kwargs"]["current_time"] == 3030.5
+    assert (remux._read_state() or {})["base"] == 3027.125
     vtt = Path(seen["dir"], "subs.vtt").read_text()
-    assert "00:00:02.875 --> 00:00:04.875" in vtt  # 3030 s - 3027.125 s
+    assert "00:50:30.000 --> 00:50:32.000" in vtt
 
 
-def test_live_seek_maps_film_time_to_playlist_time(monkeypatch, tmp_path):
+def test_live_seek_loads_film_time_against_the_playlist_base(monkeypatch, tmp_path):
     loads = _live_state(monkeypatch, tmp_path, pos=3100.0)
     st = remux._read_state() or {}
-    remux._write_state(4242, st["file"], "10.0.0.5", mode="live", url=st["url"], offset=3000.0)
-    assert remux.live_seek("10.0.0.5", 3500.0) is True
-    assert loads[-1][1] == 500.0
-    ctl = []
-    monkeypatch.setattr(remux.bridge, "control", lambda d, c, v: ctl.append((c, v)) or True)
-    assert remux.live_seek("10.0.0.5", 3110.0) is True  # short jump: native, in playlist time
-    assert ctl == [("seek", 110.0)]
+    remux._write_state(4242, st["file"], "10.0.0.5", mode="live", url=st["url"], base=3000.0)
+    assert remux.live_seek("10.0.0.5", 3500.0) is True  # 500 s into a 1000 s playlist
+    assert loads[-1][1] == 3500.0
+    assert remux.live_seek("10.0.0.5", 3110.0) is None  # short: the receiver's own seek
 
 
-def test_cast_live_follow_events_speak_film_time(monkeypatch, tmp_path):
-    """--follow JSONL after a fast resume: positions + offset, the probed duration."""
-    seen = _live_wiring(monkeypatch, writes_segments=True)
-    monkeypatch.setattr(remux.live, "first_pts", lambda d: 3000.0)
+def test_cast_live_follow_events_carry_the_probed_duration(monkeypatch, tmp_path):
+    """--follow JSONL: a growing playlist reports duration -1; events carry the runtime."""
+    _live_wiring(monkeypatch, writes_segments=True)
     events: list = []
 
     def drive(device, url, *, follow, load_kwargs, on_event=None, **k):
         assert on_event is not None
-        on_event({"kind": "playing", "position": 12.0, "duration": -1.0})
-        return cast_delivery.BridgeOutcome(12.0, -1.0, True, False)
+        on_event({"kind": "playing", "position": 3012.0, "duration": -1.0})
+        return cast_delivery.BridgeOutcome(3012.0, -1.0, True, False)
 
     monkeypatch.setattr(remux.cast_delivery, "drive_bridge", drive)
     remux.cast_live(
@@ -1180,7 +1176,6 @@ def test_cast_live_follow_events_speak_film_time(monkeypatch, tmp_path):
         follow=False, on_event=events.append,
     )  # fmt: skip
     assert events == [{"kind": "playing", "position": 3012.0, "duration": 6000.0}]
-    assert seen["job"].ss_s == 3001.0
 
 
 def test_report_rate_records_the_link_and_warns_when_slow(monkeypatch):
