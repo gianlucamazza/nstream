@@ -210,8 +210,23 @@ def _to_abs(t0: float, t_rel: float) -> float:
     return t0 + t_rel
 
 
+def _mono_chain(channels: int | None) -> str:
+    """Downmix to one 16 kHz channel before measuring: the dialogue lives in the centre
+    channel of a 5.1/7.1 mix (and is cleanest there), any other layout is averaged. The
+    RMS only needs speech activity, and per-channel stats on a 6-channel 48 kHz stream
+    made a full-film pass ~8x slower (measured 19.1 s → 2.4 s per 600 s of 5.1 audio) —
+    slow enough that every local alignment hit its timeout (2026-10-01)."""
+    first = "pan=mono|c0=FC" if channels and channels >= 6 else "aformat=channel_layouts=mono"
+    return f"{first},aresample=16000"
+
+
 def _rms_series(
-    url: str, t0: float, d: float, *, timeout: float = _FFMPEG_TIMEOUT
+    url: str,
+    t0: float,
+    d: float,
+    *,
+    timeout: float = _FFMPEG_TIMEOUT,
+    channels: int | None = None,
 ) -> list[tuple[float, float]] | None:
     """(t_rel, rms_db) at 100 ms resolution for the window, or None on failure."""
     proc = util.run_cmd(
@@ -236,7 +251,8 @@ def _rms_series(
             # asetnsamples makes 100 ms frames; astats reset=1 → per-frame RMS. `reset`
             # takes INTEGER frames: a fractional value silently disables the reset and
             # the cumulative RMS flattens all contrast (found live in Phase 0).
-            f"{_SPEECH_FILTER},asetnsamples=n=4800,astats=metadata=1:reset=1,"
+            f"{_mono_chain(channels)},{_SPEECH_FILTER},asetnsamples=n=1600,"
+            "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level,"
             "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
             "-f",
             "null",
@@ -414,7 +430,12 @@ def probe(
 
 
 def probe_local(
-    path: str, *, duration: float, segments: int = 8, timeout_s: float = _FFMPEG_LOCAL_TIMEOUT
+    path: str,
+    *,
+    duration: float,
+    segments: int = 8,
+    timeout_s: float = _FFMPEG_LOCAL_TIMEOUT,
+    channels: int | None = None,
 ) -> Fingerprint | str:
     """Full-signal fingerprint from a LOCAL media file (the Tier-2 remux cast: the whole
     file is already on disk, so the audio evidence is free — no network, only one ffmpeg
@@ -427,7 +448,7 @@ def probe_local(
         return "no_ffmpeg"
     if duration <= 60 or segments < 4:
         return "no_media_geometry"
-    series = _rms_series(path, 0.0, duration, timeout=timeout_s)
+    series = _rms_series(path, 0.0, duration, timeout=timeout_s, channels=channels)
     if not series:
         return "probe_failures"
     seg_len = duration / segments

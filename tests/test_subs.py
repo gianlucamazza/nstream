@@ -284,7 +284,7 @@ def _align_env(monkeypatch, *, verdict_offset=-13.9, reason="aligned", duration=
     fp = subalign.Fingerprint(duration, ((0.0, 100.0),), ((1.0, 2.0),))
     monkeypatch.setattr(
         subs.subalign, "probe_local",
-        lambda path, *, duration, timeout_s=180.0: calls["probe"].append(path) or fp,
+        lambda path, *, duration, timeout_s=180.0, **_k: calls["probe"].append(path) or fp,
     )  # fmt: skip
     diag = subalign.Alignment(verdict_offset or 0.0, 0.9, 0.2, 100.0, 50, 0.1, 0.2, 6, 8)
     monkeypatch.setattr(
@@ -369,22 +369,29 @@ def test_align_local_skips_hash_and_manual_and_disabled(monkeypatch, tmp_path):
     assert calls["probe"] == []  # nessun probe in tutti e tre i casi
 
 
-def test_align_local_timeout_scales_with_file_size(monkeypatch, tmp_path):
-    """Measured live: the probe demuxes the whole container (10.5 GB ≈ 270 s), so a
-    fixed budget refuses big remuxes 30 s short of success. The effective timeout must
-    scale with size, with the config budget as the floor."""
+def test_align_local_timeout_scales_with_runtime_and_size(monkeypatch, tmp_path):
+    """The probe decodes one downmixed channel (~4 ms per second of runtime) after
+    demuxing the file: the timeout grows with both, the config budget as the floor. The
+    source's channel count reaches the probe so a 5.1 mix is measured on its centre."""
     srt_path = _srt_file(tmp_path)
-    _align_env(monkeypatch)
+    _align_env(monkeypatch, duration=8526.0)
+    monkeypatch.setattr(
+        subs.tracks, "probe_tracks",
+        lambda path: subs.tracks.Tracks(
+            duration=8526.0, audio=[subs.tracks.Track(1, "eng", "aac", 6)]
+        ),
+    )  # fmt: skip
     seen = {}
     monkeypatch.setattr(
         subs.subalign, "probe_local",
-        lambda path, *, duration, timeout_s: seen.update(t=timeout_s)
-        or subs.subalign.Fingerprint(5000.0, ((0.0, 100.0),), ((1.0, 2.0),)),
+        lambda path, *, duration, timeout_s, channels=None: seen.update(t=timeout_s, ch=channels)
+        or subs.subalign.Fingerprint(8526.0, ((0.0, 100.0),), ((1.0, 2.0),)),
     )  # fmt: skip
-    monkeypatch.setattr(subs.os.path, "getsize", lambda p: 12_000_000_000)  # 12 GB
+    monkeypatch.setattr(subs.os.path, "getsize", lambda p: 36_000_000_000)  # 36 GB
     pick = subs.SubsPick((str(srt_path),), "lang")
     subs.align_local(CFG, pick, "/m.mp4", str(tmp_path), _opts_plain())
-    assert seen["t"] >= 12_000_000_000 / 30e6  # ≥ 400 s for a 12 GB file
+    assert seen["ch"] == 6
+    assert seen["t"] >= 8526.0 * 0.02 + 36_000_000_000 / 100e6  # runtime + demux headroom
 
 
 def test_report_safety_subs_only_on_real_outcome(capsys):

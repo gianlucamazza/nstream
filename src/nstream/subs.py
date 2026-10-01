@@ -230,17 +230,19 @@ def align_local(
         return pick
     if not cfg.sub_align or not subalign.available():
         return pick
-    duration = tracks.probe_tracks(media_path).duration
-    # The probe pass demuxes the WHOLE container (interleaved), so its cost scales with
-    # file SIZE, not runtime: measured 10.5 GB in ~270 s (~39 MB/s demux+decode+filter).
-    # cfg.sub_align_budget_s is the FLOOR; the effective timeout grows with the file
-    # (30 MB/s conservative + headroom) so a big remux is analyzed, not refused.
+    tr = tracks.probe_tracks(media_path)
+    duration = tr.duration
+    # The pass demuxes the whole container and decodes ONE downmixed 16 kHz audio channel
+    # (`subalign._mono_chain`): ~4 ms of wall time per second of runtime (measured 2.4 s
+    # per 600 s), plus the demux of the file. cfg.sub_align_budget_s is the floor; the
+    # timeout grows with runtime and size so a long or big remux is analyzed, not refused.
     try:
         size = os.path.getsize(media_path)
     except OSError:
         size = 0
-    timeout = max(float(cfg.sub_align_budget_s), size / 30e6 + 60.0)
-    fp = subalign.probe_local(media_path, duration=duration, timeout_s=timeout)
+    timeout = max(float(cfg.sub_align_budget_s), duration * 0.02 + size / 100e6 + 30.0)
+    channels = tr.audio[0].channels if tr.audio else None
+    fp = subalign.probe_local(media_path, duration=duration, timeout_s=timeout, channels=channels)
     if isinstance(fp, str):
         _log.info("align_local: fingerprint rifiutato (%s)", fp)
         return pick
