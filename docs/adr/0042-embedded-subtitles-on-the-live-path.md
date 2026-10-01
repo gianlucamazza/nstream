@@ -51,6 +51,22 @@ locally on 2026-10-02: a master playlist with `EXT-X-MEDIA:TYPE=SUBTITLES`, a se
 If gate 1 or 2 fails, the live path side-loads the downloaded VTT only, and embedded
 tracks serve the complete-file path.
 
+## Phase 0 results (2026-10-02, 43PUS9235)
+
+- **Gate 1 passes only with `CODECS`.** The master playlist ffmpeg writes has no `CODECS`
+  attribute. Without it the receiver fetches `master`, `v0.m3u8` and two segments, then goes
+  IDLE; this holds also without any subtitle rendition. The source is HEVC Main, so the
+  receiver presumably assumes H.264. With
+  `CODECS="hvc1.2.4.L120.B0,mp4a.40.2"` written into `EXT-X-STREAM-INF` it plays: the viewer
+  confirmed the picture. nstream must write the master itself, deriving `CODECS` from the
+  probe.
+- **Gate 3 fails without castbridge.** `DEFAULT=YES` does not activate the rendition: the
+  receiver never requested `v0_vtt.m3u8` (0 requests in 3 min of playback), and
+  `activeTrackIds` stayed empty. Activation needs castbridge (LOAD `activeTrackIds`, or an
+  `edit-tracks` control).
+- **Gate 2 is not reached yet.** It needs the track active. Open questions remain: the
+  missing `X-TIMESTAMP-MAP` and the raw cue text.
+
 ## Consequences
 
 - castbridge (cast repo) gains text-track activation for in-manifest tracks.
