@@ -396,9 +396,6 @@ def run_cast(
     # suppressed, fail explicitly rather than override the user (ADR 0021).
     if bad_video and (not mirror.available() or opts.mirror is False):
         raise CastVideoUnsupported(bad_video)
-    # A new cast replaces the TV's content: a previous fire-and-return session no longer
-    # describes it (the headless caller re-writes a fresh one right after this returns).
-    state.clear_cast_session()
     target_lang = opts.audio_lang or cfg.primary
     # Container gate (ADR 0022): the DMR refuses .mkv on a direct cast though it decodes the
     # same HEVC/AAC in .mp4. Prefer an MP4 twin (a free direct cast) over a download+rewrap;
@@ -556,6 +553,11 @@ def run_cast(
             f"{ui.g().warn} sottotitoli scaricati ma non caricati sul TV",
             code="subs_not_delivered",
         )
+    if delivery.started:
+        # The new cast replaced the TV's content: a previous fire-and-return session no
+        # longer describes it (the headless caller writes a fresh one right after). Cleared
+        # only now — a cast that never started must not lose the old session's position.
+        state.clear_cast_session()
     if not follow:
         # Fire-and-return handoff: a pure-torrent stream is served by the TorrServer we may
         # have spawned — keep it alive past exit so the TV keeps playing (atexit would kill

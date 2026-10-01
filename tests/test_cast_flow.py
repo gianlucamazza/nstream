@@ -1066,3 +1066,18 @@ def test_mirror_choice_probes_availability_lazily():
         needs_remux=False, bad_video="", refused_mirror="", available=_boom("not needed"),
     )  # fmt: skip
     assert use is False
+
+
+def test_failed_cast_keeps_the_previous_cast_session(monkeypatch):
+    stream: Stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("direct", stream))
+    cleared = []
+    monkeypatch.setattr(cast_flow.state, "clear_cast_session", lambda: cleared.append(1))
+    monkeypatch.setattr(
+        cast_flow.caster, "cast", lambda *a, **k: cast_flow.cast_delivery.CastResult(0.0, 0.0)
+    )
+    out = _run(_opts(), stream)
+    assert out.started is False and cleared == []  # old resume point survives
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
+    _run(_opts(), stream)
+    assert cleared == [1]

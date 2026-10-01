@@ -30,6 +30,7 @@ import argparse
 import contextlib
 import os
 import secrets
+import select
 import shutil
 import signal
 import socket
@@ -381,6 +382,9 @@ def _cache_dir() -> Path:
     return d
 
 
+_ANNOUNCE_TIMEOUT = 10.0
+
+
 def spawn_detached(
     bind_ip: str, *, file_path: str | None = None, sub_path: str | None = None
 ) -> tuple[int, int, str] | None:
@@ -404,6 +408,12 @@ def spawn_detached(
         _log.warning("serve detach fallito: %s", e)
         return None
     if proc.stdout is None:
+        kill_detached(proc.pid)
+        return None
+    # The child announces port and token right after binding; a child that hangs before
+    # that (stuck import, full disk for its log) must not hang the cast forever.
+    if not select.select([proc.stdout], [], [], _ANNOUNCE_TIMEOUT)[0]:
+        _log.warning("serve: nessun annuncio entro %.0fs", _ANNOUNCE_TIMEOUT)
         kill_detached(proc.pid)
         return None
     line = proc.stdout.readline().strip()
