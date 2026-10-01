@@ -196,6 +196,13 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Se on, Dolby/DTS vengono remuxati in AAC sul host (video copy).",
         ),
         (
+            "cast_live",
+            "Remux in diretta (HLS)",
+            "bool",
+            "on" if cfg.cast_live else "off",
+            "Se on, il TV parte in pochi secondi (audio stereo); off = file completo prima.",
+        ),
+        (
             "cast_remux_max_resolution",
             "Remux: max risoluzione",
             "maxres",

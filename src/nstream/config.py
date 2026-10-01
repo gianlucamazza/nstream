@@ -111,6 +111,10 @@ class Config:
     # AAC releases are preferred first (no remux). Off → Dolby/DTS titles are demoted as
     # before.
     cast_remux: bool = True
+    # ADR 0039: the Tier-2 conversion streams a live HLS-TS playlist the TV starts in
+    # seconds (stereo AAC); the complete-file remux above is the fallback. Off → always the
+    # complete file (keeps multichannel AAC, costs the whole download before the start).
+    cast_live: bool = True
     cast_audio_codec: str = "aac"  # target audio codec for the cast remux (DMR-decodable)
     # A Tier-2 remux downloads + rewrites the whole file before playback, so a 4K Dolby
     # title means a 30-60 GB fetch. A *direct* cast streams 4K for free (no host download),
@@ -376,6 +380,7 @@ def load(*, secure_permissions: bool = True) -> Config:
             raw.get("cast_receiver_app_id", Config.cast_receiver_app_id) or ""
         ),
         cast_remux=bool(raw.get("cast_remux", Config.cast_remux)),
+        cast_live=bool(raw.get("cast_live", Config.cast_live)),
         cast_audio_codec=str(raw.get("cast_audio_codec", Config.cast_audio_codec) or "aac"),
         cast_remux_max_resolution=_bounded_int(
             raw, "cast_remux_max_resolution", Config.cast_remux_max_resolution

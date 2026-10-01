@@ -38,7 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
-from . import bridge, cast_delivery, caster, log, notices, serve, srt, ui, urlproxy, util
+from . import bridge, cast_delivery, caster, live, log, notices, serve, srt, ui, urlproxy, util
 from . import config as config_mod
 from .config import Config
 
@@ -188,10 +188,10 @@ def _gc_stale() -> None:
     st = _read_state()
     keep = st.get("file") if st and _pid_alive(st.get("pid")) else None
     with contextlib.suppress(OSError):
-        for f in _cache_dir().glob("cast-*.mp4"):
+        for f in [*_cache_dir().glob("cast-*.mp4"), *_cache_dir().glob("cast-*.hls")]:
             path = str(f)
             if path != keep and not _prepare_active(path):
-                f.unlink(missing_ok=True)
+                _rm(path)
                 Path(f"{path}.lock").unlink(missing_ok=True)
         for pat in ("cast-*.mp4.srt", "cast-*.mp4.vtt"):  # subtitle sidecars of detached casts
             for f in _cache_dir().glob(pat):
@@ -199,11 +199,11 @@ def _gc_stale() -> None:
                     f.unlink(missing_ok=True)
         for f in _cache_dir().glob("catt-*.log"):  # startup-diagnosis stderr leftovers
             f.unlink(missing_ok=True)
-        for f in _cache_dir().glob("cast-*.mp4.lock"):
+        for f in [*_cache_dir().glob("cast-*.mp4.lock"), *_cache_dir().glob("cast-*.hls.lock")]:
             path = str(f)[: -len(".lock")]
             if path != keep and not _prepare_active(path):
                 f.unlink(missing_ok=True)
-        for f in _cache_dir().glob(".cast-*.mp4.lock"):  # unpublished lock of a crashed run
+        for f in _cache_dir().glob(".cast-*.lock"):  # unpublished lock of a crashed run
             if not _prepare_active(str(f)[: -len(".lock")]):
                 f.unlink(missing_ok=True)
 
@@ -230,20 +230,21 @@ def _pid_alive(pid: int | None) -> bool:
     return util.pid_alive(pid)
 
 
-def _new_remux_temp() -> str:
-    """Create a remux path already protected from cross-process stale-file GC.
+def _new_remux_temp(suffix: str = ".mp4") -> str:
+    """Create a remux path already protected from cross-process stale-file GC: a file, or a
+    directory for a live HLS cast (`suffix=".hls"`).
 
     The lock is created under a hidden name the GC never globs, flocked, and only THEN
     linked under its visible `cast-*.mp4.lock` name. Created visible (the old mkstemp),
     a concurrent `_gc_stale` could find it before the flock, judge it idle and unlink it —
     and later delete the remux being written, whose lock file was gone."""
     base = _cache_dir()
-    fd, hidden = tempfile.mkstemp(suffix=".mp4.lock", prefix=".cast-", dir=str(base))
+    fd, hidden = tempfile.mkstemp(suffix=f"{suffix}.lock", prefix=".cast-", dir=str(base))
     lock = os.fdopen(fd, "r+b")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while True:
-            path = str(base / f"cast-{secrets.token_hex(4)}.mp4")
+            path = str(base / f"cast-{secrets.token_hex(4)}{suffix}")
             try:
                 os.link(hidden, f"{path}.lock")  # no-clobber publish of the held lock
             except FileExistsError:
@@ -251,11 +252,13 @@ def _new_remux_temp() -> str:
             break
         os.unlink(hidden)
         try:
-            out_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            if suffix == ".hls":
+                os.mkdir(path, 0o700)
+            else:
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         except BaseException:
             os.unlink(f"{path}.lock")
             raise
-        os.close(out_fd)
     except BaseException:
         lock.close()
         with contextlib.suppress(OSError):
@@ -294,6 +297,9 @@ def _release_prepare_lock(path: str) -> None:
 def _rm(path: str | None) -> None:
     if path:
         _release_prepare_lock(path)
+        if os.path.isdir(path):  # a live HLS directory
+            shutil.rmtree(path, ignore_errors=True)
+            return
         with contextlib.suppress(OSError):
             os.unlink(path)
 
@@ -785,6 +791,209 @@ def _cast_file_via_bridge(
     return cast_delivery.CastResult(out.pos, out.dur, delivered, started=True)
 
 
+# --- live HLS-TS (ADR 0039) ---------------------------------------------------
+
+_HLS_TYPE = "application/vnd.apple.mpegurl"
+# The first segment of a 4K source over a slow debrid can take a while; no growth for this
+# long means the producer is stuck (or dead) and the complete-file path takes over.
+_LIVE_STALL_S = 45.0
+_LIVE_POLL_S = 0.5
+
+
+def live_available(cfg: Config) -> bool:
+    """Whether a Tier-2 cast can go live (ADR 0039): config on and ffmpeg present."""
+    return cfg.cast_remux and cfg.cast_live and available()
+
+
+def live_refusal(size_gb: float, duration: float) -> str | None:
+    """Why the live window (10 min behind + 30 min ahead of the play head) would not fit
+    on disk, or None. Far below the complete file: that is the point of going live."""
+    free = _free_gb(_cache_dir())
+    if not free:
+        return None  # unknown → don't block (best-effort, like `refusal`)
+    if size_gb > 0 and duration > 0:
+        window = (live.KEEP_BEHIND_S + live.AHEAD_MAX_S) / duration * size_gb
+        need = min(window, size_gb) * 1.2
+    else:
+        need = _MIN_FREE_GB
+    if free < need:
+        return f"spazio disco insufficiente per il cast in diretta (~{need:.0f}GB, {free:.0f}GB)"
+    return None
+
+
+def live_feasible(cfg: Config, url: str, size_gb: float) -> bool:
+    """Whether a live start can be attempted for `url` (decision time, ADR 0036): config,
+    tools, and the disk window. The probe is the memoized one the vetting already ran."""
+    if not live_available(cfg) or not bridge.bridge_available():
+        return False
+    return live_refusal(size_gb, _probe_meta(url)[2]) is None
+
+
+def _live_job(url: str, cfg: Config, audio: list, audio_index: int, head_s: float) -> live.Job:
+    """The producer job: the planned track, copied when it is already DMR-decodable stereo,
+    else AAC stereo (AAC 5.1 in HLS stalls this receiver — ADR 0039 matrix #7/#8)."""
+    sel = audio[audio_index] if 0 <= audio_index < len(audio) else (audio[0] if audio else None)
+    amap = f"0:a:{audio_index}" if audio_index > 0 else "0:a:0?"
+    if sel is not None and sel.codec in ("aac", "he-aac", "heaac") and (sel.channels or 2) <= 2:
+        args: tuple[str, ...] = ("-c:a", "copy")
+    else:
+        args = ("-c:a", cfg.cast_audio_codec or "aac", "-ac", "2", "-b:a", _audio_bitrate(2))
+    return live.Job(url, amap, args, head_s=head_s)
+
+
+def _await_live(out_dir: str, target_s: float, *, failed: Callable[[], bool], label: str) -> bool:
+    """Wait until the playlist covers `target_s` (the resume point plus two segments).
+    False when the producer fails or makes no progress for `_LIVE_STALL_S`."""
+    g = ui.g().tv
+    last, last_change = -1.0, time.monotonic()
+    shown = -1
+    while True:
+        done = live.produced_s(out_dir)
+        if done >= target_s:
+            ui.progress_done()
+            return True
+        now = time.monotonic()
+        if done > last:
+            last, last_change = done, now
+        if failed() or now - last_change > _LIVE_STALL_S:
+            ui.progress_done()
+            return False
+        pct = min(99, int(done / target_s * 100)) if target_s else 0
+        if pct // 10 != shown // 10:
+            shown = pct
+            ui.progress(f"{g} audio in diretta  {pct:3d}%{label}")
+        time.sleep(_LIVE_POLL_S)
+
+
+@log.phase("cast_live")
+def cast_live(
+    cfg: Config,
+    title: str,
+    url: str,
+    *,
+    device: str,
+    audio_index: int,
+    start: float | None = None,
+    size_gb: float = 0.0,
+    sub_paths: tuple[str, ...] = (),
+    sub_lang: str | None = None,
+    follow: bool = True,
+    meta: caster.CastMeta | None = None,
+    on_event: caster.EventCb | None = None,
+) -> cast_delivery.CastResult | None:
+    """Cast `url` as a live HLS-TS playlist (ADR 0039): the TV starts as soon as the first
+    segments (past the resume point) exist, instead of after the whole-file remux. Returns
+    the `CastResult`, or **None** when the live tier could not start — producer failure,
+    no progress, disk, or a receiver that never played it — so the caller falls back to
+    the complete-file remux (`remux_for_cast` + `cast_file`). castbridge only: catt joins a
+    live playlist at its edge and cannot seek it."""
+    if not live_available(cfg) or not bridge.bridge_available():
+        return None
+    t, _n_video, duration = _probe_meta(url)
+    why = live_refusal(size_gb, duration)
+    if why:
+        _log.info("live: %s", why)
+        return None
+    head = float(start or 0.0)
+    if duration and head >= duration - 2 * live.SEGMENT_S:
+        head = 0.0
+    job = _live_job(url, cfg, t.audio, audio_index, head)
+    serve.reap_sub_server()
+    prev = _read_state()
+    if prev and _pid_alive(prev.get("pid")):
+        _teardown(prev.get("pid"), prev.get("file"))
+    bind_ip = serve.lan_ip(device)
+    serve.ensure_firewall(bind_ip)
+    out_dir = _new_remux_temp(".hls")
+    vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
+    if vtt and not follow:
+        # The per-play work dir dies with a headless return; the copy dies with out_dir.
+        try:
+            shutil.copyfile(vtt, os.path.join(out_dir, "subs.vtt"))
+            vtt = os.path.join(out_dir, "subs.vtt")
+        except OSError:
+            vtt = None
+    producer: live.Producer | None = None
+    server = None
+    pid: int | None = None
+    if follow:
+        producer = live.Producer.start(job, out_dir)
+        if producer is None:
+            _rm(out_dir)
+            return None
+        server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt, hls_dir=out_dir)
+        server.producer = producer
+        producer.run_pacing()
+        token = server.token
+    else:
+        spawned = serve.spawn_detached(bind_ip, sub_path=vtt, hls_dir=out_dir, job=job)
+        if spawned is None:
+            _rm(out_dir)
+            return None
+        pid, port, token = spawned
+
+    def teardown() -> None:
+        if server is not None:
+            server.shutdown()
+        if producer is not None:
+            producer.stop()
+        _kill(pid)
+        _rm(out_dir)
+
+    def failed() -> bool:
+        if producer is not None:
+            return producer.failed()
+        return not _pid_alive(pid)
+
+    label = f"  → {int(head) // 60}:{int(head) % 60:02d}" if head > 60 else ""
+    try:
+        ready = _await_live(out_dir, head + 2 * live.SEGMENT_S, failed=failed, label=label)
+    except BaseException:
+        teardown()
+        raise
+    if not ready:
+        _log.warning(
+            "live: il produttore non è partito%s",
+            f" ({producer.failure_reason()})" if producer is not None else "",
+        )
+        teardown()
+        return None
+    kwargs = _bridge_meta_kwargs(
+        title, meta or caster.CastMeta(), head, app_id=(cfg.cast_receiver_app_id or "").strip()
+    )
+    kwargs["content_type"] = _HLS_TYPE
+    if vtt:
+        kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
+
+    def abort(started: bool) -> bool:
+        if not started or not follow:
+            teardown()
+            return True
+        return False
+
+    out: cast_delivery.BridgeOutcome | None = None
+    try:
+        out = cast_delivery.drive_bridge(
+            device, serve.served_hls_url(bind_ip, port, token), follow=follow,
+            load_kwargs=kwargs, on_event=on_event,
+            on_started=lambda: ui.cast_live(device, follow=follow), on_interrupt=abort,
+        )  # fmt: skip
+    finally:
+        if follow and out is not None and out.started:
+            teardown()  # the followed cast ended: its producer and segments go with it
+    if out is None or not out.started:
+        if out is not None and out.error:
+            _log.warning("live: il ricevitore ha rifiutato la playlist (%s)", out.error)
+        teardown()
+        return None  # → the complete-file remux takes over
+    delivered = cast_delivery.caption_active(kwargs, out.tracks)
+    if not follow:
+        _write_state(pid or 0, out_dir, device, mode="live")
+        return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
+    dur = out.dur if out.dur > 0 else duration
+    return cast_delivery.CastResult(out.pos, dur, delivered, started=True)
+
+
 def _log_catt_stderr(path: str) -> None:
     """Log the tail of the detached catt's captured stderr — why the cast never started.
     The file holds a local path (no debrid token), so the tail is safe to log."""
@@ -834,7 +1043,7 @@ def stop(device: str | None = None) -> bool:
     if not st:
         return reaped_sub
     dev = st.get("device") if device is None else device
-    if st.get("mode") == "serve":
+    if st.get("mode") in ("serve", "live"):
         # Native path: castbridge owns the receiver session; our process is the file server.
         bridge.stop(dev)
     else:

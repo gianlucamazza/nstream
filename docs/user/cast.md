@@ -60,7 +60,8 @@ flowchart TD
 | Backend | Start | Fidelity | Cost |
 | ------- | ----- | -------- | ---- |
 | **Direct DMR** (castbridge/catt) | Instant stream | Full video (HEVC/4K/HDR) if codec ok | Needs DMR-decodable **audio** (AAC/…) |
-| **Tier-2 remux** (ADR 0005) | Prepare wait (download whole file) | Video copy; audio → AAC | Disk + time; remux res capped by default |
+| **Tier-2 live** (ADR 0039) | Seconds (live HLS-TS) | Video copy; audio → AAC stereo | ~40 min window on disk |
+| **Tier-2 remux** (ADR 0005) | Prepare wait (download whole file) | Video copy; audio → AAC (multichannel) | Disk + time; fallback, or `cast_live: false` |
 | **Mirror** (ADR 0006/0015/0023) | Instant | 1080p SDR (HDR→SDR) | Needs openscreen sender + Hyprland/PipeWire |
 
 ### Tier-2 remux
@@ -73,6 +74,10 @@ when only Dolby/DTS exist and `cast_remux` is on, the host remuxes (video `-c co
 - `cast_remux_max_size_gb` (default 20) — demote / confirm huge downloads
 - `cast_mirror_over_remux_gb` (default 10) — auto-switch to mirror when remux would be large
   (ADR 0015), if the mirror binary is available
+
+With `cast_live` on (default) the conversion is streamed: the TV starts on the first
+segments, in stereo AAC (5.1 AAC stalls the receiver over HLS). The complete-file remux is the
+fallback when the live start fails. JSON `delivery` says which ran (`live` / `file`).
 
 stderr shows a prepare message during remux. JSON field `reencoded: true` when remux was used.
 `--stop` tears down the remux server and temp file; stale temps are GC'd on the next run.

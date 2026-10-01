@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from nstream import caster, remux
+from nstream import cast_delivery, caster, remux
 from nstream.config import Config
 from nstream.tracks import Track, Tracks
 
@@ -967,3 +967,79 @@ def test_remux_argv_never_carries_the_debrid_url(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "_run_ffmpeg", lambda cmd, d, **k: seen.append(cmd) or (1, "x"))
     remux.remux_to_file("https://rd.example/realdebrid=TOK/f.mkv", Config(torrentio_base="tb"))
     assert not any("TOK" in a for a in seen[0])
+
+
+# --- live HLS-TS (ADR 0039) ---------------------------------------------------
+
+
+def _live_wiring(monkeypatch, *, writes_segments: bool):
+    from nstream import live, tracks
+
+    seen: dict = {}
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "live_refusal", lambda *a: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda d: "127.0.0.1")
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux, "_LIVE_STALL_S", 0.3)
+    monkeypatch.setattr(
+        remux, "_probe_meta",
+        lambda url: (tracks.Tracks(audio=[tracks.Track(0, "ita", "ac3", channels=6)]), 1, 6000.0),
+    )  # fmt: skip
+
+    def spawn(bind_ip, *, sub_path=None, hls_dir=None, job=None, file_path=None):
+        seen["job"] = job
+        if writes_segments:
+            lines = ["#EXTM3U"] + [f"#EXTINF:6.0,\nindex{i}.ts" for i in range(3)]
+            Path(str(hls_dir), live.PLAYLIST).write_text("\n".join(lines) + "\n")
+        seen["dir"] = hls_dir
+        return 4242, 45001, "tok"
+
+    monkeypatch.setattr(remux.serve, "spawn_detached", spawn)
+    alive = {"v": True}
+    monkeypatch.setattr(remux, "_pid_alive", lambda pid: alive["v"] and pid == 4242)
+    monkeypatch.setattr(remux, "_kill", lambda pid: alive.update(v=False))
+
+    def drive(device, url, *, follow, load_kwargs, **k):
+        seen["url"], seen["kwargs"] = url, load_kwargs
+        return cast_delivery.BridgeOutcome(0.0, 0.0, True, False)
+
+    monkeypatch.setattr(remux.cast_delivery, "drive_bridge", drive)
+    return seen
+
+
+def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, start=0.0, follow=False
+    )
+    assert out is not None and out.started
+    assert seen["url"].endswith("/hls/index.m3u8")
+    assert seen["kwargs"]["content_type"] == "application/vnd.apple.mpegurl"
+    assert seen["job"].audio_args[:2] == ("-c:a", "aac") and "-ac" in seen["job"].audio_args
+    assert remux._read_state() == {
+        "pid": 4242, "file": seen["dir"], "device": "10.0.0.5", "mode": "live",
+    }  # fmt: skip
+
+
+def test_cast_live_without_segments_cleans_up_and_yields(monkeypatch):
+    """No segment in time → None (the caller falls back to the complete file), the detached
+    server is killed and the directory removed."""
+    seen = _live_wiring(monkeypatch, writes_segments=False)
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, follow=False
+    )
+    assert out is None
+    assert not Path(seen["dir"]).exists()
+    assert remux._read_state() is None
+
+
+def test_live_job_copies_stereo_aac_and_downmixes_the_rest():
+    from nstream import tracks
+
+    aac = [tracks.Track(0, "ita", "aac", channels=2)]
+    assert remux._live_job("u", _cfg(), aac, 0, 0.0).audio_args == ("-c:a", "copy")
+    eac3 = [tracks.Track(0, "eng", "aac", channels=6), tracks.Track(1, "ita", "eac3", channels=6)]
+    job = remux._live_job("u", _cfg(), eac3, 1, 90.0)
+    assert job.audio_map == "0:a:1" and job.head_s == 90.0
+    assert job.audio_args == ("-c:a", "aac", "-ac", "2", "-b:a", "192k")

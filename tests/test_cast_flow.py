@@ -1147,3 +1147,78 @@ def test_handoff_start_without_session_asks_nobody(monkeypatch):
     monkeypatch.setattr(cast_flow.state, "cast_session_info", lambda: None)
     monkeypatch.setattr(cast_flow.caster, "status", lambda d: pytest.fail("no receiver query"))
     assert cast_flow._handoff_start(CFG, "10.0.0.5", "tt1", None) is None
+
+
+# --- Tier-2 live HLS-TS (ADR 0039) -------------------------------------------
+
+
+def _live_on(monkeypatch):
+    monkeypatch.setattr(cast_flow.remux, "live_available", lambda cfg: True)
+    monkeypatch.setattr(cast_flow.remux, "live_feasible", lambda *a, **k: True)
+
+
+def test_live_tier_starts_instead_of_the_complete_remux(monkeypatch):
+    """A Dolby plan goes live: no whole-file prepare, the plan's track is mapped, and the
+    outcome says `delivery == "live"`."""
+    stream: Stream = _STREAM.copy()
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    _live_on(monkeypatch)
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_live",
+        lambda cfg, title, url, **k: seen.update(live=(url, k["audio_index"], k["start"]))
+        or _ok(),
+    )  # fmt: skip
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("no complete remux"))
+    out = _run(_opts(), stream, start=42.0, follow=False)
+    assert seen["live"] == (stream["url"], 1, 42.0)
+    assert out.delivery == "live" and out.reencoded is True and out.action == "cast"
+
+
+def test_live_failure_falls_back_to_the_complete_remux(monkeypatch):
+    stream: Stream = _STREAM.copy()
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    _live_on(monkeypatch)
+    monkeypatch.setattr(cast_flow.remux, "cast_live", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cast_flow.remux, "remux_for_cast", lambda *a, **k: seen.update(full=True) or "/t.mp4"
+    )
+    monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
+    monkeypatch.setattr(cast_flow.subs, "align_local", lambda cfg, pick, *a, **k: pick)
+    out = _run(_opts(), stream)
+    assert seen.get("full") and out.delivery == "file"
+
+
+def test_live_failure_with_a_refused_complete_file_is_infeasible(monkeypatch):
+    """The live tier bypassed a complete-file refusal (disk): if it then fails, the honest
+    answer is remux_infeasible (ADR 0036), never a mute direct cast."""
+    stream: Stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    _live_on(monkeypatch)
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: "spazio disco insufficiente")
+    monkeypatch.setattr(cast_flow.remux, "cast_live", lambda *a, **k: None)
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("never a mute direct cast"))
+    with pytest.raises(cast_flow.CastRemuxInfeasible, match="diretta non è partita"):
+        _run(_opts(), stream)
+
+
+def test_direct_cast_reports_direct_delivery(monkeypatch):
+    stream: Stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
+    assert _run(_opts(), stream).delivery == "direct"
+
+
+def test_no_auto_mirror_when_the_live_tier_can_run(monkeypatch):
+    """The 55 GB 4K Dolby release that used to auto-mirror (1080p SDR) goes live instead:
+    native 4K video, seconds to start, no whole-file download."""
+    stream: Stream = _STREAM_4K.copy()
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: True)
+    monkeypatch.setattr(cast_flow.mirror, "cast_via_mirror", _boom("live beats the mirror"))
+    _live_on(monkeypatch)
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_live", lambda *a, **k: seen.update(live=True) or _ok()
+    )
+    out = _run(_opts(mirror=None), stream)
+    assert seen.get("live") and out.delivery == "live"

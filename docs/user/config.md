@@ -95,6 +95,7 @@ primary audio → try next source or play fallback with primary-language safety 
 | `cast_receiver_app_id` | str | `""` | Custom Cast application id (ADR 0013). Empty keeps the Default Media Receiver `CC1AD845`. |
 | `cast_mode` | enum | `dmr` | `dmr` \| `mirror` |
 | `cast_remux` | bool | `true` | Tier-2 host remux for Dolby/DTS (ADR 0005) |
+| `cast_live` | bool | `true` | Tier-2 as a live HLS-TS playlist: starts in seconds, stereo AAC (ADR 0039); `false` = complete-file remux only |
 | `cast_audio_codec` | str | `aac` | Remux target audio |
 | `cast_remux_max_resolution` | int | `1080` | Cap **remuxed** picks only; `0` = no cap; bounds 0–4320 |
 | `cast_remux_max_size_gb` | int | `20` | Demote / confirm oversized remux; bounds 0–1000 |

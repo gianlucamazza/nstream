@@ -14,6 +14,7 @@
   "cast_device": "",
   "cast_receiver_app_id": "",
   "cast_remux": true,
+  "cast_live": true,
   "cast_audio_codec": "aac",
   "cast_remux_max_resolution": 1080,
   "cast_remux_max_size_gb": 20,

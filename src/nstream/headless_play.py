@@ -265,6 +265,7 @@ def auto_play(
     muted: bool | None = None
     notice: str | None = None
     reencoded = False  # set when a Tier-2 audio remux was used for the cast
+    delivery = "local"  # how it reached the screen (cast paths override from the outcome)
     # Reported audio language/subtitles: defaults for the local path, overridden by the cast
     # language decision (`vet_cast_audio`) so the JSON reflects what actually plays.
     cast_audio_lang = opts.audio_lang or (cfg.primary or None)
@@ -348,6 +349,7 @@ def auto_play(
             sub_offset = outcome.sub_offset
             subs_delivered = outcome.subs_delivered
             action, reencoded, notice = outcome.action, outcome.reencoded, outcome.notice
+            delivery = outcome.delivery
             if args.follow:
                 hist_pos, hist_dur = outcome.pos, outcome.dur
             elif opts.history:
@@ -423,6 +425,7 @@ def auto_play(
             "quality": vetted.quality if vetted.quality else None,
             "available_resolutions": available_resolutions,
             "reencoded": reencoded,
+            "delivery": delivery,
             "device": device_name,
             "volume": volume,
             "muted": muted,

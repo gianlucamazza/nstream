@@ -7,6 +7,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- **ADR 0039 Accepted:** a cast whose audio needs conversion (Dolby/DTS, or an `.mkv`
+  rewrap) streams a live HLS-TS playlist and starts in seconds instead of after the
+  whole-file remux. Stereo AAC; disk bounded to a ~40-min window; the complete file is the
+  fallback. `cast_live` config key; JSON `delivery` (`live`/`file`/`direct`/`mirror`/`local`).
+
+### Fixed
+
+- A recast of the title the TV is playing (another dub, a retry) resumes where the TV is
+  at LOAD time, not where it was when the command began.
+- `urlproxy` resumes dropped upstream reads and never prints tracebacks (#5).
+
 ## [1.39.0] — 2026-10-01
 
 ### Fixed

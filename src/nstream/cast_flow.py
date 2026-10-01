@@ -161,6 +161,7 @@ class CastOutcome:
     # mute). Callers must not fall back to a pre-cast language guess.
     audio_degraded: bool = False
     start: float | None = None  # the position the delivery was LOADed at (see `_handoff_start`)
+    delivery: str = ""  # "live" (HLS-TS) | "file" (complete remux) | "direct" | "mirror"
 
 
 def _handoff_start(cfg: Config, device: str, video_id: str, start: float | None) -> float | None:
@@ -244,6 +245,9 @@ class _Settled:
     needs_remux: bool
     refused_mirror: str  # the remux refusal the mirror stands in for ("" = none)
     notice: str | None  # set when a direct release replaced a refused remux
+    # The complete-file refusal a live start bypasses (ADR 0039): if the live start then
+    # fails, this is the honest `remux_infeasible` reason — never a mute direct cast.
+    full_refusal: str = ""
 
 
 def _settle(
@@ -276,9 +280,14 @@ def _settle(
     container = cast_vet.cast_container(cfg, chosen)
     needs_rewrap = not quality.container_castable(container)
     needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
-    refused_mirror, notice = "", None
+    refused_mirror, notice, full_refusal = "", None, ""
     if needs_remux and not opts.mirror:
-        why = remux.refusal(cfg, quality.parse_stream(chosen).size_gb, interactive=opts.interactive)
+        size_gb = quality.parse_stream(chosen).size_gb
+        why = remux.refusal(cfg, size_gb, interactive=opts.interactive)
+        if why and remux.live_feasible(cfg, chosen["url"], size_gb):
+            # Live needs only a window of the file on disk (ADR 0039): go ahead, and keep the
+            # complete-file reason for the case the live start fails.
+            full_refusal, why = why, None
         if why:
             mirror_ok_now = mirror.available()
             if opts.mirror is None and mirror_ok_now:
@@ -305,8 +314,9 @@ def _settle(
                 container = cast_vet.cast_container(cfg, chosen)
                 needs_rewrap = needs_remux = False
     return _Settled(
-        plan, chosen, bad_video, container, needs_rewrap, needs_remux, refused_mirror, notice
-    )
+        plan, chosen, bad_video, container, needs_rewrap, needs_remux, refused_mirror, notice,
+        full_refusal,
+    )  # fmt: skip
 
 
 def _mirror_choice(
@@ -528,9 +538,15 @@ def run_cast(
     # a 30-60 GB fetch, at the cost of 1080p SDR. Below the size threshold the remux still wins
     # (native video/HDR). An EXPLICIT `--mirror` now forces the mirror even for a decodable
     # title (ADR 0023): the manual intent wins, mirroring how `--no-mirror` suppresses it.
+    # A live Tier-2 (ADR 0039) starts in seconds with native video: the auto mirror only
+    # stood in for a slow whole-file prepare, so it no longer applies when live can run.
+    slow_prepare = needs_remux and not (
+        not opts.mirror
+        and remux.live_feasible(cfg, chosen["url"], quality.parse_stream(chosen).size_gb)
+    )
     use_mirror, mirror_notice, loud = _mirror_choice(
         cfg, opts, quality.parse_stream(chosen),
-        needs_remux=needs_remux, bad_video=bad_video, refused_mirror=refused_mirror,
+        needs_remux=slow_prepare, bad_video=bad_video, refused_mirror=refused_mirror,
         available=mirror.available,
     )  # fmt: skip
     # Exactly one auto_subs call, with the effective safety language (normalization 2).
@@ -569,12 +585,33 @@ def run_cast(
         pos, dur = delivery.pos, delivery.dur
         subs_delivered = bool(sub_paths)  # mpv renders them into the mirrored frame
         action = "mirror"
+        delivered_as = "mirror"
     else:
         if opts.mirror is True:
             # Reached the else with --mirror forced ⇒ `mirror.available()` is False (the only
             # way `mirror_ok` is False here): honour the intent with an honest fallback notice.
             print(MIRROR_UNAVAILABLE, file=sys.stderr)
-        if needs_remux:
+        live_delivery = None
+        if needs_remux and remux.live_available(cfg):
+            # ADR 0039: the TV starts on the first converted segments. The subtitle fetch is
+            # awaited first (seconds): the caption track rides the LOAD.
+            if pending_subs is not None:
+                subs_pick = pending_subs.result()
+                pending_subs = None
+                subs.report_safety_subs(subs_pick, safety_sub_lang)
+                sub_paths = subs_pick.paths
+                sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
+            start = _handoff_start(cfg, device, video_id, start)
+            live_delivery = remux.cast_live(
+                cfg, title, chosen["url"],
+                device=device, audio_index=plan.audio_index, start=start,
+                size_gb=quality.parse_stream(chosen).size_gb,
+                sub_paths=sub_paths, sub_lang=sub_lang, follow=follow,
+                meta=meta, on_event=on_event,
+            )  # fmt: skip
+            if live_delivery is None and st.full_refusal:
+                raise CastRemuxInfeasible(f"{st.full_refusal}; la diretta non è partita")
+        if needs_remux and live_delivery is None:
             print(_prepare_line(chosen, plan, target_lang), file=sys.stderr)
         remux_path = (
             remux.remux_for_cast(
@@ -584,7 +621,7 @@ def run_cast(
                 size_gb=quality.parse_stream(chosen).size_gb,
                 confirm=opts.confirm if opts.interactive else None,
             )  # fmt: skip
-            if needs_remux
+            if needs_remux and live_delivery is None
             else None
         )
         if pending_subs is not None:  # fetched while the remux ran
@@ -593,7 +630,13 @@ def run_cast(
             sub_paths = subs_pick.paths
             sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
         start = _handoff_start(cfg, device, video_id, start)
-        if remux_path:
+        if live_delivery is not None:
+            delivery = live_delivery
+            pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
+            reencoded = True
+            action = "cast"
+            delivered_as = "live"
+        elif remux_path:
             # Tier 2 of the subtitle pipeline (ADR 0020): the remux output IS the local
             # media file the receiver will play — align the delivered subtitle against
             # its real audio (free of network cost) before the VTT is built from it.
@@ -607,6 +650,7 @@ def run_cast(
             pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             reencoded = True
             action = "cast"
+            delivered_as = "file"
         elif needs_rewrap and mirror.available():
             # ADR 0022 gap: the container rewrap is unavailable (cfg.cast_remux off or ffmpeg
             # missing) and the DMR refuses this .mkv LOAD — mirror it (mpv decodes any
@@ -620,6 +664,7 @@ def run_cast(
             pos, dur = delivery.pos, delivery.dur
             subs_delivered = bool(sub_paths)
             action = "mirror"
+            delivered_as = "mirror"
         else:
             if needs_remux:
                 # remux failed mid-way (ffmpeg error, or a guard tripped after `refusal`)
@@ -643,6 +688,7 @@ def run_cast(
             )  # fmt: skip
             pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             action = "cast"
+            delivered_as = "direct"
     if sub_paths and not subs_delivered:
         # Honesty over silence: the subtitles were fetched but not attached to the cast
         # (e.g. WebVTT conversion/serving failed, or the mirror path with no burn-in).
@@ -678,4 +724,5 @@ def run_cast(
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
         sub_match=subs_pick.match, sub_offset=subs_pick.offset_s,
         subs_delivered=subs_delivered, audio_degraded=degraded_audio, start=start,
+        delivery=delivered_as,
     )  # fmt: skip

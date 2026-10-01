@@ -1,6 +1,6 @@
 # 0039. Tier-2 audio conversion streams live HLS-TS instead of a complete file on disk
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-01)
 - **Date:** 2026-10-01
 - **Deciders:** maintainer
 - **Amends:** 0005 (the delivery format of Tier-2; the decision to remux on the host stands)
@@ -64,6 +64,34 @@ token-and-CORS server, and casts the playlist as soon as the first segments exis
 - The finish predicate and resume (ADR 0029) must handle `duration: -1` on a live
   playlist. The duration can come from the probe instead.
 - Segment cleanup joins the detached-server lifecycle: idle-exit, `--stop` and GC.
+
+## Acceptance (2026-10-01)
+
+Gates 2–5 passed on the 43PUS9235 (`0039-phase0/receiver-matrix-2026-10-01.md`): real debrid
+input, 62 min to the end of the film with 0 stalls, the castbridge BUFFERED path with seek
+inside the produced range, side-loaded WebVTT. Gate 1 (4K HEVC Main10) is still open: a 4K
+live start that fails falls back to the complete file, which already handles 4K.
+
+Decisions taken at acceptance:
+
+- **Stereo AAC 192k** on the live path. AAC 5.1 in HLS stalls this receiver (matrix #7/#8);
+  a stereo AAC source track is copied. The complete-file fallback keeps channel-aware AAC.
+  `cast_live: false` restores the complete file for anyone who prefers surround to a fast
+  start.
+- **Disk:** the producer is not throttled by rate but by distance. `live.Producer` deletes
+  segments more than 10 min behind the newest segment the receiver requested, and pauses
+  ffmpeg (SIGSTOP) 30 min ahead of it, resuming at 15 min. No receiver polling: the
+  segment requests are the play head. Feasibility (ADR 0036) checks this window, not the
+  release size; a live failure falls back to the complete file, and a complete file the
+  disk refused is `remux_infeasible` — never a mute cast.
+- **Seek:** inside the produced range and the 10-min window behind, it works; a backward
+  seek past the window is not served, a forward one waits for the producer. The
+  restart-at-`-ss` design stays deferred.
+- **Resume:** the producer starts from 0 and the LOAD seeks to the resume point once the
+  playlist covers it (timestamps stay absolute, so position, history and subtitles need no
+  offset). A far resume point over a slow debrid costs that production time.
+- The debrid url reaches the detached producer on stdin, never in argv; ffmpeg reads a
+  `urlproxy` loopback url that resumes dropped upstream reads with a Range.
 
 ## References
 
