@@ -771,6 +771,28 @@ def test_gc_stale_keeps_in_progress_remux_until_server_state_exists(tmp_path):
     assert Path(f"{path}.lock").exists()
 
 
+def test_new_remux_temp_lock_is_held_before_it_is_visible(monkeypatch, tmp_path):
+    """A GC racing the creation (here: run right before the lock is published) must find
+    nothing it may delete — the lock was visible-but-unlocked in the old mkstemp order."""
+    real_link = os.link
+
+    def racing_link(src, dst):
+        remux._gc_stale()
+        return real_link(src, dst)
+
+    monkeypatch.setattr(remux.os, "link", racing_link)
+    path = remux._new_remux_temp()
+    remux._gc_stale()  # and one after: the published lock is held
+    assert Path(path).exists() and Path(f"{path}.lock").exists()
+    assert list(tmp_path.glob(".cast-*")) == []  # the hidden name is gone
+
+
+def test_gc_removes_unpublished_lock_of_a_crashed_run(tmp_path):
+    (tmp_path / ".cast-dead.mp4.lock").write_bytes(b"")
+    remux._gc_stale()
+    assert not (tmp_path / ".cast-dead.mp4.lock").exists()
+
+
 def test_write_state_atomically_replaces_prepare_lock(tmp_path):
     path = remux._new_remux_temp()
     f = tmp_path / Path(path).name

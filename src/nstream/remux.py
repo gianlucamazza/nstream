@@ -28,6 +28,7 @@ import atexit
 import contextlib
 import fcntl
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -202,6 +203,9 @@ def _gc_stale() -> None:
             path = str(f)[: -len(".lock")]
             if path != keep and not _prepare_active(path):
                 f.unlink(missing_ok=True)
+        for f in _cache_dir().glob(".cast-*.mp4.lock"):  # unpublished lock of a crashed run
+            if not _prepare_active(str(f)[: -len(".lock")]):
+                f.unlink(missing_ok=True)
 
 
 def _read_state() -> dict | None:
@@ -227,18 +231,35 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def _new_remux_temp() -> str:
-    """Create a remux path already protected from cross-process stale-file GC."""
-    fd, lock_path = tempfile.mkstemp(suffix=".mp4.lock", prefix="cast-", dir=str(_cache_dir()))
+    """Create a remux path already protected from cross-process stale-file GC.
+
+    The lock is created under a hidden name the GC never globs, flocked, and only THEN
+    linked under its visible `cast-*.mp4.lock` name. Created visible (the old mkstemp),
+    a concurrent `_gc_stale` could find it before the flock, judge it idle and unlink it —
+    and later delete the remux being written, whose lock file was gone."""
+    base = _cache_dir()
+    fd, hidden = tempfile.mkstemp(suffix=".mp4.lock", prefix=".cast-", dir=str(base))
     lock = os.fdopen(fd, "r+b")
-    path = lock_path[: -len(".lock")]
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        out_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        while True:
+            path = str(base / f"cast-{secrets.token_hex(4)}.mp4")
+            try:
+                os.link(hidden, f"{path}.lock")  # no-clobber publish of the held lock
+            except FileExistsError:
+                continue
+            break
+        os.unlink(hidden)
+        try:
+            out_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except BaseException:
+            os.unlink(f"{path}.lock")
+            raise
         os.close(out_fd)
     except BaseException:
         lock.close()
         with contextlib.suppress(OSError):
-            os.unlink(lock_path)
+            os.unlink(hidden)
         raise
     _PREPARE_LOCKS[path] = lock
     return path
