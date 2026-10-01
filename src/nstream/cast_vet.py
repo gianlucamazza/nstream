@@ -18,7 +18,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import availability, languages, quality, remux, stream_select, tracks
+from . import availability, languages, log, quality, remux, stream_select, tracks
 from .config import Config
 from .types import Stream
 
@@ -107,6 +107,7 @@ def _duration_castable(cfg: Config, stream: Stream, expected_s: float) -> bool:
     return availability.vet_duration(url or "", expected_s).ok
 
 
+@log.phase("vet_video")
 def vet_cast_video(
     cfg: Config,
     results: list[Stream],
@@ -171,6 +172,7 @@ def _container_castable(cfg: Config, stream: Stream) -> bool:
     return quality.container_castable(cast_container(cfg, stream))
 
 
+@log.phase("vet_container")
 def vet_cast_container(
     cfg: Config,
     results: list[Stream],
@@ -341,6 +343,7 @@ def _reselect_cast_for_lang(
     return remux_fallback or direct_bad_container or tagged_guess
 
 
+@log.phase("vet_instant")
 def find_instant_direct(
     cfg: Config,
     results: list[Stream],
@@ -402,6 +405,7 @@ def instant_defer_notice(slow: CastAudioPlan, instant: CastAudioPlan, target: st
     return f"audio {target} solo dopo remux completo ({', '.join(detail)}); cast diretto {played}"
 
 
+@log.phase("vet_audio")
 def vet_cast_audio(
     cfg: Config,
     results: list[Stream],

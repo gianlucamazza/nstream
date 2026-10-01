@@ -323,6 +323,7 @@ def align_local(
     return pick
 
 
+@log.phase("subs")
 def auto_subs(
     cfg: Config, typ: str, video_id: str, work_dir: str, opts: PlayOpts,
     *, safety_sub_lang: str | None = None,

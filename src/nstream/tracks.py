@@ -112,14 +112,20 @@ def cached_duration(url: str) -> float:
     return tr.duration if tr else 0.0
 
 
-@log.phase("probe")
 def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
     """Probe `url` for embedded audio/subtitle tracks (+ video count / duration). Returns
     empty lists if ffprobe is unavailable or the probe fails (caller falls back to mpv
     defaults). Memoized per url — one network ffprobe per stream per process."""
     cached = _cache.get(url)
     if cached is not None:
-        return cached
+        return cached  # memo hits are not timed: they would skew the probe phase average
+    result = _ffprobe(url, timeout)
+    _cache[url] = result
+    return result
+
+
+@log.phase("ffprobe")
+def _ffprobe(url: str, timeout: float) -> Tracks:
     cmd = [
         "ffprobe", "-v", "error", "-of", "json", "-show_entries",
         "format=duration,format_name"
@@ -135,5 +141,4 @@ def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
         except json.JSONDecodeError:
             data = {}
         result = _parse_ffprobe(data if isinstance(data, dict) else {})
-    _cache[url] = result
     return result

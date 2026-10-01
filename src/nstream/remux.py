@@ -369,6 +369,7 @@ def _await_ffmpeg(
     return proc.returncode, stderr
 
 
+@log.phase("remux")
 def remux_to_file(
     url: str,
     cfg: Config,
@@ -483,6 +484,7 @@ def remux_to_file(
 # --- serve + cast ---------------------------------------------------------
 
 
+@log.phase("cast_file")
 def cast_file(
     cfg: Config,
     title: str,

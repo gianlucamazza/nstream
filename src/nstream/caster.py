@@ -280,6 +280,7 @@ def _switch_cast_audio(
         )
 
 
+@log.phase("cast_direct")
 def cast(
     cfg: Config,
     title: str,
@@ -587,6 +588,7 @@ def _cast_via_catt(
     )  # fmt: skip
 
 
+@log.phase("catt_info")
 def _raw_info(device: str | None) -> dict:
     """One `catt info -j`, parsed; {} on any failure (best-effort, never raises)."""
     base = ["catt", *(["-d", device] if device else [])]

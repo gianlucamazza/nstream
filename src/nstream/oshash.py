@@ -58,6 +58,7 @@ def _ranged_read(url: str, start: int, end: int) -> tuple[bytes, int]:
         return body, total
 
 
+@log.phase("oshash")
 def hash_url(url: str) -> tuple[str, int] | None:
     """OSHash of the file behind `url` → (hash, size), or None when it can't be computed
     (no Range support, tiny file, network error). Two 64 KB reads, ~128 KB total."""

@@ -168,6 +168,7 @@ def _served_total(headers, status: int) -> int | None:
     return None
 
 
+@log.phase("urlprobe")
 def probe_url(url: str, *, expected_bytes: int = 0, timeout: float = 6.0) -> Probe:
     """Classify a ready (debrid) stream url (ADR 0025). Asks for the first byte and judges
     both the status AND the size the server reports: a `200` proves the url resolves, not

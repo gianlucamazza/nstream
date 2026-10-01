@@ -155,6 +155,7 @@ class CastOutcome:
     audio_degraded: bool = False
 
 
+@log.phase("run_cast")
 def run_cast(
     cfg: Config,
     results: list[Stream],
