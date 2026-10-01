@@ -761,3 +761,38 @@ def test_prune_meta_cache_drops_only_expired(tmp_path):
     os.utime(aged, (old, old))
     api._prune_meta_cache(tmp_path)
     assert fresh.exists() and not aged.exists()
+
+
+def test_gather_client_error_counts_as_availability(monkeypatch):
+    # A 404 means the addon is up and this request is wrong: it must not open the breaker
+    # (an "Anime Catalogs" 404 on every search kept its breaker cycling forever).
+    from nstream import net
+    from nstream.state import breaker
+
+    records = []
+    monkeypatch.setattr(breaker, "record_failure", lambda *a, **kw: records.append("failed"))
+    monkeypatch.setattr(breaker, "record_success", lambda *a: records.append("success"))
+
+    def not_found():
+        raise net.ClientError("catalogo: HTTP 404", 404)
+
+    assert api._gather([not_found], keys=["http://addon"]) == []
+    assert records == ["success"]
+
+
+def test_gather_decides_breaker_once_per_key(monkeypatch):
+    from nstream.state import breaker
+
+    calls = []
+    leased = {"taken": False}
+
+    def allow(key):  # half-open: only the first caller gets the probe lease
+        calls.append(key)
+        first = not leased["taken"]
+        leased["taken"] = True
+        return first
+
+    monkeypatch.setattr(breaker, "allow", allow)
+    monkeypatch.setattr(breaker, "record_success", lambda *a: None)
+    rows = api._gather([lambda: [1], lambda: [2]], keys=["http://a", "http://a"])
+    assert calls == ["http://a"] and rows == [1, 2]

@@ -1044,3 +1044,30 @@ def test_title_guard_accepts_localized_primary_language_release():
 def test_title_guard_matches_series_name_not_episode_title():
     info = quality.parse_stream(_mk("Fargo.S01E01.1080p.WEB-DL.AAC"))
     assert quality._title_guard(info, "Fargo · S01E01 · The Crocodile's Dilemma", ()) is True
+
+
+@pytest.mark.parametrize(
+    ("name", "res"),
+    [
+        ("Movie.2019.UHD.BluRay.1080p.x264", 1080),
+        ("Movie.Remastered.4K.1080p", 1080),
+        ("Movie.2019.UHD.BluRay.x265", 2160),
+        ("Movie.4K.HDR", 2160),
+    ],
+)
+def test_explicit_resolution_beats_uhd_alias(name, res):
+    assert quality.parse_stream(_mk(name)).resolution == res
+
+
+@pytest.mark.parametrize(
+    ("name", "langs"),
+    [
+        ("Movie.2019.1080p.ENG.SUB.ITA", {"eng"}),
+        ("Movie.2019.1080p.iTA.ENG.Subs.ITA.ENG", {"ita", "eng"}),
+        ("Movie.2019.VOSTFR.1080p", set()),
+        ("Movie.2019.LEGENDADO.1080p", set()),
+        ("Movie.2019.iTA.1080p", {"ita"}),
+    ],
+)
+def test_subtitle_tags_are_not_audio_languages(name, langs):
+    assert set(quality.parse_stream(_mk(name)).languages) == langs

@@ -33,7 +33,7 @@ LANGUAGES: tuple[Language, ...] = (
     Language(
         "fra",
         "Français",
-        ("FRA", "FRENCH", "TRUEFRENCH", "VFF", "VFQ", "VOSTFR"),
+        ("FRA", "FRENCH", "TRUEFRENCH", "VFF", "VFQ"),  # not VOSTFR: French *subs*
         ("🇫🇷",),
         ("fr", "fre"),
     ),  # noqa: E501
@@ -42,9 +42,8 @@ LANGUAGES: tuple[Language, ...] = (
     ),  # noqa: E501
     Language("deu", "Deutsch", ("GER", "GERMAN", "DEU"), ("🇩🇪",), ("de", "ger")),
     Language("rus", "Русский", ("RUS", "RUSSIAN"), ("🇷🇺",), ("ru",)),
-    Language(
-        "por", "Português", ("POR", "PORTUGUESE", "DUBLADO", "LEGENDADO"), ("🇵🇹", "🇧🇷"), ("pt",)
-    ),  # noqa: E501
+    # Not LEGENDADO: it names Portuguese *subtitles*, the audio is the original.
+    Language("por", "Português", ("POR", "PORTUGUESE", "DUBLADO"), ("🇵🇹", "🇧🇷"), ("pt",)),
     Language("jpn", "日本語", ("JPN", "JAP", "JAPANESE"), ("🇯🇵",), ("ja", "jp")),
     Language("kor", "한국어", ("KOR", "KOREAN"), ("🇰🇷",), ("ko",)),
     Language("zho", "中文", ("ZHO", "CHI", "CHINESE", "MANDARIN", "CANTONESE"), ("🇨🇳",), ("zh",)),

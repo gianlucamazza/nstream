@@ -135,8 +135,13 @@ def _gather(
     # Skip Open breakers before paying network (ADR 0027).
     active: list[tuple[int, Callable[[], list], str, str]] = []
     skipped = 0
+    # One breaker decision per addon per gather: movie + series search share a key, and a
+    # second `allow()` would see the lease the first just took and skip the half-open probe.
+    allowed: dict[str, bool] = {}
     for i, t in enumerate(tasks):
-        if bases[i] and not brk.allow(bases[i]):
+        if bases[i] and bases[i] not in allowed:
+            allowed[bases[i]] = brk.allow(bases[i])
+        if bases[i] and not allowed[bases[i]]:
             skipped += 1
             _log.info("breaker skip: %s (%s)", names[i], bases[i])
             continue
@@ -161,6 +166,11 @@ def _gather(
                 net.remaining()
                 rows = task()
             return i, rows, "ok"
+        except net.ClientError as e:
+            # The addon answered (it's up): a 4xx says this request is wrong, not that the
+            # addon is down — it counts as availability for the breaker (ADR 0027).
+            _log.debug("addon rifiuta la richiesta%s: %s", f" ({label})" if label else "", e)
+            return i, [], "client"
         except NetworkError as e:
             _log.debug("addon saltato%s: %s", f" ({label})" if label else "", e)
             return i, [], "fail"
@@ -200,7 +210,7 @@ def _gather(
                         if key:
                             if status == "fail":
                                 brk.record_failure(key, reason="network")
-                            else:
+                            else:  # "ok" or "client": the addon answered → it's up
                                 brk.record_success(key)
                         done += 1
                         if sys.stderr.isatty():

@@ -59,6 +59,15 @@ class NetworkError(Exception):
     """A request failed after exhausting retries, or hit a non-retryable status."""
 
 
+class ClientError(NetworkError):
+    """A non-retryable HTTP 4xx: the server is up and answered — this request (path, id,
+    config) is wrong. Not an availability signal, so circuit breakers don't count it."""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 class AddonPool:
     """Fixed daemon workers and a bounded queue; stalled DNS cannot hold CLI exit.
 
@@ -248,7 +257,7 @@ def http_get_json(url: str, *, what: str = "richiesta", retries: int = 3) -> dic
         except urllib.error.HTTPError as e:
             # Don't retry client errors (auth, not found, bad config).
             if e.code != 429 and not (500 <= e.code < 600):
-                raise NetworkError(f"{what}: HTTP {e.code}") from None
+                raise ClientError(f"{what}: HTTP {e.code}", e.code) from None
             last_exc = e
             wait = util.retry_after(e)
         except (ValueError, gzip.BadGzipFile, EOFError) as e:

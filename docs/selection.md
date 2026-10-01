@@ -171,11 +171,12 @@ its cache endpoint in 2024 — ADR 0002). Two guards, auto-pick only:
 
 Probe (`net.probe_url`) is **classified, not boolean**:
 
-| Verdict   | Signal                                                | Effect                             |
-| --------- | ----------------------------------------------------- | ---------------------------------- |
-| `live`    | 2xx with plausible total size                         | keep                               |
-| `gone`    | 404/410/4xx                                           | drop **and** denylist              |
-| `unknown` | incomplete size, 403/405/416, 5xx, timeout, transport | drop this run — **never** denylist |
+| Verdict   | Signal                                                  | Effect                                        |
+| --------- | ------------------------------------------------------- | --------------------------------------------- |
+| `live`    | 2xx with plausible total size                           | keep                                          |
+| `gone`    | 404/410                                                 | drop **and** denylist                         |
+| `unknown` | 403/405/416 (method/range refused, resource exists)     | **keep** (benefit of the doubt) — never denylist |
+| `unknown` | other 4xx, 5xx, incomplete size, timeout, transport     | drop this run — **never** denylist            |
 
 Size mismatch never escalates to `gone` (in-flight `[RD download]` vs emptied file).
 

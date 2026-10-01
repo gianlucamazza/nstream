@@ -54,13 +54,18 @@ class StreamInfo:
     has_url: bool = False  # a ready debrid url: playable without touching the swarm
 
 
+# An explicit "NNNNp" wins over the 8K/4K/UHD/2K aliases: "UHD.BluRay.1080p" is a 1080p
+# encode of a UHD source and "Remastered.4K.1080p" a 1080p file.
 _RES_PATTERNS = (
-    (re.compile(r"4320p|\b8k\b", re.I), 4320),
-    (re.compile(r"2160p|\b4k\b|\buhd\b", re.I), 2160),
-    (re.compile(r"1440p|\b2k\b", re.I), 1440),
+    (re.compile(r"4320p", re.I), 4320),
+    (re.compile(r"2160p", re.I), 2160),
+    (re.compile(r"1440p", re.I), 1440),
     (re.compile(r"1080p", re.I), 1080),
     (re.compile(r"720p", re.I), 720),
     (re.compile(r"480p", re.I), 480),
+    (re.compile(r"\b8k\b", re.I), 4320),
+    (re.compile(r"\b4k\b|\buhd\b", re.I), 2160),
+    (re.compile(r"\b2k\b", re.I), 1440),
 )
 
 
@@ -182,7 +187,18 @@ def _likely_needs_remux(info: StreamInfo) -> bool:
 _CACHED_RE = re.compile("\\[[A-Za-z]{2,6}[+\u26a1]\ufe0f?\\]")
 
 
+# Subtitle-language tags ("SUB.ITA", "Subs ENG FRE") name the subtitles, not the audio:
+# dropped before matching so a subbed release isn't ranked as a dub.
+_SUB_TAG_RE = re.compile(
+    r"(?<![A-Za-z])SUB(?:S|BED|TITLES?)?(?:[ ._/-]+(?:"
+    + "|".join(t for toks in _LANG_TOKENS.values() for t in toks)
+    + r")(?![A-Za-z]))+",
+    re.I,
+)
+
+
 def _parse_languages(text: str) -> frozenset[str]:
+    text = _SUB_TAG_RE.sub(" ", text)
     found = {code for code, pat in _LANG_RE.items() if pat.search(text)}
     found |= {code for flag, code in _FLAG_LANG.items() if flag in text}
     return frozenset(found)

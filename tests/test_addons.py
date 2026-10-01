@@ -166,3 +166,18 @@ def test_cinemeta_builtin_is_searchable(monkeypatch):
     cine = addons.effective_addons(CFG)[0]
     assert addons.search_catalog(cine, "movie") == "top"
     assert addons.search_catalog(cine, "series") == "top"
+
+
+def test_load_addon_negative_caches_a_failed_fetch(monkeypatch):
+    calls = []
+
+    def down(url, **k):
+        calls.append(url)
+        raise addons.net.NetworkError("giù")
+
+    monkeypatch.setattr(addons.net, "http_get_json", down)
+    monkeypatch.setattr(addons, "_failed_at", {})
+    url = "https://down.example/manifest.json"
+    assert addons.load_addon(url) is None
+    assert addons.load_addon(url) is None
+    assert len(calls) == 1  # second call served by the negative cache

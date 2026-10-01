@@ -24,6 +24,10 @@ from . import net, util
 from .config import DEBRID_PROVIDERS, Config
 
 CACHE_TTL = 86400  # re-fetch a user addon's manifest at most once a day
+# After a failed manifest fetch, don't retry it in this process for a while: every API call
+# goes through `effective_addons`, so a down addon used to cost one timed-out fetch per call.
+FAIL_TTL = 600.0
+_failed_at: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
@@ -136,12 +140,16 @@ def load_addon(manifest_url: str, *, use_cache: bool = True) -> Addon | None:
     entry = cache.get(key)
     if entry and (time.time() - entry.get("ts", 0)) < CACHE_TTL:
         return _parse_manifest(manifest_url, entry["manifest"])
+    if use_cache and time.monotonic() - _failed_at.get(key, -FAIL_TTL) < FAIL_TTL:
+        return _parse_manifest(manifest_url, entry["manifest"]) if entry else None
     try:
         # One try only: a dead user addon must not stall the flow for ~60s.
         data = net.http_get_json(manifest_url, what="manifest addon", retries=1)
     except net.NetworkError:
+        _failed_at[key] = time.monotonic()
         # Fall back to a stale copy rather than dropping the addon entirely.
         return _parse_manifest(manifest_url, entry["manifest"]) if entry else None
+    _failed_at.pop(key, None)
     cache[key] = {"ts": int(time.time()), "manifest": data}
     _store_cache(cache)
     return _parse_manifest(manifest_url, data)
