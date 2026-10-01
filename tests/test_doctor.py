@@ -26,3 +26,10 @@ def test_doctor_preserves_config_bytes_and_permissions(monkeypatch, capsys):
     assert report["checks"][-1]["status"] == "permissions"
     assert "SECRET" not in json.dumps(report)
     assert path.read_text() == raw and stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_doctor_finds_castbridge_where_the_cast_path_does(monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor.bridge, "bridge_available", lambda: True)
+    checks = {c["name"]: c["status"] for c in doctor.inspect()["checks"]}
+    assert checks["castbridge"] == "ok"

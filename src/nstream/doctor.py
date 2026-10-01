@@ -7,13 +7,13 @@ import shutil
 import stat
 import sys
 
-from . import __version__, log, mirror
+from . import __version__, bridge, log, mirror
 from .config import ConfigError, config_path, load
 
 
 def inspect() -> dict:
     checks: list[dict] = []
-    for name in ("mpv", "fzf", "ffmpeg", "ffprobe", "catt", "chafa", "vainfo", "castbridge"):
+    for name in ("mpv", "fzf", "ffmpeg", "ffprobe", "catt", "chafa", "vainfo"):
         checks.append(
             {
                 "name": name,
@@ -21,6 +21,12 @@ def inspect() -> dict:
                 "status": "ok" if shutil.which(name) else "missing",
             }
         )
+    # castbridge is found where the cast path looks for it (`bridge._binary`: env override or
+    # the build tree), not on PATH — `which` reported it missing while every cast used it.
+    checks.append(
+        {"name": "castbridge", "required": False,
+         "status": "ok" if bridge.bridge_available() else "missing"}
+    )  # fmt: skip
     # Not required, but its absence silently disables the mirror fallbacks for huge or
     # .mkv remuxes (ADR 0015/0022), so name the reason.
     why = mirror.unavailable_reason()

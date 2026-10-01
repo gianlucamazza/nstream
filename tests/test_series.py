@@ -270,9 +270,7 @@ def test_resume_falls_back_to_single_episode(monkeypatch):
 
 
 def test_resume_no_autoplay_plays_single(monkeypatch):
-    monkeypatch.setattr(
-        series.api, "episodes", lambda cfg, sid: pytest.fail("episodes fetched without autoplay")
-    )
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: _multi_season((2, 2)))
     play, calls = _fake_play(advance_until=99)
     entry = HistoryEntry(
         video_id="tt:1", type="series", title="Show", series_id="tt", season=1, episode=1
@@ -410,3 +408,13 @@ def test_resume_finished_series_says_so(monkeypatch):
     notice = series.resume(CFG, _entry(2, 2, position=99.0), _opts(), play_video=play)
     assert notice is not None and "finita" in notice
     assert calls == []  # nothing replayed
+
+
+def test_resume_no_autoplay_finished_episode_plays_the_next_one(monkeypatch):
+    # ADR 0029: autoplay decides chaining, not WHICH episode — a finished one moves on,
+    # instead of replaying the credits the row label says were already watched.
+    eps = _multi_season((2, 2))
+    monkeypatch.setattr(series.api, "episodes", lambda cfg, sid: eps)
+    play, calls = _fake_play(advance_until=99)
+    series.resume(CFG, _entry(1, 2, position=99.0), _opts(autoplay=False), play_video=play)
+    assert [c["video_id"] for c in calls] == ["tt:2:1"]  # one episode, no binge

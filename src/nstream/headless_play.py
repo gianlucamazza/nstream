@@ -235,6 +235,14 @@ def auto_play(
     Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
     auto_subs → play/cast) but never opens fzf (auto=True, reselect_on_wrong_audio=False)
     and never silently falls back to local when a requested cast device is missing."""
+    # The TV first: a missing device must fail before any stream work (debrid resolves,
+    # P2P joins, ffprobe vetting) — it used to surface only after all of it.
+    device = ""
+    if opts.cast:
+        try:
+            device = _resolve_device(cfg, headless=True, prefer=args.device)
+        except CastUnavailable as e:
+            return emit_failure(e)
     sel = _select(cfg, opts, typ, video_id, title)
     if isinstance(sel, int):
         return sel
@@ -276,10 +284,6 @@ def auto_play(
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
         start = state.resume_position(cfg, video_id) if opts.history else None
         if opts.cast:
-            try:
-                device = _resolve_device(cfg, headless=True, prefer=args.device)
-            except CastUnavailable as e:
-                return emit_failure(e)
             device_name = args.device or cfg.cast_device or device
 
             def on_cast_event(ev: dict) -> None:

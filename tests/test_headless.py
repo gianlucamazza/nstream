@@ -1699,3 +1699,19 @@ def test_run_auto_stop_unreachable_device_reclaims_remux(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)  # exactly one JSON object
     assert calls == [None]
     assert rc == 0 and out["ok"] is True and out["action"] == "stop"
+
+
+def test_cast_device_resolved_before_any_stream_work(monkeypatch, capsys):
+    # A missing TV must fail before debrid resolves / P2P joins / probes.
+    def no_tv(cfg, **k):
+        raise headless.CastUnavailable("nessun Chromecast in rete")
+
+    monkeypatch.setattr(headless_play, "_resolve_device", no_tv)
+    monkeypatch.setattr(
+        headless_play.api, "streams", lambda *a, **k: pytest.fail("streams fetched before device")
+    )
+    rc = headless_play.auto_play(
+        CFG, _hns(), _hopts(cast=True), "movie", "tt1", "Dune", "tt1", None, None, "exact"
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["error"] == "device_not_found"

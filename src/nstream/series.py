@@ -222,18 +222,24 @@ def resume(
     (ADR 0029); before that parity, the TUI replayed the credits it had just watched."""
     name = entry.get("title", "nstream")
     series_id = entry.get("series_id", "")
-    if series_id and opts.autoplay:
+    target: Video | None = None  # the next episode, when the entry's one is finished
+    if series_id:
         eps = api.episodes(cfg, series_id)
         nu = next_up(cfg, entry, eps=eps)
         if nu.selection == "completed":
             return f"«{name}» è finita: nessun episodio dopo questo"
-        start = nu.video if nu.selection == "next" else None
-        if start is None:
-            start = next((v for v in eps if v.get("id") == entry["video_id"]), None)
-        if start is not None:
-            return binge(cfg, series_id, name, eps, start, opts, play_video=play_video)
+        target = nu.video if nu.selection == "next" else None
+        if opts.autoplay:
+            # Autoplay only decides whether to keep chaining episodes — not WHICH one
+            # comes next (that is `next_up`'s call on both settings, ADR 0029).
+            start = target or next((v for v in eps if v.get("id") == entry["video_id"]), None)
+            if start is not None:
+                return binge(cfg, series_id, name, eps, start, opts, play_video=play_video)
 
-    video_id = entry["video_id"]
+    video_id = target.get("id", entry["video_id"]) if target else entry["video_id"]
+    season = int(target.get("season") or 0) if target else entry.get("season", 0)
+    episode = int(target.get("episode") or 0) if target else entry.get("episode", 0)
+    shown = target if target else entry_video(entry)
 
     def on_save(pos: float, dur: float) -> None:
         state.save_entry(
@@ -245,13 +251,13 @@ def resume(
                 pos,
                 dur,
                 series_id=series_id,
-                season=entry.get("season", 0),
-                episode=entry.get("episode", 0),
+                season=season,
+                episode=episode,
             ),  # fmt: skip
         )
 
     notice, _, _ = play_video(
-        video_id, display_title(name, entry_video(entry)), opts,
+        video_id, display_title(name, shown), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
     )  # fmt: skip
     return notice
