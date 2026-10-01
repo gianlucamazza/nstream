@@ -19,3 +19,38 @@ Notes:
 - Cast URLs must be cache-busted (`?v=N`): the receiver reused a cached 40 s file for the same URL.
 - Not covered: seeking within a growing playlist, 4K, HEVC Main10/HDR10/Dolby Vision, a real
   remote (debrid) source as ffmpeg input, the castbridge path, side-loaded subtitles.
+
+## Round 2 — acceptance gates, real source (2026-10-01, evening)
+
+Source: real debrid link (Torrentio/Real-Debrid), *The Great Gatsby* 2013 1080p BluRay, MKV,
+HEVC **Main 10, HDR10 (PQ/BT.2020) + Dolby Vision profile 8 RPU** (bl compat 1, no EL),
+DTS-HD MA 5.1. ffmpeg 9.0.2 reading the debrid URL directly (`-rw_timeout 30000000`).
+Producer: `-c:v copy -c:a aac -f hls -hls_time 4 -hls_segment_type mpegts`.
+
+| # | Variant | Sender | Result |
+|---|---|---|---|
+| 7 | EVENT, AAC **5.1 448k**, `-ss` before `-i` | catt | joined at live edge (seg 12), stalled BUFFERING, never fetched more |
+| 8 | same, playlist complete (ENDLIST) | catt | fetched seg 0–1, then UNKNOWN → **content issue, not playlist growth** |
+| 9 | synthetic HEVC Main10 HDR10 (no DV), AAC stereo | catt | plays, picture + sound |
+| 10 | real source, DV RPU **stripped** (`dovi_rpu=strip=1`), AAC 5.1 | catt | UNKNOWN → DV is not the cause |
+| 11 | real source, DV kept, AAC **stereo 192k** | catt | **plays**, but A/V out of sync |
+| 12 | #11 + `-noaccurate_seek` (audio starts on the video keyframe) | catt | **plays, in sync** (stream start_time v 1.483 / a 1.469) |
+| 13 | #12 as growing EVENT playlist | catt | plays, but **joins at the live edge** (skips ~2 min), `duration -1`, `catt seek` → "Stream is not seekable" |
+| 14 | #13 + `#EXT-X-START:TIME-OFFSET=0,PRECISE=YES` | catt | ignored: still live edge |
+| 15 | #13 | **castbridge** (`streamType: BUFFERED`) | **starts at segment 0**, seek +90 s via `media-control` works |
+| 16 | #15 + side-loaded WebVTT (`subtitle_url`) | castbridge | caption track active (`active_tracks [1]`), cues render; offset from the manual −4800 s shift, not from delivery |
+
+Findings:
+- AAC 5.1 in HLS-TS stalls this receiver; **stereo AAC works**. (Surround loss vs today's
+  full-file remux, which keeps channel-aware AAC.)
+- `-noaccurate_seek` is required with `-ss` + video copy, or audio leads the video.
+- Dolby Vision profile 8 with HDR10 base layer is fine copied as-is.
+- The sender must LOAD as **BUFFERED** (castbridge does; catt's LIVE detection starts at the
+  live edge and forbids seek). `EXT-X-START` is ignored by the DMR.
+- Seek inside the produced range works via castbridge; a seek beyond it still needs the
+  restart-ffmpeg design.
+- ffmpeg produced the remaining 71 min (1.5 GB of segments) in seconds from the debrid link:
+  the "segment window" is not small unless the producer is paced or old segments are pruned.
+
+Open: gate 3 (full runtime, no stall) — running on #15/#16 from 1h20m to the end; 4K source
+not yet tested (1080p HDR10 only).
