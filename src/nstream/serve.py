@@ -385,6 +385,16 @@ def _cache_dir() -> Path:
 _ANNOUNCE_TIMEOUT = 10.0
 
 
+def _readable_within(stream, timeout: float) -> bool:
+    """Whether `stream` has data within `timeout`. A stream without a real descriptor
+    (in-memory) is always readable."""
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        return True
+    return bool(select.select([fd], [], [], timeout)[0])
+
+
 def spawn_detached(
     bind_ip: str, *, file_path: str | None = None, sub_path: str | None = None
 ) -> tuple[int, int, str] | None:
@@ -412,7 +422,7 @@ def spawn_detached(
         return None
     # The child announces port and token right after binding; a child that hangs before
     # that (stuck import, full disk for its log) must not hang the cast forever.
-    if not select.select([proc.stdout], [], [], _ANNOUNCE_TIMEOUT)[0]:
+    if not _readable_within(proc.stdout, _ANNOUNCE_TIMEOUT):
         _log.warning("serve: nessun annuncio entro %.0fs", _ANNOUNCE_TIMEOUT)
         kill_detached(proc.pid)
         return None
