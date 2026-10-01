@@ -366,7 +366,12 @@ def find_instant_direct(
     probed = 0
     for r in stream_select.cast_playable(cfg, results, exact_resolution=exact_resolution):
         named = r.info.languages
-        if not (named & wanted_set or "multi" in named):
+        # Worth a probe: a release whose name claims a wanted language, or an UNTAGGED one
+        # already in a DMR-loadable container — the most common direct-castable kind (a
+        # plain English WEB-DL .mp4), which the tag-only filter never considered.
+        tagged = bool(named & wanted_set or "multi" in named)
+        untagged_direct = not named and r.info.container in quality.CAST_CONTAINER_DECODABLE
+        if not (tagged or untagged_direct):
             continue
         if probed >= probe_cap:
             break

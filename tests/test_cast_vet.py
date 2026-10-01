@@ -114,11 +114,13 @@ def test_vet_cast_audio_absent_when_nobody_has_target(monkeypatch):
 class _R:
     """Minimal RankedStream stand-in (stream + name-tag languages) for reselect tests."""
 
-    def __init__(self, stream, languages, size_gb=0.0):
+    def __init__(self, stream, languages, size_gb=0.0, container=""):
         from types import SimpleNamespace
 
         self.stream = stream
-        self.info = SimpleNamespace(languages=languages, resolution=0, size_gb=size_gb)
+        self.info = SimpleNamespace(
+            languages=languages, resolution=0, size_gb=size_gb, container=container
+        )
 
 
 def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
@@ -753,3 +755,20 @@ def test_reselect_skips_remux_over_the_budget(monkeypatch):
     )  # fmt: skip
     plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, huge], chosen, "ita")
     assert plan.stream is chosen and plan.mode == "absent"
+
+
+def test_instant_direct_considers_untagged_mp4(monkeypatch):
+    # The most common direct-castable release: a plain English WEB-DL .mp4 with no language
+    # tag in its name. The tag-only filter never probed it.
+    mkv: Stream = {"url": "http://x/ita.mkv"}
+    plain: Stream = {"url": "http://x/plain.mp4"}
+    _container_env(
+        monkeypatch,
+        {
+            "http://x/ita.mkv": ("matroska,webm", "hevc", [Track(1, "ita", "dts", 6)]),
+            "http://x/plain.mp4": ("mov,mp4,m4a", "h264", [Track(1, "eng", "aac")]),
+        },
+        [_R(mkv, frozenset({"ita"})), _R(plain, frozenset(), container="mp4")],
+    )
+    plan = cast_vet.find_instant_direct(_ccfg(), [mkv, plain], ("ita", "eng"))
+    assert plan is not None and plan.stream is plain and plan.real_lang == "eng"
