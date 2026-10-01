@@ -209,9 +209,9 @@ def _pick_stream(
         if exact_resolution:
             pool = [s for s in results if quality.parse_stream(s).resolution == exact_resolution]
         if not pool:
-            if exact_resolution:
-                ui.status(f"nessuno stream {exact_resolution}p", kind="fail")
-                return None
+            if exact_resolution:  # exhaustion, not ESC (ADR 0033)
+                tiers = sorted({quality.parse_stream(s).resolution for s in results} - {0})
+                raise QualityUnavailable(exact_resolution, tiers)
             raise NoPlayableStream("nessuno stream disponibile")
         ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in pool]
         return pool[0] if auto else fzf(ranked, "stream> ")
@@ -238,9 +238,10 @@ def _pick_stream(
             ui.status_detail(notice)
         if playable:
             return playable[0].stream
-        if exact_resolution:
-            ui.status(f"nessuno stream {exact_resolution}p disponibile", kind="fail")
-            return None
+        if exact_resolution:  # exhaustion, not ESC (ADR 0033)
+            raise QualityUnavailable(
+                exact_resolution, available_resolutions(cfg, results, cast=cast)
+            )
         raise NoPlayableStream(
             "nessuno stream compatibile col Chromecast (prova Tab o --local)"
             if cast
@@ -512,16 +513,16 @@ def pick_and_resolve(
     title: str = "",
     exact_resolution: int = 0,
 ) -> Stream | None:
-    """Pick a stream and make it playable. Returns None on ESC (or on a manual pick that
-    won't resolve); raises `NoPlayableStream` when the auto-pick can't be served — the
-    reason is the one thing the user needs and the one thing the old silent None dropped."""
+    """Pick a stream and make it playable. Returns None only on ESC; raises
+    `NoPlayableStream` when the pick — automatic or manual — can't be served (ADR 0033): a
+    manual pick that won't resolve used to return None and read as ESC, silently."""
     chosen = _pick_stream(
         cfg, results, auto=auto, cast=cast, title=title, exact_resolution=exact_resolution
     )
     if not chosen:
         return None
     ready = _resolve_stream(cfg, chosen)
-    if ready is None and auto:
+    if ready is None:
         raise NoPlayableStream(
             unresolvable_reason(cfg, results, chosen) or "nessuna sorgente riproducibile"
         )

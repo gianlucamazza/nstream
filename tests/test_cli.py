@@ -1498,3 +1498,18 @@ def test_run_continue_shows_finished_episodes_as_next(monkeypatch, tmp_path):
     )
     assert cli.run_continue(CFG, opts) == 0
     assert len(labels) == 1 and "prossimo episodio" in labels[0]
+
+
+def test_play_on_cast_not_started_returns_header_notice(monkeypatch):
+    # ADR 0031 in the TUI: a cast that never began must leave a notice for the fzf header,
+    # not only a stderr line that the fullscreen menu scrolls away.
+    stream = dict(_CAST_STREAM)
+    _wire_cast_tree(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, False, error="receiver_error"),
+    )  # fmt: skip
+    pos, dur, advance, notice = _call_cast(_cast_opts(), stream)
+    assert (pos, dur, advance) == (0.0, 0.0, False)
+    assert notice and "receiver_error" in notice

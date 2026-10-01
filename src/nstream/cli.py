@@ -196,8 +196,9 @@ def _play_video(
         start = state.resume_position(cfg, video_id) if opts.history else None
         name_line = next(iter((chosen.get("name") or "").splitlines()), "") or "sorgente"
         ui.status(f"scelto {name_line}", kind="play")
+        notice: str | None = None
         if device is not None:
-            pos, dur, advance = _play_on_cast(
+            pos, dur, advance, notice = _play_on_cast(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
                 start=start, next_label=next_label, safety_sub_lang=safety_sub_lang,
@@ -223,7 +224,7 @@ def _play_video(
     # watched/near-end logic, otherwise the entry would stick forever.
     if opts.history and on_save and pos > 0 and dur > 0:
         on_save(pos, dur)
-    return (None, advance, quality_choice)
+    return (notice, advance, quality_choice)
 
 
 def _resolve_cast_device(cfg: Config, opts: PlayOpts) -> str | None:
@@ -255,10 +256,14 @@ def _play_on_cast(
     safety_sub_lang: str | None = None,
     cast_meta: caster.CastMeta | None = None,
     expected_runtime_s: float = 0.0,
-) -> tuple[float, float, bool]:
+) -> tuple[float, float, bool, str | None]:
     """Interactive cast: thin wrapper over the shared decision tree (`cast_flow.run_cast`),
     with the interactive knobs on — blocking follow, next-episode label, and the in-cast
-    audio switch (re-cast a differently-dubbed release) when several dubs exist."""
+    audio switch (re-cast a differently-dubbed release) when several dubs exist.
+
+    Returns (pos, dur, advance, notice). `notice` is set when the cast didn't happen, so
+    the failure survives into the fzf header instead of scrolling away on stderr (ADR 0031
+    applied to the TUI, not only to `--json`)."""
     try:
         outcome = cast_flow.run_cast(
             cfg, results, chosen,
@@ -270,26 +275,28 @@ def _play_on_cast(
     except cast_flow.CastStreamUnresolved:
         # Same class as the black-screen guard below: back out to the list rather than
         # crashing on a url-less stream (ADR 0031 appendix).
-        print(
-            f"nstream: {ui.g().warn} nessuna sorgente castabile risolvibile ora — "
-            "riprova più tardi o scegli un'altra release",
-            file=sys.stderr,
-        )
-        return (0.0, 0.0, False)
+        msg = "nessuna sorgente castabile risolvibile ora — riprova o scegli un'altra release"
+        print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
+        return (0.0, 0.0, False, msg)
     except cast_flow.CastRemuxInfeasible as e:
         # Casting the undecodable file anyway plays mute: back out with the reason.
-        print(f"nstream: {ui.g().warn} cast annullato — {e}", file=sys.stderr)
-        return (0.0, 0.0, False)
+        msg = f"cast annullato — {e}"
+        print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
+        return (0.0, 0.0, False, msg)
     except cast_flow.CastVideoUnsupported as e:
         # Casting anyway would show a black screen (ADR 0017): back out to the list with
         # an honest message instead. Local mpv decodes anything → suggest it.
-        print(
-            f"nstream: {ui.g().warn} video {e.codec.upper()} non decodificabile dal TV "
-            "e nessuna alternativa castabile — riproduci in locale o scegli un'altra release",
-            file=sys.stderr,
+        msg = (
+            f"video {e.codec.upper()} non decodificabile dal TV e nessuna alternativa "
+            "castabile — riproduci in locale o scegli un'altra release"
         )
-        return (0.0, 0.0, False)
-    return (outcome.pos, outcome.dur, outcome.advance)
+        print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
+        return (0.0, 0.0, False, msg)
+    if not outcome.started:
+        msg = f"il cast non è partito ({outcome.cast_error or 'causa sconosciuta'})"
+        print(f"nstream: {ui.g().warn} {msg}", file=sys.stderr)
+        return (0.0, 0.0, False, msg)
+    return (outcome.pos, outcome.dur, outcome.advance, outcome.notice)
 
 
 def _play_on_mpv(

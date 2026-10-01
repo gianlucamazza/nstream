@@ -1418,3 +1418,20 @@ def test_prepare_candidates_matches_play_defaults():
     assert stream_select.prepare_candidates(cfg, results) == 1080
     assert results == [live]
     assert stream_select.prepare_candidates(cfg, [live], 720) == 720  # explicit choice wins
+
+
+def test_manual_pick_that_wont_resolve_raises_not_esc(monkeypatch):
+    # ADR 0033: None means ESC. A manual pick that can't be served used to return None too,
+    # so the TUI showed nothing at all.
+    bare: Stream = {"name": "x\n1080p", "title": "x"}  # neither url nor infoHash
+    monkeypatch.setattr(stream_select, "_pick_stream", lambda *a, **k: bare)
+    with pytest.raises(stream_select.NoPlayableStream):
+        stream_select.pick_and_resolve(Config(torrentio_base="tb"), [bare], auto=False, cast=False)
+
+
+def test_unfiltered_exact_quality_exhaustion_raises():
+    s720: Stream = {"name": "x\n720p", "title": "Movie.720p", "url": "u"}
+    cfg = Config(torrentio_base="tb", hw_filter=False)
+    with pytest.raises(stream_select.QualityUnavailable) as e:
+        stream_select._pick_stream(cfg, [s720], auto=True, cast=False, exact_resolution=1080)
+    assert e.value.available == [720]
