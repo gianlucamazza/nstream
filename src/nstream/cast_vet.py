@@ -421,7 +421,10 @@ def instant_defer_notice(slow: CastAudioPlan, instant: CastAudioPlan, target: st
     if info.size_gb:
         detail.append(f"~{info.size_gb:.1f}GB")
     played = instant.real_lang or "?"
-    return f"audio {target} solo dopo remux completo ({', '.join(detail)}); cast diretto {played}"
+    return (
+        f"audio {target} solo dopo remux completo ({', '.join(detail)}); cast diretto {played}"
+        f" — --audio-lang {target} per attendere"
+    )
 
 
 @log.phase("vet_audio")

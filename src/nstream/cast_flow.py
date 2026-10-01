@@ -58,13 +58,19 @@ MIRROR_UNAVAILABLE = "nstream: mirror non disponibile → cast diretto"
 def _cast_would_wait(cfg: Config, plan: cast_vet.CastAudioPlan) -> bool:
     """True when delivering `plan` fetches a complete file before the TV can start.
 
-    Remux and an undecodable track always wait. A direct plan waits only when the
-    container itself is not loadable (MKV rewrap, ADR 0022)."""
+    Remux and an undecodable track wait, and a direct plan whose container is not loadable
+    (MKV rewrap, ADR 0022) — unless the live tier can run (ADR 0039/0041): then the TV
+    starts in seconds and nothing waits."""
     if plan.mode == "remux" or plan.needs_remux:
-        return True
-    if not plan.stream.get("url"):
+        slow = True
+    elif not plan.stream.get("url"):
         return False
-    return not quality.container_castable(cast_vet.cast_container(cfg, plan.stream))
+    else:
+        slow = not quality.container_castable(cast_vet.cast_container(cfg, plan.stream))
+    if not slow or not plan.stream.get("url"):
+        return slow
+    size_gb = quality.parse_stream(plan.stream).size_gb
+    return not remux.live_feasible(cfg, plan.stream["url"], size_gb)
 
 
 def _prepare_line(stream: Stream, plan: cast_vet.CastAudioPlan, target: str) -> str:

@@ -14,6 +14,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   whole-file remux. Stereo AAC; disk bounded to a ~40-min window; the complete file is the
   fallback. `cast_live` config key; JSON `delivery` (`live`/`file`/`direct`/`mirror`/`local`).
 
+### Changed
+
+- **ADR 0041 Accepted:** with the live tier, a soft `audio_langs` preference starts the
+  preferred dub instead of yielding to another one (ADR 0035 stays the fallback when live
+  cannot run; its notice now names `--audio-lang <lang>`).
+
 ### Fixed
 
 - A recast of the title the TV is playing (another dub, a retry) resumes where the TV is

@@ -1222,3 +1222,14 @@ def test_no_auto_mirror_when_the_live_tier_can_run(monkeypatch):
     )
     out = _run(_opts(mirror=None), stream)
     assert seen.get("live") and out.delivery == "live"
+
+
+def test_soft_preference_waits_for_nothing_when_live_can_run(monkeypatch):
+    """ADR 0041: with the live tier the preferred dub starts in seconds, so the ADR 0035
+    fallback to another dub (2026-10-01: English instead of Italian) no longer triggers."""
+    stream: Stream = _STREAM.copy()
+    plan = _plan("remux", stream, audio_index=1)
+    monkeypatch.setattr(cast_flow.remux, "live_feasible", lambda *a, **k: True)
+    assert cast_flow._cast_would_wait(CFG, plan) is False
+    monkeypatch.setattr(cast_flow.remux, "live_feasible", lambda *a, **k: False)
+    assert cast_flow._cast_would_wait(CFG, plan) is True
