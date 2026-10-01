@@ -1,8 +1,9 @@
 """Frontend menus over domain data (ADR 0037): the domain decides, these modules prompt.
 
 `choose_tracks` is the pre-play audio/subtitle track menu over the ffprobe tracks and
-OpenSubtitles. It lived in `subs`, which made the subtitle domain import the fzf picker and
-the TUI labels; frontends pass it to `application.play_local(choose_tracks=...)`.
+OpenSubtitles (frontends pass it to `application.play_local(choose_tracks=...)`).
+`choose_stream` renders a `stream_select.StreamMenu` (via `PlayOpts.choose_stream`). Both
+lived in the domain, which made it import the fzf picker and the TUI labels.
 """
 
 from __future__ import annotations
@@ -12,8 +13,10 @@ from typing import cast as typecast
 
 from . import subs, tracks, ui
 from .config import Config
-from .labels import audio_summary, sub_summary, track_label
+from .labels import audio_summary, stream_label, sub_summary, track_label
 from .picker import fzf
+from .stream_select import StreamMenu
+from .types import Stream
 
 # Sentinels: fzf returns None for ESC, so "automatic" can't be a None *value*.
 _PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
@@ -68,3 +71,30 @@ def choose_tracks(
                     sub_paths, sid = got, None
             else:
                 sid, sub_paths = typecast("str | int", pick), ()
+
+
+def choose_stream(menu: StreamMenu) -> Stream | None:
+    """The manual stream menu: top `cap` playable rows + a "show all" entry revealing the
+    rest and the excluded ones (⚠ + reason). None = ESC."""
+    playable, excluded, notice = menu.playable, menu.excluded, menu.notice
+
+    def full() -> Stream | None:
+        items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
+        items += [
+            (f"{ui.g().warn} {r.reason}  {stream_label(r.stream, r.info)}", r.stream)
+            for r in excluded
+        ]
+        return fzf(items, "stream> ", header=notice)
+
+    cap = menu.cap
+    if not cap or len(playable) + len(excluded) <= cap:
+        return full()  # nothing hidden → one flat menu
+    show_all = object()
+    shown = playable[:cap]
+    hidden = len(playable) - len(shown) + len(excluded)
+    items: list[tuple[str, object]] = [(stream_label(r.stream, r.info), r.stream) for r in shown]
+    items.append((f"{ui.g().down} mostra tutti ({hidden} altri)", show_all))
+    chosen = fzf(items, "stream> ", header=notice)
+    if chosen is show_all:
+        return full()
+    return typecast("Stream | None", chosen)

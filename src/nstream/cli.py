@@ -28,6 +28,7 @@ from . import (
     failures,
     headless,
     log,
+    menus,
     preview,
     series,
     settings,
@@ -414,9 +415,9 @@ def _choose_device(devices: list[tuple[str, str]]) -> str | None:
     return fzf(devices, "dispositivo> ")
 
 
-def _choose(rows: list, prompt: str):
+def _choose(rows: list, prompt: str, *, header: str | None = None):
     """`PlayOpts.choose` for the TUI: the fzf single-choice menu."""
-    return fzf(rows, prompt)
+    return fzf(rows, prompt, header=header)
 
 
 def _confirm(question: str, default_yes: bool) -> bool:
@@ -1178,6 +1179,7 @@ def main() -> int:
         interactive=not args.json,
         confirm=None if args.json else _confirm,
         choose=None if args.json else _choose,
+        choose_stream=None if args.json else menus.choose_stream,
     )
     try:
         return _dispatch(cfg, args, opts)

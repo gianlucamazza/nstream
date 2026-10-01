@@ -29,12 +29,14 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
 - One-way chain (no cycles): `headless` → `headless_play` → `cast_flow` → `cast_vet` →
   `stream_select`
 - **Domain never prompts (ADR 0037):** whether a run may ask is `PlayOpts.interactive`, set by
-  the frontend (TUI True, `--json` False) — never a TTY probe. Yes/no questions arrive as the
-  injected `PlayOpts.confirm`. Domain modules must not import `picker`/`labels`; the remaining
-  pre-0037 edges (fzf menus in `stream_select`) are listed in
-  `tests/test_architecture.py::_KNOWN_DEBT`, which may only shrink
+  the frontend (TUI True, `--json` False) — never a TTY probe. Prompts are injected:
+  `PlayOpts.confirm` (yes/no), `PlayOpts.choose` (single choice), `PlayOpts.choose_stream`
+  (renders a `stream_select.StreamMenu`), `caster.resolve_device(confirm=, picker=)`,
+  `caster.cast(choose_lang=)`. Domain modules never import `picker`/`labels`
+  (`tests/test_architecture.py`, no exceptions left)
 - Machine output: every `--json` object goes through `log.emit_json` (scrubbed)
-- Menus: `menus` (frontend tier) holds the TUI menus over domain data — `choose_tracks`
+- Menus: `menus` (frontend tier) holds the TUI menus over domain data — `choose_tracks`,
+  `choose_stream`
 - Failures: `failures.describe` maps a domain exception to one `Failure(code, message, hint,
   fields)` for both the TUI notice and the `--json` error (orchestration tier, frontends only)
 - Candidate pass shared by play, `--explain`, `--probe`: `stream_select.prepare_candidates`
@@ -147,7 +149,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 breaker outcomes; HTTP work inherits its monotonic deadline. `util.state_update`
 serializes best-effort store updates with bounded locks and corrupt-file recovery.
 `tests/test_architecture.py` enforces: stdlib-only runtime, nothing imports `cli`, no import
-cycles, and no new domain→TUI edge (ratchet). Other rules on this page are review-enforced.
+cycles, and no domain→TUI edge. Other rules on this page are review-enforced.
 
 ### Foundation
 

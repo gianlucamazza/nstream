@@ -54,7 +54,11 @@ class PlayOpts:
     confirm: Callable[[str, bool], bool] | None = field(default=None, compare=False)
     # The frontend's single-choice menu `(rows, prompt) -> value | None` (None = ESC),
     # rows being `(label, value)` pairs. None on non-interactive runs (ADR 0037).
-    choose: Callable[[list[tuple[str, Any]], str], Any] | None = field(default=None, compare=False)
+    choose: Callable[..., Any] | None = field(
+        default=None, compare=False
+    )  # (rows, prompt, *, header=None)
+    # The frontend's stream menu `(stream_select.StreamMenu) -> Stream | None` (ADR 0037).
+    choose_stream: Callable[[Any], Any] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

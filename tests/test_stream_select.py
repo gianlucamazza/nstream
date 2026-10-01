@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import pytest
 
-from nstream import availability, net, state, stream_select, tracks
+from nstream import availability, menus, net, state, stream_select, tracks
 from nstream.config import Config, PlayOpts
 from nstream.types import Stream
 
 
-def _gopts(*, cast: bool = False, quality: int | None = 0) -> PlayOpts:
+def _gopts(
+    *, cast: bool = False, quality: int | None = 0, choose=None, choose_stream=None
+) -> PlayOpts:
     # quality=0 (Auto) by default so unit tests don't open the in-flow quality picker.
+    # `choose`/`choose_stream` are the frontend menus (ADR 0037); None = no menu.
     return PlayOpts(
         auto=True,
         cast=cast,
@@ -22,7 +25,13 @@ def _gopts(*, cast: bool = False, quality: int | None = 0) -> PlayOpts:
         history=False,
         autoplay=False,
         quality=quality,
+        choose=choose,
+        choose_stream=choose_stream,
     )
+
+
+def _menu(*a, **k):
+    raise AssertionError("menu stub must not be called in this test")
 
 
 @pytest.fixture(autouse=True)
@@ -396,8 +405,8 @@ def test_pick_stream_cap_and_show_all(monkeypatch):
             return items[-1][1]  # capped menu → the "↓ mostra tutti" sentinel
         return items[0][1]  # full menu → first stream
 
-    monkeypatch.setattr(stream_select, "fzf", fzf)
-    out = stream_select._pick_stream(cfg, [{"url": "x"}] * 27, auto=False)
+    monkeypatch.setattr(menus, "fzf", fzf)
+    out = stream_select._pick_stream(cfg, [{"url": "x"}] * 27, auto=False, menu=menus.choose_stream)
     # Capped menu = 20 streams + 1 "show all" entry; full menu = 25 playable + 2 excluded.
     assert len(calls[0]) == 21
     assert "mostra tutti" in calls[0][-1][0]
@@ -634,7 +643,7 @@ def test_prepare_stream_quality_picker_interactive(monkeypatch):
     }
     seen: dict = {}
 
-    def _pick(cfg, results, *, auto, cast=False, title="", exact_resolution=0):
+    def _pick(cfg, results, *, auto, cast=False, title="", exact_resolution=0, **_k):
         seen["exact"] = exact_resolution
         # Prefer 1080 when filtered; otherwise first.
         if exact_resolution == 1080:
@@ -647,8 +656,9 @@ def test_prepare_stream_quality_picker_interactive(monkeypatch):
     monkeypatch.setattr(stream_select, "_audio_langs_of", lambda cfg, ch: {"ita"})
     cfg = Config(torrentio_base="tb", audio_langs=["ita"])
     v = stream_select.prepare_stream(
-        cfg, [s4k, s1080], _gopts(quality=None), auto=True, reselect_on_wrong_audio=True
-    )
+        cfg, [s4k, s1080], _gopts(quality=None, choose=_menu), auto=True,
+        reselect_on_wrong_audio=True,
+    )  # fmt: skip
     assert v is not None and v.quality == 1080 and v.stream is s1080
     assert seen["exact"] == 1080
 
@@ -781,7 +791,7 @@ def test_prepare_stream_quality_cli_skips_picker(monkeypatch):
     }
     seen: dict = {}
 
-    def _pick(cfg, results, *, auto, cast=False, title="", exact_resolution=0):
+    def _pick(cfg, results, *, auto, cast=False, title="", exact_resolution=0, **_k):
         seen["exact"] = exact_resolution
         return s720
 
@@ -841,7 +851,9 @@ def test_resolve_quality_esc_returns_none(monkeypatch):
     monkeypatch.setattr(stream_select, "pick_quality", lambda *a, **k: None)
     cfg = Config(torrentio_base="tb")
     assert (
-        stream_select.resolve_quality(cfg, [], _gopts(quality=None), cast=False, offer_picker=True)
+        stream_select.resolve_quality(
+            cfg, [], _gopts(quality=None, choose=_menu), cast=False, offer_picker=True
+        )
         is None
     )
 
@@ -1108,7 +1120,7 @@ def test_prepare_stream_no_duration_check_on_manual_pick(monkeypatch):
     )
     cfg = Config(torrentio_base="tb")
     v = stream_select.prepare_stream(
-        cfg, [fake], _gopts(), auto=False, reselect_on_wrong_audio=False,
+        cfg, [fake], _gopts(choose_stream=_menu), auto=False, reselect_on_wrong_audio=False,
         expected_runtime_s=3300.0,
     )  # fmt: skip
     assert v is not None and v.stream is fake

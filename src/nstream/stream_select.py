@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import contextlib
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast as typecast
+from typing import Any
 
 from . import (
     addons,
@@ -28,8 +29,6 @@ from . import (
     ui,
 )
 from .config import Config, PlayOpts
-from .labels import stream_label
-from .picker import fzf
 from .types import Stream
 
 _log = log.get_logger("stream_select")
@@ -132,6 +131,21 @@ def no_streams_message(cfg: Config, typ: str, video_id: str, title: str) -> str:
     return f"nessuno stream disponibile per «{title}»"
 
 
+@dataclass(frozen=True)
+class StreamMenu:
+    """What the manual stream menu shows (ADR 0037): the domain ranks and curates, the
+    frontend (`menus.choose_stream`) labels, caps and prompts. `cap` = how many playable
+    rows to show before a "show all" entry (0 = all); `notice` = the header line."""
+
+    playable: list[quality.RankedStream]
+    excluded: list[quality.RankedStream]
+    notice: str | None = None
+    cap: int = 0
+
+
+ChooseStream = Callable[[StreamMenu], "Stream | None"]
+
+
 def no_stream_source_error(cfg: Config) -> str | None:
     """JSON/headless error code when no stream addon is configured, else None."""
     if addons.has_stream_source(cfg):
@@ -150,15 +164,21 @@ def available_resolutions(cfg: Config, results: list[Stream], *, cast: bool = Fa
 
 
 def pick_quality(
-    cfg: Config, results: list[Stream], *, cast: bool = False, title: str = ""
+    cfg: Config,
+    results: list[Stream],
+    choose: Callable[..., Any],
+    *,
+    cast: bool = False,
+    title: str = "",
 ) -> int | None:
-    """In-flow quality picker: Auto + resolutions present for this title. Returns 0 (Auto),
-    N (exact res), or None on ESC. Only offers tiers that exist among playable streams."""
+    """In-flow quality picker: Auto + resolutions present for this title, asked through the
+    frontend's `choose` (ADR 0037). Returns 0 (Auto), N (exact res), or None on ESC. Only
+    offers tiers that exist among playable streams."""
     res_list = available_resolutions(cfg, results, cast=cast)
     items: list[tuple[str, int]] = [(quality.quality_label(0), 0)]
     items += [(quality.quality_label(r), r) for r in res_list]
     header = f"qualità · {title}" if title else "qualità"
-    return fzf(items, "qualità> ", header=header)
+    return choose(items, "qualità> ", header=header)
 
 
 def resolve_quality(
@@ -180,9 +200,9 @@ def resolve_quality(
         return opts.quality
     if cfg.default_quality is not None:
         return cfg.default_quality
-    if not offer_picker:
+    if not offer_picker or opts.choose is None:
         return 0  # headless / binge without sticky/default → Auto
-    return pick_quality(cfg, results, cast=cast, title=title)
+    return pick_quality(cfg, results, opts.choose, cast=cast, title=title)
 
 
 def _pick_stream(
@@ -193,9 +213,11 @@ def _pick_stream(
     cast: bool = False,
     title: str = "",
     exact_resolution: int = 0,
+    menu: ChooseStream | None = None,
 ) -> Stream | None:
-    """Rank and curate streams, then auto-pick the best or show an fzf menu (top N
-    playable + a 'show all' entry that reveals the rest and the excluded ones ⚠).
+    """Rank and curate streams, then auto-pick the best or hand a `StreamMenu` to the
+    frontend's `menu` (ADR 0037: top N playable + a 'show all' entry that reveals the rest
+    and the excluded ones ⚠). Without a `menu` the manual path auto-picks.
 
     When `cast`, rank against the Chromecast receiver's profile (not the laptop GPU)
     and demote streams whose audio it can't decode (TrueHD/DTS/DTS-HD → silent).
@@ -213,8 +235,11 @@ def _pick_stream(
                 tiers = sorted({quality.parse_stream(s).resolution for s in results} - {0})
                 raise QualityUnavailable(exact_resolution, tiers)
             raise NoPlayableStream("nessuno stream disponibile")
-        ranked = [(stream_label(s, quality.parse_stream(s)), s) for s in pool]
-        return pool[0] if auto else fzf(ranked, "stream> ")
+        if auto or menu is None:
+            return pool[0]
+        return menu(
+            StreamMenu([quality.RankedStream(s, quality.parse_stream(s)) for s in pool], [])
+        )
 
     caps = quality.cast_caps() if cast else quality.detect_caps()
     spec = quality.FilterSpec.from_config(
@@ -232,7 +257,7 @@ def _pick_stream(
     if dupes > 0:
         notice_parts.append(f"{dupes} doppioni rimossi")
     notice = "  ·  ".join(notice_parts) if notice_parts else None
-    if auto:
+    if auto or menu is None:
         # No menu → ranking summary as a secondary status line (not a hard `nstream:` error).
         if notice:
             ui.status_detail(notice)
@@ -256,26 +281,7 @@ def _pick_stream(
             else (unresolvable_reason(cfg, results) or "nessuno stream disponibile")
         )
 
-    def _full() -> Stream | None:
-        items = [(stream_label(r.stream, r.info), r.stream) for r in playable]
-        items += [
-            (f"{ui.g().warn} {r.reason}  {stream_label(r.stream, r.info)}", r.stream)
-            for r in excluded
-        ]
-        return fzf(items, "stream> ", header=notice)
-
-    cap = cfg.max_streams
-    if not cap or len(playable) + len(excluded) <= cap:
-        return _full()  # nothing hidden → one flat menu
-    _ALL = object()
-    shown = playable[:cap]
-    hidden = len(playable) - len(shown) + len(excluded)
-    items: list[tuple[str, object]] = [(stream_label(r.stream, r.info), r.stream) for r in shown]
-    items.append((f"{ui.g().down} mostra tutti ({hidden} altri)", _ALL))
-    chosen = fzf(items, "stream> ", header=notice)
-    if chosen is _ALL:
-        return _full()
-    return typecast("Stream | None", chosen)
+    return menu(StreamMenu(playable, excluded, notice, cfg.max_streams))
 
 
 def _playable_set(
@@ -512,13 +518,15 @@ def pick_and_resolve(
     cast: bool,
     title: str = "",
     exact_resolution: int = 0,
+    menu: ChooseStream | None = None,
 ) -> Stream | None:
     """Pick a stream and make it playable. Returns None only on ESC; raises
     `NoPlayableStream` when the pick — automatic or manual — can't be served (ADR 0033): a
     manual pick that won't resolve used to return None and read as ESC, silently."""
     chosen = _pick_stream(
-        cfg, results, auto=auto, cast=cast, title=title, exact_resolution=exact_resolution
-    )
+        cfg, results, auto=auto, cast=cast, title=title, exact_resolution=exact_resolution,
+        menu=menu,
+    )  # fmt: skip
     if not chosen:
         return None
     ready = _resolve_stream(cfg, chosen)
@@ -843,9 +851,12 @@ def prepare_stream(
                 "tutte le sorgenti risultano non più disponibili — riprova, o azzera la "
                 "denylist con --forget-dead"
             )
+    # No frontend stream menu (ADR 0037) → the manual path is the automatic one, guards included.
+    auto = auto or opts.choose_stream is None
     chosen = pick_and_resolve(
-        cfg, results, auto=auto, cast=opts.cast, title=title, exact_resolution=exact
-    )
+        cfg, results, auto=auto, cast=opts.cast, title=title, exact_resolution=exact,
+        menu=opts.choose_stream,
+    )  # fmt: skip
     if not chosen:
         # Auto + hard quality tier with nothing playable: fail loudly (TUI notice /
         # headless quality_unavailable). Manual ESC on the stream menu stays None.
@@ -917,6 +928,7 @@ def prepare_stream(
                         cast=opts.cast,
                         title=title,
                         exact_resolution=exact,
+                        menu=opts.choose_stream,
                     )
                     if not chosen:
                         return None

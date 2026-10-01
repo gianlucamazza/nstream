@@ -72,12 +72,6 @@ _DOMAIN = {
     "stream_select", "subs", "subalign", "tracks",
 }  # fmt: skip
 _TUI = {"picker", "labels"}
-# Edges that predate ADR 0037 and are being removed (prompter injection). The set may only
-# shrink: a new edge fails, and a fixed one must be deleted from here.
-_KNOWN_DEBT = {
-    ("stream_select", "picker"),
-    ("stream_select", "labels"),
-}
 
 
 def test_domain_does_not_import_the_tui():
@@ -89,5 +83,5 @@ def test_domain_does_not_import_the_tui():
         for tui in _TUI:
             if f"nstream.{tui}" in edges:
                 found.add((name, tui))
-    assert found - _KNOWN_DEBT == set(), "new domain→TUI import (ADR 0037)"
-    assert _KNOWN_DEBT - found == set(), "debt paid: remove it from _KNOWN_DEBT"
+    # The pre-0037 debt (caster/subs/stream_select menus) is paid: no exceptions remain.
+    assert found == set(), "domain→TUI import (ADR 0037): inject the menu instead"
