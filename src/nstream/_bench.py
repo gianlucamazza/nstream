@@ -31,7 +31,7 @@ import time
 import urllib.request
 from urllib.parse import urlsplit
 
-from . import srt, subalign
+from . import _subalign_remote, srt, subalign
 
 
 class _CountingProxy(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -103,8 +103,8 @@ def _g1_anchor_check(url: str, windows: list[subalign.Span]) -> None:
     print("== G1: anchor accuracy (overlapping windows) ==")
     disagreements: list[float] = []
     for t0, t1 in windows[:5]:
-        a = subalign._extract_window(url, (t0, t1))
-        b = subalign._extract_window(url, (max(t0 - 7.0, 0.0), t1))
+        a = _subalign_remote._extract_window(url, (t0, t1))
+        b = _subalign_remote._extract_window(url, (max(t0 - 7.0, 0.0), t1))
         if not a or not b:
             print(f"  window {t0:.0f}s: extraction failed on one variant (skip)")
             continue
@@ -182,7 +182,7 @@ def main(argv: list[str]) -> int:
         print(f"fingerprint: RIUSATO da {args.fingerprint}")
     else:
         t_start = time.monotonic()
-        got = subalign.probe(
+        got = _subalign_remote.probe(
             url, duration, size,
             budget_s=120.0, budget_bytes=args.budget_mb * 1_000_000,
             cue_starts=[s for s, _ in cue_sets[0]],
@@ -209,7 +209,7 @@ def main(argv: list[str]) -> int:
         print(f"fingerprint scritto → {args.dump_fingerprint}")
 
     if args.g1:
-        plan = subalign.plan_probes(duration, size, [s for s, _ in cue_sets[0]])
+        plan = _subalign_remote.plan_probes(duration, size, [s for s, _ in cue_sets[0]])
         if isinstance(plan, list):
             _g1_anchor_check(url, plan)
 

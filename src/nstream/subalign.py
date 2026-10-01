@@ -1,16 +1,16 @@
-"""Native sparse-evidence subtitle alignment engine (ADR 0020).
+"""Native subtitle alignment engine (ADR 0020).
 
 When the subtitle pick is not a protocol hash match, the only strong sync evidence is
-the media's own audio. This engine probes N short windows across the WHOLE runtime
-(the container is interleaved: full-length audio would cost the full download, so the
-budget buys sparse evidence), turns them into speech spans with an adaptive threshold,
-and finds the constant offset that maximizes a coverage-normalized overlap between the
+the media's own audio. `probe_local` decodes the audio of a LOCAL media file (the Tier-2
+remux) into speech spans with an adaptive threshold, split into virtual windows; `align`
+finds the constant offset that maximizes a coverage-normalized overlap between the
 subtitle cues and the detected speech. The concept is that of a no-split interval
 alignment (as in subtitle-sync literature); the implementation is original, pure
-Python, stdlib-only — ffmpeg is the sole signal extractor.
+Python, stdlib-only — ffmpeg is the sole signal extractor. The sparse REMOTE probing of
+Phase 0 lives in `_subalign_remote` (bench only: 100-300 MB per cast).
 
 Design doctrine (paid for in the field, ADR 0019 post-scriptum):
-- **probe/align split**: `probe()` pays the network ONCE per cast; `align()` is pure
+- **probe/align split**: `probe_local()` pays the decode ONCE per cast; `align()` is pure
   math, run once per candidate — and testable on recorded fixtures with zero I/O.
 - **coverage-normalized score** `overlap(S+δ, speech) / overlap(S+δ, windows)`: a δ
   that slides cues out of the probed regions shrinks numerator and denominator
@@ -23,8 +23,7 @@ Design doctrine (paid for in the field, ADR 0019 post-scriptum):
   drift diagnostic refuses honestly (`drift_suspected`) instead of delivering a wrong
   constant. A v2 pass would refit with scale ∈ {25/23.976, ...} against its own gate.
 
-The stream url rides in the ffmpeg argv exactly as it does for mpv/ffprobe — never
-logged. All engine thresholds are internal (fixture-calibrated in Phase 0, see
+All engine thresholds are internal (fixture-calibrated in Phase 0, see
 `tests/data/coherence.json`), NOT config: a user knob on a statistical gate invites
 fabricated confidence; the user lever stays `--sub-offset`.
 """
@@ -33,27 +32,18 @@ from __future__ import annotations
 
 import re
 import shutil
-import time
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import log, urlproxy, util
+from . import log, util
 
 _log = log.get_logger("subalign")
 
 Span = tuple[float, float]  # [start, end) seconds, absolute media time
 
-# --- probe plan -----------------------------------------------------------------
-_BUDGET_BYTES = 25_000_000  # transfer cap per cast (issue #2); internal, not config
-_PROBE_OVERHEAD_B = 600_000  # per-invocation container overhead (Phase-0 calibrated)
-_N_TARGET = 10  # desired probe count; degrades to _N_MIN on high byte-rate files
-_N_MIN = 6
-_D_MIN_S, _D_MAX_S = 4.0, 30.0  # per-probe duration bounds
-_USABLE = (0.03, 0.97)  # skip intro/credits fractions (music-heavy)
+# --- ffmpeg ---------------------------------------------------------------------
 _FFMPEG_TIMEOUT = 20.0
 _FFMPEG_LOCAL_TIMEOUT = 180.0  # one full-file decode pass (local IO, CPU-bound)
-_MAX_WORKERS = 4
 
 # --- signal ---------------------------------------------------------------------
 _WARMUP_S = 0.3  # decoder ramp discarded at window head
@@ -153,52 +143,10 @@ def is_loopback(url: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
-# --- probe planning ----------------------------------------------------------------
-
-
-def plan_probes(
-    duration: float, size_bytes: int, cue_starts: list[float], *, budget_bytes: int = _BUDGET_BYTES
-) -> list[Span] | str:
-    """Plan N dialogue-dense probe windows within the byte budget, or a refusal reason.
-    Cost per probed second = container byte-rate (interleaved media), NOT audio bitrate."""
-    if duration <= 0 or size_bytes <= 0:
-        return "no_media_geometry"
-    bps = size_bytes / duration
-    n = _N_TARGET
-    d = 0.0
-    while n >= _N_MIN:
-        d = (budget_bytes - n * _PROBE_OVERHEAD_B) / bps / n
-        if d >= _D_MIN_S:
-            break
-        n -= 2
-    else:
-        return "bitrate_over_budget"
-    d = min(d, _D_MAX_S)
-    lo, hi = duration * _USABLE[0], duration * _USABLE[1] - d
-    if hi <= lo:
-        return "no_media_geometry"
-    starts = sorted(t for t in cue_starts if lo <= t <= hi)
-    windows: list[Span] = []
-    for i in range(n):
-        s_lo = lo + (hi - lo) * i / n
-        s_hi = lo + (hi - lo) * (i + 1) / n
-        cands = [t for t in starts if s_lo <= t <= s_hi] or [s_lo]
-        best, best_n = cands[0], -1
-        for t in cands[::3]:
-            k = sum(1 for x in starts if t <= x <= t + d)
-            if k > best_n:
-                best, best_n = t, k
-        t0 = max(best - 10.0, lo)
-        windows.append((t0, t0 + d))
-    return windows
-
-
 # --- signal extraction ---------------------------------------------------------------
 
 _RMS_PTS_RE = re.compile(r"pts_time:\s*([0-9.]+)")
 _RMS_VAL_RE = re.compile(r"lavfi\.astats\.Overall\.RMS_level=(-?[0-9.]+|-inf)")
-_SIL_START_RE = re.compile(r"silence_start:\s*(-?[0-9.]+)")
-_SIL_END_RE = re.compile(r"silence_end:\s*(-?[0-9.]+)")
 
 _SPEECH_FILTER = "highpass=f=120,lowpass=f=4000"
 
@@ -276,52 +224,6 @@ def _rms_series(
     return out or None
 
 
-def _silencedetect_spans(url: str, t0: float, d: float) -> list[Span] | None:
-    """Fallback extractor (ametadata format drift across ffmpeg versions): speech spans
-    from inverted silencedetect intervals, window-relative."""
-    proc = util.run_cmd(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostats",
-            "-v",
-            "info",
-            "-ss",
-            f"{t0:.3f}",
-            "-t",
-            f"{d:.3f}",
-            "-i",
-            url,
-            "-map",
-            "0:a:0",
-            "-vn",
-            "-sn",
-            "-dn",
-            "-af",
-            f"{_SPEECH_FILTER},silencedetect=n=-35dB:d=0.35",
-            "-f",
-            "null",
-            "-",
-        ],  # fmt: skip
-        timeout=_FFMPEG_TIMEOUT,
-    )
-    if proc is None or proc.returncode != 0:
-        return None
-    err = proc.stderr or ""
-    starts = [float(x) for x in _SIL_START_RE.findall(err)]
-    ends = [float(x) for x in _SIL_END_RE.findall(err)]
-    # invert silences into speech within [0, d]
-    speech: list[Span] = []
-    cur = 0.0
-    for s, e in zip(sorted(starts), sorted(ends), strict=False):
-        if s > cur:
-            speech.append((cur, s))
-        cur = max(cur, e)
-    if cur < d:
-        speech.append((cur, d))
-    return speech
-
-
 def _spans_from_rms(series: list[tuple[float, float]]) -> list[Span]:
     """Hysteresis VAD over the RMS series with a PER-WINDOW adaptive threshold: the
     noise floor is this window's low percentile, so a loud scene and a quiet one get
@@ -349,84 +251,6 @@ def _spans_from_rms(series: list[tuple[float, float]]) -> list[Span]:
         else:
             merged.append((s, e))
     return [(s, e) for s, e in merged if e - s >= _VAD_MIN_SPAN_S]
-
-
-def _extract_window(url: str, w: Span) -> tuple[Span, list[Span]] | None:
-    """One probe: effective window + absolute speech spans, or None (failed /
-    uninformative). Primary extractor = RMS series + adaptive VAD; fallback =
-    silencedetect at a fixed threshold."""
-    t0, t1 = w
-    d = t1 - t0
-    series = _rms_series(url, t0, d)
-    if series is not None:
-        series = [(t, v) for t, v in series if t >= _WARMUP_S]
-        if not series:
-            return None
-        rel_spans = _spans_from_rms(series)
-    else:
-        rel_spans = _silencedetect_spans(url, t0, d)
-        if rel_spans is None:
-            return None
-        rel_spans = [(max(s, _WARMUP_S), e) for s, e in rel_spans if e > _WARMUP_S]
-    eff: Span = (t0 + _WARMUP_S + _EDGE_S, t1 - _EDGE_S)
-    if eff[1] <= eff[0]:
-        return None
-    spans_abs = [
-        (max(_to_abs(t0, s), eff[0]), min(_to_abs(t0, e), eff[1]))
-        for s, e in rel_spans
-        if _to_abs(t0, e) > eff[0] and _to_abs(t0, s) < eff[1]
-    ]
-    speech_s = sum(e - s for s, e in spans_abs)
-    frac = speech_s / (eff[1] - eff[0])
-    if not (_INFORMATIVE[0] <= frac <= _INFORMATIVE[1]):
-        return None  # wall-to-wall chatter/music or no dialogue: noise, not evidence
-    return eff, spans_abs
-
-
-def probe(
-    video_url: str,
-    duration: float,
-    size_bytes: int,
-    *,
-    budget_s: float = 30.0,
-    budget_bytes: int = _BUDGET_BYTES,
-    cue_starts: list[float] | None = None,
-) -> Fingerprint | str:
-    """Extract the media's sparse speech fingerprint, or a refusal reason. Network is
-    paid HERE, once per cast; `align` is then pure per candidate."""
-    # NB: the loopback (P2P gateway) refusal belongs to the ORCHESTRATOR's tier-2 gate,
-    # not here — the Phase-0 bench legitimately probes through a local counting proxy.
-    if not available():
-        return "no_ffmpeg"
-    plan = plan_probes(duration, size_bytes, cue_starts or [], budget_bytes=budget_bytes)
-    if isinstance(plan, str):
-        return plan
-    deadline = time.monotonic() + max(budget_s - 5.0, 5.0)
-    video_url = urlproxy.local_url(video_url)  # the ffmpeg argv never sees a debrid token
-    results: list[tuple[Span, list[Span]]] = []
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as ex:
-        futs = [ex.submit(_extract_window, video_url, w) for w in plan]
-        for f in futs:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                ex.shutdown(wait=False, cancel_futures=True)
-                return "deadline_exceeded"
-            try:
-                got = f.result(timeout=left)
-            except TimeoutError:
-                ex.shutdown(wait=False, cancel_futures=True)
-                return "deadline_exceeded"
-            if got is not None:
-                results.append(got)
-    min_ok = max(4, len(plan) - 2)
-    if len(results) < min_ok:
-        reason = "low_speech" if results else "probe_failures"
-        _log.info("subalign: %d/%d finestre utili → %s", len(results), len(plan), reason)
-        return reason
-    results.sort(key=lambda r: r[0][0])
-    windows = tuple(w for w, _ in results)
-    speech = tuple(s for _, spans in results for s in spans)
-    return Fingerprint(duration=duration, windows=windows, speech=speech)
 
 
 def probe_local(
