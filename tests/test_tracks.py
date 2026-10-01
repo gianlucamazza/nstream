@@ -164,8 +164,10 @@ def test_probe_tracks_is_bounded(monkeypatch):
     seen = []
     monkeypatch.setattr(tracks.util, "run_cmd", lambda cmd, **k: seen.append(cmd))
     tracks._cache.clear()
-    tracks.probe_tracks("http://x/bounded.mkv")
+    tracks.probe_tracks("http://x/realdebrid=TOK/bounded.mkv")
     cmd = seen[0]
     assert cmd[cmd.index("-rw_timeout") + 1] == "6000000"
     assert cmd[cmd.index("-probesize") + 1] == "2M"
-    assert cmd.index("-rw_timeout") < cmd.index("http://x/bounded.mkv")
+    # The debrid url (and its token) never reaches argv: ffprobe reads a loopback proxy.
+    assert not any("TOK" in a for a in cmd)
+    assert cmd[-1].startswith("http://127.0.0.1:")

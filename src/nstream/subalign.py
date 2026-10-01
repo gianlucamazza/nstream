@@ -38,7 +38,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import log, util
+from . import log, urlproxy, util
 
 _log = log.get_logger("subalign")
 
@@ -386,6 +386,7 @@ def probe(
     if isinstance(plan, str):
         return plan
     deadline = time.monotonic() + max(budget_s - 5.0, 5.0)
+    video_url = urlproxy.local_url(video_url)  # the ffmpeg argv never sees a debrid token
     results: list[tuple[Span, list[Span]]] = []
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as ex:
         futs = [ex.submit(_extract_window, video_url, w) for w in plan]

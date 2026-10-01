@@ -1018,6 +1018,8 @@ def _wire_cast_tree(monkeypatch, plan, *, langs=("ita",)):
         lambda cfg, results, chosen, target, exact_resolution=0, **_kw: (chosen, False),
     )
     monkeypatch.setattr(cast_flow.cast_vet, "cast_container", lambda cfg, stream: "mp4")
+    # Remux feasibility reads the real disk (tests run on tmpfs): hermetic by default.
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: None)
     monkeypatch.setattr(
         cast_flow.cast_vet, "cast_languages", lambda cfg, results, exact_resolution=0, **_kw: langs
     )

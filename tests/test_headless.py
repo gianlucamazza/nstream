@@ -32,6 +32,12 @@ from nstream.types import HistoryEntry, Meta
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_remux_feasibility(monkeypatch):
+    """Remux feasibility reads the real disk (tests run on tmpfs): off unless a test opts in."""
+    monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: None)
+
+
 def _cast_opts(**kw):
     return replace(
         headless.PlayOpts(

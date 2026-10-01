@@ -297,3 +297,15 @@ def test_lua_signal_contract_pinned():
     assert 'f:write("cast\\n")' in lua
     # play() strips the trailing newline: both spellings must land on the same tokens
     assert "next\n".strip() == "next" and "cast\n".strip() == "cast"
+
+
+def test_playlist_arg_keeps_url_out_of_argv(tmp_path):
+    import os
+    import stat
+
+    arg = player._playlist_arg(str(tmp_path), "https://rd.example/realdebrid=TOK/f.mkv")
+    path = arg.removeprefix("--playlist=")
+    assert "TOK" not in arg and os.path.isfile(path)
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    with open(path) as f:
+        assert f.read().strip().endswith("f.mkv")

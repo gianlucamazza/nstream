@@ -37,7 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
-from . import bridge, cast_delivery, caster, log, notices, serve, srt, ui, util
+from . import bridge, cast_delivery, caster, log, notices, serve, srt, ui, urlproxy, util
 from . import config as config_mod
 from .config import Config
 
@@ -457,7 +457,7 @@ def remux_to_file(
     cmd = [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         # A stalled source must fail the remux, not hang it forever (30s, microseconds).
-        "-rw_timeout", "30000000", "-i", url,
+        "-rw_timeout", "30000000", "-i", urlproxy.local_url(url),  # token kept out of argv
         "-map", "0:v:0", "-map", amap,
         "-c:v", "copy", *acodec,
         "-movflags", "+faststart", path,

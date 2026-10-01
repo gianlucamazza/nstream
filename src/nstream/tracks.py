@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from . import log, util
+from . import log, urlproxy, util
 
 
 @dataclass(frozen=True)
@@ -141,7 +141,7 @@ def _ffprobe(url: str, timeout: float) -> Tracks:
         "-of", "json", "-show_entries",
         "format=duration,format_name"
         ":stream=index,codec_type,codec_name,channels:stream_tags=language,title",
-        url,
+        urlproxy.local_url(url),  # never the debrid url in argv
     ]  # fmt: skip
     proc = util.run_cmd(cmd, timeout=timeout)
     if proc is None:

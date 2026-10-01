@@ -933,3 +933,13 @@ def test_remux_cmd_bounds_stalled_source(monkeypatch, tmp_path):
     cmd = seen[0]
     assert cmd[cmd.index("-rw_timeout") + 1] == "30000000"
     assert cmd.index("-rw_timeout") < cmd.index("-i")
+
+
+def test_remux_argv_never_carries_the_debrid_url(monkeypatch, tmp_path):
+    seen: list = []
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_free_gb", lambda _p: 500.0)
+    monkeypatch.setattr(remux, "_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(remux, "_run_ffmpeg", lambda cmd, d, **k: seen.append(cmd) or (1, "x"))
+    remux.remux_to_file("https://rd.example/realdebrid=TOK/f.mkv", Config(torrentio_base="tb"))
+    assert not any("TOK" in a for a in seen[0])

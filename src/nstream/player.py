@@ -251,6 +251,19 @@ def _lang_defaults(cfg: Config, *, audio_lang: str | None = None) -> list[str]:
     return flags
 
 
+def _playlist_arg(work_dir: str, url: str) -> str:
+    """Hand mpv the url through a private (0600) playlist file instead of argv:
+    `/proc/<pid>/cmdline` is world-readable and a debrid url carries the account token."""
+    path = os.path.join(work_dir, "playlist.m3u")
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(url + "\n")
+    except OSError:
+        return url  # best-effort: play rather than fail on a private-file write
+    return f"--playlist={path}"
+
+
 def play(
     cfg: Config,
     title: str,
@@ -333,7 +346,7 @@ def play(
         if cast_enabled:
             args.append("--script-opts-append=nstream-cast=yes")
         args.append(f"--script-opts-append=nstream-outcome={outcome_path}")
-        args.append(url)
+        args.append(_playlist_arg(work_dir, url))
         try:
             proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
