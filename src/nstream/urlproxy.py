@@ -14,8 +14,10 @@ returned unchanged — they carry no token and gain nothing from a second hop.
 from __future__ import annotations
 
 import contextlib
+import http.client
+import re
 import secrets
-import shutil
+import sys
 import threading
 import urllib.error
 import urllib.parse
@@ -31,11 +33,18 @@ _log = log.get_logger("urlproxy")
 # Upstream headers forwarded to the child: what a media reader needs for ranged reads.
 _PASS_HEADERS = ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges")
 _CHUNK = 256 * 1024
-_UPSTREAM_TIMEOUT = 30.0
+# Per socket operation. Short enough that a stalled upstream fails while the bounded
+# ffprobe (6 s read) is still listening, long enough for a debrid's first byte.
+_UPSTREAM_TIMEOUT = 10.0
+# A long read (a whole film for the live producer) survives this many upstream drops: the
+# proxy re-requests the rest with a Range from the last byte it delivered.
+_RESUME_TRIES = 3
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+_RANGE = re.compile(r"bytes=(\d+)-(\d*)$")
 
 _lock = threading.Lock()
 _routes: dict[str, str] = {}
-_server: ThreadingHTTPServer | None = None
+_server: _Server | None = None
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -45,10 +54,23 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # never log paths: the route is a capability, the upstream a secret
 
     def do_HEAD(self) -> None:
-        self._forward("HEAD")
+        self._serve("HEAD")
 
     def do_GET(self) -> None:
-        self._forward("GET")
+        self._serve("GET")
+
+    def _serve(self, method: str) -> None:
+        # The reader seeking or stopping drops the connection: normal, on every write path
+        # (an error reply to a client that already left used to print a traceback).
+        with contextlib.suppress(*_CLIENT_GONE):
+            self._forward(method)
+
+    def _open(self, upstream: str, method: str, rng: str | None):
+        headers = {"User-Agent": UA}
+        if rng:
+            headers["Range"] = rng
+        req = urllib.request.Request(upstream, headers=headers, method=method)
+        return urllib.request.urlopen(req, timeout=_UPSTREAM_TIMEOUT)  # noqa: S310
 
     def _forward(self, method: str) -> None:
         with _lock:
@@ -56,12 +78,9 @@ class _Handler(BaseHTTPRequestHandler):
         if upstream is None:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        headers = {"User-Agent": UA}
-        if self.headers.get("Range"):
-            headers["Range"] = self.headers["Range"]
-        req = urllib.request.Request(upstream, headers=headers, method=method)
+        rng = self.headers.get("Range")
         try:
-            resp = urllib.request.urlopen(req, timeout=_UPSTREAM_TIMEOUT)  # noqa: S310
+            resp = self._open(upstream, method, rng)
         except urllib.error.HTTPError as e:
             self.send_response(e.code)
             self.send_header("Content-Length", "0")
@@ -83,17 +102,66 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             if method == "HEAD":
                 return
-            # The reader seeking or stopping drops the connection: normal.
-            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-                shutil.copyfileobj(resp, self.wfile, _CHUNK)
+            resumable = resp.headers.get("Accept-Ranges") == "bytes" or resp.status == 206
+            length = resp.headers.get("Content-Length")
+            expected = int(length) if length and length.isdigit() else None
+            self._copy(resp, upstream, rng if resp.status == 206 else None, resumable, expected)
+
+    def _copy(
+        self, resp, upstream: str, rng: str | None, resumable: bool, expected: int | None
+    ) -> None:
+        """Stream the body; on an upstream drop, re-request the rest from the last byte
+        delivered (client errors propagate to `_serve`, which ends the request quietly).
+        A drop is an error OR an early EOF: http.client returns b"" short of the
+        Content-Length instead of raising."""
+        m = _RANGE.match(rng or "bytes=0-")
+        first, last = (int(m.group(1)), m.group(2)) if m else (0, "")
+        sent = 0
+        tries = 0
+        while True:
+            try:
+                if resp is None:  # reopen the rest after a drop
+                    resp = self._open(upstream, "GET", f"bytes={first + sent}-{last}")
+                    if resp.status != 206:  # the upstream ignored the Range: cannot splice
+                        resp.close()
+                        self.close_connection = True
+                        return
+                chunk = resp.read(_CHUNK)
+                if not chunk and expected is not None and sent < expected:
+                    raise http.client.IncompleteRead(b"", expected - sent)
+            except (OSError, http.client.HTTPException) as e:
+                if resp is not None:
+                    resp.close()
+                    resp = None
+                if not resumable or tries >= _RESUME_TRIES:
+                    _log.warning("proxy: upstream interrotto (%s)", type(e).__name__)
+                    self.close_connection = True
+                    return
+                tries += 1
+                continue
+            if not chunk:
+                resp.close()
+                return
+            self.wfile.write(chunk)
+            sent += len(chunk)
 
 
-def _ensure_server() -> ThreadingHTTPServer:
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        # Never print a traceback (the stdlib default) on the user's terminal: a client
+        # that hung up is normal, anything else is logged once, without the path.
+        exc = sys.exception()
+        if not isinstance(exc, _CLIENT_GONE):
+            _log.debug("proxy: errore di richiesta (%s)", type(exc).__name__)
+
+
+def _ensure_server() -> _Server:
     global _server
     with _lock:
         if _server is None:
-            server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-            server.daemon_threads = True
+            server = _Server(("127.0.0.1", 0), _Handler)
             threading.Thread(target=server.serve_forever, name="urlproxy", daemon=True).start()
             _server = server
         return _server

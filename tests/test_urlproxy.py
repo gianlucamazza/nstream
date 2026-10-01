@@ -69,3 +69,48 @@ def test_unknown_route_is_404():
 def test_loopback_and_non_http_urls_pass_through():
     assert urlproxy.local_url("http://127.0.0.1:8090/stream/x") == "http://127.0.0.1:8090/stream/x"
     assert urlproxy.local_url("/tmp/file.mp4") == "/tmp/file.mp4"
+
+
+class _Dropping(_Upstream):
+    """Sends half the body of a full GET, then drops the connection; ranged GETs work."""
+
+    drops = 0
+
+    def do_GET(self):
+        if self.headers.get("Range") is None and _Dropping.drops == 0:
+            _Dropping.drops += 1
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BODY)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(BODY[: len(BODY) // 2])
+            self.wfile.flush()
+            self.connection.shutdown(2)
+            self.close_connection = True
+            return
+        super().do_GET()
+
+
+def test_upstream_drop_mid_body_is_resumed_with_a_range(monkeypatch):
+    """A long read (the live producer reads a whole film) must survive a debrid drop: the
+    proxy re-requests the rest from the last byte it delivered."""
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Dropping)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(urlproxy, "_is_local", lambda host: False)
+        local = urlproxy.local_url(f"http://127.0.0.1:{srv.server_address[1]}/f.mkv")
+        with urllib.request.urlopen(local, timeout=5) as r:
+            assert r.read() == BODY
+        assert _Dropping.drops == 1
+    finally:
+        srv.shutdown()
+
+
+def test_unreachable_upstream_prints_no_traceback(monkeypatch, capfd):
+    monkeypatch.setattr(urlproxy, "_is_local", lambda host: False)
+    local = urlproxy.local_url("http://127.0.0.1:9/nothing-listens-here")
+    try:
+        urllib.request.urlopen(local, timeout=5)
+    except urllib.error.HTTPError as e:
+        assert e.code == 502
+    assert "Traceback" not in capfd.readouterr().err
