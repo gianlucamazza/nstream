@@ -1011,11 +1011,23 @@ def cast_live(
             return True
         return False
 
+    def film_time(ev: dict) -> None:
+        # `--follow` JSONL speaks film time: the receiver reports playlist time (from 0
+        # after a fast resume) and duration -1 for a growing playlist.
+        if on_event is None:
+            return
+        ev = dict(ev)
+        if isinstance(ev.get("position"), (int, float)):
+            ev["position"] = round(ev["position"] + offset, 1)
+        if "duration" in ev and not (ev.get("duration") or 0) > 0 and duration:
+            ev["duration"] = round(duration, 1)
+        on_event(ev)
+
     out: cast_delivery.BridgeOutcome | None = None
     try:
         out = cast_delivery.drive_bridge(
             device, serve.served_hls_url(bind_ip, port, token), follow=follow,
-            load_kwargs=kwargs, on_event=on_event,
+            load_kwargs=kwargs, on_event=film_time if on_event else None,
             on_started=lambda: ui.cast_live(device, follow=follow), on_interrupt=abort,
         )  # fmt: skip
     finally:

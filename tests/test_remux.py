@@ -1126,3 +1126,23 @@ def test_live_seek_maps_film_time_to_playlist_time(monkeypatch, tmp_path):
     monkeypatch.setattr(remux.bridge, "control", lambda d, c, v: ctl.append((c, v)) or True)
     assert remux.live_seek("10.0.0.5", 3110.0) is True  # short jump: native, in playlist time
     assert ctl == [("seek", 110.0)]
+
+
+def test_cast_live_follow_events_speak_film_time(monkeypatch, tmp_path):
+    """--follow JSONL after a fast resume: positions + offset, the probed duration."""
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    monkeypatch.setattr(remux.live, "first_pts", lambda d: 3000.0)
+    events: list = []
+
+    def drive(device, url, *, follow, load_kwargs, on_event=None, **k):
+        assert on_event is not None
+        on_event({"kind": "playing", "position": 12.0, "duration": -1.0})
+        return cast_delivery.BridgeOutcome(12.0, -1.0, True, False)
+
+    monkeypatch.setattr(remux.cast_delivery, "drive_bridge", drive)
+    remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, start=3001.0,
+        follow=False, on_event=events.append,
+    )  # fmt: skip
+    assert events == [{"kind": "playing", "position": 3012.0, "duration": 6000.0}]
+    assert seen["job"].ss_s == 3001.0
