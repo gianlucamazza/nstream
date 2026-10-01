@@ -1085,11 +1085,46 @@ def test_live_seek_reloads_far_jumps(monkeypatch, tmp_path):
     assert loads == [("http://h/pl.m3u8", 900.0, "application/vnd.apple.mpegurl")]
 
 
-def test_live_seek_leaves_short_jumps_and_clamps_to_produced(monkeypatch, tmp_path):
-    loads = _live_state(monkeypatch, tmp_path, pos=600.0, produced=80)  # 800 s produced
-    assert remux.live_seek("10.0.0.5", 620.0) is None  # short: the receiver's own seek
-    assert remux.live_seek("10.0.0.5", 5000.0) is True
-    assert loads[-1][1] == 800.0 - 12  # never past what the producer has made
+def test_live_seek_short_jumps_native_far_beyond_reach_restarts(monkeypatch, tmp_path):
+    _live_state(monkeypatch, tmp_path, pos=600.0, produced=80)  # 800 s produced
+    assert remux.live_seek("10.0.0.5", 620.0) is None  # short, no offset: the receiver's seek
+    restarts = []
+    monkeypatch.setattr(remux, "_live_restart", lambda st, dev, t: restarts.append(t) or True)
+    assert remux.live_seek("10.0.0.5", 5000.0) is True  # 73 min ahead: past the pacing reach
+    assert restarts == [5000.0]
+
+
+def test_live_seek_before_the_playlist_start_restarts(monkeypatch, tmp_path):
+    """A fast resume at 50 min, then a seek back to 20 min: nothing was produced there."""
+    _live_state(monkeypatch, tmp_path, pos=3100.0)
+    st = remux._read_state() or {}
+    remux._write_state(4242, st["file"], "10.0.0.5", mode="live", url=st["url"], offset=3000.0)
+    restarts = []
+    monkeypatch.setattr(remux, "_live_restart", lambda st, dev, t: restarts.append(t) or True)
+    assert remux.live_seek("10.0.0.5", 1200.0) is True and restarts == [1200.0]
+
+
+def test_live_restart_requests_a_generation_and_loads_it(monkeypatch, tmp_path):
+    from nstream import live
+
+    loads = _live_state(monkeypatch, tmp_path, pos=3100.0)
+    st = remux._read_state() or {}
+    d = Path(st["file"])
+    sent = []
+
+    def fake_kill(pid, sig):
+        sent.append((pid, sig))
+        req = json.loads((d / remux.serve.RESTART_REQUEST).read_text())
+        lines = ["#EXTM3U"] + [f"#EXTINF:6.0,\ng{req['gen']}_{i}.ts" for i in range(3)]
+        (d / live.playlist_name(req["gen"])).write_text("\n".join(lines) + "\n")
+
+    monkeypatch.setattr(remux.os, "kill", fake_kill)
+    monkeypatch.setattr(remux.live, "first_pts", lambda out, gen: 1197.5)
+    assert remux._live_restart(st, "10.0.0.5", 1200.0) is True
+    assert sent and sent[0][1] == remux.signal.SIGUSR1
+    new = remux._read_state() or {}
+    assert new["gen"] == 1 and new["offset"] == 1197.5 and new["url"].endswith("/g1.m3u8")
+    assert loads[-1] == ("http://h/g1.m3u8", 0.0, "application/vnd.apple.mpegurl")
 
 
 def test_live_seek_is_none_without_a_live_cast(monkeypatch):

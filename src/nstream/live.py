@@ -20,6 +20,7 @@ The job (the debrid url) reaches the producer as data, never as an argv: ffmpeg 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import re
 import shutil
@@ -33,12 +34,29 @@ from . import log, urlproxy, util
 
 _log = log.get_logger("live")
 
-PLAYLIST = "index.m3u8"
+PLAYLIST = "index.m3u8"  # generation 0 (the playlist a cast LOADs first)
 SEGMENT_S = 6
 KEEP_BEHIND_S = 600.0
 AHEAD_MAX_S = 1800.0
 AHEAD_RESUME_S = 900.0
-_SEGMENT = re.compile(r"index(\d+)\.ts$")
+# Generation 0 keeps the historical names; a restart (seek anywhere) writes generation N
+# as `gN.m3u8` + `gN_<i>.ts`, so the receiver never mixes two producers' segments.
+_SEGMENT = re.compile(r"(?:index|g(\d+)_)(\d+)\.ts$")
+_PLAYLIST_NAME = re.compile(r"(?:index|g\d+)\.m3u8")
+
+
+def playlist_name(gen: int) -> str:
+    return PLAYLIST if gen == 0 else f"g{gen}.m3u8"
+
+
+def segment_name(gen: int, index: int) -> str:
+    return f"index{index}.ts" if gen == 0 else f"g{gen}_{index}.ts"
+
+
+def is_playlist_name(name: str) -> bool:
+    return bool(_PLAYLIST_NAME.fullmatch(name))
+
+
 _EXTINF = re.compile(r"#EXTINF:([0-9.]+)")
 
 
@@ -71,7 +89,7 @@ class Job:
         )  # fmt: skip
 
 
-def producer_cmd(src: str, out_dir: str, job: Job) -> list[str]:
+def producer_cmd(src: str, out_dir: str, job: Job, gen: int = 0) -> list[str]:
     """The ffmpeg argv: video copied, one audio track, MPEG-TS segments in a growing EVENT
     playlist. `temp_file` renames each segment and playlist into place, so the server never
     serves a half-written file. `src` must already be token-free (a loopback url).
@@ -88,18 +106,18 @@ def producer_cmd(src: str, out_dir: str, job: Job) -> list[str]:
         "-f", "hls", "-hls_time", str(SEGMENT_S), "-hls_list_size", "0",
         "-hls_playlist_type", "event", "-hls_segment_type", "mpegts",
         "-hls_flags", "temp_file",
-        "-hls_segment_filename", os.path.join(out_dir, "index%d.ts"),
-        os.path.join(out_dir, PLAYLIST),
+        "-hls_segment_filename", os.path.join(out_dir, segment_name(gen, 0)[:-4] + "%d.ts"),
+        os.path.join(out_dir, playlist_name(gen)),
     ]  # fmt: skip
 
 
-def first_pts(out_dir: str) -> float | None:
+def first_pts(out_dir: str, gen: int = 0) -> float | None:
     """The source time the playlist starts at (first segment's start), or None. With a
     fast-resume `ss_s` it is the keyframe at or before it — the offset between what the
     receiver reports (playlist time, from 0) and the film."""
     proc = util.run_cmd(
         ["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0",
-         os.path.join(out_dir, "index0.ts")],
+         os.path.join(out_dir, segment_name(gen, 0))],
         timeout=10,
     )  # fmt: skip
     try:
@@ -108,10 +126,11 @@ def first_pts(out_dir: str) -> float | None:
         return None
 
 
-def timeline(out_dir: str) -> list[tuple[int, float, float]]:
-    """(segment index, start s, duration s) of every segment the playlist lists so far."""
+def timeline(out_dir: str, gen: int = 0) -> list[tuple[int, float, float]]:
+    """(segment index, start s, duration s) of every segment generation `gen`'s playlist
+    lists so far."""
     try:
-        with open(os.path.join(out_dir, PLAYLIST), encoding="utf-8") as f:
+        with open(os.path.join(out_dir, playlist_name(gen)), encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError:
         return []
@@ -125,52 +144,107 @@ def timeline(out_dir: str) -> list[tuple[int, float, float]]:
             continue
         s = _SEGMENT.search(line)
         if s:
-            out.append((int(s.group(1)), t, dur))
+            out.append((int(s.group(2)), t, dur))
             t += dur
     return out
 
 
-def produced_s(out_dir: str) -> float:
-    """Seconds of media the playlist already lists."""
-    tl = timeline(out_dir)
+def produced_s(out_dir: str, gen: int = 0) -> float:
+    """Seconds of media generation `gen`'s playlist already lists."""
+    tl = timeline(out_dir, gen)
     return tl[-1][1] + tl[-1][2] if tl else 0.0
 
 
-def segment_index(name: str) -> int | None:
+def segment_id(name: str) -> tuple[int, int] | None:
+    """(generation, index) of a segment file name, or None for anything else."""
     m = _SEGMENT.fullmatch(name)
-    return int(m.group(1)) if m else None
+    return (int(m.group(1) or 0), int(m.group(2))) if m else None
+
+
+def segment_index(name: str) -> int | None:
+    sid = segment_id(name)
+    return sid[1] if sid else None
+
+
+def _spawn(job: Job, out_dir: str, gen: int) -> subprocess.Popen | None:
+    cmd = producer_cmd(urlproxy.local_url(job.url), out_dir, job, gen)
+    try:
+        # stderr beside the segments (never served: the route whitelists names), read
+        # back by `failure_reason`, removed with the directory.
+        with open(os.path.join(out_dir, "ffmpeg.log"), "ab") as err:
+            return subprocess.Popen(  # noqa: S603
+                cmd, stdout=subprocess.DEVNULL, stderr=err,
+                preexec_fn=util.die_with_parent,  # noqa: PLW1509 — owned by this process
+            )  # fmt: skip
+    except (OSError, subprocess.SubprocessError) as e:
+        _log.warning("live: ffmpeg non avviato (%s)", type(e).__name__)
+        return None
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """End ffmpeg, resuming it first: a stopped process ignores SIGTERM until continued."""
+    if proc.poll() is not None:
+        return
+    with contextlib.suppress(ProcessLookupError, OSError):
+        proc.send_signal(signal.SIGCONT)
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _remove_generation(out_dir: str, gen: int) -> None:
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(out_dir):
+            sid = segment_id(entry.name)
+            if (sid is not None and sid[0] == gen) or entry.name == playlist_name(gen):
+                with contextlib.suppress(OSError):
+                    os.unlink(entry.path)
 
 
 @dataclass
 class Producer:
     """A running producer and its disk policy. `on_request` is called by the server for
-    each segment served; `tick` runs the pacing periodically; `stop` ends it all."""
+    each segment served; `tick` runs the pacing periodically; `restart` moves it to another
+    film time (seek anywhere); `stop` ends it all."""
 
     out_dir: str
     proc: subprocess.Popen
     newest_s: float = 0.0
     paused: bool = False
+    gen: int = 0
+    job: Job | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _stopped: bool = False
 
     @classmethod
-    def start(cls, job: Job, out_dir: str) -> Producer | None:
-        cmd = producer_cmd(urlproxy.local_url(job.url), out_dir, job)
-        try:
-            # stderr beside the segments (never served: the route whitelists names), read
-            # back by `failure_reason`, removed with the directory.
-            with open(os.path.join(out_dir, "ffmpeg.log"), "wb") as err:
-                proc = subprocess.Popen(  # noqa: S603
-                    cmd, stdout=subprocess.DEVNULL, stderr=err,
-                    preexec_fn=util.die_with_parent,  # noqa: PLW1509 — owned by this process
-                )  # fmt: skip
-        except (OSError, subprocess.SubprocessError) as e:
-            _log.warning("live: ffmpeg non avviato (%s)", type(e).__name__)
+    def start(cls, job: Job, out_dir: str, gen: int = 0) -> Producer | None:
+        proc = _spawn(job, out_dir, gen)
+        if proc is None:
             return None
-        return cls(out_dir, proc, newest_s=job.head_s)
+        return cls(out_dir, proc, newest_s=job.head_s, gen=gen, job=job)
+
+    def restart(self, ss_s: float, gen: int) -> bool:
+        """Stop this producer and start generation `gen` at film time `ss_s` (fast-resume
+        style: the new playlist counts from 0). The previous generation's files go."""
+        if self.job is None or gen <= self.gen:
+            return False
+        job = dataclasses.replace(self.job, ss_s=max(ss_s, 0.0), head_s=0.0)
+        proc = _spawn(job, self.out_dir, gen)
+        if proc is None:
+            return False
+        with self._lock:
+            old, old_gen = self.proc, self.gen
+            self.proc, self.gen, self.job = proc, gen, job
+            self.newest_s, self.paused = 0.0, False
+        _terminate(old)
+        _remove_generation(self.out_dir, old_gen)
+        return True
 
     def failed(self) -> bool:
         """The producer exited without producing anything usable."""
-        return self.proc.poll() not in (None, 0) and not timeline(self.out_dir)
+        return self.proc.poll() not in (None, 0) and not timeline(self.out_dir, self.gen)
 
     def failure_reason(self) -> str:
         """The tail of ffmpeg's stderr (diagnosis only; it never carries the token, ffmpeg
@@ -181,9 +255,14 @@ class Producer:
         except OSError:
             return ""
 
-    def on_request(self, index: int) -> None:
-        """Segment `index` was requested: advance the play head, prune behind it."""
-        tl = timeline(self.out_dir)
+    def on_request(self, name: str) -> None:
+        """Segment `name` was requested: advance the play head, prune behind it. Requests
+        for another generation (a receiver still on the old playlist) are ignored."""
+        sid = segment_id(name)
+        if sid is None or sid[0] != self.gen:
+            return
+        gen, index = sid
+        tl = timeline(self.out_dir, gen)
         start = next((t for i, t, _ in tl if i == index), None)
         if start is None:
             return
@@ -194,13 +273,15 @@ class Producer:
             if t + d > floor:
                 break
             with contextlib.suppress(OSError):
-                os.unlink(os.path.join(self.out_dir, f"index{i}.ts"))
+                os.unlink(os.path.join(self.out_dir, segment_name(gen, i)))
 
     def tick(self) -> None:
         """Pause the producer far ahead of the play head, resume it when it catches up."""
-        if self.proc.poll() is not None:
+        with self._lock:
+            proc, gen = self.proc, self.gen
+        if proc.poll() is not None:
             return
-        ahead = produced_s(self.out_dir) - self.newest_s
+        ahead = produced_s(self.out_dir, gen) - self.newest_s
         with self._lock:
             if not self.paused and ahead > AHEAD_MAX_S:
                 self._signal(signal.SIGSTOP)
@@ -214,10 +295,11 @@ class Producer:
             self.proc.send_signal(sig)
 
     def run_pacing(self, interval: float = 2.0) -> threading.Thread:
-        """Start the pacing loop in a daemon thread (ends with the producer)."""
+        """Start the pacing loop in a daemon thread (until `stop`: a restart swaps the
+        process underneath it)."""
 
         def loop() -> None:
-            while self.proc.poll() is None:
+            while not self._stopped:
                 self.tick()
                 time.sleep(interval)
 
@@ -226,13 +308,7 @@ class Producer:
         return t
 
     def stop(self) -> None:
-        """Terminate ffmpeg (resuming it first, a stopped process ignores SIGTERM until
-        continued) and remove the segment directory."""
-        if self.proc.poll() is None:
-            self._signal(signal.SIGCONT)
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+        """Terminate ffmpeg and remove the segment directory."""
+        self._stopped = True
+        _terminate(self.proc)
         shutil.rmtree(self.out_dir, ignore_errors=True)

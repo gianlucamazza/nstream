@@ -222,9 +222,9 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             name = req[len(prefix) :].decode("ascii", errors="replace")
             # Whitelisted names only: no traversal, and ffmpeg's log beside the segments
             # (or a `.tmp` being written) is never served.
-            if name == live.PLAYLIST:
+            if live.is_playlist_name(name):
                 return os.path.join(srv.hls_dir, name), _HLS_PLAYLIST_TYPE
-            if live.segment_index(name) is not None:
+            if live.segment_id(name) is not None:
                 return os.path.join(srv.hls_dir, name), "video/mp2t"
         return None
 
@@ -278,9 +278,7 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.server.touch(-1)
         producer = self.server.producer
         if producer is not None and write_body:
-            index = live.segment_index(os.path.basename(path))
-            if index is not None:
-                producer.on_request(index)
+            producer.on_request(os.path.basename(path))
 
     def _serve_target(self, path: str, content_type: str, *, write_body: bool) -> None:
         try:
@@ -600,6 +598,18 @@ def _exit_when_idle(server: _FileServer, idle_s: float) -> None:
             return
 
 
+RESTART_REQUEST = "restart.json"
+
+
+def _restart_from_request(producer: live.Producer, hls_dir: str) -> None:
+    try:
+        with open(os.path.join(hls_dir, RESTART_REQUEST), encoding="utf-8") as f:
+            req = json.load(f)
+        producer.restart(float(req["ss"]), int(req["gen"]))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        _log.warning("serve: richiesta di riavvio live non valida (%s)", type(e).__name__)
+
+
 def _main(argv: list[str] | None = None) -> int:
     """Detached entrypoint: `python -m nstream.serve <file> --bind <ip> [--port N]`. Binds, prints
     a `PORT=<n>` line then a `TOKEN=<t>` line on stdout (so the parent learns the ephemeral port
@@ -640,6 +650,17 @@ def _main(argv: list[str] | None = None) -> int:
     # SIGTERM (`--stop`, a new cast, GC) must run the cleanup below: stop the producer and
     # remove its segments, not just die.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    if producer is not None:
+        live_producer = producer
+
+        def restart(*_: object) -> None:
+            # Seek anywhere (`remux.live_seek`): the request is a 0600 file in the live dir
+            # — `{"ss": film time, "gen": N}` — signalled with SIGUSR1. Run off the handler.
+            threading.Thread(
+                target=_restart_from_request, args=(live_producer, args.hls), daemon=True
+            ).start()
+
+        signal.signal(signal.SIGUSR1, restart)
     server = _make_server(
         args.bind, args.file, preferred_port=args.port, sub_path=args.subs, hls_dir=args.hls
     )

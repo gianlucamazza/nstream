@@ -28,9 +28,11 @@ import atexit
 import contextlib
 import dataclasses
 import fcntl
+import json
 import os
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -878,6 +880,7 @@ def _await_live(
     failed: Callable[[], bool],
     label: str,
     measure: dict | None = None,
+    gen: int = 0,
 ) -> bool:
     """Wait until the playlist covers `target_s` (the resume point plus two segments).
     False when the producer fails or makes no progress for `_LIVE_STALL_S`. `measure`
@@ -888,7 +891,7 @@ def _await_live(
     shown = -1
     first: tuple[float, float, int] | None = None  # (wall, produced, bytes) at 1st segment
     while True:
-        done = live.produced_s(out_dir)
+        done = live.produced_s(out_dir, gen)
         now = time.monotonic()
         if done > 0 and first is None:
             first = (now, done, _segment_bytes(out_dir))
@@ -1106,10 +1109,14 @@ _LIVE_NATIVE_SEEK_S = 30.0
 
 
 def live_seek(device: str | None, target: float) -> bool | None:
-    """Seek the active live cast to film time `target`. A far jump re-LOADs the playlist
-    there (clamped to what the producer has made); a short one is the receiver's own seek,
-    in playlist time when the cast started mid-film (`offset`). None when no live cast is
-    active — the caller then uses the normal media-control path."""
+    """Seek the active live cast to film time `target`. None when no live cast is active —
+    the caller then uses the normal media-control path. Three ways, cheapest first:
+
+    - a short jump is the receiver's own seek (in playlist time after a fast resume);
+    - a far jump inside what the producer has made — or will make within its pacing
+      reach, waited for — re-LOADs the playlist there (the receiver clamps far seeks);
+    - anywhere else (before the playlist's start, into pruned segments, or beyond the
+      pacing reach) the producer restarts there as a new generation (`_live_restart`)."""
     st = _read_state()
     if not st or st.get("mode") != "live" or not st.get("url") or not _pid_alive(st.get("pid")):
         return None
@@ -1117,23 +1124,30 @@ def live_seek(device: str | None, target: float) -> bool | None:
     if not dev or dev != st.get("device"):
         return None
     offset = float(st.get("offset") or 0.0)
+    gen = int(st.get("gen") or 0)
     pos = float(caster.status(dev).get("position") or 0.0)  # film time (status adds offset)
     out_dir = str(st.get("file") or "")
-    want = max(0.0, target - offset)
-    if want + 2 * live.SEGMENT_S > live.produced_s(out_dir) and want - (pos - offset) <= (
-        live.AHEAD_MAX_S
-    ):
-        # Ahead of the producer but within its pacing reach: it runs many times faster
-        # than real time, so wait for it rather than land short (field: +25 min → +8).
-        _await_live(out_dir, want + 2 * live.SEGMENT_S, failed=lambda: False, label="")
-    produced = live.produced_s(out_dir)
-    rel = max(0.0, min(want, produced - 2 * live.SEGMENT_S))
+    want = target - offset
+    tl = live.timeline(out_dir, gen)
+    kept = [t for i, t, _ in tl if os.path.exists(os.path.join(out_dir, live.segment_name(gen, i)))]
+    if want < 0 or (kept and want < kept[0]):
+        return _live_restart(st, dev, target)
+    need = want + 2 * live.SEGMENT_S
+    if need > live.produced_s(out_dir, gen):
+        within_reach = want - (pos - offset) <= live.AHEAD_MAX_S
+        if not within_reach or not _await_live(
+            out_dir, need, failed=lambda: False, label="", gen=gen
+        ):
+            return _live_restart(st, dev, target)
     if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
-        return bridge.control(dev, "seek", rel) if offset else None
+        return bridge.control(dev, "seek", want) if offset else None
+    return _live_load(dev, str(st["url"]), str(st.get("title") or ""), want)
+
+
+def _live_load(dev: str, url: str, title: str, at: float) -> bool:
     events = bridge.cast_load(
-        dev, st["url"], follow=False,
-        title=str(st.get("title") or ""), content_type=_HLS_TYPE, current_time=rel,
-    )  # fmt: skip
+        dev, url, follow=False, title=title, content_type=_HLS_TYPE, current_time=at
+    )
     try:
         for ev in events:
             if ev.get("kind") == "started":
@@ -1143,6 +1157,33 @@ def live_seek(device: str | None, target: float) -> bool | None:
     finally:
         events.close()
     return False
+
+
+def _live_restart(st: dict, dev: str, target: float) -> bool:
+    """Ask the detached serve to restart its producer at film time `target` as a new
+    generation (a 0600 request file + SIGUSR1), wait for its first segments, then LOAD the
+    new playlist from 0 with the new offset recorded in the state."""
+    out_dir = str(st.get("file") or "")
+    pid = st.get("pid")
+    gen = int(st.get("gen") or 0) + 1
+    target = max(target, 0.0)
+    try:
+        util.atomic_write_bytes(
+            Path(out_dir, serve.RESTART_REQUEST),
+            json.dumps({"ss": target, "gen": gen}).encode(),
+            prefix=".restart-",
+        )
+        os.kill(int(pid or 0), signal.SIGUSR1)
+    except (OSError, ValueError):
+        return False
+    if not _await_live(
+        out_dir, 2 * live.SEGMENT_S, failed=lambda: not _pid_alive(pid), label="", gen=gen
+    ):
+        return False
+    offset = live.first_pts(out_dir, gen) or target
+    url = f"{str(st['url']).rsplit('/', 1)[0]}/{live.playlist_name(gen)}"
+    _runstate().write({**st, "url": url, "offset": offset, "gen": gen})
+    return _live_load(dev, url, str(st.get("title") or ""), 0.0)
 
 
 def _log_catt_stderr(path: str) -> None:

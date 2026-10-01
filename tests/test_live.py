@@ -60,10 +60,10 @@ def test_on_request_prunes_behind_the_window(tmp_path, monkeypatch):
     monkeypatch.setattr(live, "KEEP_BEHIND_S", 12.0)
     _playlist(tmp_path, 10)
     p = live.Producer(str(tmp_path), cast(Any, _Proc()))
-    p.on_request(5)  # play head at 30 s → keep from 18 s
+    p.on_request("index5.ts")  # play head at 30 s → keep from 18 s
     left = sorted(int(f.stem[5:]) for f in tmp_path.glob("index*.ts"))
     assert left == [3, 4, 5, 6, 7, 8, 9]
-    p.on_request(2)  # a backward request never moves the head back
+    p.on_request("index2.ts")  # a backward request never moves the head back
     assert p.newest_s == 30.0
 
 
@@ -75,7 +75,7 @@ def test_tick_pauses_far_ahead_and_resumes(tmp_path, monkeypatch):
     p = live.Producer(str(tmp_path), cast(Any, proc))
     p.tick()
     assert p.paused and proc.signals == [signal.SIGSTOP]
-    p.on_request(8)  # head at 48 s → 12 s ahead
+    p.on_request("index8.ts")  # head at 48 s → 12 s ahead
     p.tick()
     assert not p.paused and proc.signals[-1] == signal.SIGCONT
 
@@ -116,7 +116,9 @@ def test_hls_route_serves_playlist_and_segments(hls_server):
     with urllib.request.urlopen(base + "index2.ts", timeout=5) as r:
         assert r.headers["Content-Type"] == "video/mp2t"
         r.read()
-    assert seen == [2]  # the segment request advanced the producer's play head
+    assert (
+        seen[-1] == "index2.ts"
+    )  # the segment request reached the producer (it ignores the playlist)
 
 
 @pytest.mark.parametrize("name", ["ffmpeg.log", "../index0.ts", "index0.ts.tmp", "x.m3u8"])
@@ -204,3 +206,44 @@ def test_producer_cmd_fast_resume_seeks_input_and_keeps_timestamps(tmp_path):
     assert "-noaccurate_seek" in cmd and "-copyts" in cmd
     plain = live.producer_cmd("http://127.0.0.1:1/r", str(tmp_path), live.Job("u"))
     assert "-ss" not in plain and "-copyts" not in plain
+
+
+def test_restart_moves_to_a_new_generation(tmp_path, monkeypatch):
+    """Seek anywhere: generation N+1 starts at the requested film time; the old
+    generation's playlist and segments are removed; stale requests are ignored."""
+    _playlist(tmp_path, 3)
+    spawned = []
+
+    def fake_spawn(job, out_dir, gen):
+        spawned.append((job.ss_s, gen))
+        return _Proc()
+
+    monkeypatch.setattr(live, "_spawn", fake_spawn)
+    monkeypatch.setattr(live, "_terminate", lambda proc: None)
+    p = live.Producer(str(tmp_path), cast(Any, _Proc()), job=live.Job("u"), newest_s=100.0)
+    assert p.restart(4000.0, 1) is True
+    assert spawned == [(4000.0, 1)] and p.gen == 1 and p.newest_s == 0.0
+    assert not (tmp_path / live.PLAYLIST).exists() and not list(tmp_path.glob("index*.ts"))
+    assert p.restart(10.0, 1) is False  # a stale/duplicate request never goes back
+    p.on_request("index2.ts")  # the old generation: ignored
+    assert p.newest_s == 0.0
+
+
+def test_generation_names():
+    assert live.playlist_name(0) == "index.m3u8" and live.playlist_name(2) == "g2.m3u8"
+    assert live.segment_id("g2_14.ts") == (2, 14) and live.segment_id("index3.ts") == (0, 3)
+    assert live.segment_id("g2_14.ts.tmp") is None and not live.is_playlist_name("x.m3u8")
+
+
+def test_serve_restart_request_reaches_the_producer(tmp_path):
+    seen = []
+
+    class _P:
+        def restart(self, ss, gen):
+            seen.append((ss, gen))
+
+    (tmp_path / serve.RESTART_REQUEST).write_text('{"ss": 1200.5, "gen": 2}')
+    serve._restart_from_request(cast(Any, _P()), str(tmp_path))
+    (tmp_path / serve.RESTART_REQUEST).write_text("garbage")
+    serve._restart_from_request(cast(Any, _P()), str(tmp_path))  # logged, not raised
+    assert seen == [(1200.5, 2)]
