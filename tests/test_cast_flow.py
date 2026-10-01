@@ -1105,3 +1105,45 @@ def test_subtitles_are_fetched_while_the_remux_runs(monkeypatch):
     monkeypatch.setattr(cast_flow.subs, "align_local", lambda cfg, pick, *a, **k: pick)
     out = _run(_opts(), stream)
     assert out.reencoded is True and seen is not None
+
+
+def _session(monkeypatch, *, video_id, device, pos):
+    monkeypatch.setattr(
+        cast_flow.state, "cast_session_info", lambda: {"video_id": video_id, "device": device}
+    )
+    monkeypatch.setattr(
+        cast_flow.caster, "status", lambda d: {"position": pos, "duration": 6000.0, "title": "T"}
+    )
+    merged = []
+    monkeypatch.setattr(
+        cast_flow.state, "update_from_receiver", lambda *a, **k: merged.append(a[2]) or True
+    )
+    return merged
+
+
+def test_handoff_start_takes_the_live_position_of_the_same_title(monkeypatch):
+    """Recasting what the TV plays (another dub after a long remux) resumes where the TV
+    is at LOAD time, not where it was when the command began; the position is merged."""
+    merged = _session(monkeypatch, video_id="tt1", device="10.0.0.5", pos=865.0)
+    assert cast_flow._handoff_start(CFG, "10.0.0.5", "tt1", 60.0) == 865.0
+    assert merged == [865.0]
+
+
+@pytest.mark.parametrize(
+    ("video_id", "device", "pos", "start"),
+    [
+        ("tt2", "10.0.0.5", 865.0, 60.0),  # another title: its position is not ours
+        ("tt1", "10.0.0.9", 865.0, 60.0),  # another TV
+        ("tt1", "10.0.0.5", 30.0, 60.0),  # receiver behind the stored resume point
+    ],
+)
+def test_handoff_start_keeps_start_otherwise(monkeypatch, video_id, device, pos, start):
+    merged = _session(monkeypatch, video_id=video_id, device=device, pos=pos)
+    assert cast_flow._handoff_start(CFG, "10.0.0.5", "tt1", start) == start
+    assert merged == []
+
+
+def test_handoff_start_without_session_asks_nobody(monkeypatch):
+    monkeypatch.setattr(cast_flow.state, "cast_session_info", lambda: None)
+    monkeypatch.setattr(cast_flow.caster, "status", lambda d: pytest.fail("no receiver query"))
+    assert cast_flow._handoff_start(CFG, "10.0.0.5", "tt1", None) is None

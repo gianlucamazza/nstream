@@ -160,6 +160,27 @@ class CastOutcome:
     # The planned remux failed and the file went out as-is: what plays is unknown (maybe
     # mute). Callers must not fall back to a pre-cast language guess.
     audio_degraded: bool = False
+    start: float | None = None  # the position the delivery was LOADed at (see `_handoff_start`)
+
+
+def _handoff_start(cfg: Config, device: str, video_id: str, start: float | None) -> float | None:
+    """The resume point at the moment of the LOAD, not at command start. Recasting the title
+    the TV is already playing (another dub, a retry) used to restart from the position frozen
+    when the command began — before a remux that can take minutes, while the old cast kept
+    playing — and the merge into history was dropped by `clear_cast_session`. A live session
+    for the same video on the same device is asked once; its position wins when it is later,
+    and is merged into history like `--status` does."""
+    session = state.cast_session_info()
+    if not session or session.get("video_id") != video_id or session.get("device") != device:
+        return start
+    info = caster.status(device)
+    pos = float(info.get("position") or 0.0)
+    if pos <= (start or 0.0):
+        return start
+    state.update_from_receiver(
+        cfg, device, pos, float(info.get("duration") or 0.0), title=info.get("title")
+    )
+    return pos
 
 
 def _defer_to_instant(
@@ -535,6 +556,7 @@ def run_cast(
     sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
     _log.info("cast '%s' → %s (%s/%s)", title, device, plan.mode, plan.real_lang or "?")
     if use_mirror:
+        start = _handoff_start(cfg, device, video_id, start)
         if mirror_notice:
             notice = mirror_notice
             notices.emit(f"{notice}")
@@ -570,6 +592,7 @@ def run_cast(
             subs.report_safety_subs(subs_pick, safety_sub_lang)
             sub_paths = subs_pick.paths
             sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
+        start = _handoff_start(cfg, device, video_id, start)
         if remux_path:
             # Tier 2 of the subtitle pipeline (ADR 0020): the remux output IS the local
             # media file the receiver will play — align the delivered subtitle against
@@ -654,5 +677,5 @@ def run_cast(
         audio_verified=plan.verified and not degraded_audio,
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
         sub_match=subs_pick.match, sub_offset=subs_pick.offset_s,
-        subs_delivered=subs_delivered, audio_degraded=degraded_audio,
+        subs_delivered=subs_delivered, audio_degraded=degraded_audio, start=start,
     )  # fmt: skip

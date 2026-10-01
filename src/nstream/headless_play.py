@@ -355,7 +355,7 @@ def auto_play(
                 # record that this title/episode started (a later `-c` proposes it instead
                 # of restarting the series at S01E01); `--stop`/`--status` merge the real
                 # receiver position into it via the cast session.
-                started = _hist_entry(float(start or 0.0), 0.0)
+                started = _hist_entry(float(outcome.start or 0.0), 0.0)
                 state.note_started(cfg, started)
                 if action == "cast":  # mirror has no DMR media session to read back
                     # Session key = the resolved IP (`device`), NOT `device_name`: --stop
