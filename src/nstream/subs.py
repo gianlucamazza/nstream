@@ -1,8 +1,8 @@
-"""Subtitle acquisition + the pre-play audio/subtitle track menu.
+"""Subtitle acquisition.
 
 Fetch OpenSubtitles tracks, rank by preferred language, download (gunzip) into the
-per-play temp dir. Also owns `choose_tracks` (the fzf menu over ffprobe tracks +
-OpenSubtitles) so the orchestrator stays free of leaf-menu code."""
+per-play temp dir. Menus are injected (ADR 0037); the pre-play track menu lives in
+`menus.choose_tracks`."""
 
 from __future__ import annotations
 
@@ -13,17 +13,18 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast as typecast
+from typing import Any
 
-from . import api, log, oshash, srt, subalign, tracks, ui
+from . import api, log, oshash, srt, subalign, tracks
 from .config import Config, PlayOpts
-from .labels import audio_summary, sub_summary, track_label
-from .picker import fzf
 from .types import Stream, Subtitle
 
+# The frontend's single-choice menu `(rows, prompt) -> value | None` (ADR 0037).
+Choose = Callable[[list[tuple[str, Any]], str], Any]
+
 _log = log.get_logger("subs")
-_PLAY, _AUDIO, _SUBS, _AUTO, _OPENSUBS = (object() for _ in range(5))
 
 
 @dataclass(frozen=True)
@@ -60,55 +61,6 @@ def stream_filename(stream: Stream) -> str | None:
     hints = stream.get("behaviorHints")
     name = hints.get("filename") if isinstance(hints, dict) else None
     return name if isinstance(name, str) and name else None
-
-
-def choose_tracks(
-    cfg: Config, url: str, typ: str, video_id: str, work_dir: str
-) -> tuple[int | None, str | int | None, tuple[str, ...]] | None:
-    """Pre-play menu to pick the audio/subtitle track from those actually in the file
-    (probed with ffprobe). Returns (audio_id, sub_id, sub_paths), or None if the user
-    backs out (ESC). With ffprobe unavailable, skips silently to mpv's defaults."""
-    tr = tracks.probe_tracks(url)
-    if tr.empty():
-        print("nstream: tracce non sondabili (ffprobe assente?), uso i default", file=sys.stderr)
-        return (None, None, ())
-
-    aid: int | None = None
-    sid: int | str | None = None
-    sub_paths: tuple[str, ...] = ()
-    # Sentinels: fzf returns None for ESC, so "automatic" can't be a None *value*.
-    while True:
-        items: list[tuple[str, object]] = [
-            (f"{ui.g().play}  Avvia", _PLAY),
-            (f"{ui.g().audio} Audio: {audio_summary(aid, tr)}", _AUDIO),
-            (f"{ui.g().subs} Sottotitoli: {sub_summary(sid, sub_paths, tr)}", _SUBS),
-        ]
-        chosen = fzf(items, "riproduzione> ")
-        if chosen is None:
-            return None
-        if chosen is _PLAY:
-            return (aid, sid, sub_paths)
-        if chosen is _AUDIO:
-            opts: list[tuple[str, object]] = [("automatico (lingua preferita)", _AUTO)]
-            opts += [(track_label(a), a.id) for a in tr.audio]
-            pick = fzf(opts, "audio> ")
-            if pick is _AUTO:
-                aid = None
-            elif pick is not None:
-                aid = typecast(int, pick)
-        else:  # _SUBS
-            sopts: list[tuple[str, object]] = [("nessuno", "no")]
-            sopts += [(track_label(s), s.id) for s in tr.subs]
-            sopts.append(("OpenSubtitles… (esterni)", _OPENSUBS))
-            pick = fzf(sopts, "sottotitoli> ")
-            if pick is None:
-                continue
-            if pick is _OPENSUBS:
-                got = pick_subtitles(cfg, typ, video_id, work_dir, mode="menu", video_url=url)
-                if got:
-                    sub_paths, sid = got, None
-            else:
-                sid, sub_paths = typecast("str | int", pick), ()
 
 
 def _download_subtitle(sub: Subtitle, work_dir: str) -> str | None:
@@ -154,10 +106,13 @@ def pick_subtitles(
     mode: str = "auto",
     lang: str | None = None,
     video_url: str | None = None,
+    choose: Choose | None = None,
 ) -> tuple[str, ...]:
     """Back-compat façade over `_pick` for callers that only need the file paths
     (the interactive menu). The no-menu paths use `auto_subs` → SubsPick."""
-    return _pick(cfg, typ, video_id, work_dir, mode=mode, lang=lang, video_url=video_url).paths
+    return _pick(
+        cfg, typ, video_id, work_dir, mode=mode, lang=lang, video_url=video_url, choose=choose
+    ).paths
 
 
 def _pick(
@@ -170,10 +125,12 @@ def _pick(
     lang: str | None = None,
     video_url: str | None = None,
     filename: str | None = None,
+    choose: Choose | None = None,
 ) -> SubsPick:
-    """Fetch, rank and download one subtitle track. With `video_url` the stream's OSHash
-    is computed first (two 64 KB ranged reads) and hash-matched tracks — timed for the
-    exact file — win within a language (ADR 0018). Language stays the primary key: a
+    """Fetch, rank and download one subtitle track. `mode="menu"` asks through the injected
+    `choose` (ADR 0037); without one it falls back to the automatic pick. With `video_url`
+    the stream's OSHash is computed first (two 64 KB ranged reads) and hash-matched tracks —
+    timed for the exact file — win within a language (ADR 0018). Language stays the primary key: a
     perfectly synced track in the wrong language helps nobody."""
     video_hash: str | None = None
     video_size = 0
@@ -196,7 +153,7 @@ def _pick(
     langs = [lang] if lang else cfg.subtitle_langs
     pref = {code: i for i, code in enumerate(langs)}
     subs.sort(key=lambda s: (pref.get(s.get("lang", ""), len(pref)), not s.get("hash_match")))
-    if mode == "menu":
+    if mode == "menu" and choose is not None:
         items = [
             (
                 f"{s.get('lang', '?'):5s} {s.get('id', '')}"
@@ -205,7 +162,7 @@ def _pick(
             )
             for s in subs
         ]
-        chosen = fzf(items, "sottotitoli> ")
+        chosen = choose(items, "sottotitoli> ")
         if not chosen:
             return SubsPick()
         path = _download_subtitle(chosen, work_dir)
@@ -340,6 +297,7 @@ def auto_subs(
         pick = _pick(
             cfg, typ, video_id, work_dir,
             mode=opts.sub_mode, lang=opts.sub_lang, video_url=video_url, filename=filename,
+            choose=opts.choose,
         )  # fmt: skip
     if pick.paths and (opts.sub_offset or opts.sub_scale != 1.0):
         for p in pick.paths:

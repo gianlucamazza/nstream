@@ -31,9 +31,10 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
 - **Domain never prompts (ADR 0037):** whether a run may ask is `PlayOpts.interactive`, set by
   the frontend (TUI True, `--json` False) — never a TTY probe. Yes/no questions arrive as the
   injected `PlayOpts.confirm`. Domain modules must not import `picker`/`labels`; the remaining
-  pre-0037 edges (fzf menus in `caster`, `stream_select`, `subs`) are listed in
+  pre-0037 edges (fzf menus in `stream_select`) are listed in
   `tests/test_architecture.py::_KNOWN_DEBT`, which may only shrink
 - Machine output: every `--json` object goes through `log.emit_json` (scrubbed)
+- Menus: `menus` (frontend tier) holds the TUI menus over domain data — `choose_tracks`
 - Failures: `failures.describe` maps a domain exception to one `Failure(code, message, hint,
   fields)` for both the TUI notice and the `--json` error (orchestration tier, frontends only)
 - Candidate pass shared by play, `--explain`, `--probe`: `stream_select.prepare_candidates`

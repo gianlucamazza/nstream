@@ -55,11 +55,12 @@ from .labels import (
     history_label,
     meta_label,
 )
+from .menus import choose_tracks  # re-export: tests + _play_on_mpv
 from .picker import ask_query, fzf, fzf_key
 from .picker import confirm as _fzf_confirm
 from .playback import PlaybackError
 from .player import play
-from .subs import auto_subs, choose_tracks  # re-export: tests + _play_on_mpv
+from .subs import auto_subs
 from .types import (
     HistoryEntry,
     Meta,

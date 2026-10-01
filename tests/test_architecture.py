@@ -77,8 +77,6 @@ _TUI = {"picker", "labels"}
 _KNOWN_DEBT = {
     ("stream_select", "picker"),
     ("stream_select", "labels"),
-    ("subs", "picker"),
-    ("subs", "labels"),
 }
 
 

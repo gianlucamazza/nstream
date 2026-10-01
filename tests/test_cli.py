@@ -12,7 +12,7 @@ import threading
 
 import pytest
 
-from nstream import cast_delivery, cast_flow, cli, subs
+from nstream import cast_delivery, cast_flow, cli, menus, subs
 from nstream.config import Config
 from nstream.playback import PlaybackOutcome
 from nstream.types import HistoryEntry, Meta, Stream
@@ -687,9 +687,8 @@ def test_choose_tracks_empty_when_no_probe(monkeypatch):
 
 
 def test_choose_tracks_pick_audio_then_play(monkeypatch):
-    from nstream import subs
 
-    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
+    monkeypatch.setattr(menus.tracks, "probe_tracks", lambda *a, **k: _TR)
     # main: pick Audio → submenu: pick track id 2 → main: pick ▶ Avvia
     captured = {}
 
@@ -702,23 +701,21 @@ def test_choose_tracks_pick_audio_then_play(monkeypatch):
             return items[2][1]  # track id 2 (after "automatico")
         return items[0][1]  # ▶ Avvia
 
-    monkeypatch.setattr(subs, "fzf", fzf)
+    monkeypatch.setattr(menus, "fzf", fzf)
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (2, None, ())
 
 
 def test_choose_tracks_esc_returns_none(monkeypatch):
-    from nstream import subs
 
-    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
+    monkeypatch.setattr(menus.tracks, "probe_tracks", lambda *a, **k: _TR)
     it = iter([None])
-    monkeypatch.setattr(subs, "fzf", lambda *a, **k: next(it))
+    monkeypatch.setattr(menus, "fzf", lambda *a, **k: next(it))
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") is None
 
 
 def test_choose_tracks_subs_none(monkeypatch):
-    from nstream import subs
 
-    monkeypatch.setattr(subs.tracks, "probe_tracks", lambda *a, **k: _TR)
+    monkeypatch.setattr(menus.tracks, "probe_tracks", lambda *a, **k: _TR)
     seen_menu = False
 
     def fzf(items, prompt, *, header=None):
@@ -730,7 +727,7 @@ def test_choose_tracks_subs_none(monkeypatch):
             return items[0][1]  # "nessuno" → "no"
         return items[0][1]  # ▶ Avvia
 
-    monkeypatch.setattr(subs, "fzf", fzf)
+    monkeypatch.setattr(menus, "fzf", fzf)
     assert cli.choose_tracks(CFG, "http://u", "movie", "id", "/tmp") == (None, "no", ())
 
 

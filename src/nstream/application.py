@@ -41,7 +41,7 @@ def play_local(
     *,
     backend: Callable[..., PlaybackOutcome] = player.play,
     acquire_subs: Callable[..., subs.SubsPick] = subs.auto_subs,
-    choose_tracks: Callable = subs.choose_tracks,
+    choose_tracks: Callable | None = None,
 ) -> LocalResult | None:
     """Apply identical language/subtitle policy and evidence checks in TUI and JSON.
 
@@ -51,7 +51,7 @@ def play_local(
     started = time.monotonic()
     aid: int | None = None
     sid: int | str | None = None
-    if request.auto:
+    if request.auto or choose_tracks is None:  # no frontend menu → the automatic policy
         pick = acquire_subs(
             cfg,
             request.typ,

@@ -57,12 +57,20 @@ def test_pick_subtitles_lang_override(monkeypatch, stub_download, tmp_path):
     assert stub_download["sub"]["lang"] == "eng"
 
 
-def test_pick_subtitles_menu_uses_fzf(monkeypatch, stub_download, tmp_path):
+def test_pick_subtitles_menu_uses_injected_choose(monkeypatch, stub_download, tmp_path):
     tracks = [{"lang": "ita", "url": "u"}, {"lang": "eng", "url": "u"}]
     monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks))
-    monkeypatch.setattr(subs, "fzf", lambda items, prompt: items[-1][1])  # pick last
-    subs.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="menu")
+    pick_last = lambda items, prompt: items[-1][1]  # noqa: E731
+    subs.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="menu", choose=pick_last)
     assert stub_download["sub"]["lang"] == "eng"
+
+
+def test_menu_mode_without_choose_falls_back_to_auto(monkeypatch, stub_download, tmp_path):
+    # ADR 0037: no injected menu (e.g. --json) never opens one; the automatic pick applies.
+    tracks = [{"lang": "ita", "url": "u"}, {"lang": "eng", "url": "u"}]
+    monkeypatch.setattr(subs.api, "subtitles", lambda *a, **k: list(tracks))
+    subs.pick_subtitles(CFG, "movie", "id", str(tmp_path), mode="menu")
+    assert stub_download["sub"]["lang"] == "ita"
 
 
 def test_pick_subtitles_none_available(monkeypatch, tmp_path):
