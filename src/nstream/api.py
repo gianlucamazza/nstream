@@ -207,6 +207,7 @@ def _gather(
         for i, t, lab, key, probe in active
         for is_prim in (prim[i],)
     }
+    probe_keys = {key for _i, _t, _lab, key, probe in active if probe}
     primary_left = sum(1 for v in fut_map.values() if v[3])
     quorum_cut = False
     try:
@@ -247,9 +248,12 @@ def _gather(
             f.cancel()
             i, lab, key, _is_prim = fut_map[f]
             results_by_i.setdefault(i, [])
-            if quorum_cut:
+            if quorum_cut and key not in probe_keys:
                 _log.info("addon lento, risultati principali già arrivati → salto (%s)", lab)
                 continue
+            # A half-open probe that didn't answer in time failed its health check, even
+            # when the quorum cut it: otherwise the key stays half-open, is re-probed on
+            # every lease expiry, and its cooldown never grows.
             timed_out += 1
             _note(key, "timeout")
             _log.warning("addon oltre il budget di %.0fs → scartato (%s)", _GATHER_BUDGET, lab)

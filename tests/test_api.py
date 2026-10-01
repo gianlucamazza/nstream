@@ -846,3 +846,27 @@ def test_gather_applies_one_breaker_effect_per_key(monkeypatch):
 
     api._gather([down, down], keys=["http://x", "http://x"])
     assert records == [("f", "http://x")]
+
+
+def test_gather_probe_cut_by_quorum_counts_as_failure(monkeypatch):
+    from nstream.state import breaker
+
+    release = threading.Event()
+    records = []
+    monkeypatch.setattr(breaker, "admit", lambda key: "probe" if key == "http://dead" else "normal")
+    monkeypatch.setattr(breaker, "record_failure", lambda key, **k: records.append(("f", key)))
+    monkeypatch.setattr(breaker, "record_success", lambda key: records.append(("s", key)))
+    monkeypatch.setattr(api, "_QUORUM_GRACE_S", 0.05)
+
+    def hang():
+        release.wait(5)
+        return []
+
+    try:
+        api._gather(
+            [lambda: ["cinemeta"], hang], keys=["http://cine", "http://dead"],
+            primary=[True, False],
+        )  # fmt: skip
+    finally:
+        release.set()
+    assert ("f", "http://dead") in records
