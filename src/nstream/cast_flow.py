@@ -573,6 +573,8 @@ def run_cast(
             f"{ui.g().warn} sottotitoli scaricati ma non caricati sul TV",
             code="subs_not_delivered",
         )
+    elif sub_paths:
+        subs.report_unverified(subs_pick, hint="se sfasati: --sub-offset ±s")
     if delivery.started:
         # The new cast replaced the TV's content: a previous fire-and-return session no
         # longer describes it (the headless caller writes a fresh one right after). Cleared

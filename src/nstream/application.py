@@ -63,6 +63,7 @@ def play_local(
             filename=subs.stream_filename(request.stream),
         )
         subs.report_safety_subs(pick, request.safety_sub_lang)
+        subs.report_unverified(pick, hint="se sfasati: z / Z in mpv")
     else:
         tracks = choose_tracks(
             cfg, request.stream["url"], request.typ, request.video_id, request.work_dir

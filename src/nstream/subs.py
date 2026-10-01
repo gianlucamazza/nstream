@@ -58,6 +58,18 @@ def report_safety_subs(pick: SubsPick, lang: str | None) -> None:
         notices.emit(f"sottotitoli {lang} attivati")
 
 
+def report_unverified(pick: SubsPick, *, hint: str) -> None:
+    """Say when the delivered track is a language guess (`match == "lang"`): neither hash-
+    matched nor aligned to the audio, so it may run early or late. Called once the final
+    pick is known (after any local alignment) — `hint` names the fix on that path."""
+    if pick.paths and pick.match == "lang":
+        notices.emit(
+            f"sottotitoli scelti per lingua: sincronia non verificata ({hint})",
+            code="subs_unverified",
+            level="info",
+        )
+
+
 def stream_filename(stream: Stream) -> str | None:
     """The release filename Torrentio exposes in behaviorHints — the `filename` extra of
     a subtitles hash query (improves matching per the OpenSubtitles guidance)."""

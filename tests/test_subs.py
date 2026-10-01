@@ -477,3 +477,11 @@ def test_choose_moves_on_when_a_download_fails(monkeypatch, tmp_path):
     pick = subs._choose(pool, {"ita": 0}, str(tmp_path))
     assert pick is not None and pick.paths == (got["u2"],) and pick.lang == "ita"
     assert [a["url"] for a in pick.alternates] == ["u3"]
+
+
+@pytest.mark.parametrize(("match", "said"), [("lang", True), ("audio", False), ("hash", False)])
+def test_report_unverified_only_for_language_guesses(match, said):
+    with subs.notices.capture() as bag:
+        subs.report_unverified(subs.SubsPick(("/s.srt",), match), hint="h")
+        subs.report_unverified(subs.SubsPick(), hint="h")  # nothing delivered: silent
+    assert [n.code for n in bag] == (["subs_unverified"] if said else [])
