@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import replace
@@ -781,18 +782,67 @@ def test_gather_client_error_counts_as_availability(monkeypatch):
 
 
 def test_gather_decides_breaker_once_per_key(monkeypatch):
+    # One admit() per addon per gather; a Half-Open key sends a single probe task and its
+    # sibling (movie+series search share the key) waits for the verdict.
     from nstream.state import breaker
 
     calls = []
-    leased = {"taken": False}
-
-    def allow(key):  # half-open: only the first caller gets the probe lease
-        calls.append(key)
-        first = not leased["taken"]
-        leased["taken"] = True
-        return first
-
-    monkeypatch.setattr(breaker, "allow", allow)
+    monkeypatch.setattr(breaker, "admit", lambda key: calls.append(key) or "probe")
     monkeypatch.setattr(breaker, "record_success", lambda *a: None)
     rows = api._gather([lambda: [1], lambda: [2]], keys=["http://a", "http://a"])
-    assert calls == ["http://a"] and rows == [1, 2]
+    assert calls == ["http://a"] and rows == [1]
+
+
+def test_gather_half_open_probe_is_bounded(monkeypatch):
+    # Field case 2026-10-01: a dead addon's half-open probe used the whole 25s budget.
+    from nstream import net
+    from nstream.state import breaker
+
+    seen = []
+    monkeypatch.setattr(breaker, "admit", lambda key: "probe")
+    monkeypatch.setattr(breaker, "record_failure", lambda *a, **k: None)
+    monkeypatch.setattr(breaker, "record_success", lambda *a: None)
+    api._gather([lambda: seen.append(net.remaining()) or []], keys=["http://dead"])
+    assert seen and seen[0] <= breaker.PROBE_BUDGET_S + 0.1
+
+
+def test_gather_quorum_drops_slow_secondary_without_breaker_failure(monkeypatch):
+    from nstream.state import breaker
+
+    release = threading.Event()
+    records = []
+    monkeypatch.setattr(breaker, "admit", lambda key: "normal")
+    monkeypatch.setattr(breaker, "record_failure", lambda *a, **k: records.append("fail"))
+    monkeypatch.setattr(breaker, "record_success", lambda key: records.append(key))
+    monkeypatch.setattr(api, "_QUORUM_GRACE_S", 0.05)
+
+    def slow():
+        release.wait(5)
+        return ["late"]
+
+    t0 = time.monotonic()
+    try:
+        rows = api._gather(
+            [lambda: ["cinemeta"], slow], keys=["http://cine", "http://slow"],
+            primary=[True, False],
+        )  # fmt: skip
+    finally:
+        release.set()
+    assert rows == ["cinemeta"]
+    assert time.monotonic() - t0 < 2.0
+    assert records == ["http://cine"]  # slow is not down: no failure recorded
+
+
+def test_gather_applies_one_breaker_effect_per_key(monkeypatch):
+    from nstream.state import breaker
+
+    records = []
+    monkeypatch.setattr(breaker, "admit", lambda key: "normal")
+    monkeypatch.setattr(breaker, "record_failure", lambda key, **k: records.append(("f", key)))
+    monkeypatch.setattr(breaker, "record_success", lambda key: records.append(("s", key)))
+
+    def down():
+        raise api.NetworkError("giù")
+
+    api._gather([down, down], keys=["http://x", "http://x"])
+    assert records == [("f", "http://x")]

@@ -19,8 +19,15 @@ _log = log.get_logger("breaker")
 # Consecutive retryable failures before Open. Matches the field arithmetic of a full
 # timeout budget (~80s) being paid a few times without recovery.
 FAIL_THRESHOLD = 3
-# Seconds to stay Open before a single Half-Open probe is allowed.
+# Seconds to stay Open before a single Half-Open probe is allowed — the first time. Each
+# consecutive trip doubles it up to MAX_COOLDOWN_S, so a chronically dead addon stops being
+# re-probed every 5 minutes (field case 2026-10-01: a dead TMDB addon cost every cold
+# search a 25s probe). A success resets the count.
 OPEN_COOLDOWN_S = 300.0
+MAX_COOLDOWN_S = 6 * 3600.0
+# Network budget of a Half-Open probe: enough for a live addon to answer, never the whole
+# gather budget for a dead one.
+PROBE_BUDGET_S = 4.0
 HALF_OPEN_LEASE_S = 30.0
 MAX_ENTRIES = 64
 
@@ -69,36 +76,47 @@ def _now() -> float:
     return time.time()
 
 
-@util.state_update(_path, True)
-def allow(key: str, *, now: float | None = None) -> bool:
-    """True if this addon base may be queried. Open → False until cooldown; then Half-Open."""
+def cooldown(rec: dict) -> float:
+    """Open duration before the next probe: doubles per consecutive trip, capped."""
+    trips = max(1, int(rec.get("trips") or 1))
+    return min(OPEN_COOLDOWN_S * 2 ** (trips - 1), MAX_COOLDOWN_S)
+
+
+@util.state_update(_path, "normal")
+def admit(key: str, *, now: float | None = None) -> str | None:
+    """How this addon base may be queried: "normal", "probe" (the single Half-Open probe —
+    the caller bounds it with PROBE_BUDGET_S) or None (Open: skip without network)."""
     if not key:
-        return True
+        return "normal"
     now = _now() if now is None else now
     rec = _read().get(key)
     if not rec:
-        return True
+        return "normal"
     state = rec.get("state") or "closed"
     if state == "closed":
-        return True
+        return "normal"
     if state == "open":
         opened = float(rec.get("opened_at") or 0.0)
-        if now - opened >= OPEN_COOLDOWN_S:
-            # Transition to half-open in memory for this process; first success/fail settles.
-            rec = {**rec, "state": "half_open", "ts": now}
+        if now - opened >= cooldown(rec):
+            # Transition to half-open; the first success/fail settles it.
             entries = _read()
-            entries[key] = rec
+            entries[key] = {**rec, "state": "half_open", "ts": now}
             _write(entries)
             _log.info("breaker half-open: %s", key)
-            return True
-        return False
+            return "probe"
+        return None
     if now - float(rec.get("ts") or 0) < HALF_OPEN_LEASE_S:
-        return False
+        return None
     # A process may have exited while holding the probe lease; allow recovery.
     entries = _read()
     entries[key] = {**rec, "ts": now}
     _write(entries)
-    return True
+    return "probe"
+
+
+def allow(key: str, *, now: float | None = None) -> bool:
+    """True if this addon base may be queried (see `admit`)."""
+    return admit(key, now=now) is not None
 
 
 @util.state_update(_path)
@@ -107,6 +125,8 @@ def record_success(key: str) -> None:
         return
     entries = _read()
     prev = entries.get(key) or {}
+    if prev.get("state", "closed") == "closed" and not prev.get("fails") and key in entries:
+        return  # already healthy: no rewrite (and no fsync) per completed task
     if prev.get("state") in ("open", "half_open") or prev.get("fails", 0):
         _log.info("breaker closed: %s", key)
     entries[key] = {"state": "closed", "fails": 0, "ts": _now()}
@@ -121,16 +141,22 @@ def record_failure(key: str, *, reason: str = "") -> None:
     entries = _read()
     rec = dict(entries.get(key) or {})
     state = rec.get("state") or "closed"
+    if state == "open":
+        return  # already open: nothing to count (a second task of the same gather)
     if state == "half_open":
+        trips = int(rec.get("trips") or 1) + 1
         entries[key] = {
             "state": "open",
             "fails": FAIL_THRESHOLD,
             "opened_at": _now(),
             "ts": _now(),
+            "trips": trips,
             "reason": reason or rec.get("reason") or "timeout",
         }
         _write(entries)
-        _log.warning("breaker open (half-open failed): %s", key)
+        _log.warning(
+            "breaker open (half-open failed, riprovo tra %.0fs): %s", cooldown(entries[key]), key
+        )
         return
     fails = int(rec.get("fails") or 0) + 1
     if fails >= FAIL_THRESHOLD:
@@ -139,6 +165,7 @@ def record_failure(key: str, *, reason: str = "") -> None:
             "fails": fails,
             "opened_at": _now(),
             "ts": _now(),
+            "trips": 1,
             "reason": reason or "network",
         }
         _write(entries)

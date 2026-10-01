@@ -88,3 +88,33 @@ def test_state_package_exports(tmp_path, monkeypatch):
     assert state.breaker_allow("http://x") is True
     state.breaker_record_success("http://x")
     assert state.forget_breakers() >= 0
+
+
+def test_cooldown_doubles_per_trip_and_resets_on_success(tmp_path, monkeypatch):
+    # A chronically dead addon must not be re-probed every 5 minutes forever.
+    from nstream.state import breaker as brk
+
+    now = [1000.0]
+    monkeypatch.setattr(brk, "_now", lambda: now[0])
+    for _ in range(brk.FAIL_THRESHOLD):
+        brk.record_failure("http://dead")
+    assert brk.admit("http://dead") is None
+    now[0] += brk.OPEN_COOLDOWN_S
+    assert brk.admit("http://dead") == "probe"
+    brk.record_failure("http://dead")  # half-open probe failed → second trip
+    now[0] += brk.OPEN_COOLDOWN_S
+    assert brk.admit("http://dead") is None  # cooldown is now 2x
+    now[0] += brk.OPEN_COOLDOWN_S
+    assert brk.admit("http://dead") == "probe"
+    brk.record_success("http://dead")
+    assert brk.admit("http://dead") == "normal"
+
+
+def test_record_success_skips_rewrite_when_already_closed(monkeypatch):
+    from nstream.state import breaker as brk
+
+    brk.record_success("http://ok")
+    writes = []
+    monkeypatch.setattr(brk, "_write", lambda e: writes.append(e))
+    brk.record_success("http://ok")
+    assert writes == []

@@ -46,6 +46,8 @@ _addon_pool = net.AddonPool(workers=_MAX_WORKERS)
 # dropped — same best-effort spirit as `_safe` with NetworkError — so one hung addon
 # never holds the picker hostage.
 _GATHER_BUDGET = 25.0
+# Minimum wait for secondary sources once the authoritative ones answered (`_gather`).
+_QUORUM_GRACE_S = 1.5
 # In-process TTL cache for token-free metadata (search/catalog/meta/episodes). Each
 # CLI run is a fresh process, but the home TUI / browse / pick loops live in one
 # process, so this makes back-navigation and re-browse within a session instant.
@@ -108,6 +110,7 @@ def _gather(
     *,
     labels: list[str] | None = None,
     keys: list[str] | None = None,
+    primary: list[bool] | None = None,
 ) -> list:
     """Run per-addon/per-type fetch tasks concurrently, flattening results in task
     order (so the built-in providers keep priority for dedup). A task raising
@@ -117,8 +120,14 @@ def _gather(
     Single-source requests use the same worker/deadline path.
 
     `keys` (addon base URLs) feed the per-addon circuit breaker (ADR 0027): Open
-    sources are skipped without network; failures/timeouts count toward Open; any
-    completed HTTP (even empty streams) counts as success.
+    sources are skipped without network; a Half-Open source sends ONE probe task bounded
+    by `breaker.PROBE_BUDGET_S` (a dead addon used to cost every cold run the full
+    budget); failures/timeouts count toward Open; any completed HTTP (even empty or a
+    4xx) counts as success. Effects are applied once per key, after collection.
+
+    `primary` marks authoritative tasks (built-in Cinemeta for search): once all of them
+    finished, the others get a short grace — `max(_QUORUM_GRACE_S, 2× primary latency)` —
+    and are then dropped without a breaker effect (slow is not down).
 
     On a TTY, multi-task gathers update progress as futures *complete* (not submit order)."""
     from concurrent.futures import as_completed
@@ -131,21 +140,26 @@ def _gather(
     n = len(tasks)
     names = labels if labels and len(labels) == n else [f"#{i + 1}" for i in range(n)]
     bases = keys if keys and len(keys) == n else [""] * n
+    prim = primary if primary and len(primary) == n else [False] * n
 
-    # Skip Open breakers before paying network (ADR 0027).
-    active: list[tuple[int, Callable[[], list], str, str]] = []
+    # One breaker decision per addon per gather (ADR 0027): movie + series search share a
+    # key. A Half-Open key sends a single bounded probe; its siblings wait for the verdict.
+    modes: dict[str, str | None] = {}
+    active: list[tuple[int, Callable[[], list], str, str, bool]] = []
     skipped = 0
-    # One breaker decision per addon per gather: movie + series search share a key, and a
-    # second `allow()` would see the lease the first just took and skip the half-open probe.
-    allowed: dict[str, bool] = {}
+    probing: set[str] = set()
     for i, t in enumerate(tasks):
-        if bases[i] and bases[i] not in allowed:
-            allowed[bases[i]] = brk.allow(bases[i])
-        if bases[i] and not allowed[bases[i]]:
+        key = bases[i]
+        if key and key not in modes:
+            modes[key] = brk.admit(key)
+        mode = modes.get(key, "normal") if key else "normal"
+        if mode is None or (mode == "probe" and key in probing):
             skipped += 1
-            _log.info("breaker skip: %s (%s)", names[i], bases[i])
+            _log.info("breaker skip: %s (%s)", names[i], key)
             continue
-        active.append((i, t, names[i], bases[i]))
+        if mode == "probe":
+            probing.add(key)
+        active.append((i, t, names[i], key, mode == "probe"))
 
     if not active:
         if skipped and sys.stderr.isatty():
@@ -156,13 +170,20 @@ def _gather(
         return []
 
     results_by_i: dict[int, list] = {}
+    status_by_key: dict[str, str] = {}  # "ok" wins over "fail"/"timeout" for the key
     timed_out = 0
     failed = 0
-    deadline = time.monotonic() + _GATHER_BUDGET
+    started = time.monotonic()
+    deadline = started + _GATHER_BUDGET
 
-    def _run(i: int, task: Callable[[], list], label: str, key: str) -> tuple[int, list, str]:
+    def _note(key: str, status: str) -> None:
+        if key and status_by_key.get(key) != "ok":
+            status_by_key[key] = status
+
+    def _run(i: int, task: Callable[[], list], label: str, probe: bool) -> tuple[int, list, str]:
+        budget = min(deadline, time.monotonic() + brk.PROBE_BUDGET_S) if probe else deadline
         try:
-            with net.request_budget(deadline):
+            with net.request_budget(budget):
                 net.remaining()
                 rows = task()
             return i, rows, "ok"
@@ -170,86 +191,86 @@ def _gather(
             # The addon answered (it's up): a 4xx says this request is wrong, not that the
             # addon is down — it counts as availability for the breaker (ADR 0027).
             _log.debug("addon rifiuta la richiesta%s: %s", f" ({label})" if label else "", e)
-            return i, [], "client"
+            return i, [], "ok"
         except NetworkError as e:
             _log.debug("addon saltato%s: %s", f" ({label})" if label else "", e)
             return i, [], "fail"
 
-    if active:
-        if sys.stderr.isatty():
-            msg = f"interrogo {len(active)} fonti…"
-            if skipped:
-                msg += f" · {skipped} in breaker"
-            ui.status(msg, kind="search")
-        ex = _addon_pool
-        try:
-            fut_map = {ex.submit(_run, i, t, lab, key): (i, lab, key) for i, t, lab, key in active}
-            done = 0
-            pending = set(fut_map)
-            while pending:
-                remaining = max(0.0, deadline - time.monotonic())
-                if remaining <= 0:
-                    break
-                finished = set()
-                try:
-                    for f in as_completed(pending, timeout=remaining):
-                        if time.monotonic() >= deadline:
-                            break
-                        finished.add(f)
-                        i, lab, key = fut_map[f]
-                        try:
-                            i, rows, status = f.result()
-                        except Exception:  # noqa: BLE001 — worker should not raise
-                            i, lab, key = fut_map[f]
-                            rows, status = [], "fail"
-                        results_by_i[i] = rows
-                        if status == "fail":
-                            failed += 1
-                        # Only the collector owns breaker effects. A timed-out worker
-                        # cannot later close the breaker with an obsolete success.
-                        if key:
-                            if status == "fail":
-                                brk.record_failure(key, reason="network")
-                            else:  # "ok" or "client": the addon answered → it's up
-                                brk.record_success(key)
-                        done += 1
-                        if sys.stderr.isatty():
-                            lab = fut_map[f][1]
-                            ui.progress(f"fonti {done}/{len(active)} · {lab}")
-                        if done >= len(active):
-                            break
-                except TimeoutError:
-                    pass
-                pending -= finished
-                if remaining <= 0 or not pending:
-                    break
-            # Timed-out stragglers: empty + breaker failure
-            for f in list(pending):
-                f.cancel()
-                i, lab, key = fut_map[f]
-                if i not in results_by_i:
-                    results_by_i[i] = []
-                    timed_out += 1
-                    if key:
-                        brk.record_failure(key, reason="timeout")
-                    _log.warning(
-                        "addon oltre il budget di %.0fs → scartato (%s)",
-                        _GATHER_BUDGET,
-                        lab,
-                    )
-        finally:
-            for future in fut_map:
-                future.cancel()
-        if sys.stderr.isatty():
-            got = sum(1 for r in results_by_i.values() if r)
-            msg = f"fonti: {got}/{len(active)} con risultati"
-            if timed_out:
-                msg += f" · {timed_out} timeout"
-            if failed:
-                msg += f" · {failed} errori"
-            if skipped:
-                msg += f" · {skipped} breaker"
-            ui.progress_done(msg)
+    if sys.stderr.isatty():
+        msg = f"interrogo {len(active)} fonti…"
+        if skipped:
+            msg += f" · {skipped} in breaker"
+        ui.status(msg, kind="search")
+    ex = _addon_pool
+    fut_map = {
+        ex.submit(_run, i, t, lab, probe): (i, lab, key, is_prim)
+        for i, t, lab, key, probe in active
+        for is_prim in (prim[i],)
+    }
+    primary_left = sum(1 for v in fut_map.values() if v[3])
+    quorum_cut = False
+    try:
+        pending = set(fut_map)
+        done = 0
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                f = next(as_completed(pending, timeout=remaining))
+            except TimeoutError:
+                break
+            pending.discard(f)
+            i, lab, key, is_prim = fut_map[f]
+            try:
+                i, rows, status = f.result()
+            except Exception:  # noqa: BLE001 — worker should not raise
+                rows, status = [], "fail"
+            results_by_i[i] = rows
+            if status == "fail":
+                failed += 1
+            _note(key, status)  # only the collector owns breaker effects
+            done += 1
+            if sys.stderr.isatty():
+                ui.progress(f"fonti {done}/{len(active)} · {lab}")
+            if is_prim:
+                primary_left -= 1
+                if primary_left == 0 and pending:
+                    # Quorum: the authority answered; the rest get a short grace only.
+                    grace = max(_QUORUM_GRACE_S, 2 * (time.monotonic() - started))
+                    if time.monotonic() + grace < deadline:
+                        deadline = time.monotonic() + grace
+                        quorum_cut = True
+        # Stragglers: empty. Past the full budget they count as a breaker timeout; cut by
+        # the quorum grace they don't (slow is not down).
+        for f in pending:
+            f.cancel()
+            i, lab, key, _is_prim = fut_map[f]
+            results_by_i.setdefault(i, [])
+            if quorum_cut:
+                _log.info("addon lento, risultati principali già arrivati → salto (%s)", lab)
+                continue
+            timed_out += 1
+            _note(key, "timeout")
+            _log.warning("addon oltre il budget di %.0fs → scartato (%s)", _GATHER_BUDGET, lab)
+    finally:
+        for future in fut_map:
+            future.cancel()
+    for key, status in status_by_key.items():
+        if status == "ok":
+            brk.record_success(key)
+        else:
+            brk.record_failure(key, reason="timeout" if status == "timeout" else "network")
+    if sys.stderr.isatty():
+        got = sum(1 for r in results_by_i.values() if r)
+        msg = f"fonti: {got}/{len(active)} con risultati"
+        if timed_out:
+            msg += f" · {timed_out} timeout"
+        if failed:
+            msg += f" · {failed} errori"
+        if skipped:
+            msg += f" · {skipped} breaker"
+        ui.progress_done(msg)
 
     # Preserve original task order for dedup priority
     out: list = []
@@ -283,11 +304,13 @@ def _cached_json(url: str, *, what: str) -> dict:
 
 def _search_tasks(
     cfg: Config, typ: str, q: str
-) -> tuple[list[Callable[[], list]], list[str], list[str]]:
-    """One fetch per addon that declares a searchable catalog for `typ` (ADR 0024)."""
+) -> tuple[list[Callable[[], list]], list[str], list[str], list[bool]]:
+    """One fetch per addon that declares a searchable catalog for `typ` (ADR 0024). The
+    built-in Cinemeta tasks are the authority for the gather quorum."""
     tasks: list[Callable[[], list]] = []
     labels: list[str] = []
     keys: list[str] = []
+    primary: list[bool] = []
     for addon in addons.effective_addons(cfg):
         cat = addons.search_catalog(addon, typ)
         if cat is None or not addons.serves(addon, "catalog", typ):
@@ -300,7 +323,8 @@ def _search_tasks(
         )
         labels.append(addon.name)
         keys.append(addon.base)
-    return tasks, labels, keys
+        primary.append(addon.builtin)
+    return tasks, labels, keys, primary
 
 
 @log.phase("search")
@@ -309,12 +333,15 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     tasks: list[Callable[[], list]] = []
     labels: list[str] = []
     keys: list[str] = []
+    primary: list[bool] = []
     for t in (typ,) if typ else ("movie", "series"):
-        t_tasks, t_labels, t_keys = _search_tasks(cfg, t, q)
+        t_tasks, t_labels, t_keys, t_primary = _search_tasks(cfg, t, q)
         tasks += t_tasks
         labels += t_labels
         keys += t_keys
-    results = _dedup(_gather(tasks, labels=labels, keys=keys), lambda m: m.get("id") or id(m))
+        primary += t_primary
+    gathered = _gather(tasks, labels=labels, keys=keys, primary=primary)
+    results = _dedup(gathered, lambda m: m.get("id") or id(m))
     # Stable sort on relevance only: equal scores keep the addons' own order (Cinemeta
     # first), never an alphabetical tie-break that would float an unrelated title up.
     return sorted(results, key=lambda m: tuple(-x for x in _search_score(m, query)))
