@@ -63,6 +63,8 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0034](0034-bounded-effects-and-playback-evidence.md) | Bounded effects, local playback evidence, and reproducible verification | Accepted | 2026-09-09 |
 | [0035](0035-direct-cast-before-full-remux.md)         | A soft language preference yields to a direct cast                       | Accepted | 2026-09-25 |
 | [0036](0036-remux-feasibility-before-prepare.md)      | Remux feasibility is decided before the prepare; never a mute cast        | Accepted | 2026-10-01 |
+| [0037](0037-explicit-interactivity-and-injected-prompts.md) | Interactivity is an explicit mode; the domain never opens fzf | Proposed | 2026-10-01 |
+| [0038](0038-dead-source-key-by-what-failed.md) | A dead source is keyed by what failed, never by a shared display name | Proposed | 2026-10-01 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.
