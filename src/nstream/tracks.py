@@ -94,9 +94,14 @@ def _parse_ffprobe(data: dict) -> Tracks:
     )  # fmt: skip
 
 
-# Per-url probe memo (see module docstring): failures (empty Tracks) are cached on purpose.
+# Per-url probe memo (see module docstring). A failed probe (empty Tracks) is memoized only
+# briefly: within one play it must not be paid again, but in a long TUI session a transient
+# ffprobe timeout must not leave the url trackless forever. LRU-bounded.
 # `timeout` is not part of the key — every caller uses the default FFPROBE_TIMEOUT.
-_cache: dict[str, Tracks] = {}
+_FAILED_PROBE_TTL = 120.0
+_cache: util.BoundedMemo[str, Tracks] = util.BoundedMemo(
+    512, ttl_for=lambda tr: _FAILED_PROBE_TTL if tr.empty() and not tr.duration else None
+)
 
 
 def clear_cache() -> None:

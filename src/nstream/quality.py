@@ -316,7 +316,8 @@ def _parse_seeders(text: str) -> int:
 # re-parsing cost ~0.8 s of CPU on a 50-stream title — seconds on a popular one
 # (measured live 2026-07-13; closes audit 2026-06-09 finding #32). Process-lifetime
 # cache, bounded by the streams seen in one run; StreamInfo is frozen, safe to share.
-_PARSE_CACHE: dict[tuple, StreamInfo] = {}
+# LRU-bounded: a long TUI session parses every row of every title it browses.
+_PARSE_CACHE: util.BoundedMemo[tuple, StreamInfo] = util.BoundedMemo(4096)
 
 
 def parse_stream(stream: Stream) -> StreamInfo:

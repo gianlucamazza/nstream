@@ -804,6 +804,7 @@ def prepare_stream(
     # Sources proven removed in an earlier run never compete again (ADR 0025): filter before
     # ranking, not after, so a dead release can't win the auto-pick nor clutter the manual
     # picker. Idempotent — headless already pruned to answer `sources_removed`.
+    engine.begin_play()  # a new play says its P2P gate verdict again, once
     # Native backend: cached releases are tagged up front so the cached score term ranks
     # them first for both the auto-pick and the cast menu. Shared with explain/probe.
     prepare_candidates(cfg, results)

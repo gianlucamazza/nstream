@@ -20,6 +20,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 from collections.abc import Callable
@@ -168,6 +169,68 @@ def load_json[T](path: Path, fallback: T) -> T:
     except (OSError, ValueError, UnicodeError):
         return fallback
     return data if isinstance(data, type(fallback)) else fallback
+
+
+class BoundedMemo[K, V]:
+    """Thread-safe in-process memo with an LRU bound and optional expiry — for caches that
+    used to be plain dicts "bounded by one run", which a long TUI session is not.
+
+    `ttl` expires every entry after N seconds; `ttl_for(value)` may return a shorter
+    per-value TTL (e.g. failed probes), None = the default. Supports the dict subset the
+    callers use: get / [] / []= / in / clear / len."""
+
+    def __init__(
+        self,
+        maxsize: int,
+        *,
+        ttl: float | None = None,
+        ttl_for: Callable[[V], float | None] | None = None,
+    ) -> None:
+        from collections import OrderedDict
+
+        self._data: OrderedDict[K, tuple[V, float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self.maxsize, self.ttl, self.ttl_for = maxsize, ttl, ttl_for
+
+    def _expiry(self, value: V) -> float:
+        ttl = self.ttl_for(value) if self.ttl_for else None
+        ttl = ttl if ttl is not None else self.ttl
+        return time.monotonic() + ttl if ttl is not None else float("inf")
+
+    def get(self, key: K, default: V | None = None) -> V | None:
+        with self._lock:
+            hit = self._data.get(key)
+            if hit is None:
+                return default
+            if hit[1] <= time.monotonic():
+                del self._data[key]
+                return default
+            self._data.move_to_end(key)
+            return hit[0]
+
+    def __getitem__(self, key: K) -> V:
+        value = self.get(key)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def __setitem__(self, key: K, value: V) -> None:
+        with self._lock:
+            self._data[key] = (value, self._expiry(value))
+            self._data.move_to_end(key)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
+
+    def __contains__(self, key: object) -> bool:
+        return self.get(key) is not None  # type: ignore[arg-type]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
 
 
 def runtime_dir() -> Path:

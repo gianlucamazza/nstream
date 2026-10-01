@@ -15,14 +15,16 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from . import log, net, quality, state, tracks
+from . import log, net, quality, state, tracks, util
 from .config import Config
 from .types import Stream
 
 _log = log.get_logger("availability")
 
 # Process-lifetime memo: a resolved url's availability does not change within a run.
-_PROBE_MEMO: dict[str, net.Probe] = {}
+# Availability changes over a long TUI session (an `[RD download]` becomes live, a link
+# dies), so the memo expires; LRU-bounded, thread-safe (probes run on a pool).
+_PROBE_MEMO: util.BoundedMemo[str, net.Probe] = util.BoundedMemo(512, ttl=600.0)
 VERIFY_CAP = 5  # top-N candidates to probe before committing the auto-pick
 
 

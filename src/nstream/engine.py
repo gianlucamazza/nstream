@@ -317,9 +317,16 @@ def _largest_index(files: list[dict]) -> int:
     return int(best.get("id", 1))
 
 
-# Printed at most once per process: the cast vetting resolves many candidates, and a gate that
-# repeated itself per candidate would bury the reason it fired.
+# Printed at most once per play (`begin_play` resets it): the cast vetting resolves many
+# candidates, and a gate that repeated itself per candidate would bury the reason it fired. A
+# process-lifetime latch made every later refusal in a TUI session silent.
 _p2p_gate_said = False
+
+
+def begin_play() -> None:
+    """Start of a new play: its P2P gate refusal (or VPN warning) is said again, once."""
+    global _p2p_gate_said
+    _p2p_gate_said = False
 
 
 def p2p_block_reason(cfg: Config) -> str | None:

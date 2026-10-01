@@ -402,3 +402,21 @@ def test_p2p_blocked_is_an_engine_unavailable():
     """A subclass, so every existing `except EngineUnavailable` degrades correctly without
     knowing the gate exists — including `playable_url`, which memoises it as unresolvable."""
     assert issubclass(engine.P2PBlocked, engine.EngineUnavailable)
+
+
+def test_p2p_gate_notice_repeats_per_play(monkeypatch, capsys):
+    # A process-lifetime latch made every later P2P refusal in a TUI session silent.
+    from nstream.config import Config
+
+    cfg = Config(torrentio_base="tb", p2p_require_vpn=True)
+    monkeypatch.setattr(engine, "vpn_active", lambda: False)
+    monkeypatch.setattr(engine, "p2p_block_reason", lambda cfg: "nessuna VPN")
+    engine.begin_play()
+    for _ in range(2):
+        with pytest.raises(engine.P2PBlocked):
+            engine._p2p_gate(cfg)
+    assert capsys.readouterr().err.count("streaming P2P") == 1  # once per play
+    engine.begin_play()
+    with pytest.raises(engine.P2PBlocked):
+        engine._p2p_gate(cfg)
+    assert capsys.readouterr().err.count("streaming P2P") == 1  # said again on the next play

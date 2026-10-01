@@ -227,3 +227,16 @@ def test_proc_start_of_self_and_missing():
     assert util.proc_start(os.getpid())
     assert util.proc_start(0) is None
     assert util.proc_start(2**22 + 12345) is None
+
+
+def test_bounded_memo_lru_and_ttl(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(util.time, "monotonic", lambda: now[0])
+    m = util.BoundedMemo(2, ttl_for=lambda v: 5.0 if v == "fail" else None)
+    m["a"], m["b"] = "A", "B"
+    assert m.get("a") == "A"  # touch a → b is now least recent
+    m["c"] = "C"
+    assert "b" not in m and "a" in m and len(m) == 2
+    m["x"] = "fail"
+    now[0] += 6
+    assert m.get("x") is None and m.get("a") == "A"  # only the short-TTL value expired
