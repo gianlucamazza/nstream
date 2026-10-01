@@ -20,7 +20,8 @@ date, or reject via a superseding ADR.
 | --- | ----- | ----- |
 | [0008](adr/0008-castbridge-socket-activation.md) | castbridge systemd socket activation | Interim: `systemd-run` transient unit in `bridge.ensure_daemon`. Full socket activation still **Proposed** — blocked on castbridge graduating from WIP packaging. |
 | [0013](adr/0013-custom-cast-receiver.md) | Custom CAF receiver | Would reduce Tier-2 remux and unlock track switching. Large external build; remains **Proposed**. |
-| [0039](adr/0039-disk-free-tier2-via-live-hls-ts.md) | Disk-free Tier-2 via live HLS-TS | Phase 0 on the 43PUS9235: live HLS-TS (H.264/HEVC copy + AAC) plays with sound; Dolby in MP4 is muted. Five acceptance gates open. |
+| [0039](adr/0039-disk-free-tier2-via-live-hls-ts.md) | Disk-free Tier-2 via live HLS-TS | Phase 0 on the 43PUS9235: live HLS-TS (H.264/HEVC copy + AAC) plays with sound; Dolby in MP4 is muted. Gate 3 (full runtime) passed: 62 min, 0 stalls; the other gates are still open. |
+| [0040](adr/0040-subtitles-off-the-start-path.md) | Subtitles off the cast start path | Embedded text track first; alignment from the producer pass after the start; `--sub-shift` during the cast. Phase 0: three gates on the TV. |
 
 ## Possible product extensions
 

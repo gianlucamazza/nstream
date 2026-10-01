@@ -66,6 +66,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0037](0037-explicit-interactivity-and-injected-prompts.md) | Interactivity is an explicit mode; the domain never opens fzf | Accepted | 2026-10-01 |
 | [0038](0038-dead-source-key-by-what-failed.md) | A dead source is keyed by what failed, never by a shared display name | Accepted | 2026-10-01 |
 | [0039](0039-disk-free-tier2-via-live-hls-ts.md) | Tier-2 audio conversion streams live HLS-TS instead of a complete file | Proposed | 2026-10-01 |
+| [0040](0040-subtitles-off-the-start-path.md) | Subtitles stay off the cast start path: embedded first, alignment after start | Proposed | 2026-10-01 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.
