@@ -22,6 +22,7 @@ date, or reject via a superseding ADR.
 | [0013](adr/0013-custom-cast-receiver.md) | Custom CAF receiver | Would reduce Tier-2 remux and unlock track switching. Large external build; remains **Proposed**. |
 | [0037](adr/0037-explicit-interactivity-and-injected-prompts.md) | Explicit interactivity + injected prompter | `--json` under a pty can block on fzf; domain imports the TUI. Awaiting acceptance. |
 | [0038](adr/0038-dead-source-key-by-what-failed.md) | Dead-source key by what failed | A debrid 404 bans the whole torrent for 30 days. Awaiting acceptance. |
+| [0039](adr/0039-disk-free-tier2-via-live-hls-ts.md) | Disk-free Tier-2 via live HLS-TS | Phase 0 on the 43PUS9235: live HLS-TS (H.264/HEVC copy + AAC) plays with sound; Dolby in MP4 is muted. Five acceptance gates open. |
 
 ## Possible product extensions
 
