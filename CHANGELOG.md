@@ -20,8 +20,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   preferred dub instead of yielding to another one (ADR 0035 stays the fallback when live
   cannot run; its notice now names `--audio-lang <lang>`).
 
+- Live seeks: far jumps re-LOAD the playlist at the target (the receiver clamps them);
+  a resume starts the producer at the resume point (27 s instead of 223 s for 50 min).
+
 ### Fixed
 
+- A live cast's progress reaches history (the playlist reports no duration).
+- A live LOAD always uses the Default Media Receiver: the custom receiver refuses HLS.
 - A recast of the title the TV is playing (another dub, a retry) resumes where the TV is
   at LOAD time, not where it was when the command began.
 - `urlproxy` resumes dropped upstream reads and never prints tracebacks (#5).

@@ -1057,8 +1057,16 @@ def live_seek(device: str | None, target: float) -> bool | None:
         return None
     offset = float(st.get("offset") or 0.0)
     pos = float(caster.status(dev).get("position") or 0.0)  # film time (status adds offset)
-    produced = live.produced_s(str(st.get("file") or ""))
-    rel = max(0.0, min(target - offset, produced - 2 * live.SEGMENT_S))
+    out_dir = str(st.get("file") or "")
+    want = max(0.0, target - offset)
+    if want + 2 * live.SEGMENT_S > live.produced_s(out_dir) and want - (pos - offset) <= (
+        live.AHEAD_MAX_S
+    ):
+        # Ahead of the producer but within its pacing reach: it runs many times faster
+        # than real time, so wait for it rather than land short (field: +25 min → +8).
+        _await_live(out_dir, want + 2 * live.SEGMENT_S, failed=lambda: False, label="")
+    produced = live.produced_s(out_dir)
+    rel = max(0.0, min(want, produced - 2 * live.SEGMENT_S))
     if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
         return bridge.control(dev, "seek", rel) if offset else None
     events = bridge.cast_load(

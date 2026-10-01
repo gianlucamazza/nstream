@@ -93,6 +93,28 @@ Decisions taken at acceptance:
 - The debrid url reaches the detached producer on stdin, never in argv; ffmpeg reads a
   `urlproxy` loopback url that resumes dropped upstream reads with a Range.
 
+## Field results after acceptance (2026-10-01, appended)
+
+On the TV, from `fix`/`feat` commits on top of the acceptance:
+
+- **Gate 1 passed:** Blade Runner 2049, 3840×1600 HEVC Main 10 HDR10 (smpte2084/bt2020),
+  ita AC-3 → AAC stereo, live start in 18 s, picture and sound confirmed by the viewer.
+- **Custom receiver:** the custom app (`cast_receiver_app_id`) answers an HLS LOAD with
+  `LOAD_FAILED` without fetching the playlist; the live LOAD always uses the Default Media
+  Receiver.
+- **Seek:** the receiver honours short seeks exactly (±30–60 s) but clamps far forward ones
+  (+90 → +35, +180 → +5); a LOAD with a start offset lands exactly. `remux.live_seek`
+  re-LOADs for jumps over 30 s, waiting for the producer when the target is within its
+  pacing reach (75:17 reached in 29 s from 58:40).
+- **Resume (supersedes the "producer starts from 0" decision above):** producing up to a
+  50-min resume point took 223 s. The producer now opens the source at the resume point
+  (`-ss`, `-noaccurate_seek`, `-copyts`): start in 27.7 s end to end. The receiver counts
+  the playlist from 0 whatever the PTS (tested with and without `-output_ts_offset`), so
+  the first segment's start PTS — the keyframe, byte-identical to the source frame, audio
+  +6 ms — is the offset nstream adds to positions, seeks and the caption track.
+- **History:** a live playlist reports duration −1, which history rejected; the probed
+  duration is kept in the live state.
+
 ## References
 
 ADR 0005, 0015, 0022, 0029, 0031, 0035, 0036. Symbols: `remux.remux_to_file`,
