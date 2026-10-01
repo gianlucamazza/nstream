@@ -1405,3 +1405,16 @@ def test_native_debrid_resolve_is_not_gated(monkeypatch):
         stream_select.engine, "resolve", lambda cfg, s: pytest.fail("engine used for a debrid url")
     )
     assert stream_select._playable_url(cfg, {"infoHash": "aaaa"}) == "http://rd/x.mkv"
+
+
+def test_prepare_candidates_matches_play_defaults():
+    # ADR 0037: explain/probe share the play path's candidate pass — dead sources pruned and
+    # cfg.default_quality applied — so --explain can't describe a pick that won't play.
+    dead: Stream = {"infoHash": "D1", "url": "https://rd/d"}
+    live: Stream = {"infoHash": "L1", "url": "https://rd/l"}
+    state.mark_dead(availability.source_key(dead), "HTTP 404")
+    cfg = Config(torrentio_base="tb", playback_backend="debrid", default_quality=1080)
+    results = [dead, live]
+    assert stream_select.prepare_candidates(cfg, results) == 1080
+    assert results == [live]
+    assert stream_select.prepare_candidates(cfg, [live], 720) == 720  # explicit choice wins

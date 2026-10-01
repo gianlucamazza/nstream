@@ -603,6 +603,19 @@ def source_key(stream: Stream) -> str:
     return availability.source_key(stream)
 
 
+def prepare_candidates(cfg: Config, results: list[Stream], quality: int | None = None) -> int:
+    """The candidate pass every ranking consumer shares — play, `--explain`, `--probe`
+    (ADR 0037): drop sources proven removed (ADR 0025) and tag native-cached releases, in
+    place. Returns the exact resolution the play path would filter to without a picker:
+    `quality` (the per-invocation choice), else `cfg.default_quality`, else Auto (0). Without
+    it `--explain` could describe a pick that would never play."""
+    kept, _dropped = prune_dead(cfg, results)
+    results[:] = kept
+    _mark_native_cached(cfg, results)
+    chosen = quality if quality is not None else cfg.default_quality
+    return exact_resolution(chosen or 0)
+
+
 def prune_dead(cfg: Config, results: list[Stream]) -> tuple[list[Stream], int]:
     return availability.prune_dead(cfg, results)
 
@@ -782,12 +795,9 @@ def prepare_stream(
     # Sources proven removed in an earlier run never compete again (ADR 0025): filter before
     # ranking, not after, so a dead release can't win the auto-pick nor clutter the manual
     # picker. Idempotent — headless already pruned to answer `sources_removed`.
-    kept, _dropped = prune_dead(cfg, results)
-    results[:] = kept
-
-    # Native backend: tag cached releases up front so the cached score term ranks them first
-    # for both the auto-pick and the cast menu (mutates `results` once, in place).
-    _mark_native_cached(cfg, results)
+    # Native backend: cached releases are tagged up front so the cached score term ranks
+    # them first for both the auto-pick and the cast menu. Shared with explain/probe.
+    prepare_candidates(cfg, results)
 
     # Quality choice first (before ranking/pick) so the hard-filter is in place everywhere.
     # `reselect_on_wrong_audio` doubles as the interactive signal: True for a user-attended

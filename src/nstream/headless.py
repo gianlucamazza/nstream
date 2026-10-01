@@ -294,7 +294,7 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
                 }
             )
             return 1
-        exact = stream_select.exact_resolution(opts.quality)
+        exact = stream_select.prepare_candidates(cfg, results, opts.quality)
         _emit_json(
             {
                 "ok": True,
@@ -314,7 +314,9 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
 
     if args.probe:
         # Discovery only: list available audio/subtitle languages + resolutions, never play.
+        # Same candidate pass as play, so the lists describe what can actually play.
         results = api.streams(cfg, typ, video_id)
+        stream_select.prepare_candidates(cfg, results, opts.quality)
         _emit_json(
             {
                 "ok": True,

@@ -672,7 +672,6 @@ def run_explain(cfg: Config, query: str, opts: PlayOpts | None = None) -> int:
     """`--explain`: search → pick a title (and episode, for series) → print WHY the
     auto-pick won (ranking table for local + cast profiles, plus the audio decision).
     Read-only: never plays or casts. Honours `--quality` when set on `opts`."""
-    exact = stream_select.exact_resolution(opts.quality if opts else None)
     metas = api.search(cfg, query)
     if not metas:
         print("nstream: nessun risultato", file=sys.stderr)
@@ -694,6 +693,7 @@ def run_explain(cfg: Config, query: str, opts: PlayOpts | None = None) -> int:
         video_id = v["id"]
         title = display_title(title, v)
     results = api.streams(cfg, typ, video_id)
+    exact = stream_select.prepare_candidates(cfg, results, opts.quality if opts else None)
     print(f"\n# nstream --explain · {title}\n")
     print(explain.explain_streams(cfg, results, cast=False, title=title, exact_resolution=exact))
     print()
