@@ -22,7 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import net, util
-from .config import DEBRID_PROVIDERS, Config
+from .config import Config
+from .providers import DEBRID_PROVIDERS
 
 CACHE_TTL = 86400  # re-fetch a user addon's manifest at most once a day
 # After a failed manifest fetch, don't retry it in this process for a while: every API call

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import util
+from .providers import DEBRID_PROVIDERS
 
 
 class ConfigError(Exception):
@@ -210,22 +211,8 @@ class Config:
         return [code for code in self.audio_langs if code != self.primary]
 
 
-# Debrid provider keys Torrentio understands, embedded in `torrentio_base` as `key=token`.
-# Single source of truth shared by settings (provider picker) and addons (strip for local
-# backend); kept provider-agnostic — code never special-cases an individual provider.
-# Single source of truth (key → display name); both the provider key set and the settings
-# picker derive from it, and log.py builds its redaction regex from the keys — no drift.
-DEBRID_PROVIDER_NAMES: dict[str, str] = {
-    "realdebrid": "RealDebrid",
-    "alldebrid": "AllDebrid",
-    "premiumize": "Premiumize",
-    "torbox": "TorBox",
-    "debridlink": "Debrid-Link",
-    "easydebrid": "EasyDebrid",
-    "offcloud": "Offcloud",
-    "putio": "Put.io",
-}
-DEBRID_PROVIDERS: tuple[str, ...] = tuple(DEBRID_PROVIDER_NAMES)
+# Debrid provider keys live in the `providers` leaf (log.py needs them for redaction
+# and must not depend on config).
 
 
 # Allowed values for the enum-like string config fields (bad values fall back to default).

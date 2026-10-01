@@ -120,10 +120,9 @@ def binge(
         nxt = next_video(eps, video)  # shared policy: season boundaries, gaps, ordering
         next_label = display_title(name, nxt) if (opts.autoplay and nxt is not None) else None
 
-        def on_save(pos: float, dur: float, vid: str = video_id, v: Video = video) -> None:
-            state.save_entry(
-                cfg, state.make_entry(vid, name, "series", pos, dur, series_id=series_id, video=v)
-            )
+        on_save = state.progress_saver(
+            cfg, video_id, name, "series", series_id=series_id, video=video
+        )
 
         notice, advance, quality = play_video(
             video_id, display_title(name, video), opts,
@@ -241,20 +240,9 @@ def resume(
     episode = int(target.get("episode") or 0) if target else entry.get("episode", 0)
     shown = target if target else entry_video(entry)
 
-    def on_save(pos: float, dur: float) -> None:
-        state.save_entry(
-            cfg,
-            state.make_entry(
-                video_id,
-                name,
-                "series",
-                pos,
-                dur,
-                series_id=series_id,
-                season=season,
-                episode=episode,
-            ),  # fmt: skip
-        )
+    on_save = state.progress_saver(
+        cfg, video_id, name, "series", series_id=series_id, season=season, episode=episode
+    )
 
     notice, _, _ = play_video(
         video_id, display_title(name, shown), opts,

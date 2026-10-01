@@ -37,12 +37,6 @@ def expire_cast_session() -> None:
         run_state.clear()
 
 
-def _norm_title(s: str) -> str:
-    """Casefold + alnum-only for tolerant title comparison. Deliberate small duplicate
-    of `api.norm_text`: state must not import api (layering)."""
-    return "".join(c for c in s.casefold() if c.isalnum())
-
-
 def _session_title_matches(session_title: str, receiver_title: str) -> bool:
     """Whether the receiver's now-playing title plausibly IS the session's content.
     The receiver title varies by sender — castbridge reports the decorated display
@@ -50,10 +44,10 @@ def _session_title_matches(session_title: str, receiver_title: str) -> bool:
     fallback our own `cast-*.mp4` temp name — so match by normalized substring in
     either direction, and treat an empty/artifact title as not-applicable (True:
     the session TTL decides alone)."""
-    r = _norm_title(receiver_title)
+    r = util.compact_text(receiver_title)
     if not r or re.fullmatch(r"cast[0-9a-z_]*mp4", r):
         return True
-    s = _norm_title(session_title)
+    s = util.compact_text(session_title)
     if not s:
         return True
     return s in r or r in s

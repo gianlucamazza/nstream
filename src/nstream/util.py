@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 from collections.abc import Callable
 from pathlib import Path
@@ -158,6 +159,19 @@ def atomic_write_bytes(path: Path, data: bytes, *, prefix: str, mode: int = 0o60
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def fold_text(value: object) -> str:
+    """Casefolded text with the accents removed (NFKD, combining marks dropped): "Léon"
+    and "Leon" compare equal. The base of every title comparison."""
+    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    return "".join(c for c in text if not unicodedata.combining(c))
+
+
+def compact_text(value: object) -> str:
+    """`fold_text` reduced to its letters and digits: separators and punctuation gone, so
+    "I.S.S." is "iss" and "Spider-Man" is "spiderman"."""
+    return "".join(c for c in fold_text(value) if c.isalnum())
 
 
 def prune_lru(cache_dir: Path, *, max_files: int, max_bytes: int) -> None:

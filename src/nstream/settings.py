@@ -10,7 +10,7 @@ import getpass
 import re
 import sys
 
-from . import addons, config, debrid, discovery, engine, languages, picker, sources, ui
+from . import addons, config, debrid, discovery, engine, languages, picker, providers, sources, ui
 from .config import Config
 
 HWDEC_CHOICES = ["auto-safe", "auto", "vaapi", "nvdec", "vdpau", "no (disabilita)"]
@@ -66,8 +66,8 @@ def _pick_languages(current: list[str], label: str) -> list[str] | None:
 # Debrid providers Torrentio supports (config-string key, display name), derived from the
 # single source in config so the key set never drifts. The whole `torrentio_base` is passed
 # to Torrentio as-is, so switching provider is just swapping this key.
-_PROVIDERS: list[tuple[str, str]] = list(config.DEBRID_PROVIDER_NAMES.items())
-_PROVIDER_KEYS = set(config.DEBRID_PROVIDERS)
+_PROVIDERS: list[tuple[str, str]] = list(providers.DEBRID_PROVIDER_NAMES.items())
+_PROVIDER_KEYS = set(providers.DEBRID_PROVIDERS)
 
 
 def _token_status(cfg: Config) -> str:

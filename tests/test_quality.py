@@ -1104,3 +1104,17 @@ def test_untagged_disc_sized_release_counts_as_remux(monkeypatch):
 )
 def test_ambiguous_language_codes_need_capitals(name, langs):
     assert set(quality.parse_stream(_mk(name)).languages) == langs
+
+
+@pytest.mark.parametrize(
+    ("release", "title"),
+    [
+        ("Leon.The.Professional.1994.1080p", "Léon"),
+        ("Leon.The.Professional.1994.2160p", "Léon: The Professional"),
+        ("Amelie.2001.1080p", "Amélie"),
+    ],
+)
+def test_title_match_folds_accents(release, title):
+    """Accented catalog titles used to lose their accented letters ("Léon" → "lon") and
+    demote every real release."""
+    assert quality._title_matches(release, title)

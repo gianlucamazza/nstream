@@ -462,9 +462,7 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
     name = meta.get("name", "nstream")
     movie_id = meta["id"]
 
-    def on_save(pos: float, dur: float) -> None:
-        state.save_entry(cfg, state.make_entry(movie_id, name, typ, pos, dur))
-
+    on_save = state.progress_saver(cfg, movie_id, name, typ)
     notice, _, _ = _play_video(
         cfg, typ, movie_id, display_title(name, None), opts,
         auto=opts.auto, next_label=None, on_save=on_save,
@@ -483,9 +481,7 @@ def play_history(cfg: Config, entry: HistoryEntry, opts: PlayOpts) -> str | None
     name = entry.get("title", "nstream")
     video_id = entry["video_id"]
 
-    def on_save(pos: float, dur: float) -> None:
-        state.save_entry(cfg, state.make_entry(video_id, name, typ, pos, dur))
-
+    on_save = state.progress_saver(cfg, video_id, name, typ)
     notice, _, _ = _play_video(
         cfg, typ, video_id, display_title(name, None), opts,
         auto=opts.auto, next_label=None, on_save=on_save,

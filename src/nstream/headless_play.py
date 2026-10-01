@@ -317,7 +317,6 @@ def auto_play(
                     expected_runtime_s=expected_s,
                 )  # fmt: skip
             except (
-                stream_select.ContentTooShort,
                 cast_flow.CastStreamUnresolved,
                 cast_flow.CastRemuxInfeasible,
                 cast_flow.CastVideoUnsupported,

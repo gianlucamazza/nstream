@@ -21,12 +21,12 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from .config import DEBRID_PROVIDERS
+from .providers import DEBRID_PROVIDERS
 
 # Debrid token carriers to redact. Provider `key=token` (Torrentio config / URLs), the
 # resolve path `/resolve/<provider>/<token>/`, a `token=` query param (TorBox requestdl)
 # and an `Authorization: Bearer <token>` header (native debrid API calls). The provider
-# alternation is derived from config's single source so it can never drift.
+# alternation is derived from the `providers` single source so it can never drift.
 _PROVIDERS = "|".join(DEBRID_PROVIDERS)
 _REDACTIONS = (
     (re.compile(rf"\b({_PROVIDERS})=[^|&\s\"']+", re.I), r"\1=<redacted>"),

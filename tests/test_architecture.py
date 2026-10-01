@@ -85,3 +85,14 @@ def test_domain_does_not_import_the_tui():
                 found.add((name, tui))
     # The pre-0037 debt (caster/subs/stream_select menus) is paid: no exceptions remain.
     assert found == set(), "domain→TUI import (ADR 0037): inject the menu instead"
+
+
+# Bottom tier: imported by everything, so it may depend only on itself (and the stdlib).
+_BOTTOM = {"util", "log", "notices", "languages", "srt", "providers"}
+
+
+def test_bottom_tier_imports_only_the_bottom_tier():
+    graph = _graph()
+    for name in _BOTTOM:
+        own = {e.split(".")[1] for e in graph[f"nstream.{name}"] if e.startswith("nstream.")}
+        assert own <= _BOTTOM, (name, own - _BOTTOM)

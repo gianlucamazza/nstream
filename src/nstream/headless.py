@@ -349,42 +349,10 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         )
     else:
         cast_meta = caster.CastMeta(poster=poster)
-    return _auto_play(
+    return headless_play.auto_play(
         cfg, args, opts, typ, video_id, title, imdb_id, season, episode, selection, cast_meta,
         name=name,
     )  # fmt: skip
-
-
-def _auto_play(
-    cfg: Config,
-    args: argparse.Namespace,
-    opts: PlayOpts,
-    typ: str,
-    video_id: str,
-    title: str,
-    imdb_id: str,
-    season: int | None,
-    episode: int | None,
-    selection: str,
-    cast_meta: caster.CastMeta | None = None,
-    *,
-    name: str | None = None,
-) -> int:
-    """Delegate to `headless_play` (stream resolve + play/cast + success JSON)."""
-    return headless_play.auto_play(
-        cfg,
-        args,
-        opts,
-        typ,
-        video_id,
-        title,
-        imdb_id,
-        season,
-        episode,
-        selection,
-        cast_meta,
-        name=name,
-    )
 
 
 def _reconcile_cast_session(cfg: Config) -> None:
@@ -445,13 +413,13 @@ def _run_auto_resume(
     if nu.selection == "next" and nu.video is not None:
         nxt = nu.video
         series_id = entry.get("series_id") or entry["video_id"]
-        return _auto_play(
+        return headless_play.auto_play(
             cfg, args, opts, "series", nxt["id"],
             display_title(entry.get("title", "?"), nxt),
             series_id, nxt.get("season"), nxt.get("episode"), "next",
             name=entry.get("title"),
         )  # fmt: skip
-    return _auto_play(
+    return headless_play.auto_play(
         cfg, args, opts, typ, entry["video_id"],
         display_title(entry.get("title", "?"), series.entry_video(entry)),
         entry.get("series_id") or entry["video_id"],

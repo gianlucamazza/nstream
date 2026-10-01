@@ -71,12 +71,10 @@ def norm_text(value: object) -> str:
 
     The single normalizer: `headless._select_meta` compares catalog names against the
     query with it too, so "Amélie" and "amelie" match on every path (ADR 0030)."""
-    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     # Keep separators between words: ``Spider-Man`` and ``Spider Man`` must
-    # normalize to the same value. Combining marks are dropped after NFKD so
-    # accented and unaccented text compare identically.
+    # normalize to the same value (`util.compact_text` drops them instead).
     chars = []
-    for c in text:
+    for c in util.fold_text(value):
         if c.isalnum():
             chars.append(c)
         elif c.isspace() or unicodedata.category(c).startswith("P"):

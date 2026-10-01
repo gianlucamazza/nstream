@@ -707,10 +707,6 @@ def _source_rank(source: str) -> int:
     return _SOURCE_RANK.get(source, _SOURCE_UNKNOWN_RANK)
 
 
-def _norm_title(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", s.lower())
-
-
 def _title_guard(info: StreamInfo, title: str, audio_langs: tuple[str, ...]) -> bool:
     """`title_match` term. The searched title is the English catalog name, so two real
     releases would otherwise sink: a localized-title release ("Il.Grande.Gatsby.iTALiAN" vs
@@ -734,13 +730,13 @@ def _title_matches(release_name: str, title: str) -> bool:
     name — this handles acronym titles like "I.S.S." (compact "iss") that have no usable
     word tokens — or, for multi-word titles, if at least half the title's ≥3-char word
     tokens appear in the release name (release names reorder/drop words freely)."""
-    nt = _norm_title(title)
-    nr = _norm_title(release_name)
+    nt = util.compact_text(title)
+    nr = util.compact_text(release_name)
     if len(nt) < 3 or not nr:
         return True
     if nt in nr:
         return True
-    tokens = [t for t in re.split(r"[^a-z0-9]+", title.lower()) if len(t) >= 3]
+    tokens = [t for t in re.split(r"[\W_]+", util.fold_text(title)) if len(t) >= 3]
     if not tokens:
         return False
     return sum(t in nr for t in tokens) / len(tokens) >= 0.5

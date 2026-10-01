@@ -6,7 +6,7 @@ import contextlib
 import json
 import math
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from .. import util
 from ..config import Config, library_path, state_path
@@ -41,6 +41,19 @@ def make_entry(
         entry["season"] = video.get("season", 0) if video is not None else season
         entry["episode"] = video.get("episode", 0) if video is not None else episode
     return entry
+
+
+def progress_saver(
+    cfg: Config, video_id: str, title: str, typ: str, **fields
+) -> Callable[[float, float], None]:
+    """The `on_save(pos, dur)` callback a playback path records its progress through —
+    one definition for the TUI film/history/series paths (`fields` are `make_entry`'s
+    series fields)."""
+
+    def save(pos: float, dur: float) -> None:
+        save_entry(cfg, make_entry(video_id, title, typ, pos, dur, **fields))
+
+    return save
 
 
 def load_history(cfg: Config) -> dict[str, HistoryEntry]:

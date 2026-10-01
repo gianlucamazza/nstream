@@ -1,6 +1,6 @@
 """Unit tests for the headless `--json` subsystem (headless.py).
 
-Moved from test_cli.py with the headless extraction: `run`/`run_auto`/`_auto_play`/
+Moved from test_cli.py with the headless extraction: `run`/`run_auto`/`auto_play`/
 `_select_meta` and the lifecycle actions (--probe/--stop/--status/-c). The cast seams
 reachable through cast_flow (cast_flow.caster / cast_flow.subs / cast_flow.engine) are
 identical to the interactive ones pinned in test_cli.py / test_cast_flow.py."""
@@ -736,7 +736,7 @@ def test_run_auto_series_flag_no_result_reflects_filter(monkeypatch, capsys):
     assert rc == 1 and out["error"] == "no_result" and "serie" in out["message"]
 
 
-# --- headless cast tree (_auto_play) — safety net for the headless extraction ---
+# --- headless cast tree (auto_play) — safety net for the headless extraction ---
 
 
 def test_run_auto_mirror_action(monkeypatch, capsys):
@@ -871,7 +871,7 @@ def test_run_auto_follow_emits_event_jsonl(monkeypatch, capsys):
 
 
 def test_run_auto_resume_threads_history_entry(monkeypatch):
-    """--json -c with a query: the matched series entry's identity reaches _auto_play."""
+    """--json -c with a query: the matched series entry's identity reaches auto_play."""
     entry = HistoryEntry(
         video_id="tt2:1:2", title="Severance", type="series", series_id="tt2",
         season=1, episode=2, position=100.0, duration=3000.0, ts=1.0,
@@ -886,7 +886,7 @@ def test_run_auto_resume_threads_history_entry(monkeypatch):
         )  # fmt: skip
         return 0
 
-    monkeypatch.setattr(headless, "_auto_play", spy)
+    monkeypatch.setattr(headless.headless_play, "auto_play", spy)
     rc = headless.run_auto(CFG, _hns(query=["severance"], cont=True), _hopts())
     assert rc == 0
     assert seen["typ"] == "series" and seen["video_id"] == "tt2:1:2"
@@ -899,7 +899,7 @@ def test_run_auto_resume_no_result(monkeypatch, tmp_path, capsys):
     # Isolate the on-disk history: the resume path reads it directly (not only via the stubbed
     # `state.recent`), so without this it would find the real user history and try to play it.
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    monkeypatch.setattr(headless, "_auto_play", _boom("nothing should play"))
+    monkeypatch.setattr(headless.headless_play, "auto_play", _boom("nothing should play"))
     monkeypatch.setattr(headless.state, "recent", lambda cfg, limit=30, typ=None: [])
     rc = headless.run_auto(CFG, _hns(cont=True), _hopts())
     out = json.loads(capsys.readouterr().out)
@@ -1219,7 +1219,7 @@ def test_resume_advances_to_next_episode(monkeypatch, tmp_path, capsys):
         played.update(video_id=video_id, season=season, episode=episode, selection=selection)
         return 0
 
-    monkeypatch.setattr(headless, "_auto_play", fake_auto_play)
+    monkeypatch.setattr(headless.headless_play, "auto_play", fake_auto_play)
     rc = headless.run_auto(CFG, _hns(cont=True, query=["show"]), _hopts())
     assert rc == 0
     assert played == {"video_id": "tt1:1:5", "season": 1, "episode": 5, "selection": "next"}
@@ -1268,7 +1268,7 @@ def test_resume_prefers_in_progress_over_advance(monkeypatch, tmp_path, capsys):
         played.update(video_id=video_id, selection=selection)
         return 0
 
-    monkeypatch.setattr(headless, "_auto_play", fake_auto_play)
+    monkeypatch.setattr(headless.headless_play, "auto_play", fake_auto_play)
     rc = headless.run_auto(CFG, _hns(cont=True, query=["show"]), _hopts())
     assert rc == 0
     assert played == {"video_id": "tt1:1:5", "selection": "resume"}
@@ -1580,7 +1580,7 @@ def _spy_auto_play(monkeypatch, played):
         played.update(video_id=video_id, selection=selection)
         return 0
 
-    monkeypatch.setattr(headless, "_auto_play", fake)
+    monkeypatch.setattr(headless.headless_play, "auto_play", fake)
 
 
 def test_query_prefers_the_fresh_finish_over_a_stale_half_watch(monkeypatch, tmp_path):

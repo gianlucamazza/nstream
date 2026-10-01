@@ -371,11 +371,18 @@ def _p2p_gate(cfg: Config) -> None:
     _p2p_notice_once(cfg)
 
 
+_p2p_noticed = False
+
+
 def _p2p_notice_once(cfg: Config) -> None:
     """One-time privacy notice the first time a P2P stream is served: torrent peers see the
-    client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback."""
-    if cfg.p2p_ack:
+    client's IP. Persists the acknowledgement so it isn't shown again; never blocks playback.
+    `cfg` is frozen for the process, so a binge would re-read the stale `p2p_ack` and repeat
+    the notice (and the config write) every episode: the process remembers it too."""
+    global _p2p_noticed
+    if cfg.p2p_ack or _p2p_noticed:
         return
+    _p2p_noticed = True
     notices.emit(
         "streaming P2P locale attivo — il tuo IP è visibile ai peer del torrent.\n"
         "         Valuta una VPN se è una preoccupazione. (avviso mostrato una sola volta)",
