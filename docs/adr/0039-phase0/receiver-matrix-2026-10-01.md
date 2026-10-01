@@ -52,5 +52,8 @@ Findings:
 - ffmpeg produced the remaining 71 min (1.5 GB of segments) in seconds from the debrid link:
   the "segment window" is not small unless the producer is paced or old segments are pruned.
 
-Open: gate 3 (full runtime, no stall) — running on #15/#16 from 1h20m to the end; 4K source
-not yet tested (1080p HDR10 only).
+Gate 3 (full runtime, no stall) — **passed**: #15/#16 from 1h20m to the end of the film,
+3727 s of produced content (792 segments), polled every 60 s: PLAYING throughout, 0 stalls,
+the receiver ended by itself at `ENDLIST` (20:27–21:28).
+
+Open: 4K source not yet tested (1080p HDR10 only).
