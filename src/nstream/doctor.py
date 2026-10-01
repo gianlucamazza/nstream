@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import stat
 import sys
 
-from . import __version__, mirror
+from . import __version__, log, mirror
 from .config import ConfigError, config_path, load
 
 
@@ -52,7 +51,7 @@ def inspect() -> dict:
 def run(*, json_mode: bool = False) -> int:
     report = inspect()
     if json_mode:
-        print(json.dumps(report, ensure_ascii=False))
+        log.emit_json(report)
     else:
         print(f"nstream {report['version']} — diagnostica locale")
         for check in report["checks"]:

@@ -17,9 +17,7 @@ requested cast device is missing.
 from __future__ import annotations
 
 import argparse
-import json
 import re
-import sys
 
 from . import (
     api,
@@ -27,6 +25,7 @@ from . import (
     caster,
     explain,
     headless_play,
+    log,
     mirror,
     remux,
     series,
@@ -53,10 +52,9 @@ def typ_filter(args: argparse.Namespace) -> str | None:
 
 
 def _emit_json(obj: dict) -> None:
-    """Write one machine-readable JSON object to stdout (progress stays on stderr).
-    Never carries a stream/debrid url or token — only descriptive metadata."""
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    """Write one machine-readable JSON object to stdout (progress stays on stderr), through
+    the shared scrubbing writer — it used to skip the url/token scrub."""
+    log.emit_json(obj)
 
 
 class YearMismatch(Exception):

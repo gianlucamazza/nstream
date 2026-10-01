@@ -7,7 +7,6 @@ Lifecycle actions (--stop/--status/…) and title selection stay in `headless`.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import tempfile
@@ -35,8 +34,7 @@ from .types import HistoryEntry, Stream
 
 def emit_json(obj: dict) -> None:
     """One machine-readable JSON object on stdout (no url/token)."""
-    sys.stdout.write(json.dumps(log.public_value(obj), ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    log.emit_json(obj)
 
 
 def emit_truncated(e: stream_select.ContentTooShort, title: str) -> None:

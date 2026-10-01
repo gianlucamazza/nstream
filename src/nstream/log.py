@@ -54,6 +54,16 @@ def public_value(value):
     return value
 
 
+def emit_json(obj: dict) -> None:
+    """The one writer of machine-readable output (ADR 0037): exactly one scrubbed JSON object
+    per line on stdout. Every `--json` path goes through here, so no emitter can forget the
+    url/token scrub."""
+    import json
+
+    sys.stdout.write(json.dumps(public_value(obj), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
 class RedactFilter(logging.Filter):
     """Scrub secrets from a record's final message (after %-formatting).
 

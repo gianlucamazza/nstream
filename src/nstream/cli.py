@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
@@ -1002,29 +1001,21 @@ def _json_error(error: str, message: str) -> None:
     """Emit the one JSON error object the `--json` contract promises on stdout, for
     failure paths that die before (or outside) `headless.run` — a missing/corrupt
     config, an unexpected crash. Without it an agent parsing stdout sees nothing."""
-    sys.stdout.write(
-        json.dumps({"ok": False, "error": error, "message": log.redact(message)}) + "\n"
-    )
-    sys.stdout.flush()
+    log.emit_json({"ok": False, "error": error, "message": message})
 
 
 def _emit_forget_dead(dropped: int, message: str) -> None:
     """`--json --forget-dead`: same one-object contract as every other headless command."""
-    payload = {"ok": True, "action": "forget_dead", "removed_sources": dropped, "message": message}
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    log.emit_json(
+        {"ok": True, "action": "forget_dead", "removed_sources": dropped, "message": message}
+    )
 
 
 def _emit_forget_breakers(dropped: int, message: str) -> None:
     """`--json --forget-breakers`: clear per-addon circuit breakers (ADR 0027)."""
-    payload = {
-        "ok": True,
-        "action": "forget_breakers",
-        "removed_breakers": dropped,
-        "message": message,
-    }
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    log.emit_json(
+        {"ok": True, "action": "forget_breakers", "removed_breakers": dropped, "message": message}
+    )
 
 
 def _ensure_config(*, headless_mode: bool = False) -> Config:
@@ -1090,7 +1081,11 @@ def main() -> int:
         return 0
 
     if args.debrid_test:
-        print(debrid.selftest(cfg, args.debrid_test))
+        report = debrid.selftest(cfg, args.debrid_test)
+        if args.json:  # one JSON object, like every other --json command
+            log.emit_json({"ok": True, "action": "debrid_test", "message": report})
+        else:
+            print(report)
         return 0
 
     if args.forget_dead:

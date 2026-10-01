@@ -98,3 +98,15 @@ def test_private_handler_keeps_log_0600(tmp_path):
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     finally:
         h.close()
+
+
+def test_emit_json_scrubs_tokens_everywhere(capsys):
+    # ADR 0037: one writer for every --json path, always scrubbed (headless._emit_json and
+    # doctor used to write raw).
+    import json
+
+    from nstream import headless
+
+    headless._emit_json({"ok": True, "nested": {"u": "https://x/realdebrid=SECRETTOKEN123/f"}})
+    out = json.loads(capsys.readouterr().out)
+    assert "SECRETTOKEN123" not in json.dumps(out)
