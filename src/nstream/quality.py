@@ -159,6 +159,13 @@ def _cast_audio_rank(info: StreamInfo) -> int:
     return 0
 
 
+# Above this size an untagged release is a full disc or remux: only lossless audio
+# (TrueHD/DTS-HD) and untouched video get that big. Field case 2026-10-01: an 87GB
+# "UHD Blu-ray disc" with no codec in its name ranked first for cast, and sailed past the
+# remux size budget because nothing marked it as needing a remux.
+_DISC_SIZE_GB = 30.0
+
+
 def _likely_needs_remux(info: StreamInfo) -> bool:
     """True when casting this release will probably need a Tier-2 host remux — so its
     download cost (size) matters for ranking. Known-undecodable codecs need it; so does a
@@ -173,7 +180,7 @@ def _likely_needs_remux(info: StreamInfo) -> bool:
     path stays a direct mp4 cast (the container twin of "selection prefers AAC")."""
     return (
         info.audio in _CAST_NEEDS_REMUX
-        or (not info.audio and info.source == "remux")
+        or (not info.audio and (info.source == "remux" or info.size_gb >= _DISC_SIZE_GB))
         or (info.container != "" and info.container not in CAST_CONTAINER_DECODABLE)
     )
 
@@ -827,6 +834,20 @@ def _score(
     )
 
 
+def spec_components(info: StreamInfo, spec: FilterSpec) -> dict[str, float | int | bool]:
+    """`score_components` under every knob of `spec` — the ranking key and what `--explain`
+    shows. One call site for both, so the explanation can't drop a term the ranking used
+    (it used to omit the remux size/cap budgets)."""
+    return score_components(
+        info,
+        spec.audio_langs,
+        cast=spec.cast_audio,
+        cast_remux_cap=spec.cast_remux_max_resolution,
+        cast_remux_size=spec.cast_remux_max_size,
+        title=spec.title,
+    )
+
+
 @dataclass(frozen=True)
 class RankedStream:
     stream: Stream
@@ -835,10 +856,11 @@ class RankedStream:
 
 
 def _dedup_by_release(
-    infos: list[tuple[Stream, StreamInfo]], audio_langs: tuple[str, ...], *, cast: bool = False
+    infos: list[tuple[Stream, StreamInfo]], spec: FilterSpec
 ) -> list[tuple[Stream, StreamInfo]]:
     """Collapse the same release seen on multiple trackers (identical release_name),
-    keeping the best-scoring copy. Streams without a release_name are kept as-is."""
+    keeping the copy the ranking itself would prefer (same `spec_components` key).
+    Streams without a release_name are kept as-is."""
     best: dict[str, tuple[Stream, StreamInfo]] = {}
     out: list[tuple[Stream, StreamInfo]] = []
     for s, info in infos:
@@ -847,8 +869,8 @@ def _dedup_by_release(
             out.append((s, info))
             continue
         cur = best.get(key)
-        if cur is None or _score(info, audio_langs, cast=cast) > _score(
-            cur[1], audio_langs, cast=cast
+        if cur is None or tuple(spec_components(info, spec).values()) > tuple(
+            spec_components(cur[1], spec).values()
         ):
             best[key] = (s, info)
     out.extend(best.values())
@@ -864,7 +886,7 @@ def rank_streams(
     reason; `spec.dedup` drops duplicate releases entirely (not in either list)."""
     infos = [(s, parse_stream(s)) for s in streams]
     if spec.dedup:
-        infos = _dedup_by_release(infos, spec.audio_langs, cast=spec.cast_audio)
+        infos = _dedup_by_release(infos, spec)
     playable: list[RankedStream] = []
     excluded: list[RankedStream] = []
     for s, info in infos:
@@ -877,17 +899,7 @@ def rank_streams(
             excluded.append(RankedStream(s, info, reason))
         else:
             playable.append(RankedStream(s, info))
-    playable.sort(
-        key=lambda r: _score(
-            r.info,
-            spec.audio_langs,
-            cast=spec.cast_audio,
-            cast_remux_cap=spec.cast_remux_max_resolution,
-            cast_remux_size=spec.cast_remux_max_size,
-            title=spec.title,
-        ),
-        reverse=True,
-    )
+    playable.sort(key=lambda r: tuple(spec_components(r.info, spec).values()), reverse=True)
     return playable, excluded
 
 

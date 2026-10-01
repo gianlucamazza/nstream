@@ -116,11 +116,11 @@ def test_vet_cast_audio_absent_when_nobody_has_target(monkeypatch):
 class _R:
     """Minimal RankedStream stand-in (stream + name-tag languages) for reselect tests."""
 
-    def __init__(self, stream, languages):
+    def __init__(self, stream, languages, size_gb=0.0):
         from types import SimpleNamespace
 
         self.stream = stream
-        self.info = SimpleNamespace(languages=languages, resolution=0)
+        self.info = SimpleNamespace(languages=languages, resolution=0, size_gb=size_gb)
 
 
 def test_cast_plan_all_und_tracks_benefit_of_the_doubt():
@@ -732,3 +732,26 @@ def test_cast_resolver_walks_past_unresolvable(monkeypatch):
     )  # fmt: skip
     assert cast_vet.cast_resolver(cfg, [])("ita") == "http://ita"
     assert attempts == ["deadbeef"]  # the dead one WAS tried, then walked past
+
+
+def test_reselect_skips_remux_over_the_budget(monkeypatch):
+    # Field case 2026-10-01: the only ITA dubs were 66-87GB remuxes with 45GB free. Returning
+    # one turned a playable cast (other dub + safety subs) into a refused remux.
+    chosen: Stream = {"url": "eng-only"}
+    huge: Stream = {"url": "ita-66gb"}
+
+    def tracks_of(cfg, s):
+        return (
+            [Track(1, "eng", "aac")]
+            if s is chosen
+            else [Track(1, "eng", "dts"), Track(2, "ita", "dts")]
+        )
+
+    monkeypatch.setattr(cast_vet, "_cast_audio_tracks", tracks_of)
+    monkeypatch.setattr(cast_vet.quality, "remux_size_budget", lambda cfg: 20)
+    monkeypatch.setattr(
+        stream_select, "_cast_playable",
+        lambda cfg, results, exact_resolution=0: [_R(huge, frozenset({"ita"}), size_gb=66.6)],
+    )  # fmt: skip
+    plan = cast_vet.vet_cast_audio(_ccfg(), [chosen, huge], chosen, "ita")
+    assert plan.stream is chosen and plan.mode == "absent"

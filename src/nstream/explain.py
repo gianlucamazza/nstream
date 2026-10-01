@@ -87,16 +87,8 @@ def _fmt_info(info: quality.StreamInfo) -> str:
     return " ".join(tags)
 
 
-def _row(
-    idx: int,
-    r: quality.RankedStream,
-    audio_langs: tuple[str, ...],
-    mark: str,
-    *,
-    cast: bool = False,
-    title: str = "",
-) -> str:
-    comp = quality.score_components(r.info, audio_langs, cast=cast, title=title)
+def _row(idx: int, r: quality.RankedStream, spec: quality.FilterSpec, mark: str) -> str:
+    comp = quality.spec_components(r.info, spec)
     # Release names are untrusted: strip control/ESC chars before they reach the terminal.
     name = ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:60]
     addon = ui.sanitize(r.stream.get("addon") or "").strip()
@@ -171,12 +163,12 @@ def explain_streams(
     ]
     for i, r in enumerate(playable):
         mark = f"{ui.g().cached}PICK" if i == 0 else ""
-        lines.append(_row(i + 1, r, spec.audio_langs, mark, cast=cast, title=spec.title))
+        lines.append(_row(i + 1, r, spec, mark))
     if excluded:
         lines.append("")
         lines.append("ESCLUSI (motivo):")
         for i, r in enumerate(excluded):
-            lines.append(_row(i + 1, r, spec.audio_langs, ui.g().warn, cast=cast, title=spec.title))
+            lines.append(_row(i + 1, r, spec, ui.g().warn))
             lines[-1] = lines[-1].replace("[", f"[escluso: {r.reason}] [", 1)
     lines.extend(_links_section(cfg, results))
     lines.extend(_breaker_section())
@@ -184,16 +176,11 @@ def explain_streams(
 
 
 def _row_data(
-    r: quality.RankedStream,
-    audio_langs: tuple[str, ...],
-    *,
-    cast: bool,
-    reason: str | None = "",
-    title: str = "",
+    r: quality.RankedStream, spec: quality.FilterSpec, *, reason: str | None = ""
 ) -> dict:
     """One ranked stream as parsed metadata + score components (never the url/token)."""
     info = r.info
-    comp = quality.score_components(info, audio_langs, cast=cast, title=title)
+    comp = quality.spec_components(info, spec)
     row = {
         "name": ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:120],
         "resolution": info.resolution,
@@ -256,16 +243,9 @@ def explain_data(
                 max(0, len(results) - len(playable) - len(excluded)) if spec.dedup else 0
             ),
         },
-        "pick": (
-            _row_data(playable[0], spec.audio_langs, cast=cast, title=spec.title)
-            if playable
-            else None
-        ),
-        "playable": [_row_data(r, spec.audio_langs, cast=cast, title=spec.title) for r in playable],
-        "excluded": [
-            _row_data(r, spec.audio_langs, cast=cast, reason=r.reason, title=spec.title)
-            for r in excluded
-        ],
+        "pick": (_row_data(playable[0], spec) if playable else None),
+        "playable": [_row_data(r, spec) for r in playable],
+        "excluded": [_row_data(r, spec, reason=r.reason) for r in excluded],
         "breakers": state.open_breakers(),
         "unresolvable_reason": stream_select.unresolvable_reason(cfg, results),
     }

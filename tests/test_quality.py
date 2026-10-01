@@ -1071,3 +1071,22 @@ def test_explicit_resolution_beats_uhd_alias(name, res):
 )
 def test_subtitle_tags_are_not_audio_languages(name, langs):
     assert set(quality.parse_stream(_mk(name)).languages) == langs
+
+
+def test_untagged_disc_sized_release_counts_as_remux(monkeypatch):
+    # Field case 2026-10-01: an 87GB "UHD Blu-ray disc" with no audio tag ranked first for
+    # cast and skipped the disk budget; a feasible 6GB DTS release must win instead.
+    disc: Stream = {
+        "name": "[RD+] T\n4k",
+        "title": "The Great Gatsby [2013 UHD Blu-ray disc 2160p] iTA ENG\n💾 87.52 GB",
+        "url": "u1",
+    }
+    dts: Stream = {
+        "name": "[RD+] T\n1080p",
+        "title": "The.Great.Gatsby.2013.1080p.BluRay.DTS-HD.MA.5.1.iTA.ENG\n💾 6.25 GB",
+        "url": "u2",
+    }
+    assert quality._likely_needs_remux(quality.parse_stream(disc))
+    spec = _disk_cast_spec(monkeypatch, free_gib=45.0, audio_langs=["ita", "eng"])
+    playable, _ = quality.rank_streams([disc, dts], quality.cast_caps(), spec)
+    assert playable[0].stream is dts
