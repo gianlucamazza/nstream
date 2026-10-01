@@ -98,10 +98,23 @@ def _text(stream: Stream) -> str:
 # Word-boundary matched so a group name like "-CYBER" or "ENG" inside another word doesn't
 # false-positive.
 _LANG_TOKENS = {lang.code: lang.tokens for lang in languages.LANGUAGES}
-_LANG_RE = {
-    code: re.compile(r"(?<![A-Za-z])(?:" + "|".join(toks) + r")(?![A-Za-z])", re.I)
-    for code, toks in _LANG_TOKENS.items()
-}
+# Short codes that are also ordinary title words ("Chi ha ucciso…", "Lat", "Por", "Sk"):
+# counted only when written in capitals, as release language tags are. Unambiguous tags
+# (ITA, ENG, iTALiAN…) stay case-insensitive.
+_AMBIGUOUS_TOKENS = frozenset(
+    {"CHI", "POR", "LAT", "SK", "CZ", "ARA", "SPA", "TUR", "HIN", "POL", "DUT", "JAP", "ESP", "KOR"}
+)
+
+
+def _lang_re(toks: tuple[str, ...]) -> re.Pattern[str]:
+    plain = [t for t in toks if t not in _AMBIGUOUS_TOKENS]
+    caps = [t for t in toks if t in _AMBIGUOUS_TOKENS]
+    alts = [f"(?i:{'|'.join(plain)})"] if plain else []
+    alts += caps  # case-sensitive: only the all-caps tag form
+    return re.compile(r"(?<![A-Za-z])(?:" + "|".join(alts) + r")(?![A-Za-z])")
+
+
+_LANG_RE = {code: _lang_re(toks) for code, toks in _LANG_TOKENS.items()}
 # Flag emoji Torrentio may prepend → ISO code.
 _FLAG_LANG = {flag: lang.code for lang in languages.LANGUAGES for flag in lang.flags}
 

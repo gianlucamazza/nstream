@@ -1090,3 +1090,17 @@ def test_untagged_disc_sized_release_counts_as_remux(monkeypatch):
     spec = _disk_cast_spec(monkeypatch, free_gib=45.0, audio_langs=["ita", "eng"])
     playable, _ = quality.rank_streams([disc, dts], quality.cast_caps(), spec)
     assert playable[0].stream is dts
+
+
+@pytest.mark.parametrize(
+    ("name", "langs"),
+    [
+        ("Chi.ha.ucciso.2019.1080p.iTA", {"ita"}),  # "Chi" is Italian, not Chinese
+        ("Lat.den.Rätta.2008.1080p", set()),
+        ("Movie.2019.1080p.CHI.ENG", {"zho", "eng"}),  # the tag form still counts
+        ("Movie.2019.1080p.POR", {"por"}),
+        ("Movie.2019.iTALiAN.1080p", {"ita"}),  # unambiguous tags stay case-insensitive
+    ],
+)
+def test_ambiguous_language_codes_need_capitals(name, langs):
+    assert set(quality.parse_stream(_mk(name)).languages) == langs
