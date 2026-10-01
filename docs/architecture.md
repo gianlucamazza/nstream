@@ -12,7 +12,7 @@ src/nstream/
 ├── orchestration    cli · cli_args · headless · headless_play · application · series · settings · doctor
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
-│                    · remux · mirror · bridge · serve · urlproxy · discovery
+│                    · remux · live · mirror · bridge · serve · urlproxy · discovery
 ├── subs             subs · subalign · srt · oshash · (_bench · _subalign_remote dev-only)
 ├── playback         playback · player · labels · picker · preview · ui · explain
 ├── discovery/API    api · addons · net
@@ -116,6 +116,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `bridge` | castbridge IPC client + daemon ensure |
 | `discovery` | Non-blocking Chromecast discovery |
 | `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv |
+| `live` | Live HLS-TS producer for Tier-2 (ADR 0039): ffmpeg argv, playlist timeline, pruning behind the play head, pausing far ahead |
 
 ### Subs
 

@@ -9,6 +9,9 @@ the correct implementation of exactly what the DMR needs (a complete, `Content-L
 The DMR issues a GET with a `Range` header and expects a `206 Partial Content` with
 `Content-Range`; a single seek may issue further range requests, so the server is threaded.
 
+A third capability route serves a live HLS-TS directory (ADR 0039, `live`): the playlist and
+its whitelisted segment names only, each served segment advancing the producer's play head.
+
 Two run modes:
 - in-process (`serve_file`) for the interactive `follow` path (server thread dies with nstream);
 - detached (`python -m nstream.serve <file> --bind <ip>`) for headless fire-and-return, where
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import secrets
 import select
@@ -43,7 +47,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import languages, log, util
+from . import languages, live, log, util
 
 _log = log.get_logger("serve")
 
@@ -86,6 +90,16 @@ def url_path(token: str) -> str:
 def sub_url_path(token: str) -> str:
     """The secret URL path for the optional side-loaded WebVTT caption track."""
     return f"/cast/{token}/subs.vtt"
+
+
+def hls_url_path(token: str) -> str:
+    """The secret URL prefix of a live HLS directory (playlist + segments)."""
+    return f"/cast/{token}/hls/"
+
+
+def served_hls_url(ip: str, port: int, token: str) -> str:
+    """The playlist url a live cast LOADs."""
+    return f"http://{ip}:{port}{hls_url_path(token)}{live.PLAYLIST}"
 
 
 def served_url(ip: str, port: int, token: str) -> str:
@@ -159,6 +173,9 @@ def _parse_range(header: str, size: int) -> tuple[int, int] | None:
     return (start, min(end, size - 1))
 
 
+_HLS_PLAYLIST_TYPE = "application/vnd.apple.mpegurl"
+
+
 class RangeFileHandler(BaseHTTPRequestHandler):
     """Serves `self.server.file_path` (media) and/or `self.server.sub_path` (WebVTT track) with
     Range support, each on its own secret token path. GET/HEAD/OPTIONS only; anything else is 404
@@ -196,6 +213,19 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             return srv.file_path, ct
         if srv.sub_path and secrets.compare_digest(req, srv.sub_url_path.encode()):
             return srv.sub_path, "text/vtt; charset=utf-8"
+        prefix = srv.hls_prefix.encode()
+        if (
+            srv.hls_dir
+            and len(req) > len(prefix)
+            and secrets.compare_digest(req[: len(prefix)], prefix)
+        ):
+            name = req[len(prefix) :].decode("ascii", errors="replace")
+            # Whitelisted names only: no traversal, and ffmpeg's log beside the segments
+            # (or a `.tmp` being written) is never served.
+            if name == live.PLAYLIST:
+                return os.path.join(srv.hls_dir, name), _HLS_PLAYLIST_TYPE
+            if live.segment_index(name) is not None:
+                return os.path.join(srv.hls_dir, name), "video/mp2t"
         return None
 
     def _send_cors(self) -> None:
@@ -246,6 +276,11 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self._serve_target(path, content_type, write_body=write_body)
         finally:
             self.server.touch(-1)
+        producer = self.server.producer
+        if producer is not None and write_body:
+            index = live.segment_index(os.path.basename(path))
+            if index is not None:
+                producer.on_request(index)
 
     def _serve_target(self, path: str, content_type: str, *, write_body: bool) -> None:
         try:
@@ -274,6 +309,8 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self._send_cors()
         self.send_header("Content-Type", content_type)
+        if content_type == _HLS_PLAYLIST_TYPE:
+            self.send_header("Cache-Control", "no-cache")  # a live playlist grows
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
         if status == HTTPStatus.PARTIAL_CONTENT:
@@ -320,13 +357,17 @@ class _FileServer(ThreadingHTTPServer):
         file_path: str | None,
         token: str | None = None,
         sub_path: str | None = None,
+        hls_dir: str | None = None,
     ):
         super().__init__(addr, RangeFileHandler)
+        self.hls_dir = hls_dir  # live HLS directory (ADR 0039)
+        self.producer: live.Producer | None = None  # its producer, when this process owns it
         self.file_path = file_path  # media file (None → sub-only server, e.g. Tier-1 direct)
         self.sub_path = sub_path  # optional side-loaded WebVTT caption track
         self.token = token or new_token()  # per-cast capability (see module docstring)
         self.url_path = url_path(self.token)
         self.sub_url_path = sub_url_path(self.token)
+        self.hls_prefix = hls_url_path(self.token)
         self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
         # Idle tracking for the detached server's exit (`_main`): only requests that hit
         # the token paths count, so LAN scanners can't keep a finished cast's file pinned.
@@ -351,15 +392,16 @@ def _make_server(
     preferred_port: int = 0,
     token: str | None = None,
     sub_path: str | None = None,
+    hls_dir: str | None = None,
 ) -> _FileServer:
     """Bind a `_FileServer`, preferring the firewall-allowed cast port range so the receiver can
     actually reach us. `preferred_port > 0` forces that exact port; otherwise scan the range and
     fall back to an ephemeral port if it's fully busy."""
     if preferred_port:
-        return _FileServer((bind_ip, preferred_port), file_path, token, sub_path)
+        return _FileServer((bind_ip, preferred_port), file_path, token, sub_path, hls_dir)
     for port in range(_CAST_PORT_LO, _CAST_PORT_HI + 1):
         try:
-            return _FileServer((bind_ip, port), file_path, token, sub_path)
+            return _FileServer((bind_ip, port), file_path, token, sub_path, hls_dir)
         except OSError:
             continue
     _log.warning(
@@ -367,18 +409,22 @@ def _make_server(
         _CAST_PORT_LO,
         _CAST_PORT_HI,
     )
-    return _FileServer((bind_ip, 0), file_path, token, sub_path)
+    return _FileServer((bind_ip, 0), file_path, token, sub_path, hls_dir)
 
 
 def serve_file(
-    file_path: str | None, bind_ip: str, sub_path: str | None = None
+    file_path: str | None,
+    bind_ip: str,
+    sub_path: str | None = None,
+    *,
+    hls_dir: str | None = None,
 ) -> tuple[_FileServer, int, threading.Thread]:
     """Start a threaded Range server for `file_path` (and/or a side-loaded WebVTT `sub_path`)
     bound to `bind_ip:0` (ephemeral port). Returns `(server, port, thread)`; the caller builds
     URLs via `served_url`/`served_sub_url(bind_ip, port, server.token)` and shuts down with
     `server.shutdown()`. The thread is a daemon (dies with the process), so this is the
     in-process (follow) mode — headless uses the `__main__` detached entrypoint."""
-    server = _make_server(bind_ip, file_path, sub_path=sub_path)
+    server = _make_server(bind_ip, file_path, sub_path=sub_path, hls_dir=hls_dir)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, name="nstream-serve", daemon=True)
     thread.start()
@@ -407,27 +453,44 @@ def _readable_within(stream, timeout: float) -> bool:
 
 
 def spawn_detached(
-    bind_ip: str, *, file_path: str | None = None, sub_path: str | None = None
+    bind_ip: str,
+    *,
+    file_path: str | None = None,
+    sub_path: str | None = None,
+    hls_dir: str | None = None,
+    job: live.Job | None = None,
 ) -> tuple[int, int, str] | None:
     """Spawn a detached `python -m nstream.serve` serving `file_path` and/or a WebVTT `sub_path`
     on `bind_ip`, returning (pid, port, token) once it announces them, or None on failure. Detached
     (new session) so it outlives a headless return — the receiver fetches from it for the whole
     runtime. The per-cast URL token is generated by the server and read from its stdout (never on
     the command line, where `ps` would show it). Shared by `remux` (media) and `caster` (sub-only).
-    """
+
+    With `hls_dir` + `job` the child also runs the live producer (ADR 0039): the job, which
+    carries the debrid url, goes through its stdin — never its argv."""
     cmd = [sys.executable, "-m", "nstream.serve", "--bind", bind_ip]
     if file_path:
         cmd.append(file_path)
     if sub_path:
         cmd += ["--subs", sub_path]
+    if hls_dir:
+        cmd += ["--hls", hls_dir]
     try:
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE if job else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError) as e:
         _log.warning("serve detach fallito: %s", e)
         return None
+    if job and proc.stdin is not None:
+        try:
+            proc.stdin.write(json.dumps(job.to_dict()) + "\n")
+            proc.stdin.close()
+        except OSError:
+            kill_detached(proc.pid)
+            return None
     if proc.stdout is None:
         kill_detached(proc.pid)
         return None
@@ -548,6 +611,7 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bind", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--subs")  # optional side-loaded WebVTT caption track
+    ap.add_argument("--hls")  # live HLS directory; the producer job arrives on stdin
     ap.add_argument("--idle-exit", type=float, default=IDLE_EXIT_S)
     args = ap.parse_args(argv)
     # Detached process: nothing has configured logging (cli._entry does it for the TUI), so
@@ -560,10 +624,28 @@ def _main(argv: list[str] | None = None) -> int:
     if args.subs and not os.path.isfile(args.subs):
         print(f"serve: sottotitoli non trovati: {args.subs}", file=sys.stderr)
         return 2
-    if not args.file and not args.subs:
-        print("serve: né file né --subs specificati", file=sys.stderr)
+    if not args.file and not args.subs and not args.hls:
+        print("serve: né file né --subs né --hls specificati", file=sys.stderr)
         return 2
-    server = _make_server(args.bind, args.file, preferred_port=args.port, sub_path=args.subs)
+    producer: live.Producer | None = None
+    if args.hls:
+        try:
+            job = live.Job.from_dict(json.loads(sys.stdin.readline()))
+        except (ValueError, KeyError, TypeError):
+            print("serve: job live non valido", file=sys.stderr)
+            return 2
+        producer = live.Producer.start(job, args.hls)
+        if producer is None:
+            return 2
+    # SIGTERM (`--stop`, a new cast, GC) must run the cleanup below: stop the producer and
+    # remove its segments, not just die.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    server = _make_server(
+        args.bind, args.file, preferred_port=args.port, sub_path=args.subs, hls_dir=args.hls
+    )
+    server.producer = producer
+    if producer is not None:
+        producer.run_pacing()
     port = server.server_address[1]
     # The parent reads exactly these two lines to learn port+token, then leaves us running.
     sys.stdout.write(f"PORT={port}\nTOKEN={server.token}\n")
@@ -576,6 +658,8 @@ def _main(argv: list[str] | None = None) -> int:
         pass
     finally:
         server.server_close()
+        if producer is not None:
+            producer.stop()
     return 0
 
 
