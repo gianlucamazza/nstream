@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import api, log, notices, oshash, srt, subalign, tracks, util
+from . import api, languages, log, notices, oshash, srt, subalign, tracks, util
 from .config import Config, PlayOpts
 from .types import Stream, Subtitle
 
@@ -68,6 +68,25 @@ def report_unverified(pick: SubsPick, *, hint: str) -> None:
             code="subs_unverified",
             level="info",
         )
+
+
+# Embedded subtitle codecs a WebVTT rendition can carry (text). Bitmap tracks (PGS, VobSub,
+# DVB) need OCR and never qualify.
+_TEXT_SUB_CODECS = frozenset({"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"})
+
+
+def embedded_pick(tr: tracks.Tracks, langs: list[str]) -> tuple[int, str] | None:
+    """The embedded text subtitle to deliver: `(subtitle-relative index, language code)`
+    for the first full (non-`forced`) text track in `langs` order, or None. A `forced`
+    track holds only the foreign-language lines — the first ita track of a release can be
+    one, and the viewer then sees nothing for normal speech (field 2026-10-02, ADR 0042)."""
+    for want in langs:
+        for i, t in enumerate(tr.subs):
+            if t.forced or t.codec not in _TEXT_SUB_CODECS:
+                continue
+            if languages.normalize(t.lang) == want or t.lang == want:
+                return i, want
+    return None
 
 
 def stream_filename(stream: Stream) -> str | None:

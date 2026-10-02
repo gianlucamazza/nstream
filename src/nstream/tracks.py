@@ -35,6 +35,10 @@ class Track:
     codec: str = ""
     channels: int | None = None
     title: str = ""
+    # Stream dispositions. A `forced` subtitle track carries only the foreign-language
+    # lines: a release's first ita track can be one (field 2026-10-02, ADR 0042).
+    default: bool = False
+    forced: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,8 @@ def _parse_ffprobe(data: dict) -> Tracks:
             codec=str(s.get("codec_name") or ""),
             channels=int(chans) if isinstance(chans, int) else None,
             title=str(tags.get("title") or ""),
+            default=bool((s.get("disposition") or {}).get("default")),
+            forced=bool((s.get("disposition") or {}).get("forced")),
         )
         bucket.append(track)
     fmt = data.get("format") or {}
@@ -140,7 +146,8 @@ def _ffprobe(url: str, timeout: float) -> Tracks:
         "-rw_timeout", "6000000", "-probesize", "2M", "-analyzeduration", "2M",
         "-of", "json", "-show_entries",
         "format=duration,format_name"
-        ":stream=index,codec_type,codec_name,channels:stream_tags=language,title",
+        ":stream=index,codec_type,codec_name,channels:stream_tags=language,title"
+        ":stream_disposition=default,forced",
         urlproxy.local_url(url),  # never the debrid url in argv
     ]  # fmt: skip
     proc = util.run_cmd(cmd, timeout=timeout)

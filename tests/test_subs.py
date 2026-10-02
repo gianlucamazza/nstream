@@ -485,3 +485,18 @@ def test_report_unverified_only_for_language_guesses(match, said):
         subs.report_unverified(subs.SubsPick(("/s.srt",), match), hint="h")
         subs.report_unverified(subs.SubsPick(), hint="h")  # nothing delivered: silent
     assert [n.code for n in bag] == (["subs_unverified"] if said else [])
+
+
+def test_embedded_pick_skips_forced_and_bitmap_tracks():
+    """In the Mood for Love (field 2026-10-02): [ita forced, ita, eng, …] → the full ita."""
+    from nstream.tracks import Track, Tracks
+
+    tr = Tracks(subs=[
+        Track(1, "ita", "subrip", forced=True), Track(2, "ita", "subrip"),
+        Track(3, "eng", "subrip"), Track(4, "fre", "hdmv_pgs_subtitle"),
+    ])  # fmt: skip
+    assert subs.embedded_pick(tr, ["ita", "eng"]) == (1, "ita")
+    assert subs.embedded_pick(tr, ["fra"]) is None  # only a bitmap French track
+    assert subs.embedded_pick(tr, ["eng"]) == (2, "eng")
+    two_letter = Tracks(subs=[Track(1, "it", "ass")])
+    assert subs.embedded_pick(two_letter, ["ita"]) == (0, "ita")
