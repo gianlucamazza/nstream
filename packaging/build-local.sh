@@ -3,8 +3,7 @@
 #
 # The PKGBUILD `source` is the GitHub source tarball for `v<pkgver>`. This wrapper
 # asserts pkgver matches src/nstream/__init__.py, checks the tag is on origin,
-# and regenerates .SRCINFO. After a public tag, replace sha256sums=('SKIP') with
-# the tarball hash before uploading to AUR.
+# and regenerates .SRCINFO. sha256sums must match the GitHub tag tarball.
 #
 # Usage:  packaging/build-local.sh [--install]
 set -euo pipefail

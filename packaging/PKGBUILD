@@ -24,9 +24,8 @@ makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling'
 checkdepends=('python-pytest')
 install="$pkgname.install"
 # GitHub auto-generated source tarball (directory inside: nstream-$pkgver).
-# sha256 is filled on the release commit once the tag exists; SKIP until then.
 source=("$pkgname-$pkgver.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('bc665790be81593f2c9f58e764cbc91edf719a453281eb358e3a9ed49da9d576')
 
 build() {
   cd "$pkgname-$pkgver"
