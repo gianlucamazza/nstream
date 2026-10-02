@@ -23,8 +23,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   and adopted at the change.
 - Interactive (TUI) live casts share the live state: seeks, sub-shift and film-time status.
 
+### Changed
+
+- **ADR 0043 Accepted:** a downloaded subtitle on a live cast is a rendition too (the
+  producer's second input), so `--sub-shift` and the after-start alignment only rewrite
+  the cues the TV fetches next: the media is never reloaded.
+
 ### Fixed
 
+- `--sub-shift` on a live cast no longer leaves the TV IDLE or stuck in BUFFERING (it
+  re-LOADed the media).
 - `tests/test_e2e.py` no longer spawns the real castbridge (216 orphaned daemons found).
 - `--follow` events report film time and the probed duration on live casts.
 

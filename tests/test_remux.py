@@ -990,8 +990,11 @@ def _live_wiring(monkeypatch, *, writes_segments: bool):
     def spawn(bind_ip, *, sub_path=None, hls_dir=None, job=None, file_path=None):
         seen["job"] = job
         if writes_segments:
-            lines = ["#EXTM3U"] + [f"#EXTINF:6.0,\nindex{i}.ts" for i in range(3)]
-            Path(str(hls_dir), live.PLAYLIST).write_text("\n".join(lines) + "\n")
+            subs = bool(job and job.subs)
+            lines = ["#EXTM3U"] + [
+                f"#EXTINF:6.0,\n{live.segment_name(0, i, subs)}" for i in range(3)
+            ]
+            Path(str(hls_dir), live.playlist_name(0, subs)).write_text("\n".join(lines) + "\n")
         seen["dir"] = hls_dir
         return 4242, 45001, "tok"
 
@@ -1135,21 +1138,26 @@ def test_live_seek_is_none_without_a_live_cast(monkeypatch):
 def test_cast_live_fast_resume_starts_the_producer_at_the_resume_point(monkeypatch, tmp_path):
     """Resume at 50 min used to produce 50 min first (223 s, field 2026-10-01). Now the
     producer opens the source there; the LOAD seeks to the resume point in film time (the
-    served playlist starts with a gap up to `base`), and subtitles stay in film time."""
+    served playlist starts with a gap up to `base`). The downloaded subtitle is the
+    producer's second input (a rendition, ADR 0042), never a side-loaded track."""
     seen = _live_wiring(monkeypatch, writes_segments=True)
     monkeypatch.setattr(remux.live, "first_pts", lambda d, gen=0, subs=False: 3027.125)
     sub = tmp_path / "s.srt"
     sub.write_text("1\n00:50:30,000 --> 00:50:32,000\nciao\n")
     out = remux.cast_live(
         _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, start=3030.5,
-        sub_paths=(str(sub),), follow=False,
+        sub_paths=(str(sub),), sub_lang="ita", follow=False,
     )  # fmt: skip
-    assert out is not None and out.started
-    assert seen["job"].ss_s == 3030.5 and seen["job"].head_s == 0.0
+    assert out is not None and out.started and out.subs_delivered
+    job = seen["job"]
+    assert job.ss_s == 3030.5 and job.head_s == 0.0
+    assert job.sub_map == "1:0" and job.sub_lang == "ita" and job.rms
+    assert Path(job.sub_file).parent == Path(seen["dir"])
+    assert "00:50:30.000 --> 00:50:32.000" in Path(job.sub_file).read_text()
     assert seen["kwargs"]["current_time"] == 3030.5
+    assert seen["kwargs"]["text_language"] == "it" and "subtitle_url" not in seen["kwargs"]
+    assert seen["url"].endswith("/hls/s0master.m3u8")
     assert (remux._read_state() or {})["base"] == 3027.125
-    vtt = Path(seen["dir"], "subs.vtt").read_text()
-    assert "00:50:30.000 --> 00:50:32.000" in vtt
 
 
 def test_live_seek_loads_film_time_against_the_playlist_base(monkeypatch, tmp_path):
@@ -1242,13 +1250,23 @@ def test_remux_to_file_extracts_the_embedded_subtitle_in_the_same_pass(monkeypat
     assert Path(remux.embedded_vtt(path)).read_text().startswith("WEBVTT")
 
 
-def test_live_sub_shift_accumulates_and_reloads(monkeypatch, tmp_path):
+def test_live_sub_shift_accumulates_and_never_reloads(monkeypatch, tmp_path):
+    """A re-LOAD left the TV IDLE or stuck BUFFERING (field 2026-10-02): the shift only
+    writes its file, serve applies it to the segments fetched from then on."""
     loads = _live_state(monkeypatch, tmp_path, pos=1234.0)
     assert remux.live_sub_shift("10.0.0.5", 1.5) == 1.5
     assert remux.live_sub_shift("10.0.0.5", -0.5) == 1.0
     st = remux._read_state() or {}
     assert Path(st["file"], remux.serve.SUB_SHIFT).read_text() == "1.0"
-    assert [at for _, at, _ in loads] == [1234.0, 1234.0]  # re-read at the current position
+    assert loads == []
+
+
+def test_live_alignment_reports_the_verdict_and_never_reloads(monkeypatch, tmp_path):
+    loads = _live_state(monkeypatch, tmp_path, pos=1234.0)
+    st = remux._read_state() or {}
+    Path(st["file"], remux.live.ALIGN_FILE).write_text('{"reason": "aligned", "offset": 0.4}')
+    assert remux.live_alignment("10.0.0.5") == {"reason": "aligned", "offset": 0.4}
+    assert loads == []
 
 
 def test_live_sub_shift_without_a_live_cast_is_none():

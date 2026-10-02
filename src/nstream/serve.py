@@ -770,13 +770,7 @@ def _main(argv: list[str] | None = None) -> int:
     server.producer = producer
     if producer is not None:
         producer.run_pacing()
-        side = (
-            args.subs
-            if args.subs
-            and os.path.dirname(os.path.abspath(args.subs)) == os.path.abspath(args.hls)
-            else ""
-        )
-        live.Aligner(producer, side_loaded=side).run()
+        live.Aligner(producer).run()
     port = server.server_address[1]
     # The parent reads exactly these two lines to learn port+token, then leaves us running.
     sys.stdout.write(f"PORT={port}\nTOKEN={server.token}\n")

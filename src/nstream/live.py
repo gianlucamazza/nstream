@@ -141,14 +141,17 @@ class Job:
     audio_args: tuple[str, ...] = ("-c:a", "aac", "-ac", "2", "-b:a", "192k")
     head_s: float = 0.0
     ss_s: float = 0.0
-    # An embedded text subtitle delivered as a WebVTT rendition (ADR 0042): the ffmpeg map
-    # (`0:s:N`) and its ISO 639-2 language for the master's EXT-X-MEDIA.
+    # The subtitle delivered as a WebVTT rendition (ADR 0042): the ffmpeg map and its ISO
+    # 639-2 language for the master's EXT-X-MEDIA. An embedded track maps `0:s:N`; a
+    # downloaded one is `sub_file` (below: a cleaned WebVTT in the live dir) and maps `1:0`,
+    # the second input: each generation reads its cues from `ss_s` on (`sub_input_path`).
     sub_map: str = ""
     sub_lang: str = ""
     # Speech activity for the after-start subtitle alignment (ADR 0040 point 2): the
     # producer tees the planned audio track through `subalign.rms_filter` into rms<gen>.txt.
     rms: bool = False
     rms_channels: int = 0
+    sub_file: str = ""
 
     @property
     def subs(self) -> bool:
@@ -158,7 +161,7 @@ class Job:
         return {
             "url": self.url, "audio_map": self.audio_map,
             "audio_args": list(self.audio_args), "head_s": self.head_s, "ss_s": self.ss_s,
-            "sub_map": self.sub_map, "sub_lang": self.sub_lang,
+            "sub_map": self.sub_map, "sub_lang": self.sub_lang, "sub_file": self.sub_file,
             "rms": self.rms, "rms_channels": self.rms_channels,
         }  # fmt: skip
 
@@ -168,7 +171,7 @@ class Job:
             str(d["url"]), str(d["audio_map"]),
             tuple(str(a) for a in d["audio_args"]), float(d.get("head_s") or 0.0),
             float(d.get("ss_s") or 0.0), str(d.get("sub_map") or ""), str(d.get("sub_lang") or ""),
-            bool(d.get("rms")), int(d.get("rms_channels") or 0),
+            bool(d.get("rms")), int(d.get("rms_channels") or 0), str(d.get("sub_file") or ""),
         )  # fmt: skip
 
 
@@ -181,6 +184,9 @@ def producer_cmd(src: str, out_dir: str, job: Job, gen: int = 0) -> list[str]:
     it: `-noaccurate_seek`, matrix #12) and the source timestamps are kept (`-copyts`, no
     mux delay), so `first_pts` reads where the playlist really starts."""
     seek = ["-ss", f"{job.ss_s:.3f}", "-noaccurate_seek"] if job.ss_s > 0 else []
+    # A downloaded subtitle: the generation's cues as a second input, timestamps kept
+    # (phase 0 gate 3: the rendition's cues equal the file's to the millisecond).
+    sub_in = ["-i", sub_input_path(out_dir, gen)] if job.sub_file else []
     # Subtitle cues keep source time too (film time), matching the gap-filled playlists.
     keep_ts = ["-copyts", "-muxdelay", "0", "-muxpreload", "0"] if job.ss_s > 0 or job.subs else []
     hls = [
@@ -214,9 +220,31 @@ def producer_cmd(src: str, out_dir: str, job: Job, gen: int = 0) -> list[str]:
     )  # fmt: skip
     return [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-        "-rw_timeout", "30000000", *seek, "-i", src,
+        "-rw_timeout", "30000000", *seek, "-i", src, *sub_in,
         *maps, *codecs, *keep_ts, *out, *rms,
     ]  # fmt: skip
+
+
+def sub_input_path(out_dir: str, gen: int) -> str:
+    return os.path.join(out_dir, f"sub{gen}.vtt")
+
+
+def _write_sub_input(job: Job, out_dir: str, gen: int) -> bool:
+    """Generation `gen`'s subtitle input: the cues of `job.sub_file` still running at
+    `job.ss_s` or later. ffmpeg does not trim a subtitle input with `-copyts` (an `-ss` on
+    it still let every earlier cue through), and a fast resume or seek must not dump the
+    whole film's past cues into its first segment."""
+    text = srt.decode(job.sub_file)
+    if text is None:
+        return False
+    cues = [c for c in srt.parse_cues(text) if c.end > job.ss_s]
+    try:
+        util.atomic_write_bytes(
+            Path(sub_input_path(out_dir, gen)), srt.write_vtt(cues).encode(), prefix=".sub-"
+        )
+    except OSError:
+        return False
+    return True
 
 
 def rms_path(out_dir: str, gen: int) -> str:
@@ -315,6 +343,9 @@ def segment_codecs(path: str) -> str:
 
 
 def _spawn(job: Job, out_dir: str, gen: int) -> subprocess.Popen | None:
+    if job.sub_file and not _write_sub_input(job, out_dir, gen):
+        _log.warning("live: sottotitolo della generazione %d non scritto", gen)
+        return None
     cmd = producer_cmd(urlproxy.local_url(job.url), out_dir, job, gen)
     try:
         # stderr beside the segments (never served: the route whitelists names), read
@@ -350,7 +381,8 @@ def _remove_generation(out_dir: str, gen: int) -> None:
                 playlist_generation(entry.name) == gen
                 and (gen != 0 or entry.name == PLAYLIST or entry.name.startswith("s0"))
             )
-            if (sid is not None and sid[0] == gen) or own_playlist:
+            own_input = entry.name == os.path.basename(sub_input_path(out_dir, gen))
+            if (sid is not None and sid[0] == gen) or own_playlist or own_input:
                 with contextlib.suppress(OSError):
                     os.unlink(entry.path)
 
@@ -501,7 +533,6 @@ class Aligner:
     it serves. One attempt per generation; refusals change nothing."""
 
     producer: Producer
-    side_loaded: str = ""  # the side-loaded subs.vtt, when the cast carries one
     done_gen: int = -1
 
     def tick(self) -> None:
@@ -535,8 +566,6 @@ class Aligner:
 
     def _cue_spans(self) -> list[tuple[float, float]]:
         p = self.producer
-        if self.side_loaded:
-            return list(srt.cue_spans(self.side_loaded))
         spans: list[tuple[float, float]] = []
         with contextlib.suppress(OSError):
             for entry in os.scandir(p.out_dir):

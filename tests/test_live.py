@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import urllib.error
 import urllib.request
@@ -404,9 +405,9 @@ def _rms_file(path: Path, speech: list[tuple[float, float]], t0: float, t1: floa
     path.write_text("\n".join(lines) + "\n")
 
 
-def test_aligner_measures_late_side_loaded_subtitles(tmp_path):
-    """ADR 0040 point 2: 10+ min of teed speech vs cues 2 s late → offset −2, written for
-    serve to apply; one attempt per generation."""
+def test_aligner_measures_late_rendition_subtitles(tmp_path):
+    """ADR 0040 point 2: 10+ min of teed speech vs the rendition's cues 2 s late → offset
+    −2, written for serve to apply; one attempt per generation."""
     import random
 
     rng = random.Random(7)
@@ -421,10 +422,10 @@ def test_aligner_measures_late_side_loaded_subtitles(tmp_path):
         f"{i}\n{srt._fmt_ts(a + 2.0)} --> {srt._fmt_ts(b + 2.0)}\nx"
         for i, (a, b) in enumerate(speech, 1)
     )
-    side = tmp_path / "subs.vtt"
-    side.write_text("WEBVTT\n\n" + cues.replace(",", ".") + "\n")
+    (tmp_path / "s0v07.vtt").write_text("WEBVTT\n\n" + cues.replace(",", ".") + "\n")
+    (tmp_path / "s1v07.vtt").write_text("WEBVTT\n\n00:50:01.000 --> 00:50:09.000\nold gen\n")
     p = live.Producer(str(tmp_path), cast(Any, _Proc()), job=live.Job("u", rms=True))
-    a = live.Aligner(p, side_loaded=str(side))
+    a = live.Aligner(p)
     a.tick()
     verdict = live.alignment(str(tmp_path))
     assert verdict["reason"] == "aligned" and verdict["offset"] == pytest.approx(-2.0, abs=0.1)
@@ -447,6 +448,70 @@ def test_served_vtt_adds_the_accepted_alignment(hls_server, tmp_path):
     (tmp_path / serve.SUB_SHIFT).write_text("0.5")
     with urllib.request.urlopen(base + "s0v03.vtt", timeout=5) as r:
         assert "00:00:09.500 --> 00:00:11.500" in r.read().decode()
+
+
+def test_producer_cmd_downloaded_subtitle_is_the_generation_input(tmp_path):
+    """A downloaded subtitle rides the rendition too (ADR 0042): the generation's cue file
+    is the second input, mapped as the subtitle stream, timestamps kept."""
+    job = live.Job("u", ss_s=600.0, sub_map="1:0", sub_lang="ita", sub_file="/d/sub_input.vtt")
+    cmd = live.producer_cmd("http://127.0.0.1:1/r", str(tmp_path), job, gen=3)
+    i = cmd.index("http://127.0.0.1:1/r")
+    assert cmd[i + 1 : i + 3] == ["-i", str(tmp_path / "sub3.vtt")]
+    assert "-map 1:0" in " ".join(cmd) and "-copyts" in cmd
+    assert live.Job.from_dict(job.to_dict()) == job
+
+
+def test_generation_sub_input_keeps_only_cues_from_its_start(tmp_path):
+    full = tmp_path / "sub_input.vtt"
+    full.write_text(
+        "WEBVTT\n\n00:05.000 --> 00:07.000\nPrima\n\n"
+        "00:19.000 --> 00:21.000\nA cavallo\n\n00:31.000 --> 00:33.000\nDopo\n"
+    )
+    job = live.Job("u", ss_s=20.0, sub_map="1:0", sub_file=str(full))
+    assert live._write_sub_input(job, str(tmp_path), 2)
+    assert srt.cue_spans(live.sub_input_path(str(tmp_path), 2)) == ((19.0, 21.0), (31.0, 33.0))
+    live._remove_generation(str(tmp_path), 2)
+    assert not os.path.exists(live.sub_input_path(str(tmp_path), 2)) and full.exists()
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg missing")
+def test_real_producer_keeps_a_downloaded_subtitle_in_film_time(tmp_path):
+    """Phase 0 gate 3 as a test: a fast resume at 20 s with the SRT as a second input →
+    the rendition carries exactly the file's cues from the resume point, in film time."""
+    import subprocess
+    import time
+
+    from nstream import remux
+
+    sub = tmp_path / "dl.srt"
+    sub.write_text(
+        "1\n00:00:05,000 --> 00:00:07,000\nPrima\n\n"
+        "2\n00:00:24,250 --> 00:00:26,500\nDopo\n\n"
+        "3\n00:00:31,000 --> 00:00:33,000\nAncora\n"
+    )
+    src = tmp_path / "src.mkv"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "40",
+         "-c:v", "libx264", "-g", "50", "-c:a", "aac", str(src)],
+        check=True,
+    )  # fmt: skip
+    out = tmp_path / "live"
+    out.mkdir()
+    vin = remux._live_sub_input(str(sub), str(out))
+    assert vin
+    job = live.Job(str(src), ss_s=20.0, sub_map="1:0", sub_lang="ita", sub_file=vin)
+    p = live.Producer.start(job, str(out))
+    assert p is not None
+    deadline = time.monotonic() + 30
+    while p.proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert p.proc.returncode == 0, p.failure_reason()
+    got = set()
+    for f in out.glob("s0v0*.vtt"):
+        got |= set(srt.cue_spans(str(f)))
+    assert got == {(24.25, 26.5), (31.0, 33.0)}
+    p.stop()
 
 
 def test_producer_cmd_tees_speech_activity(tmp_path):

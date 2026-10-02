@@ -924,22 +924,24 @@ _LIVE_POLL_S = 0.5
 _LIVE_FAST_RESUME_S = 60.0
 
 
-def _live_vtt(sub_path: str, out_dir: str) -> bool:
-    """Write the caption track for a live cast to `out_dir/subs.vtt` (cleaned WebVTT, film
-    time: the served playlist keeps the receiver's timeline in film time)."""
-    tmp = os.path.join(out_dir, "subs.srt")
+def _live_sub_input(sub_path: str, out_dir: str) -> str | None:
+    """A downloaded subtitle as the live producer's second input: cleaned WebVTT (UTF-8, no
+    SRT position tags) in `out_dir`, which outlives every producer generation of the cast
+    and dies with it. None when it cannot be read."""
+    tmp = os.path.join(out_dir, "sub_input.srt")
     try:
         shutil.copyfile(sub_path, tmp)
     except OSError:
-        return False
+        return None
     vtt = srt.to_vtt(tmp)
     if not vtt:
-        return False
+        return None
+    dest = os.path.join(out_dir, "sub_input.vtt")
     try:
-        os.replace(vtt, os.path.join(out_dir, "subs.vtt"))
+        os.replace(vtt, dest)
     except OSError:
-        return False
-    return True
+        return None
+    return dest
 
 
 def live_available(cfg: Config) -> bool:
@@ -1105,7 +1107,7 @@ def cast_live(
         job = dataclasses.replace(job, ss_s=head)
     if embedded:
         job = dataclasses.replace(job, sub_map=f"0:s:{embedded[0]}", sub_lang=embedded[1])
-        sub_paths = ()  # the rendition replaces a side-loaded file
+        sub_paths = ()  # the embedded track wins over a downloaded one
     if (embedded or sub_paths) and cfg.sub_align and subalign.available():
         # Tee speech activity for the after-start alignment (ADR 0040 point 2).
         sel = t.audio[audio_index] if 0 <= audio_index < len(t.audio) else None
@@ -1116,17 +1118,21 @@ def cast_live(
         _replace_previous(prev)
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
-    # Adopt a prefetched producer only for a start from the top without a side-loaded file
-    # (the serve got none) — a fast resume needs a producer opened at the resume point.
+    # Adopt a prefetched producer only for a start from the top without a downloaded
+    # subtitle (a prefetch carries none) — a fast resume needs a producer opened at the
+    # resume point.
     adopted = _adopt_prefetch(job, source_key, bind_ip) if not (sub_paths or fast) else None
     if adopted is None:
         reap_prefetch()
     out_dir = adopted[0] if adopted else _new_remux_temp(".hls")
-    # The caption track lives in out_dir: it dies with it, and a headless return removes the
-    # work dir.
-    vtt = None
-    if sub_paths and _live_vtt(sub_paths[0], out_dir):
-        vtt = os.path.join(out_dir, "subs.vtt")
+    # Every live subtitle is a rendition (ADR 0042): a downloaded one is the producer's
+    # second input, kept in out_dir (a headless return removes the work dir it came from).
+    sub_input = _live_sub_input(sub_paths[0], out_dir) if sub_paths else None
+    if sub_input:
+        job = dataclasses.replace(job, sub_map="1:0", sub_lang=sub_lang or "", sub_file=sub_input)
+    elif sub_paths:
+        _log.warning("live: sottotitolo scaricato illeggibile, cast senza sottotitoli")
+        job = dataclasses.replace(job, rms=False)  # nothing to align
     producer: live.Producer | None = None
     server = None
     pid: int | None = None
@@ -1137,14 +1143,14 @@ def cast_live(
         if producer is None:
             _rm(out_dir)
             return None
-        server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt, hls_dir=out_dir)
+        server, port, _thread = serve.serve_file(None, bind_ip, hls_dir=out_dir)
         server.producer = producer
         producer.run_pacing()
-        live.Aligner(producer, side_loaded=vtt or "").run()
+        live.Aligner(producer).run()
         _INPROC[out_dir] = producer
         token = server.token
     else:
-        spawned = serve.spawn_detached(bind_ip, sub_path=vtt, hls_dir=out_dir, job=job)
+        spawned = serve.spawn_detached(bind_ip, hls_dir=out_dir, job=job)
         if spawned is None:
             _rm(out_dir)
             return None
@@ -1194,10 +1200,8 @@ def cast_live(
     base = (live.first_pts(out_dir, 0, job.subs) or head) if fast else 0.0
     kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), head)
     kwargs["content_type"] = _HLS_TYPE
-    if vtt:
-        kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
     if job.subs:  # castbridge activates the rendition by language (ADR 0042)
-        kwargs["text_language"] = languages.bcp47(job.sub_lang)
+        kwargs["text_language"] = languages.bcp47(job.sub_lang or "und")  # = the master's
     load_url = serve.served_hls_url(bind_ip, port, token, live.load_name(0, job.subs))
 
     def abort(started: bool) -> bool:
@@ -1261,8 +1265,11 @@ def cast_live(
             _log.warning("live: il ricevitore ha rifiutato la playlist (%s)", out.error)
         teardown()
         return None  # → the complete-file remux takes over
-    # A rendition's track id is the receiver's to assign: any active track means it's on.
-    delivered = bool(out.tracks) if job.subs else cast_delivery.caption_active(kwargs, out.tracks)
+    # A rendition's track id is the receiver's to assign, and castbridge activates it right
+    # after the first status — which is when a fire-and-return start returns: an empty list
+    # there is "not yet known" (ADR 0016), not a refusal (field 2026-10-02: [] at start,
+    # [1] seconds later).
+    delivered = job.subs
     if not follow:
         _write_state(
             pid or 0, out_dir, device, mode="live",
@@ -1322,33 +1329,23 @@ def live_seek(device: str | None, target: float) -> bool | None:
 
 def live_alignment(device: str | None) -> dict | None:
     """The active live cast's after-start alignment verdict (ADR 0040 point 2), or None
-    when no live cast is active. An accepted offset reaches a rendition by itself (serve
-    shifts every segment it serves from then on); a side-loaded track was fetched once at
-    LOAD, so the first status after the verdict re-LOADs at the current position."""
+    when no live cast is active. An accepted offset needs no action here: serve adds it to
+    every subtitle segment it serves from then on."""
     st = _read_state()
     if not st or st.get("mode") != "live" or not _pid_alive(st.get("pid")):
         return None
     dev = device or st.get("device")
     if not dev or dev != st.get("device"):
         return None
-    out_dir = str(st.get("file") or "")
-    verdict = live.alignment(out_dir)
-    if "offset" in verdict and not st.get("subs") and not verdict.get("applied"):
-        pos = float(caster.status(dev).get("position") or 0.0)
-        if _live_load(dev, st, pos):
-            verdict["applied"] = True
-            with contextlib.suppress(OSError):
-                util.atomic_write_bytes(
-                    Path(out_dir, live.ALIGN_FILE), json.dumps(verdict).encode(), prefix=".align-"
-                )
-    return verdict
+    return live.alignment(str(st.get("file") or ""))
 
 
 def live_sub_shift(device: str | None, delta: float) -> float | None:
     """Move the active live cast's subtitles by `delta` seconds (cumulative; + = later).
-    serve applies the total to every WebVTT it serves — the side-loaded track or the
-    embedded rendition — and the playlist is LOADed again at the current position so the
-    receiver re-reads them. Returns the new total, or None when no live cast is active."""
+    Only the shift file changes: serve applies the total to each subtitle segment as the
+    receiver fetches it, so the cues move within its fetch-ahead (~25 s, field 2026-10-02)
+    and the media is never touched. Returns the new total, or None when no live cast is
+    active."""
     st = _read_state()
     if not st or st.get("mode") != "live" or not _pid_alive(st.get("pid")):
         return None
@@ -1365,8 +1362,6 @@ def live_sub_shift(device: str | None, delta: float) -> float | None:
         util.atomic_write_bytes(path, str(total).encode(), prefix=".shift-")
     except OSError:
         return None
-    pos = float(caster.status(dev).get("position") or 0.0)
-    _live_load(dev, st, pos)
     return total
 
 
