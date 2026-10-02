@@ -97,9 +97,9 @@ def hls_url_path(token: str) -> str:
     return f"/cast/{token}/hls/"
 
 
-def served_hls_url(ip: str, port: int, token: str) -> str:
-    """The playlist url a live cast LOADs."""
-    return f"http://{ip}:{port}{hls_url_path(token)}{live.PLAYLIST}"
+def served_hls_url(ip: str, port: int, token: str, name: str = live.PLAYLIST) -> str:
+    """The playlist url a live cast LOADs (`name`: the master when subtitles ride along)."""
+    return f"http://{ip}:{port}{hls_url_path(token)}{name}"
 
 
 def served_url(ip: str, port: int, token: str) -> str:
@@ -226,6 +226,8 @@ class RangeFileHandler(BaseHTTPRequestHandler):
                 return os.path.join(srv.hls_dir, name), _HLS_PLAYLIST_TYPE
             if live.segment_id(name) is not None:
                 return os.path.join(srv.hls_dir, name), "video/mp2t"
+            if live.vtt_id(name) is not None:  # a subtitle rendition's cue segment
+                return os.path.join(srv.hls_dir, name), "text/vtt; charset=utf-8"
         return None
 
     def _send_cors(self) -> None:
@@ -289,7 +291,12 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        body = live.film_time_playlist(text, self.server.playlist_base(path)).encode()
+        name = os.path.basename(path)
+        if live.is_master_name(name):
+            text = live.master_with_codecs(text, self.server.generation_codecs(path))
+        else:
+            text = live.film_time_playlist(text, self.server.playlist_base(path))
+        body = text.encode()
         self.send_response(HTTPStatus.OK)
         self._send_cors()
         self.send_header("Content-Type", _HLS_PLAYLIST_TYPE)
@@ -394,22 +401,35 @@ class _FileServer(ThreadingHTTPServer):
         self._activity_lock = threading.Lock()
         self._in_flight = 0
         self._last_activity = time.monotonic()
-        self._bases: dict[str, float] = {}  # live playlist → film time of its first segment
+        self._bases: dict[str, float] = {}  # first segment → film time it starts at
+        self._codecs: dict[str, str] = {}  # first segment → CODECS of its generation
 
     def playlist_base(self, path: str) -> float:
-        """Film time at which a live playlist's first segment starts (cached per playlist;
-        0 when unknown or from the very start)."""
-        name = os.path.basename(path)
+        """Film time at which a live playlist's generation starts (its first segment's PTS;
+        cached; 0 when unknown or from the very start)."""
+        first = os.path.join(os.path.dirname(path), live.first_segment_name(os.path.basename(path)))
         with self._activity_lock:
-            if name in self._bases:
-                return self._bases[name]
-        gen = 0 if name == live.PLAYLIST else int(name[1:].split(".")[0] or 0)
-        base = live.first_pts(os.path.dirname(path), gen)
+            if first in self._bases:
+                return self._bases[first]
+        base = _start_pts(first)
         if base is None:
             return 0.0
         with self._activity_lock:
-            self._bases[name] = base
+            self._bases[first] = base
         return base
+
+    def generation_codecs(self, path: str) -> str:
+        """`CODECS` for a master playlist, from its generation's first segment (cached)."""
+        first = os.path.join(os.path.dirname(path), live.first_segment_name(os.path.basename(path)))
+        key = "codecs:" + first
+        with self._activity_lock:
+            if key in self._codecs:
+                return self._codecs[key]
+        codecs = live.segment_codecs(first)
+        if codecs:
+            with self._activity_lock:
+                self._codecs[key] = codecs
+        return codecs
 
     def touch(self, delta: int) -> None:
         with self._activity_lock:
@@ -637,6 +657,17 @@ def _exit_when_idle(server: _FileServer, idle_s: float) -> None:
 
 
 RESTART_REQUEST = "restart.json"
+
+
+def _start_pts(segment: str) -> float | None:
+    proc = util.run_cmd(
+        ["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", segment],
+        timeout=10,
+    )  # fmt: skip
+    try:
+        return float((proc.stdout or "").split()[0]) if proc and proc.returncode == 0 else None
+    except (IndexError, ValueError):
+        return None
 
 
 def _restart_from_request(producer: live.Producer, hls_dir: str) -> None:

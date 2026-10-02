@@ -91,6 +91,7 @@ Common fields:
 | `hash`            | OpenSubtitles moviehash of the exact file                                |
 | `audio`           | Native alignment against local/remux media; offset in `subtitles_offset` |
 | `lang`            | Language guess only                                                      |
+| `embedded`        | The release's own text track, as an HLS rendition on a live cast (ADR 0042); not verified against the audio |
 
 Manual `--sub-offset` / `--sub-fps` always win (engine steps aside). Toggle engine:
 `sub_align`, `sub_align_budget_s`.

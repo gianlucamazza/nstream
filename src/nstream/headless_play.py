@@ -343,7 +343,7 @@ def auto_play(
             stream_block = describe_stream(cfg, chosen)  # may have been reselected
             if outcome.audio_lang or outcome.audio_degraded:
                 cast_audio_lang, cast_audio_verified = outcome.audio_lang, outcome.audio_verified
-            cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang
+            cast_sub_lang = outcome.safety_sub_lang or opts.sub_lang or outcome.sub_lang
             sub_paths = outcome.sub_paths
             sub_match = outcome.sub_match
             sub_offset = outcome.sub_offset
@@ -410,6 +410,8 @@ def auto_play(
     if opts.history and hist_pos > 0 and hist_dur > 0:
         state.save_entry(cfg, _hist_entry(hist_pos, hist_dur))
 
+    # A downloaded track has a file; an embedded rendition (ADR 0042) has none.
+    has_subs = bool(sub_paths) or sub_match == "embedded"
     emit_json(
         {
             "ok": True,
@@ -442,12 +444,12 @@ def auto_play(
             # Only claim subtitles the delivery actually attached (`subs_delivered`): both the
             # castbridge (side-loaded WebVTT track) and catt (`-s`) paths carry them now, but a
             # mirror cast or a failed conversion may not — don't report those as active.
-            "subtitles": cast_sub_lang if (sub_paths and subs_delivered) else None,
+            "subtitles": cast_sub_lang if (has_subs and subs_delivered) else None,
             # How the track was chosen (ADR 0020): "hash" = protocol-verified OSHash
             # match, "audio" = aligned against the local media's real audio (offset in
             # subtitles_offset), "lang" = best language guess (correct with --sub-offset).
-            "subtitles_match": sub_match if (sub_paths and subs_delivered) else None,
-            "subtitles_offset": sub_offset if (sub_paths and subs_delivered) else None,
+            "subtitles_match": sub_match if (has_subs and subs_delivered) else None,
+            "subtitles_offset": sub_offset if (has_subs and subs_delivered) else None,
             "notice": notice,
             "error": None,
         }

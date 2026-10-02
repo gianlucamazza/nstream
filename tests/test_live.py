@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import signal
 import urllib.error
 import urllib.request
@@ -293,7 +294,89 @@ def test_film_time_playlist_prepends_a_gap_up_to_the_base():
 
 def test_served_live_playlist_is_film_time(hls_server, monkeypatch):
     base, _ = hls_server
-    monkeypatch.setattr(serve.live, "first_pts", lambda d, gen=0: 600.0)
+    monkeypatch.setattr(serve, "_start_pts", lambda segment: 600.0)
     with urllib.request.urlopen(base + live.PLAYLIST, timeout=5) as r:
         body = r.read().decode()
     assert "#EXT-X-GAP" in body and "#EXTINF:600.000," in body
+
+
+def test_subtitle_generation_names_and_whitelist():
+    assert live.load_name(2, subs=True) == "s2master.m3u8"
+    assert live.playlist_name(2, subs=True) == "s2v0.m3u8"
+    assert live.segment_id("s2v0_14.ts") == (2, 14) and live.vtt_id("s2v014.vtt") == (2, 14)
+    assert live.is_playlist_name("s2v0_vtt.m3u8") and live.is_master_name("s2master.m3u8")
+    assert live.first_segment_name("s2v0_vtt.m3u8") == "s2v0_0.ts"
+    assert live.first_segment_name("g3.m3u8") == "g3_0.ts"
+    assert live.vtt_id("../s2v01.vtt") is None and not live.is_playlist_name("s2x.m3u8")
+
+
+def test_producer_cmd_with_a_subtitle_rendition(tmp_path):
+    job = live.Job("u", sub_map="0:s:1", sub_lang="ita")
+    cmd = live.producer_cmd("http://127.0.0.1:1/r", str(tmp_path), job, gen=2)
+    j = " ".join(cmd)
+    assert "-map 0:s:1" in j and "-c:s webvtt" in j and "-copyts" in j
+    assert "-master_pl_name s2master.m3u8" in j and "language:ita" in j
+    assert cmd[-1].endswith("s2v%v.m3u8")
+
+
+@pytest.mark.parametrize(
+    ("text", "codecs", "expected"),
+    [
+        (
+            "#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=1x1\nv0.m3u8\n",
+            "hvc1.1.4.L120.B0,mp4a.40.2",
+            '#EXT-X-STREAM-INF:CODECS="hvc1.1.4.L120.B0,mp4a.40.2",BANDWIDTH=1',
+        ),
+        ('#EXT-X-STREAM-INF:CODECS="x",BANDWIDTH=1\n', "y", 'CODECS="x"'),
+    ],
+)
+def test_master_with_codecs(text, codecs, expected):
+    assert expected in live.master_with_codecs(text, codecs)
+
+
+@pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg missing")
+def test_real_producer_writes_a_subtitle_rendition(tmp_path):
+    """End to end: an MKV with a forced and a full ita subrip track → the master playlist,
+    a WebVTT rendition with real cues, and CODECS derived from the first segment."""
+    import subprocess
+    import time
+
+    srt_full = tmp_path / "full.srt"
+    srt_full.write_text(
+        "1\n00:00:01,000 --> 00:00:03,000\nCiao\n\n2\n00:00:08,000 --> 00:00:10,000\nDi nuovo\n"
+    )
+    srt_forced = tmp_path / "forced.srt"
+    srt_forced.write_text("1\n00:00:05,000 --> 00:00:06,000\n[cartello]\n")
+    src = tmp_path / "src.mkv"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25",
+         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-i", str(srt_forced),
+         "-i", str(srt_full), "-t", "14", "-map", "0", "-map", "1", "-map", "2", "-map", "3",
+         "-c:v", "libx264", "-g", "50", "-c:a", "ac3", "-c:s", "srt",
+         "-metadata:s:s:0", "language=ita", "-disposition:s:0", "forced",
+         "-metadata:s:s:1", "language=ita", str(src)],
+        check=True,
+    )  # fmt: skip
+    from nstream import subs, tracks
+
+    pick = subs.embedded_pick(tracks._parse_ffprobe(json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-of", "json", "-show_entries",
+         "stream=index,codec_type,codec_name,channels:stream_tags=language,title"
+         ":stream_disposition=default,forced", str(src)],
+        capture_output=True, text=True, check=True).stdout)), ["ita"])  # fmt: skip
+    assert pick == (1, "ita")
+    out = tmp_path / "live"
+    out.mkdir()
+    p = live.Producer.start(live.Job(str(src), sub_map=f"0:s:{pick[0]}", sub_lang="ita"), str(out))
+    assert p is not None
+    deadline = time.monotonic() + 30
+    while p.proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert p.proc.returncode == 0, p.failure_reason()
+    master = (out / "s0master.m3u8").read_text()
+    assert "TYPE=SUBTITLES" in master and 'LANGUAGE="ita"' in master
+    cues = "".join(f.read_text() for f in out.glob("s0v0*.vtt"))
+    assert "Ciao" in cues and "Di nuovo" in cues and "cartello" not in cues
+    assert live.segment_codecs(str(out / "s0v0_0.ts")).startswith("avc1.")
+    assert live.produced_s(str(out), 0, subs=True) == pytest.approx(14.0, abs=1.0)
+    p.stop()

@@ -1233,3 +1233,38 @@ def test_soft_preference_waits_for_nothing_when_live_can_run(monkeypatch):
     assert cast_flow._cast_would_wait(CFG, plan) is False
     monkeypatch.setattr(cast_flow.remux, "live_feasible", lambda *a, **k: False)
     assert cast_flow._cast_would_wait(CFG, plan) is True
+
+
+def test_live_cast_delivers_the_embedded_track(monkeypatch):
+    """ADR 0042: `--subs` on a live cast uses the release's own full text track (a
+    rendition) instead of an OpenSubtitles download, and says so in the outcome."""
+    from nstream.tracks import Track, Tracks
+
+    stream: Stream = _STREAM.copy()
+    seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    _live_on(monkeypatch)
+    monkeypatch.setattr(
+        cast_flow.tracks, "probe_tracks",
+        lambda url: Tracks(subs=[Track(1, "ita", "subrip", forced=True), Track(2, "ita", "subrip")]),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.remux, "cast_live",
+        lambda cfg, title, url, **k: seen.update(embedded=k["embedded"]) or _ok(subs=True),
+    )  # fmt: skip
+    with cast_flow.notices.capture() as bag:
+        out = _run(_opts(sub_mode="auto", sub_lang="ita"), stream)
+    assert seen["embedded"] == (1, "ita")
+    assert out.sub_match == "embedded" and out.sub_lang == "ita" and out.subs_delivered
+    assert "subs_unverified" in [n.code for n in bag]
+
+
+def test_embedded_for_needs_an_automatic_subtitle_wish(monkeypatch):
+    from nstream.tracks import Track, Tracks
+
+    monkeypatch.setattr(
+        cast_flow.tracks, "probe_tracks", lambda url: Tracks(subs=[Track(1, "ita", "subrip")])
+    )
+    st: Stream = _STREAM.copy()
+    assert cast_flow._embedded_for(CFG, _opts(), st, None) is None  # no subtitles wanted
+    assert cast_flow._embedded_for(CFG, _opts(sub_mode="menu"), st, None) is None  # user picks
+    assert cast_flow._embedded_for(CFG, _opts(), st, "ita") == (0, "ita")  # safety net

@@ -43,6 +43,7 @@ from . import (
     state,
     stream_select,
     subs,
+    tracks,
     ui,
 )
 from .config import Config, PlayOpts
@@ -168,6 +169,23 @@ class CastOutcome:
     audio_degraded: bool = False
     start: float | None = None  # the position the delivery was LOADed at (see `_handoff_start`)
     delivery: str = ""  # "live" (HLS-TS) | "file" (complete remux) | "direct" | "mirror"
+    sub_lang: str | None = None  # language of the delivered subtitle track
+
+
+def _embedded_for(
+    cfg: Config, opts: PlayOpts, chosen: Stream, safety_sub_lang: str | None
+) -> tuple[int, str] | None:
+    """The embedded text subtitle to deliver as a live rendition (ADR 0042), or None: only
+    when subtitles are wanted automatically (the safety net, or `--subs` without the
+    interactive menu) and the release carries a full text track in a wanted language. The
+    probe is the memoized one the vetting already ran."""
+    if safety_sub_lang:
+        langs = [safety_sub_lang]
+    elif opts.sub_mode and opts.sub_mode != "menu":
+        langs = [opts.sub_lang] if opts.sub_lang else list(cfg.subtitle_langs)
+    else:
+        return None
+    return subs.embedded_pick(tracks.probe_tracks(chosen["url"]), langs)
 
 
 def _handoff_start(cfg: Config, device: str, video_id: str, start: float | None) -> float | None:
@@ -561,6 +579,7 @@ def run_cast(
     # delivery starts with a whole-file prepare, the subtitle fetch runs alongside it
     # instead of before it: its seconds hide behind the remux's minutes.
     pending_subs: Future[subs.SubsPick] | None = None
+    embedded_used = False  # an embedded text track rides the live cast (ADR 0042)
     if needs_remux and not use_mirror:
         pending_subs = _SUBS_POOL.submit(
             subs.auto_subs, cfg, typ, video_id, work_dir, opts,
@@ -600,9 +619,12 @@ def run_cast(
             print(MIRROR_UNAVAILABLE, file=sys.stderr)
         live_delivery = None
         if needs_remux and remux.live_available(cfg):
-            # ADR 0039: the TV starts on the first converted segments. The subtitle fetch is
-            # awaited first (seconds): the caption track rides the LOAD.
-            if pending_subs is not None:
+            # ADR 0039: the TV starts on the first converted segments. ADR 0042: an embedded
+            # text track in a wanted language rides as a rendition (the file's own track,
+            # no download); otherwise the subtitle fetch is awaited (seconds) so the caption
+            # track rides the LOAD.
+            embedded = _embedded_for(cfg, opts, chosen, safety_sub_lang)
+            if embedded is None and pending_subs is not None:
                 subs_pick = pending_subs.result()
                 pending_subs = None
                 subs.report_safety_subs(subs_pick, safety_sub_lang)
@@ -613,9 +635,14 @@ def run_cast(
                 cfg, title, chosen["url"],
                 device=device, audio_index=plan.audio_index, start=start,
                 size_gb=quality.parse_stream(chosen).size_gb,
-                sub_paths=sub_paths, sub_lang=sub_lang, follow=follow,
+                sub_paths=sub_paths, sub_lang=sub_lang, embedded=embedded, follow=follow,
                 meta=meta, on_event=on_event,
             )  # fmt: skip
+            if live_delivery is not None and embedded is not None:
+                subs_pick = subs.SubsPick(match="embedded", lang=embedded[1])
+                sub_paths, sub_lang, pending_subs = (), embedded[1], None
+                embedded_used = True
+                notices.emit(f"sottotitoli {embedded[1]} dal file")
             if live_delivery is None and st.full_refusal:
                 raise CastRemuxInfeasible(f"{st.full_refusal}; la diretta non è partita")
         if needs_remux and live_delivery is None:
@@ -696,15 +723,15 @@ def run_cast(
             pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             action = "cast"
             delivered_as = "direct"
-    if sub_paths and not subs_delivered:
+    if (sub_paths or embedded_used) and not subs_delivered:
         # Honesty over silence: the subtitles were fetched but not attached to the cast
         # (e.g. WebVTT conversion/serving failed, or the mirror path with no burn-in).
         notices.emit(
             f"{ui.g().warn} sottotitoli scaricati ma non caricati sul TV",
             code="subs_not_delivered",
         )
-    elif sub_paths:
-        subs.report_unverified(subs_pick, hint="se sfasati: --sub-offset ±s")
+    elif sub_paths or embedded_used:
+        subs.report_unverified(subs_pick, hint="se sfasati: --sub-shift ±s")
     if delivery.started:
         # The new cast replaced the TV's content: a previous fire-and-return session no
         # longer describes it (the headless caller writes a fresh one right after). Cleared
@@ -731,5 +758,5 @@ def run_cast(
         safety_sub_lang=safety_sub_lang, sub_paths=sub_paths,
         sub_match=subs_pick.match, sub_offset=subs_pick.offset_s,
         subs_delivered=subs_delivered, audio_degraded=degraded_audio, start=start,
-        delivery=delivered_as,
+        delivery=delivered_as, sub_lang=sub_lang if (sub_paths or embedded_used) else None,
     )  # fmt: skip

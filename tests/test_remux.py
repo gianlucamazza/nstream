@@ -1020,6 +1020,7 @@ def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
     assert remux._read_state() == {
         "pid": 4242, "file": seen["dir"], "device": "10.0.0.5", "mode": "live",
         "url": seen["url"], "title": "T", "base": 0.0, "duration": 6000.0,
+        "subs": False, "text_language": "",
     }  # fmt: skip
 
 
@@ -1119,7 +1120,7 @@ def test_live_restart_requests_a_generation_and_loads_it(monkeypatch, tmp_path):
         (d / live.playlist_name(req["gen"])).write_text("\n".join(lines) + "\n")
 
     monkeypatch.setattr(remux.os, "kill", fake_kill)
-    monkeypatch.setattr(remux.live, "first_pts", lambda out, gen: 1197.5)
+    monkeypatch.setattr(remux.live, "first_pts", lambda out, gen, subs=False: 1197.5)
     assert remux._live_restart(st, "10.0.0.5", 1200.0) is True
     assert sent and sent[0][1] == remux.signal.SIGUSR1
     new = remux._read_state() or {}
@@ -1136,7 +1137,7 @@ def test_cast_live_fast_resume_starts_the_producer_at_the_resume_point(monkeypat
     producer opens the source there; the LOAD seeks to the resume point in film time (the
     served playlist starts with a gap up to `base`), and subtitles stay in film time."""
     seen = _live_wiring(monkeypatch, writes_segments=True)
-    monkeypatch.setattr(remux.live, "first_pts", lambda d: 3027.125)
+    monkeypatch.setattr(remux.live, "first_pts", lambda d, gen=0, subs=False: 3027.125)
     sub = tmp_path / "s.srt"
     sub.write_text("1\n00:50:30,000 --> 00:50:32,000\nciao\n")
     out = remux.cast_live(
@@ -1186,3 +1187,35 @@ def test_report_rate_records_the_link_and_warns_when_slow(monkeypatch):
         remux._report_rate("http://abc.download.real-debrid.com/x", {"rate": 8.0, "bps": 2.4e6})
     assert recorded == [("real-debrid.com", 2.4e6)] * 2
     assert [n.code for n in bag] == ["live_slow"]
+
+
+def test_cast_live_embedded_subtitles_load_the_master_and_activate_by_language(monkeypatch):
+    """ADR 0042: an embedded text track rides as a rendition; the LOAD is the master and
+    castbridge activates it by language (field 2026-10-02: DEFAULT=YES alone does not)."""
+    seen = _live_wiring(monkeypatch, writes_segments=False)
+
+    def spawn(bind_ip, *, sub_path=None, hls_dir=None, job=None, file_path=None):
+        from nstream import live
+
+        seen["job"], seen["dir"], seen["sub_path"] = job, hls_dir, sub_path
+        lines = ["#EXTM3U"] + [f"#EXTINF:6.0,\ns0v0_{i}.ts" for i in range(3)]
+        Path(str(hls_dir), live.playlist_name(0, subs=True)).write_text("\n".join(lines) + "\n")
+        return 4242, 45001, "tok"
+
+    monkeypatch.setattr(remux.serve, "spawn_detached", spawn)
+
+    def drive(device, url, *, follow, load_kwargs, **k):
+        seen["url"], seen["kwargs"] = url, load_kwargs
+        return cast_delivery.BridgeOutcome(0.0, 0.0, True, False, tracks=(3,))
+
+    monkeypatch.setattr(remux.cast_delivery, "drive_bridge", drive)
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, follow=False,
+        embedded=(1, "ita"), sub_paths=("/ignored.srt",),
+    )  # fmt: skip
+    assert out is not None and out.subs_delivered
+    assert seen["job"].sub_map == "0:s:1" and seen["job"].sub_lang == "ita"
+    assert seen["url"].endswith("/s0master.m3u8") and seen["kwargs"]["text_language"] == "it"
+    assert seen["sub_path"] is None and "subtitle_url" not in seen["kwargs"]
+    st = remux._read_state() or {}
+    assert st["subs"] is True and st["text_language"] == "it"

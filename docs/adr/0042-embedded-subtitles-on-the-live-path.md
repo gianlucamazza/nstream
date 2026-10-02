@@ -1,6 +1,6 @@
 # 0042. Embedded text subtitles first, delivered as an HLS rendition on the live path
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-10-02, with the round-2 revisions)
 - **Date:** 2026-10-02
 - **Deciders:** maintainer
 - **Revises:** 0040 (its points 1–3, for the live delivery of ADR 0039)

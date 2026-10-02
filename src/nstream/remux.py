@@ -42,7 +42,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
-from . import bridge, cast_delivery, caster, live, log, notices, serve, srt, ui, urlproxy, util
+from . import (
+    bridge,
+    cast_delivery,
+    caster,
+    languages,
+    live,
+    log,
+    notices,
+    serve,
+    srt,
+    ui,
+    urlproxy,
+    util,
+)
 from . import config as config_mod
 from .config import Config
 from .state import throughput as state_throughput
@@ -879,6 +892,7 @@ def _await_live(
     label: str,
     measure: dict | None = None,
     gen: int = 0,
+    subs: bool = False,
 ) -> bool:
     """Wait until the playlist covers `target_s` (the resume point plus two segments).
     False when the producer fails or makes no progress for `_LIVE_STALL_S`. `measure`
@@ -889,7 +903,7 @@ def _await_live(
     shown = -1
     first: tuple[float, float, int] | None = None  # (wall, produced, bytes) at 1st segment
     while True:
-        done = live.produced_s(out_dir, gen)
+        done = live.produced_s(out_dir, gen, subs)
         now = time.monotonic()
         if done > 0 and first is None:
             first = (now, done, _segment_bytes(out_dir))
@@ -953,11 +967,15 @@ def cast_live(
     size_gb: float = 0.0,
     sub_paths: tuple[str, ...] = (),
     sub_lang: str | None = None,
+    embedded: tuple[int, str] | None = None,
     follow: bool = True,
     meta: caster.CastMeta | None = None,
     on_event: caster.EventCb | None = None,
 ) -> cast_delivery.CastResult | None:
-    """Cast `url` as a live HLS-TS playlist (ADR 0039): the TV starts as soon as the first
+    """`embedded` = (subtitle index, language) of an embedded text track to deliver as an
+    HLS WebVTT rendition (ADR 0042) instead of a side-loaded file.
+
+    Cast `url` as a live HLS-TS playlist (ADR 0039): the TV starts as soon as the first
     segments (past the resume point) exist, instead of after the whole-file remux. Returns
     the `CastResult`, or **None** when the live tier could not start — producer failure,
     no progress, disk, or a receiver that never played it — so the caller falls back to
@@ -981,6 +999,9 @@ def cast_live(
     job = _live_job(url, cfg, t.audio, audio_index, 0.0 if fast else head)
     if fast:
         job = dataclasses.replace(job, ss_s=head)
+    if embedded:
+        job = dataclasses.replace(job, sub_map=f"0:s:{embedded[0]}", sub_lang=embedded[1])
+        sub_paths = ()  # the rendition replaces a side-loaded file
     serve.reap_sub_server()
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
@@ -1029,7 +1050,9 @@ def cast_live(
     try:
         target = (0.0 if fast else head) + 2 * live.SEGMENT_S
         measure: dict = {}
-        ready = _await_live(out_dir, target, failed=failed, label=label, measure=measure)
+        ready = _await_live(
+            out_dir, target, failed=failed, label=label, measure=measure, subs=job.subs
+        )
     except BaseException:
         teardown()
         raise
@@ -1047,11 +1070,14 @@ def cast_live(
     # start offset).
     # Film time where the playlist's first segment starts (the keyframe at or before the
     # resume point): internal playlist arithmetic only — the receiver sees film time.
-    base = (live.first_pts(out_dir) or head) if fast else 0.0
+    base = (live.first_pts(out_dir, 0, job.subs) or head) if fast else 0.0
     kwargs = _bridge_meta_kwargs(title, meta or caster.CastMeta(), head)
     kwargs["content_type"] = _HLS_TYPE
     if vtt:
         kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
+    if job.subs:  # castbridge activates the rendition by language (ADR 0042)
+        kwargs["text_language"] = languages.bcp47(job.sub_lang)
+    load_url = serve.served_hls_url(bind_ip, port, token, live.load_name(0, job.subs))
 
     def abort(started: bool) -> bool:
         if not started or not follow:
@@ -1072,7 +1098,7 @@ def cast_live(
     out: cast_delivery.BridgeOutcome | None = None
     try:
         out = cast_delivery.drive_bridge(
-            device, serve.served_hls_url(bind_ip, port, token), follow=follow,
+            device, load_url, follow=follow,
             load_kwargs=kwargs, on_event=film_time if on_event else None,
             on_started=lambda: ui.cast_live(device, follow=follow), on_interrupt=abort,
         )  # fmt: skip
@@ -1084,12 +1110,13 @@ def cast_live(
             _log.warning("live: il ricevitore ha rifiutato la playlist (%s)", out.error)
         teardown()
         return None  # → the complete-file remux takes over
-    delivered = cast_delivery.caption_active(kwargs, out.tracks)
+    # A rendition's track id is the receiver's to assign: any active track means it's on.
+    delivered = bool(out.tracks) if job.subs else cast_delivery.caption_active(kwargs, out.tracks)
     if not follow:
         _write_state(
             pid or 0, out_dir, device, mode="live",
-            url=serve.served_hls_url(bind_ip, port, token), title=title, base=base,
-            duration=duration,
+            url=load_url, title=title, base=base, duration=duration,
+            subs=job.subs, text_language=kwargs.get("text_language", ""),
         )  # fmt: skip
         return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
     dur = out.dur if out.dur > 0 else duration
@@ -1119,29 +1146,37 @@ def live_seek(device: str | None, target: float) -> bool | None:
         return None
     base = float(st.get("base") or 0.0)  # film time of the playlist's first segment
     gen = int(st.get("gen") or 0)
+    subs = bool(st.get("subs"))
     pos = float(caster.status(dev).get("position") or 0.0)  # film time
     out_dir = str(st.get("file") or "")
     want = target - base  # in the producer's playlist time
-    tl = live.timeline(out_dir, gen)
-    kept = [t for i, t, _ in tl if os.path.exists(os.path.join(out_dir, live.segment_name(gen, i)))]
+    tl = live.timeline(out_dir, gen, subs)
+    kept = [
+        t for i, t, _ in tl
+        if os.path.exists(os.path.join(out_dir, live.segment_name(gen, i, subs)))
+    ]  # fmt: skip
     if want < 0 or (kept and want < kept[0]):
         return _live_restart(st, dev, target)
     need = want + 2 * live.SEGMENT_S
-    if need > live.produced_s(out_dir, gen):
+    if need > live.produced_s(out_dir, gen, subs):
         within_reach = want - (pos - base) <= live.AHEAD_MAX_S
         if not within_reach or not _await_live(
-            out_dir, need, failed=lambda: False, label="", gen=gen
+            out_dir, need, failed=lambda: False, label="", gen=gen, subs=subs
         ):
             return _live_restart(st, dev, target)
     if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
         return None  # the receiver's own seek, in film time
-    return _live_load(dev, str(st["url"]), str(st.get("title") or ""), target)
+    return _live_load(dev, st, target)
 
 
-def _live_load(dev: str, url: str, title: str, at: float) -> bool:
+def _live_load(dev: str, st: dict, at: float) -> bool:
+    """LOAD the live cast's current playlist at film time `at`, re-activating its subtitle
+    rendition when it has one (a new LOAD starts with no text track)."""
+    extra = {"text_language": st["text_language"]} if st.get("text_language") else {}
     events = bridge.cast_load(
-        dev, url, follow=False, title=title, content_type=_HLS_TYPE, current_time=at
-    )
+        dev, str(st["url"]), follow=False, title=str(st.get("title") or ""),
+        content_type=_HLS_TYPE, current_time=at, **extra,
+    )  # fmt: skip
     try:
         for ev in events:
             if ev.get("kind") == "started":
@@ -1159,6 +1194,7 @@ def _live_restart(st: dict, dev: str, target: float) -> bool:
     new playlist at `target` (film time) with the new base recorded in the state."""
     out_dir = str(st.get("file") or "")
     pid = st.get("pid")
+    subs = bool(st.get("subs"))
     gen = int(st.get("gen") or 0) + 1
     target = max(target, 0.0)
     try:
@@ -1171,13 +1207,15 @@ def _live_restart(st: dict, dev: str, target: float) -> bool:
     except (OSError, ValueError):
         return False
     if not _await_live(
-        out_dir, 2 * live.SEGMENT_S, failed=lambda: not _pid_alive(pid), label="", gen=gen
-    ):
+        out_dir, 2 * live.SEGMENT_S, failed=lambda: not _pid_alive(pid), label="",
+        gen=gen, subs=subs,
+    ):  # fmt: skip
         return False
-    base = live.first_pts(out_dir, gen) or target
-    url = f"{str(st['url']).rsplit('/', 1)[0]}/{live.playlist_name(gen)}"
-    _runstate().write({**st, "url": url, "base": base, "gen": gen})
-    return _live_load(dev, url, str(st.get("title") or ""), max(target, base))
+    base = live.first_pts(out_dir, gen, subs) or target
+    url = f"{str(st['url']).rsplit('/', 1)[0]}/{live.load_name(gen, subs)}"
+    new = {**st, "url": url, "base": base, "gen": gen}
+    _runstate().write(new)
+    return _live_load(dev, new, max(target, base))
 
 
 def _log_catt_stderr(path: str) -> None:

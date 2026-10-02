@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import json
 import os
 import re
 import shutil
@@ -40,9 +41,14 @@ KEEP_BEHIND_S = 600.0
 AHEAD_MAX_S = 1800.0
 AHEAD_RESUME_S = 900.0
 # Generation 0 keeps the historical names; a restart (seek anywhere) writes generation N
-# as `gN.m3u8` + `gN_<i>.ts`, so the receiver never mixes two producers' segments.
-_SEGMENT = re.compile(r"(?:index|g(\d+)_)(\d+)\.ts$")
-_PLAYLIST_NAME = re.compile(r"(?:index|g\d+)\.m3u8")
+# as `gN.m3u8` + `gN_<i>.ts`, so the receiver never mixes two producers' segments. A
+# generation that carries an embedded subtitle rendition (ADR 0042) is an HLS master:
+# `sN` + `master.m3u8` / `v0.m3u8` / `v0_<i>.ts` / `v0_vtt.m3u8` / `v0<i>.vtt` (ffmpeg's
+# var_stream_map naming, `%v` = 0).
+_SEGMENT = re.compile(r"(?:index|g(\d+)_|s(\d+)v0_)(\d+)\.ts$")
+_VTT = re.compile(r"s(\d+)v0(\d+)\.vtt$")
+_PLAYLIST_NAME = re.compile(r"(?:index|g\d+|s\d+(?:v0|v0_vtt|master))\.m3u8")
+_PLAYLIST_GEN = re.compile(r"(?:g|s)(\d+)")
 
 
 # A playlist from the film's start begins at ffmpeg's mux delay (~1.4 s), not 0: below
@@ -71,16 +77,51 @@ def film_time_playlist(text: str, base: float) -> str:
     return "\n".join(out) + "\n"
 
 
-def playlist_name(gen: int) -> str:
+def playlist_name(gen: int, subs: bool = False) -> str:
+    """The media playlist of a generation (what `timeline` reads)."""
+    if subs:
+        return f"s{gen}v0.m3u8"
     return PLAYLIST if gen == 0 else f"g{gen}.m3u8"
 
 
-def segment_name(gen: int, index: int) -> str:
+def load_name(gen: int, subs: bool = False) -> str:
+    """What the cast LOADs: the master when a subtitle rendition rides along."""
+    return f"s{gen}master.m3u8" if subs else playlist_name(gen)
+
+
+def segment_name(gen: int, index: int, subs: bool = False) -> str:
+    if subs:
+        return f"s{gen}v0_{index}.ts"
     return f"index{index}.ts" if gen == 0 else f"g{gen}_{index}.ts"
+
+
+def vtt_name(gen: int, index: int) -> str:
+    return f"s{gen}v0{index}.vtt"
 
 
 def is_playlist_name(name: str) -> bool:
     return bool(_PLAYLIST_NAME.fullmatch(name))
+
+
+def is_master_name(name: str) -> bool:
+    return is_playlist_name(name) and name.endswith("master.m3u8")
+
+
+def vtt_id(name: str) -> tuple[int, int] | None:
+    m = _VTT.fullmatch(name)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def playlist_generation(name: str) -> int:
+    m = _PLAYLIST_GEN.match(name)
+    return int(m.group(1)) if m else 0
+
+
+def first_segment_name(name: str) -> str:
+    """The first media segment of the generation a playlist name belongs to — the file
+    whose start PTS is that generation's base (film time) and whose codecs fill CODECS."""
+    gen = playlist_generation(name)
+    return segment_name(gen, 0, subs=name.startswith("s"))
 
 
 _EXTINF = re.compile(r"#EXTINF:([0-9.]+)")
@@ -99,11 +140,20 @@ class Job:
     audio_args: tuple[str, ...] = ("-c:a", "aac", "-ac", "2", "-b:a", "192k")
     head_s: float = 0.0
     ss_s: float = 0.0
+    # An embedded text subtitle delivered as a WebVTT rendition (ADR 0042): the ffmpeg map
+    # (`0:s:N`) and its ISO 639-2 language for the master's EXT-X-MEDIA.
+    sub_map: str = ""
+    sub_lang: str = ""
+
+    @property
+    def subs(self) -> bool:
+        return bool(self.sub_map)
 
     def to_dict(self) -> dict:
         return {
             "url": self.url, "audio_map": self.audio_map,
             "audio_args": list(self.audio_args), "head_s": self.head_s, "ss_s": self.ss_s,
+            "sub_map": self.sub_map, "sub_lang": self.sub_lang,
         }  # fmt: skip
 
     @classmethod
@@ -111,7 +161,7 @@ class Job:
         return cls(
             str(d["url"]), str(d["audio_map"]),
             tuple(str(a) for a in d["audio_args"]), float(d.get("head_s") or 0.0),
-            float(d.get("ss_s") or 0.0),
+            float(d.get("ss_s") or 0.0), str(d.get("sub_map") or ""), str(d.get("sub_lang") or ""),
         )  # fmt: skip
 
 
@@ -124,26 +174,44 @@ def producer_cmd(src: str, out_dir: str, job: Job, gen: int = 0) -> list[str]:
     it: `-noaccurate_seek`, matrix #12) and the source timestamps are kept (`-copyts`, no
     mux delay), so `first_pts` reads where the playlist really starts."""
     seek = ["-ss", f"{job.ss_s:.3f}", "-noaccurate_seek"] if job.ss_s > 0 else []
-    keep_ts = ["-copyts", "-muxdelay", "0", "-muxpreload", "0"] if job.ss_s > 0 else []
-    return [
-        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-        "-rw_timeout", "30000000", *seek, "-i", src,
-        "-map", "0:v:0", "-map", job.audio_map, "-c:v", "copy", *job.audio_args, *keep_ts,
+    # Subtitle cues keep source time too (film time), matching the gap-filled playlists.
+    keep_ts = ["-copyts", "-muxdelay", "0", "-muxpreload", "0"] if job.ss_s > 0 or job.subs else []
+    hls = [
         "-f", "hls", "-hls_time", str(SEGMENT_S), "-hls_list_size", "0",
         "-hls_playlist_type", "event", "-hls_segment_type", "mpegts",
         "-hls_flags", "temp_file",
-        "-hls_segment_filename", os.path.join(out_dir, segment_name(gen, 0)[:-4] + "%d.ts"),
-        os.path.join(out_dir, playlist_name(gen)),
+    ]  # fmt: skip
+    if job.subs:
+        maps = ["-map", "0:v:0", "-map", job.audio_map, "-map", job.sub_map]
+        out = [
+            *hls, "-master_pl_name", f"s{gen}master.m3u8",
+            "-var_stream_map", f"v:0,a:0,s:0,sgroup:subs,language:{job.sub_lang or 'und'}",
+            "-hls_segment_filename", os.path.join(out_dir, f"s{gen}v%v_%d.ts"),
+            os.path.join(out_dir, f"s{gen}v%v.m3u8"),
+        ]  # fmt: skip
+        codecs = ["-c:v", "copy", *job.audio_args, "-c:s", "webvtt"]
+    else:
+        maps = ["-map", "0:v:0", "-map", job.audio_map]
+        out = [
+            *hls,
+            "-hls_segment_filename", os.path.join(out_dir, segment_name(gen, 0)[:-4] + "%d.ts"),
+            os.path.join(out_dir, playlist_name(gen)),
+        ]  # fmt: skip
+        codecs = ["-c:v", "copy", *job.audio_args]
+    return [
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+        "-rw_timeout", "30000000", *seek, "-i", src,
+        *maps, *codecs, *keep_ts, *out,
     ]  # fmt: skip
 
 
-def first_pts(out_dir: str, gen: int = 0) -> float | None:
+def first_pts(out_dir: str, gen: int = 0, subs: bool = False) -> float | None:
     """The source time the playlist starts at (first segment's start), or None. With a
     fast-resume `ss_s` it is the keyframe at or before it — the offset between what the
     receiver reports (playlist time, from 0) and the film."""
     proc = util.run_cmd(
         ["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0",
-         os.path.join(out_dir, segment_name(gen, 0))],
+         os.path.join(out_dir, segment_name(gen, 0, subs))],
         timeout=10,
     )  # fmt: skip
     try:
@@ -152,11 +220,11 @@ def first_pts(out_dir: str, gen: int = 0) -> float | None:
         return None
 
 
-def timeline(out_dir: str, gen: int = 0) -> list[tuple[int, float, float]]:
-    """(segment index, start s, duration s) of every segment generation `gen`'s playlist
-    lists so far."""
+def timeline(out_dir: str, gen: int = 0, subs: bool = False) -> list[tuple[int, float, float]]:
+    """(segment index, start s, duration s) of every segment generation `gen`'s media
+    playlist lists so far."""
     try:
-        with open(os.path.join(out_dir, playlist_name(gen)), encoding="utf-8") as f:
+        with open(os.path.join(out_dir, playlist_name(gen, subs)), encoding="utf-8") as f:
             lines = f.read().splitlines()
     except OSError:
         return []
@@ -170,26 +238,62 @@ def timeline(out_dir: str, gen: int = 0) -> list[tuple[int, float, float]]:
             continue
         s = _SEGMENT.search(line)
         if s:
-            out.append((int(s.group(2)), t, dur))
+            out.append((int(s.group(3)), t, dur))
             t += dur
     return out
 
 
-def produced_s(out_dir: str, gen: int = 0) -> float:
+def produced_s(out_dir: str, gen: int = 0, subs: bool = False) -> float:
     """Seconds of media generation `gen`'s playlist already lists."""
-    tl = timeline(out_dir, gen)
+    tl = timeline(out_dir, gen, subs)
     return tl[-1][1] + tl[-1][2] if tl else 0.0
 
 
 def segment_id(name: str) -> tuple[int, int] | None:
     """(generation, index) of a segment file name, or None for anything else."""
     m = _SEGMENT.fullmatch(name)
-    return (int(m.group(1) or 0), int(m.group(2))) if m else None
+    return (int(m.group(1) or m.group(2) or 0), int(m.group(3))) if m else None
 
 
 def segment_index(name: str) -> int | None:
     sid = segment_id(name)
     return sid[1] if sid else None
+
+
+def master_with_codecs(text: str, codecs: str) -> str:
+    """The master playlist with `CODECS` on its variant: ffmpeg omits it and the receiver
+    then presumes H.264 — an HEVC master went IDLE until it was there (field 2026-10-02)."""
+    if not codecs or "CODECS=" in text:
+        return text
+    return text.replace("#EXT-X-STREAM-INF:", f'#EXT-X-STREAM-INF:CODECS="{codecs}",', 1)
+
+
+_H264_PROFILES = {"Baseline": 0x42, "Constrained Baseline": 0x42, "Main": 0x4D, "High": 0x64,
+                  "High 10": 0x6E, "High 4:2:2": 0x7A}  # fmt: skip
+
+
+def segment_codecs(path: str) -> str:
+    """RFC 6381 `CODECS` for a produced segment (video + AAC audio), or "" when unknown."""
+    proc = util.run_cmd(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,profile,level",
+         "-of", "json", path],
+        timeout=10,
+    )  # fmt: skip
+    try:
+        streams = json.loads(proc.stdout or "{}").get("streams", []) if proc else []
+    except ValueError:
+        return ""
+    parts: list[str] = []
+    for st in streams:
+        name, profile, level = st.get("codec_name"), str(st.get("profile") or ""), st.get("level")
+        if st.get("codec_type") == "video" and isinstance(level, int):
+            if name == "h264":
+                parts.append(f"avc1.{_H264_PROFILES.get(profile, 0x64):02x}00{level:02x}")
+            elif name == "hevc":
+                parts.append(f"hvc1.{2 if '10' in profile else 1}.4.L{level}.B0")
+        elif st.get("codec_type") == "audio" and name == "aac":
+            parts.append("mp4a.40.2")
+    return ",".join(dict.fromkeys(parts))
 
 
 def _spawn(job: Job, out_dir: str, gen: int) -> subprocess.Popen | None:
@@ -223,8 +327,12 @@ def _terminate(proc: subprocess.Popen) -> None:
 def _remove_generation(out_dir: str, gen: int) -> None:
     with contextlib.suppress(OSError):
         for entry in os.scandir(out_dir):
-            sid = segment_id(entry.name)
-            if (sid is not None and sid[0] == gen) or entry.name == playlist_name(gen):
+            sid = segment_id(entry.name) or vtt_id(entry.name)
+            own_playlist = is_playlist_name(entry.name) and (
+                playlist_generation(entry.name) == gen
+                and (gen != 0 or entry.name == PLAYLIST or entry.name.startswith("s0"))
+            )
+            if (sid is not None and sid[0] == gen) or own_playlist:
                 with contextlib.suppress(OSError):
                     os.unlink(entry.path)
 
@@ -279,7 +387,11 @@ class Producer:
 
     def failed(self) -> bool:
         """The producer exited without producing anything usable."""
-        return self.proc.poll() not in (None, 0) and not timeline(self.out_dir, self.gen)
+        return self.proc.poll() not in (None, 0) and not timeline(self.out_dir, self.gen, self.subs)
+
+    @property
+    def subs(self) -> bool:
+        return self.job is not None and self.job.subs
 
     def failure_reason(self) -> str:
         """The tail of ffmpeg's stderr (diagnosis only; it never carries the token, ffmpeg
@@ -297,7 +409,7 @@ class Producer:
         if sid is None or sid[0] != self.gen:
             return
         gen, index = sid
-        tl = timeline(self.out_dir, gen)
+        tl = timeline(self.out_dir, gen, self.subs)
         start = next((t for i, t, _ in tl if i == index), None)
         if start is None:
             return
@@ -308,7 +420,10 @@ class Producer:
             if t + d > floor:
                 break
             with contextlib.suppress(OSError):
-                os.unlink(os.path.join(self.out_dir, segment_name(gen, i)))
+                os.unlink(os.path.join(self.out_dir, segment_name(gen, i, self.subs)))
+            if self.subs:  # the rendition's cue segments go with their media segment
+                with contextlib.suppress(OSError):
+                    os.unlink(os.path.join(self.out_dir, vtt_name(gen, i)))
 
     def tick(self) -> None:
         """Pause the producer far ahead of the play head, resume it when it catches up."""
@@ -316,7 +431,7 @@ class Producer:
             proc, gen = self.proc, self.gen
         if proc.poll() is not None:
             return
-        ahead = produced_s(self.out_dir, gen) - self.newest_s
+        ahead = produced_s(self.out_dir, gen, self.subs) - self.newest_s
         with self._lock:
             if not self.paused and ahead > AHEAD_MAX_S:
                 self._signal(signal.SIGSTOP)

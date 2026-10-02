@@ -68,6 +68,13 @@ def report_unverified(pick: SubsPick, *, hint: str) -> None:
             code="subs_unverified",
             level="info",
         )
+    elif pick.match == "embedded":
+        # A file's own track can be mistimed too (ADR 0042 round 2: one ran ~1-3 s early).
+        notices.emit(
+            f"sottotitoli del file: sincronia non verificata ({hint})",
+            code="subs_unverified",
+            level="info",
+        )
 
 
 # Embedded subtitle codecs a WebVTT rendition can carry (text). Bitmap tracks (PGS, VobSub,
