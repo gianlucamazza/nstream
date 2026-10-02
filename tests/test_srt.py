@@ -148,3 +148,14 @@ def test_to_vtt_emits_valid_cues(tmp_path):
     assert "00:00:01.500 --> 00:00:02.250\nTi amo &lt;3\n" in vtt  # 3-digit ms, no tags
     assert "A → B &amp; <i>C</i>" in vtt
     assert "X1:" not in vtt and "{\\an8}" not in vtt
+
+
+def test_vtt_cues_without_hours_parse_and_clean(tmp_path):
+    """ffmpeg writes `MM:SS.mmm` cues and raw `<` (`<- Clem: …`, field 2026-10-02)."""
+    p = tmp_path / "x.sub.vtt"
+    p.write_text("WEBVTT\n\n09:58.709 --> 10:01.683\n<- Clem: Sei di poche parole?\n")
+    assert srt.cue_spans(str(p)) == ((598.709, 601.683),)
+    out = srt.to_vtt(str(p))
+    assert out == str(p)  # cleaned in place, not a .vtt.vtt sibling
+    text = p.read_text()
+    assert "00:09:58.709 --> 00:10:01.683" in text and "&lt;- Clem" in text

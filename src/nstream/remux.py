@@ -127,8 +127,12 @@ def remux_for_cast(
     audio_index: int,
     size_gb: float = 0.0,
     confirm: Callable[[str, bool], bool] | None = None,
+    sub_index: int | None = None,
 ) -> str | None:
-    """Remux `url` to a complete temp MP4 keeping the audio track at `audio_index` (the cast
+    """`sub_index` also extracts that embedded text subtitle to `<path>.sub.vtt` in the same
+    pass (ADR 0042: the complete-file twin of the live rendition).
+
+    Remux `url` to a complete temp MP4 keeping the audio track at `audio_index` (the cast
     decision in `cast_vet.vet_cast_audio` picks it by language), and return the temp
     path — or None on failure / a refused size guard (caller then degrades to a direct cast).
     Probes once for the channel count (bitrate), video-stream count (DV7 warning) and duration
@@ -140,7 +144,13 @@ def remux_for_cast(
     return remux_to_file(
         url, cfg, audio_index=audio_index, audio=t.audio,
         n_video=n_video, duration=duration, size_gb=size_gb, confirm=confirm,
+        sub_index=sub_index,
     )  # fmt: skip
+
+
+def embedded_vtt(path: str) -> str:
+    """Where `remux_to_file(sub_index=…)` writes the extracted subtitle track."""
+    return f"{path}.sub.vtt"
 
 
 def refusal(cfg: Config, size_gb: float, *, interactive: bool) -> str | None:
@@ -211,9 +221,10 @@ def _gc_stale() -> None:
             if path != keep and not _prepare_active(path):
                 _rm(path)
                 Path(f"{path}.lock").unlink(missing_ok=True)
-        for pat in ("cast-*.mp4.srt", "cast-*.mp4.vtt"):  # subtitle sidecars of detached casts
+        # Subtitle sidecars of detached casts (`.sub.vtt`: an extracted embedded track).
+        for pat in ("cast-*.mp4.srt", "cast-*.mp4.vtt", "cast-*.mp4.sub.vtt"):
             for f in _cache_dir().glob(pat):
-                if not keep or str(f) != f"{keep}{f.suffix}":
+                if not keep or not str(f).startswith(f"{keep}."):
                     f.unlink(missing_ok=True)
         for f in _cache_dir().glob("catt-*.log"):  # startup-diagnosis stderr leftovers
             f.unlink(missing_ok=True)
@@ -428,6 +439,7 @@ def remux_to_file(
     duration: float = 0.0,
     size_gb: float = 0.0,
     confirm: Callable[[str, bool], bool] | None = None,
+    sub_index: int | None = None,
 ) -> str | None:
     """Remux `url` to a complete temp MP4 (video `-c copy`, the chosen audio track kept or
     transcoded to a DMR-decodable codec, `+faststart`) on disk. Blocks until done — this DMR
@@ -509,6 +521,9 @@ def remux_to_file(
         "-map", "0:v:0", "-map", amap,
         "-c:v", "copy", *acodec,
         "-movflags", "+faststart", path,
+        # The embedded subtitle, extracted in the same read of the source (ADR 0042).
+        *(["-map", f"0:s:{sub_index}", "-c:s", "webvtt", embedded_vtt(path)]
+          if sub_index is not None else []),
     ]  # fmt: skip
     size_label = f"~{size_gb:.1f}G" if size_gb > 0 else ""
     try:
@@ -1253,6 +1268,7 @@ def _teardown(pid: int | None, file_path: str | None) -> None:
     if file_path:
         _rm(f"{file_path}.srt")  # subtitle sidecar of the detached catt path, if any
         _rm(f"{file_path}.vtt")  # WebVTT sidecar of the detached castbridge path, if any
+        _rm(embedded_vtt(file_path))  # an embedded track extracted by the remux
     _clear_state()
 
 

@@ -24,6 +24,7 @@ What stays in the callers: device resolution, the headless volume guard (gated o
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -618,12 +619,12 @@ def run_cast(
             # way `mirror_ok` is False here): honour the intent with an honest fallback notice.
             print(MIRROR_UNAVAILABLE, file=sys.stderr)
         live_delivery = None
+        embedded = _embedded_for(cfg, opts, chosen, safety_sub_lang) if needs_remux else None
         if needs_remux and remux.live_available(cfg):
             # ADR 0039: the TV starts on the first converted segments. ADR 0042: an embedded
             # text track in a wanted language rides as a rendition (the file's own track,
             # no download); otherwise the subtitle fetch is awaited (seconds) so the caption
             # track rides the LOAD.
-            embedded = _embedded_for(cfg, opts, chosen, safety_sub_lang)
             if embedded is None and pending_subs is not None:
                 subs_pick = pending_subs.result()
                 pending_subs = None
@@ -654,10 +655,17 @@ def run_cast(
                 audio_index=plan.audio_index,
                 size_gb=quality.parse_stream(chosen).size_gb,
                 confirm=opts.confirm if opts.interactive else None,
+                sub_index=embedded[0] if embedded else None,
             )  # fmt: skip
             if needs_remux and live_delivery is None
             else None
         )
+        extracted = remux.embedded_vtt(remux_path) if remux_path and embedded else ""
+        if embedded and extracted and os.path.isfile(extracted) and os.path.getsize(extracted):
+            # The release's own track, extracted by the remux pass (ADR 0042): it replaces
+            # the download, and the local alignment below still checks it.
+            subs_pick = subs.SubsPick((extracted,), "embedded", lang=embedded[1])
+            sub_paths, sub_lang, pending_subs = subs_pick.paths, subs_pick.lang, None
         if pending_subs is not None:  # fetched while the remux ran
             subs_pick = pending_subs.result()
             subs.report_safety_subs(subs_pick, safety_sub_lang)

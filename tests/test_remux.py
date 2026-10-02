@@ -142,7 +142,7 @@ def test_remux_for_cast_threads_index_and_meta(monkeypatch):
     )  # fmt: skip
     seen = {}
 
-    def fake_remux(url, cfg, *, audio_index, audio, n_video, duration, size_gb, confirm):
+    def fake_remux(url, cfg, *, audio_index, audio, n_video, duration, size_gb, confirm, **_k):
         seen.update(
             audio_index=audio_index, n_video=n_video, duration=duration, size_gb=size_gb,
             confirm=confirm,
@@ -1219,3 +1219,24 @@ def test_cast_live_embedded_subtitles_load_the_master_and_activate_by_language(m
     assert seen["sub_path"] is None and "subtitle_url" not in seen["kwargs"]
     st = remux._read_state() or {}
     assert st["subs"] is True and st["text_language"] == "it"
+
+
+def test_remux_to_file_extracts_the_embedded_subtitle_in_the_same_pass(monkeypatch):
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_gc_stale", lambda: None)
+    seen: dict = {}
+
+    def run(cmd, duration, **_kw):
+        seen["cmd"] = cmd
+        mp4 = cmd[cmd.index("+faststart") + 1]
+        Path(mp4).write_bytes(b"x" * 1024)
+        Path(cmd[-1]).write_text("WEBVTT\n\n00:01.000 --> 00:02.000\nCiao\n")
+        return 0, ""
+
+    monkeypatch.setattr(remux, "_run_ffmpeg", run)
+    audio = [Track(id=1, lang="ita", codec="ac3", channels=6)]
+    path = remux.remux_to_file("http://x", _cfg(), audio_index=0, audio=audio, sub_index=1)
+    assert path is not None
+    cmd = seen["cmd"]
+    assert cmd[-5:] == ["-map", "0:s:1", "-c:s", "webvtt", remux.embedded_vtt(path)]
+    assert Path(remux.embedded_vtt(path)).read_text().startswith("WEBVTT")

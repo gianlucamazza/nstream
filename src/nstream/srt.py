@@ -20,8 +20,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# A cue-timing timestamp (`HH:MM:SS,mmm`; `.` accepted, 1–3 millisecond digits).
-_TS = re.compile(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})")
+# A cue-timing timestamp (`HH:MM:SS,mmm`; `.` accepted, 1–3 millisecond digits). WebVTT
+# allows the hours to be omitted (`MM:SS.mmm`) — ffmpeg's segmenter writes that form.
+_TS = re.compile(r"(?:(\d+):)?(\d{2}):(\d{2})[,.](\d{1,3})")
 # ASS/SSA override blocks some SRTs carry ({\an8}, {\i1}): shown literally on a TV.
 _ASS_TAG = re.compile(r"\{\\[^}]*\}")
 _FONT_TAG = re.compile(r"</?font[^>]*>", re.I)
@@ -59,7 +60,7 @@ def decode(path: str) -> str | None:
 
 def _ts_s(groups: tuple[str, str, str, str]) -> float:
     h, mn, s, ms = groups
-    return int(h) * 3600 + int(mn) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000
+    return int(h or 0) * 3600 + int(mn) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000
 
 
 def _fmt_ts(t: float, sep: str = ",") -> str:
@@ -157,12 +158,14 @@ def to_vtt(srt_path: str) -> str | None:
     Writes a sibling `<name>.vtt` and returns its path (or None on failure). Cues are
     re-emitted from the parsed model: 3-digit milliseconds, ASS/`<font>` tags removed,
     stray `<`/`&` escaped, `-->` in text neutralized — any of which makes a receiver
-    drop or garble a cue. A file already starting with `WEBVTT` is copied through."""
+    drop or garble a cue. WebVTT input is cleaned the same way (ffmpeg's extraction keeps
+    raw `<` and ASS tags) and rewritten in place; one without parsable cues is kept."""
     text = decode(srt_path)
     if text is None:
         return None
-    out = text if text.lstrip().startswith("WEBVTT") else write_vtt(parse_cues(text))
-    base = srt_path[:-4] if srt_path.lower().endswith(".srt") else srt_path
+    cues = parse_cues(text)
+    out = write_vtt(cues) if cues or not text.lstrip().startswith("WEBVTT") else text
+    base = srt_path[:-4] if srt_path.lower().endswith((".srt", ".vtt")) else srt_path
     vtt_path = f"{base}.vtt"
     try:
         with open(vtt_path, "w", encoding="utf-8") as f:

@@ -310,7 +310,7 @@ def align_local(
     refuses, the next family may align. Manual `--sub-offset`/`--sub-fps` wins (the
     engine steps aside), as does a protocol hash match."""
     manual_retime = bool(opts.sub_offset) or opts.sub_scale != 1.0
-    if not pick.paths or pick.match != "lang" or manual_retime:
+    if not pick.paths or pick.match not in ("lang", "embedded") or manual_retime:
         return pick
     if not cfg.sub_align or not subalign.available():
         return pick
