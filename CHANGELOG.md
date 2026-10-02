@@ -7,6 +7,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Added
+
+- **ADR 0042 Accepted:** a live cast that wants subtitles uses the release's own full text
+  track (never a `forced` one) as an HLS WebVTT rendition, activated by castbridge ≥ 0.4.1
+  (`textLanguage`). The complete-file path extracts the same track in its pass.
+  `subtitles_match: "embedded"`.
+- `--sub-shift ±S` (and TUI cast menu ±0.5 s) moves a live cast's subtitles.
+- After-start subtitle alignment on live casts: the producer measures speech activity, and
+  after 10 min the cues are aligned with the same gates as the complete-file path.
+  `--status` reports `subtitles_offset`.
+- Live seeks anywhere (producer restart at the target), the TV clock in film time
+  (`EXT-X-GAP` filler), bandwidth-aware ranking and a `live_slow` warning.
+- Binge: the next episode's live producer is prepared near the end of the current one
+  and adopted at the change.
+- Interactive (TUI) live casts share the live state: seeks, sub-shift and film-time status.
+
+### Fixed
+
+- `tests/test_e2e.py` no longer spawns the real castbridge (216 orphaned daemons found).
+- `--follow` events report film time and the probed duration on live casts.
+
 ## [1.40.0] — 2026-10-01
 
 ### Added

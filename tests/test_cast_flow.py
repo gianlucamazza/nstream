@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from nstream import cast_delivery, cast_flow, subs, util
+from nstream import cast_delivery, cast_flow, stream_select, subs, util
 from nstream.config import Config, PlayOpts
 from nstream.types import Stream
 
@@ -1268,3 +1268,29 @@ def test_embedded_for_needs_an_automatic_subtitle_wish(monkeypatch):
     assert cast_flow._embedded_for(CFG, _opts(), st, None) is None  # no subtitles wanted
     assert cast_flow._embedded_for(CFG, _opts(sub_mode="menu"), st, None) is None  # user picks
     assert cast_flow._embedded_for(CFG, _opts(), st, "ita") == (0, "ita")  # safety net
+
+
+def test_prefetch_next_prepares_the_live_producer(monkeypatch):
+    stream: Stream = _STREAM.copy()
+    seen: dict = {}
+    monkeypatch.setattr(cast_flow.api, "streams", lambda cfg, typ, vid: [stream])
+    monkeypatch.setattr(cast_flow.api, "expected_runtime_s", lambda cfg, typ, vid: 2700.0)
+    monkeypatch.setattr(
+        cast_flow.stream_select, "prepare_stream",
+        lambda *a, **k: stream_select.VettedStream(stream=stream, auto=True, safety_sub_lang=None, quality=0),
+    )  # fmt: skip
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: _plan("remux", stream, audio_index=1)
+    )
+    monkeypatch.setattr(cast_flow.tracks, "probe_tracks", lambda url: cast_flow.tracks.Tracks())
+    monkeypatch.setattr(
+        cast_flow.remux, "prefetch_live", lambda cfg, url, **k: seen.update(url=url, **k) or True
+    )
+    cast_flow.prefetch_next(CFG, "series", "tt:2", "Show · S01E02", _opts(), "10.0.0.5")
+    assert seen["url"] == stream["url"] and seen["audio_index"] == 1
+    assert seen["source_key"] == stream_select.source_key(stream) and seen["device"] == "10.0.0.5"
+
+
+def test_prefetch_next_never_raises(monkeypatch):
+    monkeypatch.setattr(cast_flow.api, "streams", lambda *a: (_ for _ in ()).throw(RuntimeError()))
+    cast_flow.prefetch_next(CFG, "series", "tt:2", "Show", _opts(), "10.0.0.5")

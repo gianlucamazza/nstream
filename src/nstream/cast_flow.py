@@ -31,6 +31,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 from . import (
+    api,
     cast_delivery,
     cast_vet,
     caster,
@@ -171,6 +172,46 @@ class CastOutcome:
     start: float | None = None  # the position the delivery was LOADed at (see `_handoff_start`)
     delivery: str = ""  # "live" (HLS-TS) | "file" (complete remux) | "direct" | "mirror"
     sub_lang: str | None = None  # language of the delivered subtitle track
+
+
+def prefetch_next(
+    cfg: Config, typ: str, video_id: str, title: str, opts: PlayOpts, device: str
+) -> None:
+    """Binge prefetch (ADR 0039 follow-up): run the next episode's unattended selection —
+    the same `prepare_stream` + cast vetting the real start will run — and, when it needs
+    the live tier, start its producer ahead (`remux.prefetch_live`). The real start adopts
+    it if it lands on the same release. Best effort: any failure only costs the speed-up."""
+    try:
+        results = api.streams(cfg, typ, video_id)
+        runtime = api.expected_runtime_s(cfg, typ, video_id)
+        vetted = stream_select.prepare_stream(
+            cfg, results, opts, auto=True, reselect_on_wrong_audio=False, title=title,
+            expected_runtime_s=runtime,
+        )  # fmt: skip
+        if vetted is None or not vetted.stream.get("url"):
+            return
+        chosen = vetted.stream
+        exact = stream_select.exact_resolution(vetted.quality or 0)
+        with stream_select.ranking_runtime(runtime):
+            plan = cast_vet.vet_cast_audio(
+                cfg, results, chosen, opts.audio_lang or cfg.primary,
+                exact_resolution=exact, title=title, expected_s=runtime,
+            )  # fmt: skip
+        chosen = plan.stream
+        needs = plan.mode == "remux" or plan.needs_remux or _needs_rewrap(cfg, chosen)
+        if not needs or not chosen.get("url"):
+            return
+        remux.prefetch_live(
+            cfg, chosen["url"], device=device, audio_index=plan.audio_index,
+            source_key=stream_select.source_key(chosen),
+            embedded=_embedded_for(cfg, opts, chosen, vetted.safety_sub_lang),
+        )  # fmt: skip
+    except Exception as e:  # noqa: BLE001 — a prefetch never disturbs the playing episode
+        _log.info("prefetch episodio successivo fallito: %s", type(e).__name__)
+
+
+def _needs_rewrap(cfg: Config, stream: Stream) -> bool:
+    return not quality.container_castable(cast_vet.cast_container(cfg, stream))
 
 
 def _embedded_for(
@@ -452,6 +493,7 @@ def run_cast(
     on_event: caster.EventCb | None = None,
     safety_sub_lang: str | None = None,
     expected_runtime_s: float = 0.0,
+    prefetch_next: Callable[[], None] | None = None,
 ) -> CastOutcome:
     """Cast `chosen` to `device` in the target audio language. The Default Media Receiver
     plays a file's first audio track and can't switch tracks, so the language is enforced
@@ -638,6 +680,7 @@ def run_cast(
                 size_gb=quality.parse_stream(chosen).size_gb,
                 sub_paths=sub_paths, sub_lang=sub_lang, embedded=embedded, follow=follow,
                 meta=meta, on_event=on_event,
+                source_key=stream_select.source_key(chosen), on_near_end=prefetch_next,
             )  # fmt: skip
             if live_delivery is not None and embedded is not None:
                 subs_pick = subs.SubsPick(match="embedded", lang=embedded[1])

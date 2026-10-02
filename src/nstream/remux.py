@@ -36,6 +36,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
@@ -836,6 +837,86 @@ _HLS_TYPE = "application/vnd.apple.mpegurl"
 _LIVE_STALL_S = 45.0
 # Producers this process runs for a followed (interactive) live cast, by live dir.
 _INPROC: dict[str, live.Producer] = {}
+# A followed cast past this fraction of its runtime prefetches the next episode.
+_NEAR_END = 0.9
+
+
+def _prefetch_state() -> util.RunState:
+    return util.RunState("live-prefetch")
+
+
+def _comparable(job: live.Job) -> dict:
+    """A job minus what legitimately differs between the prefetch and the real start: the
+    resolved url (a debrid link may be minted per resolution) and the play head."""
+    d = job.to_dict()
+    for key in ("url", "head_s", "ss_s"):
+        d.pop(key, None)
+    return d
+
+
+def prefetch_live(
+    cfg: Config,
+    url: str,
+    *,
+    device: str,
+    audio_index: int,
+    source_key: str,
+    embedded: tuple[int, str] | None = None,
+) -> bool:
+    """Start the next episode's live producer ahead of time (binge): a detached serve with
+    no LOAD. `cast_live` adopts it when the same release and job come up, so the episode
+    change skips the producer start. One prefetch at a time; a stale one is reaped."""
+    if not live_available(cfg) or not bridge.bridge_available():
+        return False
+    reap_prefetch()
+    t, _n_video, _duration = _probe_meta(url)
+    job = _live_job(url, cfg, t.audio, audio_index, 0.0)
+    if embedded:
+        job = dataclasses.replace(job, sub_map=f"0:s:{embedded[0]}", sub_lang=embedded[1])
+        if cfg.sub_align and subalign.available():
+            sel = t.audio[audio_index] if 0 <= audio_index < len(t.audio) else None
+            job = dataclasses.replace(job, rms=True, rms_channels=(sel.channels or 0) if sel else 0)
+    bind_ip = serve.lan_ip(device)
+    serve.ensure_firewall(bind_ip)
+    out_dir = _new_remux_temp(".hls")
+    spawned = serve.spawn_detached(bind_ip, hls_dir=out_dir, job=job)
+    if spawned is None:
+        _rm(out_dir)
+        return False
+    pid, port, token = spawned
+    _prefetch_state().write({
+        "pid": pid, "dir": out_dir, "port": port, "token": token, "bind": bind_ip,
+        "key": source_key, "job": _comparable(job),
+    })  # fmt: skip
+    _log.info("live: episodio successivo preparato in anticipo")
+    return True
+
+
+def _adopt_prefetch(job: live.Job, source_key: str, bind_ip: str) -> tuple | None:
+    """(out_dir, pid, port, token) of a prefetched producer for this release and job, or
+    None. Adopting it clears the prefetch slot (the cast now owns it)."""
+    st = _prefetch_state().read()
+    if (
+        not st or not source_key or st.get("key") != source_key
+        or st.get("job") != _comparable(job) or st.get("bind") != bind_ip
+        or not _pid_alive(st.get("pid"))
+    ):  # fmt: skip
+        return None
+    _prefetch_state().clear()
+    _log.info("live: adotto il produttore preparato in anticipo")
+    return st["dir"], int(st["pid"]), int(st["port"]), str(st["token"])
+
+
+def reap_prefetch() -> None:
+    """Drop a prefetched producer nobody adopted (another title, a stopped binge)."""
+    st = _prefetch_state().read()
+    if not st:
+        return
+    _kill(st.get("pid"))
+    _rm(st.get("dir"))
+    _prefetch_state().clear()
+
+
 _LIVE_POLL_S = 0.5
 
 
@@ -989,9 +1070,14 @@ def cast_live(
     follow: bool = True,
     meta: caster.CastMeta | None = None,
     on_event: caster.EventCb | None = None,
+    source_key: str = "",
+    on_near_end: Callable[[], None] | None = None,
 ) -> cast_delivery.CastResult | None:
     """`embedded` = (subtitle index, language) of an embedded text track to deliver as an
-    HLS WebVTT rendition (ADR 0042) instead of a side-loaded file.
+    HLS WebVTT rendition (ADR 0042) instead of a side-loaded file. `source_key` lets a
+    producer prefetched for this exact release be adopted (`prefetch_live`);
+    `on_near_end` runs once, in a thread, when a followed cast passes 90 % (the binge's
+    prefetch of the next episode).
 
     Cast `url` as a live HLS-TS playlist (ADR 0039): the TV starts as soon as the first
     segments (past the resume point) exist, instead of after the whole-file remux. Returns
@@ -1030,7 +1116,12 @@ def cast_live(
         _replace_previous(prev)
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
-    out_dir = _new_remux_temp(".hls")
+    # Adopt a prefetched producer only for a start from the top without a side-loaded file
+    # (the serve got none) — a fast resume needs a producer opened at the resume point.
+    adopted = _adopt_prefetch(job, source_key, bind_ip) if not (sub_paths or fast) else None
+    if adopted is None:
+        reap_prefetch()
+    out_dir = adopted[0] if adopted else _new_remux_temp(".hls")
     # The caption track lives in out_dir: it dies with it, and a headless return removes the
     # work dir.
     vtt = None
@@ -1039,7 +1130,9 @@ def cast_live(
     producer: live.Producer | None = None
     server = None
     pid: int | None = None
-    if follow:
+    if adopted:
+        _, pid, port, token = adopted  # its producer already ran ahead: the start is ~instant
+    elif follow:
         producer = live.Producer.start(job, out_dir)
         if producer is None:
             _rm(out_dir)
@@ -1063,9 +1156,9 @@ def cast_live(
         if producer is not None:
             producer.stop()
             _INPROC.pop(out_dir, None)
-            st = _read_state()
-            if st and st.get("file") == out_dir:  # our in-process live state
-                _clear_state()
+        st = _read_state()
+        if follow and st and st.get("file") == out_dir:  # the state this followed cast wrote
+            _clear_state()
         _kill(pid)
         _rm(out_dir)
 
@@ -1113,9 +1206,19 @@ def cast_live(
             return True
         return False
 
+    near_end_fired = False
+
     def film_time(ev: dict) -> None:
         # `--follow` JSONL speaks film time: the receiver reports playlist time (from 0
         # after a fast resume) and duration -1 for a growing playlist.
+        nonlocal near_end_fired
+        pos = ev.get("position")
+        if (
+            on_near_end is not None and not near_end_fired and duration
+            and isinstance(pos, int | float) and pos >= duration * _NEAR_END
+        ):  # fmt: skip
+            near_end_fired = True
+            threading.Thread(target=on_near_end, name="nstream-prefetch", daemon=True).start()
         if on_event is None:
             return
         ev = dict(ev)
@@ -1128,11 +1231,13 @@ def cast_live(
         if follow:
             # The in-process cast gets the same live state as a detached one, so the TUI's
             # seeks, sub-shift and status read it; `inproc` keeps --stop and GC from ever
-            # killing this process (the owner tears down when the cast ends).
+            # killing this process (the owner tears down when the cast ends). An adopted
+            # prefetch is a detached serve: its own pid, signalled like any other.
+            inproc = producer is not None
             _write_state(
-                os.getpid(), out_dir, device, mode="live",
+                os.getpid() if inproc else (pid or 0), out_dir, device, mode="live",
                 url=load_url, title=title, base=base, duration=duration,
-                subs=job.subs, text_language=kwargs.get("text_language", ""), inproc=True,
+                subs=job.subs, text_language=kwargs.get("text_language", ""), inproc=inproc,
             )  # fmt: skip
 
     def disconnected(pos: float) -> None:
@@ -1142,7 +1247,7 @@ def cast_live(
     try:
         out = cast_delivery.drive_bridge(
             device, load_url, follow=follow,
-            load_kwargs=kwargs, on_event=film_time if on_event else None,
+            load_kwargs=kwargs, on_event=film_time if (on_event or on_near_end) else None,
             on_started=started, on_interrupt=abort,
             on_disconnect=disconnected if follow else None,
         )  # fmt: skip
@@ -1376,6 +1481,7 @@ def stop(device: str | None = None) -> bool:
     # A Tier-1 direct cast leaves only a standalone subtitle server (no remux state) — reap it
     # here so `--stop` tears it down too, even when there's no remux temp file to clear.
     reaped_sub = serve.reap_sub_server()
+    reap_prefetch()  # a binge's prepared next episode goes with the cast
     st = _read_state()
     if not st:
         return reaped_sub

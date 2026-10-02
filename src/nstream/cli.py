@@ -100,6 +100,7 @@ def _play_video(
     on_save: Callable[[float, float], None] | None,
     reselect_on_wrong_audio: bool = True,
     cast_meta: caster.CastMeta | None = None,
+    prefetch: tuple[str, str] | None = None,
 ) -> tuple[str | None, bool, int]:
     """Resolve streams for one video, play it, persist progress. Returns
     (notice, advance, quality): `notice` is a user-facing message to surface (no
@@ -198,7 +199,7 @@ def _play_video(
                 cfg, results, chosen, work_dir, device,
                 typ=typ, video_id=video_id, title=title, opts=opts,
                 start=start, next_label=next_label, safety_sub_lang=safety_sub_lang,
-                cast_meta=cast_meta, expected_runtime_s=expected_s,
+                cast_meta=cast_meta, expected_runtime_s=expected_s, prefetch=prefetch,
             )  # fmt: skip
         else:
             try:
@@ -257,6 +258,7 @@ def _play_on_cast(
     safety_sub_lang: str | None = None,
     cast_meta: caster.CastMeta | None = None,
     expected_runtime_s: float = 0.0,
+    prefetch: tuple[str, str] | None = None,
 ) -> tuple[float, float, bool, str | None]:
     """Interactive cast: thin wrapper over the shared decision tree (`cast_flow.run_cast`),
     with the interactive knobs on — blocking follow, next-episode label, and the in-cast
@@ -272,6 +274,10 @@ def _play_on_cast(
             opts=opts, start=start, follow=True, next_label=next_label,
             allow_lang_switch=True, meta=cast_meta, safety_sub_lang=safety_sub_lang,
             expected_runtime_s=expected_runtime_s,
+            prefetch_next=(
+                (lambda: cast_flow.prefetch_next(cfg, typ, prefetch[0], prefetch[1], opts, device))
+                if prefetch else None
+            ),
         )  # fmt: skip
     except (
         cast_flow.CastStreamUnresolved,
@@ -439,11 +445,13 @@ def _series_player(cfg: Config) -> series.PlayVideo:
         on_save: Callable[[float, float], None],
         reselect_on_wrong_audio: bool = True,
         cast_meta: caster.CastMeta | None = None,
+        prefetch: tuple[str, str] | None = None,
     ) -> tuple[str | None, bool, int]:
         return _play_video(
             cfg, "series", video_id, title, opts,
             auto=auto, next_label=next_label, on_save=on_save,
             reselect_on_wrong_audio=reselect_on_wrong_audio, cast_meta=cast_meta,
+            prefetch=prefetch,
         )  # fmt: skip
 
     return play_video

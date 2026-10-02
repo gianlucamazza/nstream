@@ -39,6 +39,7 @@ class PlayVideo(Protocol):
         on_save: Callable[[float, float], None],
         reselect_on_wrong_audio: bool = True,
         cast_meta: CastMeta | None = None,
+        prefetch: tuple[str, str] | None = None,
     ) -> tuple[str | None, bool, int]: ...
 
 
@@ -128,6 +129,8 @@ def binge(
             video_id, display_title(name, video), opts,
             auto=auto, next_label=next_label, on_save=on_save,
             reselect_on_wrong_audio=not unattended,  # binge advances warn-and-proceed, don't block
+            # The next episode, prepared near this one's end (live tier: ~instant change).
+            prefetch=(nxt["id"], display_title(name, nxt)) if next_label and nxt else None,
             cast_meta=CastMeta(
                 poster=poster, series_title=name,
                 season=video.get("season", 0) or 0, episode=video.get("episode", 0) or 0,

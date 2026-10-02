@@ -1269,3 +1269,61 @@ def test_stop_and_replace_never_signal_an_inproc_live_owner(monkeypatch, tmp_pat
     remux._write_state(os.getpid(), str(d), "10.0.0.5", mode="live", inproc=True)
     remux._replace_previous(remux._read_state() or {})
     assert killed == [] and remux._read_state() is None
+
+
+def test_cast_live_adopts_a_matching_prefetch(monkeypatch):
+    """Binge: the next episode's producer, started ahead, is adopted by the real start —
+    no new serve is spawned — when release and job match; a stale one is reaped."""
+    from nstream import live
+
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    assert remux.prefetch_live(
+        _cfg(), "http://debrid/a", device="10.0.0.5", audio_index=0, source_key="hash:1"
+    )
+    prefetched_dir = seen["dir"]
+    monkeypatch.setattr(
+        remux.serve, "spawn_detached", lambda *a, **k: pytest.fail("must adopt, not spawn")
+    )
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/a-new-link", device="10.0.0.5", audio_index=0,
+        follow=False, source_key="hash:1",
+    )  # fmt: skip
+    assert out is not None and out.started
+    assert (remux._read_state() or {})["file"] == prefetched_dir
+    assert remux._prefetch_state().read() is None
+    assert Path(prefetched_dir, live.PLAYLIST).exists()
+
+
+def test_a_prefetch_for_another_release_is_reaped(monkeypatch):
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    remux.prefetch_live(
+        _cfg(), "http://debrid/a", device="10.0.0.5", audio_index=0, source_key="hash:1"
+    )
+    stale = seen["dir"]
+    remux.cast_live(
+        _cfg(), "T", "http://debrid/b", device="10.0.0.5", audio_index=0,
+        follow=False, source_key="hash:2",
+    )  # fmt: skip
+    assert not Path(stale).exists() and remux._prefetch_state().read() is None
+
+
+def test_near_end_hook_fires_once(monkeypatch):
+    import threading
+
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    fired = []
+    done = threading.Event()
+
+    def drive(device, url, *, follow, load_kwargs, on_event=None, **k):
+        assert on_event is not None
+        for pos in (100.0, 5500.0, 5600.0):  # duration 6000: 90 % = 5400
+            on_event({"kind": "playing", "position": pos})
+        return cast_delivery.BridgeOutcome(5600.0, 6000.0, True, False)
+
+    monkeypatch.setattr(remux.cast_delivery, "drive_bridge", drive)
+    remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, follow=False,
+        on_near_end=lambda: fired.append(1) or done.set(),
+    )  # fmt: skip
+    assert done.wait(2) and fired == [1]
+    assert seen

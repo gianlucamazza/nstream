@@ -40,9 +40,11 @@ def _fake_play(advance_until):
         on_save,
         reselect_on_wrong_audio=True,
         cast_meta=None,
+        prefetch=None,
     ):
         calls.append(
             {
+                "prefetch": prefetch,
                 "video_id": video_id,
                 "title": title,
                 "auto": auto,
@@ -418,3 +420,11 @@ def test_resume_no_autoplay_finished_episode_plays_the_next_one(monkeypatch):
     play, calls = _fake_play(advance_until=99)
     series.resume(CFG, _entry(1, 2, position=99.0), _opts(autoplay=False), play_video=play)
     assert [c["video_id"] for c in calls] == ["tt:2:1"]  # one episode, no binge
+
+
+def test_binge_offers_the_next_episode_for_prefetch():
+    eps = _episodes(2)
+    play, calls = _fake_play(advance_until=99)
+    series.binge(CFG, "tt", "Show", eps, eps[0], _opts(), play_video=play)
+    assert calls[0]["prefetch"] and calls[0]["prefetch"][0] == "tt:2"
+    assert calls[-1]["prefetch"] is None  # the last episode has nothing to prepare
