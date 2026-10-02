@@ -439,15 +439,17 @@ class _FileServer(ThreadingHTTPServer):
         return base
 
     def sub_shift(self) -> float:
-        """The live cast's subtitle shift in seconds (`<live dir>/sub_shift`, written by
-        `remux.live_sub_shift`), 0 when none."""
+        """The live cast's subtitle shift in seconds: the manual `--sub-shift` total
+        (`<live dir>/sub_shift`) plus an accepted after-start alignment (`align.json`)."""
         if not self.hls_dir:
             return 0.0
         try:
             with open(os.path.join(self.hls_dir, SUB_SHIFT), encoding="utf-8") as f:
-                return float(f.read().strip() or 0.0)
+                manual = float(f.read().strip() or 0.0)
         except (OSError, ValueError):
-            return 0.0
+            manual = 0.0
+        aligned = live.alignment(self.hls_dir).get("offset")
+        return manual + (float(aligned) if isinstance(aligned, int | float) else 0.0)
 
     def generation_codecs(self, path: str) -> str:
         """`CODECS` for a master playlist, from its generation's first segment (cached)."""
@@ -768,6 +770,13 @@ def _main(argv: list[str] | None = None) -> int:
     server.producer = producer
     if producer is not None:
         producer.run_pacing()
+        side = (
+            args.subs
+            if args.subs
+            and os.path.dirname(os.path.abspath(args.subs)) == os.path.abspath(args.hls)
+            else ""
+        )
+        live.Aligner(producer, side_loaded=side).run()
     port = server.server_address[1]
     # The parent reads exactly these two lines to learn port+token, then leaves us running.
     sys.stdout.write(f"PORT={port}\nTOKEN={server.token}\n")

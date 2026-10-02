@@ -563,5 +563,10 @@ def _run_status(cfg: Config, args: argparse.Namespace) -> int:
         cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0,
         title=st.get("title"),
     )  # fmt: skip
+    align = remux.live_alignment(device) or {}
+    if "offset" in align:  # the live cast's subtitles were aligned to its audio
+        st = {**st, "subtitles_match": "audio", "subtitles_offset": align["offset"]}
+    elif align.get("reason"):
+        st = {**st, "subtitles_alignment": align["reason"]}
     _emit_json({"ok": True, "action": "status", "device": device, **st, "error": None})
     return 0

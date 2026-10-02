@@ -199,9 +199,7 @@ def _rms_series(
             # asetnsamples makes 100 ms frames; astats reset=1 → per-frame RMS. `reset`
             # takes INTEGER frames: a fractional value silently disables the reset and
             # the cumulative RMS flattens all contrast (found live in Phase 0).
-            f"{_mono_chain(channels)},{_SPEECH_FILTER},asetnsamples=n=1600,"
-            "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level,"
-            "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
+            f"{rms_filter(channels)},ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
             "-f",
             "null",
             "-",
@@ -210,9 +208,15 @@ def _rms_series(
     )
     if proc is None or proc.returncode != 0:
         return None
+    return parse_rms(proc.stderr or "") or None
+
+
+def parse_rms(text: str) -> list[tuple[float, float]]:
+    """(pts_time, rms_db) pairs from ffmpeg's `ametadata=mode=print` output — stderr of
+    `_rms_series`, or the `file=` the live producer writes (ADR 0040 point 2)."""
     out: list[tuple[float, float]] = []
     pts: float | None = None
-    for ln in (proc.stderr or "").splitlines():
+    for ln in text.splitlines():
         m = _RMS_PTS_RE.search(ln)
         if m:
             pts = float(m.group(1))
@@ -221,7 +225,45 @@ def _rms_series(
         if v and pts is not None:
             out.append((pts, -100.0 if v.group(1) == "-inf" else float(v.group(1))))
             pts = None
-    return out or None
+    return out
+
+
+def rms_filter(channels: int | None) -> str:
+    """The speech-activity filter chain (`-af`): mono 16 kHz, speech band, 100 ms frames,
+    per-frame RMS. Shared by `_rms_series` and the live producer's tee."""
+    return (
+        f"{_mono_chain(channels)},{_SPEECH_FILTER},asetnsamples=n=1600,"
+        "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level"
+    )
+
+
+def fingerprint_from_series(
+    series: list[tuple[float, float]], t0: float, t1: float, *, segments: int = 8
+) -> Fingerprint | str:
+    """Fingerprint over [t0, t1) of an RMS series, split into `segments` virtual windows
+    (see `probe_local`). Times stay absolute (film time when the series is)."""
+    if t1 - t0 <= 60 or segments < 4:
+        return "no_media_geometry"
+    seg_len = (t1 - t0) / segments
+    windows: list[Span] = []
+    speech: list[Span] = []
+    for i in range(segments):
+        a, b = t0 + i * seg_len, t0 + (i + 1) * seg_len
+        chunk = [(t, v) for t, v in series if a <= t < b]
+        if len(chunk) < 50:
+            continue
+        spans = _spans_from_rms(chunk)
+        eff: Span = (a + (_WARMUP_S if i == 0 else 0.0) + _EDGE_S, b - _EDGE_S)
+        clipped = [(max(s, eff[0]), min(e, eff[1])) for s, e in spans if e > eff[0] and s < eff[1]]
+        frac = sum(e - s for s, e in clipped) / (eff[1] - eff[0])
+        if not (_INFORMATIVE[0] <= frac <= _INFORMATIVE[1]):
+            continue
+        windows.append(eff)
+        speech.extend(clipped)
+    if len(windows) < max(4, segments - 2):
+        _log.info("subalign: %d/%d segmenti utili → low_speech", len(windows), segments)
+        return "low_speech"
+    return Fingerprint(duration=t1, windows=tuple(windows), speech=tuple(speech))
 
 
 def _spans_from_rms(series: list[tuple[float, float]]) -> list[Span]:
@@ -275,26 +317,7 @@ def probe_local(
     series = _rms_series(path, 0.0, duration, timeout=timeout_s, channels=channels)
     if not series:
         return "probe_failures"
-    seg_len = duration / segments
-    windows: list[Span] = []
-    speech: list[Span] = []
-    for i in range(segments):
-        t0, t1 = i * seg_len, (i + 1) * seg_len
-        chunk = [(t, v) for t, v in series if t0 <= t < t1]
-        if len(chunk) < 50:
-            continue
-        spans = _spans_from_rms(chunk)
-        eff: Span = (t0 + (_WARMUP_S if i == 0 else 0.0) + _EDGE_S, t1 - _EDGE_S)
-        clipped = [(max(s, eff[0]), min(e, eff[1])) for s, e in spans if e > eff[0] and s < eff[1]]
-        frac = sum(e - s for s, e in clipped) / (eff[1] - eff[0])
-        if not (_INFORMATIVE[0] <= frac <= _INFORMATIVE[1]):
-            continue
-        windows.append(eff)
-        speech.extend(clipped)
-    if len(windows) < max(4, segments - 2):
-        _log.info("subalign: %d/%d segmenti utili → low_speech", len(windows), segments)
-        return "low_speech"
-    return Fingerprint(duration=duration, windows=tuple(windows), speech=tuple(speech))
+    return fingerprint_from_series(series, 0.0, duration, segments=segments)
 
 
 # --- alignment (pure) ----------------------------------------------------------------

@@ -52,6 +52,7 @@ from . import (
     notices,
     serve,
     srt,
+    subalign,
     ui,
     urlproxy,
     util,
@@ -1017,6 +1018,10 @@ def cast_live(
     if embedded:
         job = dataclasses.replace(job, sub_map=f"0:s:{embedded[0]}", sub_lang=embedded[1])
         sub_paths = ()  # the rendition replaces a side-loaded file
+    if (embedded or sub_paths) and cfg.sub_align and subalign.available():
+        # Tee speech activity for the after-start alignment (ADR 0040 point 2).
+        sel = t.audio[audio_index] if 0 <= audio_index < len(t.audio) else None
+        job = dataclasses.replace(job, rms=True, rms_channels=(sel.channels or 0) if sel else 0)
     serve.reap_sub_server()
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
@@ -1040,6 +1045,7 @@ def cast_live(
         server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt, hls_dir=out_dir)
         server.producer = producer
         producer.run_pacing()
+        live.Aligner(producer, side_loaded=vtt or "").run()
         token = server.token
     else:
         spawned = serve.spawn_detached(bind_ip, sub_path=vtt, hls_dir=out_dir, job=job)
@@ -1182,6 +1188,30 @@ def live_seek(device: str | None, target: float) -> bool | None:
     if abs(target - pos) <= _LIVE_NATIVE_SEEK_S:
         return None  # the receiver's own seek, in film time
     return _live_load(dev, st, target)
+
+
+def live_alignment(device: str | None) -> dict | None:
+    """The active live cast's after-start alignment verdict (ADR 0040 point 2), or None
+    when no live cast is active. An accepted offset reaches a rendition by itself (serve
+    shifts every segment it serves from then on); a side-loaded track was fetched once at
+    LOAD, so the first status after the verdict re-LOADs at the current position."""
+    st = _read_state()
+    if not st or st.get("mode") != "live" or not _pid_alive(st.get("pid")):
+        return None
+    dev = device or st.get("device")
+    if not dev or dev != st.get("device"):
+        return None
+    out_dir = str(st.get("file") or "")
+    verdict = live.alignment(out_dir)
+    if "offset" in verdict and not st.get("subs") and not verdict.get("applied"):
+        pos = float(caster.status(dev).get("position") or 0.0)
+        if _live_load(dev, st, pos):
+            verdict["applied"] = True
+            with contextlib.suppress(OSError):
+                util.atomic_write_bytes(
+                    Path(out_dir, live.ALIGN_FILE), json.dumps(verdict).encode(), prefix=".align-"
+                )
+    return verdict
 
 
 def live_sub_shift(device: str | None, delta: float) -> float | None:

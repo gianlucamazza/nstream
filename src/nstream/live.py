@@ -30,8 +30,9 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
-from . import log, urlproxy, util
+from . import log, srt, subalign, urlproxy, util
 
 _log = log.get_logger("live")
 
@@ -144,6 +145,10 @@ class Job:
     # (`0:s:N`) and its ISO 639-2 language for the master's EXT-X-MEDIA.
     sub_map: str = ""
     sub_lang: str = ""
+    # Speech activity for the after-start subtitle alignment (ADR 0040 point 2): the
+    # producer tees the planned audio track through `subalign.rms_filter` into rms<gen>.txt.
+    rms: bool = False
+    rms_channels: int = 0
 
     @property
     def subs(self) -> bool:
@@ -154,6 +159,7 @@ class Job:
             "url": self.url, "audio_map": self.audio_map,
             "audio_args": list(self.audio_args), "head_s": self.head_s, "ss_s": self.ss_s,
             "sub_map": self.sub_map, "sub_lang": self.sub_lang,
+            "rms": self.rms, "rms_channels": self.rms_channels,
         }  # fmt: skip
 
     @classmethod
@@ -162,6 +168,7 @@ class Job:
             str(d["url"]), str(d["audio_map"]),
             tuple(str(a) for a in d["audio_args"]), float(d.get("head_s") or 0.0),
             float(d.get("ss_s") or 0.0), str(d.get("sub_map") or ""), str(d.get("sub_lang") or ""),
+            bool(d.get("rms")), int(d.get("rms_channels") or 0),
         )  # fmt: skip
 
 
@@ -198,11 +205,22 @@ def producer_cmd(src: str, out_dir: str, job: Job, gen: int = 0) -> list[str]:
             os.path.join(out_dir, playlist_name(gen)),
         ]  # fmt: skip
         codecs = ["-c:v", "copy", *job.audio_args]
+    rms = (
+        ["-map", job.audio_map, "-af",
+         f"{subalign.rms_filter(job.rms_channels or None)},"
+         f"ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file={rms_path(out_dir, gen)}",
+         "-f", "null", "-"]
+        if job.rms else []
+    )  # fmt: skip
     return [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
         "-rw_timeout", "30000000", *seek, "-i", src,
-        *maps, *codecs, *keep_ts, *out,
+        *maps, *codecs, *keep_ts, *out, *rms,
     ]  # fmt: skip
+
+
+def rms_path(out_dir: str, gen: int) -> str:
+    return os.path.join(out_dir, f"rms{gen}.txt")
 
 
 def first_pts(out_dir: str, gen: int = 0, subs: bool = False) -> float | None:
@@ -466,3 +484,84 @@ class Producer:
         self._stopped = True
         _terminate(self.proc)
         shutil.rmtree(self.out_dir, ignore_errors=True)
+
+
+ALIGN_FILE = "align.json"
+# Audio the after-start alignment waits for: enough minutes of speech for the cross-window
+# vote (the complete-file alignment uses the whole film; 10 min is its lower bound here).
+ALIGN_AFTER_S = 600.0
+
+
+@dataclass
+class Aligner:
+    """After-start subtitle alignment for a live cast (ADR 0040 point 2). Once the producer
+    has teed `ALIGN_AFTER_S` of speech activity, the delivered subtitle's cues over that
+    span are aligned against it (`subalign.align`, the same gates as the complete-file
+    path). The verdict goes to `align.json`; serve adds an accepted offset to every WebVTT
+    it serves. One attempt per generation; refusals change nothing."""
+
+    producer: Producer
+    side_loaded: str = ""  # the side-loaded subs.vtt, when the cast carries one
+    done_gen: int = -1
+
+    def tick(self) -> None:
+        p = self.producer
+        if p.job is None or not p.job.rms or self.done_gen == p.gen:
+            return
+        try:
+            with open(rms_path(p.out_dir, p.gen), encoding="utf-8") as f:
+                series = subalign.parse_rms(f.read())
+        except OSError:
+            return
+        if not series or series[-1][0] - series[0][0] < ALIGN_AFTER_S:
+            return
+        self.done_gen = p.gen
+        t0, t1 = series[0][0], series[-1][0]
+        fp = subalign.fingerprint_from_series(series, t0, t1)
+        verdict: dict = {"gen": p.gen, "window": [round(t0, 1), round(t1, 1)]}
+        if isinstance(fp, str):
+            verdict["reason"] = fp
+        else:
+            spans = [(a, b) for a, b in self._cue_spans() if t0 <= a and b <= t1]
+            v = subalign.align(spans, fp)
+            verdict["reason"] = v.reason
+            if v.reason == "aligned" and v.offset_s is not None:
+                verdict["offset"] = round(v.offset_s, 2)
+        _log.info("live: allineamento sottotitoli → %s", verdict)
+        with contextlib.suppress(OSError):
+            util.atomic_write_bytes(
+                Path(p.out_dir, ALIGN_FILE), json.dumps(verdict).encode(), prefix=".align-"
+            )
+
+    def _cue_spans(self) -> list[tuple[float, float]]:
+        p = self.producer
+        if self.side_loaded:
+            return list(srt.cue_spans(self.side_loaded))
+        spans: list[tuple[float, float]] = []
+        with contextlib.suppress(OSError):
+            for entry in os.scandir(p.out_dir):
+                vid = vtt_id(entry.name)
+                if vid is not None and vid[0] == p.gen:
+                    spans.extend(srt.cue_spans(entry.path))
+        return sorted(set(spans))
+
+    def run(self, interval: float = 30.0) -> threading.Thread:
+        def loop() -> None:
+            while not self.producer._stopped:
+                with contextlib.suppress(Exception):  # an aligner bug must never stop a cast
+                    self.tick()
+                time.sleep(interval)
+
+        t = threading.Thread(target=loop, name="nstream-live-align", daemon=True)
+        t.start()
+        return t
+
+
+def alignment(out_dir: str) -> dict:
+    """The live cast's alignment verdict (`align.json`), or {} when none yet."""
+    try:
+        with open(os.path.join(out_dir, ALIGN_FILE), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
