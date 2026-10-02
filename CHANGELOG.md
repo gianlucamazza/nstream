@@ -7,6 +7,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.41.0] — 2026-10-02
+
 ### Added
 
 - **ADR 0042 Accepted:** a live cast that wants subtitles uses the release's own full text
@@ -28,6 +30,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **ADR 0043 Accepted:** a downloaded subtitle on a live cast is a rendition too (the
   producer's second input), so `--sub-shift` and the after-start alignment only rewrite
   the cues the TV fetches next: the media is never reloaded.
+- With castbridge ≥ 0.4.2 a live seek's LOAD rides the running receiver session (no app
+  relaunch, no INTERRUPTED playback).
 
 ### Fixed
 
