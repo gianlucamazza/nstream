@@ -45,6 +45,7 @@ Always pass `--json`. Quote the title.
 | Explain | `nstream --json --explain "X"` (add `--cast` for TV profile) |
 | Browse | `nstream --json --cast --browse popolari\|nuovi\|top` |
 | Lifecycle | `--stop` / `--status` / `--pause` / `--resume` / `--seek SEC` / `--volume N` |
+| Subtitles early/late during a live cast | `nstream --json --sub-shift +1.5` (+ = later; cumulative) |
 | Clear dead denylist | `nstream --json --forget-dead` |
 | Clear addon circuit breakers | `nstream --json --forget-breakers` (ADR 0027; Open addons skipped without network) |
 

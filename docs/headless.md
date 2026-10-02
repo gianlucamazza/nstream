@@ -43,6 +43,7 @@ Always pass `--json`. Quote the title.
 | Browse catalog                    | `nstream --json --cast --browse popolari\|nuovi\|top` |
 | Stop / status / pause / resume    | `--stop` / `--status` / `--pause` / `--resume`        |
 | Seek / volume                     | `--seek SEC` / `--volume N`                           |
+| Subtitle shift (live cast)        | `--sub-shift ±SEC` (cumulative, + = later) → `{"action": "sub_shift", "shift": total}`; `usage` when the cast is not live |
 | Clear dead denylist               | `nstream --json --forget-dead`                        |
 | Clear addon circuit breakers      | `nstream --json --forget-breakers`                    |
 

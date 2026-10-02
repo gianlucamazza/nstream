@@ -42,6 +42,7 @@ _HEADLESS_ONLY: tuple[tuple[str, str], ...] = (
     ("pause", "--pause"),
     ("resume", "--resume"),
     ("seek", "--seek"),
+    ("sub_shift", "--sub-shift"),
     ("volume", "--volume"),
     ("follow", "--follow/--no-follow"),
 )
@@ -54,7 +55,7 @@ def headless_only_misuse(args: argparse.Namespace) -> str | None:
     used: list[str] = []
     for attr, label in _HEADLESS_ONLY:
         val = getattr(args, attr, None)
-        if attr in ("season", "episode", "seek", "volume", "follow"):
+        if attr in ("season", "episode", "seek", "sub_shift", "volume", "follow"):
             if val is not None:
                 used.append(label)
         elif val:
@@ -235,6 +236,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="SEC",
         help="salta alla posizione SEC del cast in corso (richiede --json)",
+    )
+    parser.add_argument(
+        "--sub-shift",
+        type=float,
+        metavar="SEC",
+        help="sposta i sottotitoli del cast in diretta di SEC secondi (+ = dopo; richiede --json)",
     )
     parser.add_argument(
         "--follow",

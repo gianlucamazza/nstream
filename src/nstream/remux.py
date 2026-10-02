@@ -1184,6 +1184,32 @@ def live_seek(device: str | None, target: float) -> bool | None:
     return _live_load(dev, st, target)
 
 
+def live_sub_shift(device: str | None, delta: float) -> float | None:
+    """Move the active live cast's subtitles by `delta` seconds (cumulative; + = later).
+    serve applies the total to every WebVTT it serves — the side-loaded track or the
+    embedded rendition — and the playlist is LOADed again at the current position so the
+    receiver re-reads them. Returns the new total, or None when no live cast is active."""
+    st = _read_state()
+    if not st or st.get("mode") != "live" or not _pid_alive(st.get("pid")):
+        return None
+    dev = device or st.get("device")
+    if not dev or dev != st.get("device"):
+        return None
+    path = Path(str(st.get("file") or ""), serve.SUB_SHIFT)
+    try:
+        total = float(path.read_text().strip() or 0.0)
+    except (OSError, ValueError):
+        total = 0.0
+    total = round(total + delta, 3)
+    try:
+        util.atomic_write_bytes(path, str(total).encode(), prefix=".shift-")
+    except OSError:
+        return None
+    pos = float(caster.status(dev).get("position") or 0.0)
+    _live_load(dev, st, pos)
+    return total
+
+
 def _live_load(dev: str, st: dict, at: float) -> bool:
     """LOAD the live cast's current playlist at film time `at`, re-activating its subtitle
     rendition when it has one (a new LOAD starts with no text track)."""

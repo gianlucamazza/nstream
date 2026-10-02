@@ -159,3 +159,10 @@ def test_vtt_cues_without_hours_parse_and_clean(tmp_path):
     assert out == str(p)  # cleaned in place, not a .vtt.vtt sibling
     text = p.read_text()
     assert "00:09:58.709 --> 00:10:01.683" in text and "&lt;- Clem" in text
+
+
+def test_shift_vtt_moves_cues_and_keeps_empty_segments():
+    text = "WEBVTT\n\n00:10.000 --> 00:12.000\nCiao\n"
+    assert "00:00:11.500 --> 00:00:13.500" in srt.shift_vtt(text, 1.5)
+    assert srt.shift_vtt(text, -20.0).strip() == "WEBVTT"  # moved before 0: dropped
+    assert srt.shift_vtt("WEBVTT\n", 2.0) == "WEBVTT\n"  # an empty rendition segment

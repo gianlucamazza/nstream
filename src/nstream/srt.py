@@ -153,6 +153,17 @@ def retime(path: str, offset: float, scale: float) -> bool:
     return True
 
 
+def shift_vtt(text: str, delta: float) -> str:
+    """WebVTT `text` with every cue moved by `delta` seconds (cues ending at or before 0
+    dropped). A segment without cues is returned unchanged (ffmpeg's empty rendition
+    segments carry only the header)."""
+    cues = parse_cues(text)
+    if not delta or not cues:
+        return text
+    moved = [Cue(max(c.start + delta, 0.0), c.end + delta, c.lines) for c in cues]
+    return write_vtt([c for c in moved if c.end > 0 and c.end > c.start])
+
+
 def to_vtt(srt_path: str) -> str | None:
     """Convert an SRT file to WebVTT, required for a side-loaded Cast caption track.
     Writes a sibling `<name>.vtt` and returns its path (or None on failure). Cues are

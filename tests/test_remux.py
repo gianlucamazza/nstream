@@ -1240,3 +1240,16 @@ def test_remux_to_file_extracts_the_embedded_subtitle_in_the_same_pass(monkeypat
     cmd = seen["cmd"]
     assert cmd[-5:] == ["-map", "0:s:1", "-c:s", "webvtt", remux.embedded_vtt(path)]
     assert Path(remux.embedded_vtt(path)).read_text().startswith("WEBVTT")
+
+
+def test_live_sub_shift_accumulates_and_reloads(monkeypatch, tmp_path):
+    loads = _live_state(monkeypatch, tmp_path, pos=1234.0)
+    assert remux.live_sub_shift("10.0.0.5", 1.5) == 1.5
+    assert remux.live_sub_shift("10.0.0.5", -0.5) == 1.0
+    st = remux._read_state() or {}
+    assert Path(st["file"], remux.serve.SUB_SHIFT).read_text() == "1.0"
+    assert [at for _, at, _ in loads] == [1234.0, 1234.0]  # re-read at the current position
+
+
+def test_live_sub_shift_without_a_live_cast_is_none():
+    assert remux.live_sub_shift("10.0.0.5", 1.0) is None

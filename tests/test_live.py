@@ -380,3 +380,12 @@ def test_real_producer_writes_a_subtitle_rendition(tmp_path):
     assert live.segment_codecs(str(out / "s0v0_0.ts")).startswith("avc1.")
     assert live.produced_s(str(out), 0, subs=True) == pytest.approx(14.0, abs=1.0)
     p.stop()
+
+
+def test_served_vtt_follows_the_sub_shift(hls_server, tmp_path):
+    base, _ = hls_server
+    (tmp_path / "s0v03.vtt").write_text("WEBVTT\n\n00:10.000 --> 00:12.000\nCiao\n")
+    (tmp_path / serve.SUB_SHIFT).write_text("2.5")
+    with urllib.request.urlopen(base + "s0v03.vtt", timeout=5) as r:
+        body = r.read().decode()
+    assert "00:00:12.500 --> 00:00:14.500" in body

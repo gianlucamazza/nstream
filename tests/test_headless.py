@@ -1730,3 +1730,16 @@ def test_zero_volume_is_rechecked_before_warning(monkeypatch, capsys):
     headless.run_auto(CFG, _hns(query=["dune"]), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
     assert out["volume"] == 0.35 and out["notice"] is None
+
+
+def test_sub_shift_on_a_non_live_cast_is_a_usage_error(monkeypatch, capsys):
+    import argparse
+
+    monkeypatch.setattr(headless, "_headless_device", lambda cfg, args: "10.0.0.5")
+    monkeypatch.setattr(headless.remux, "live_sub_shift", lambda dev, d: None)
+    rc = headless._run_sub_shift(CFG, argparse.Namespace(sub_shift=1.5))
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 2 and out["error"] == "usage"
+    monkeypatch.setattr(headless.remux, "live_sub_shift", lambda dev, d: 3.0)
+    assert headless._run_sub_shift(CFG, argparse.Namespace(sub_shift=1.5)) == 0
+    assert json.loads(capsys.readouterr().out)["shift"] == 3.0

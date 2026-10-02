@@ -134,6 +134,17 @@ def media_control(
     return ok, (f"ripresa su {dev}" if ok else f"ripresa fallita su {dev}")
 
 
+def shift_subtitles(delta: float, device: str | None = None) -> tuple[bool, str]:
+    """Move the live cast's subtitles by `delta` seconds (TUI cast menu)."""
+    dev = resolve_session_device(device)
+    if dev is None:
+        return False, "nessun cast attivo"
+    total = remux.live_sub_shift(dev, delta)
+    if total is None:
+        return False, "sottotitoli spostabili solo su un cast in diretta"
+    return True, f"sottotitoli {total:+.1f}s"
+
+
 def runtime_health() -> list[tuple[str, bool, str]]:
     """(name, ok, detail) for key optional/required runtime deps — settings diagnostics."""
     from . import engine

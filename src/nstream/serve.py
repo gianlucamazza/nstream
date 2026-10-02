@@ -47,7 +47,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import languages, live, log, util
+from . import languages, live, log, srt, util
 
 _log = log.get_logger("serve")
 
@@ -306,9 +306,29 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         if write_body:
             self.wfile.write(body)
 
+    def _serve_shifted_vtt(self, path: str, shift: float, *, write_body: bool) -> None:
+        """A WebVTT moved by the live cast's `--sub-shift` (whole body, no Range)."""
+        text = srt.decode(path)
+        if text is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        body = srt.shift_vtt(text, shift).encode()
+        self.send_response(HTTPStatus.OK)
+        self._send_cors()
+        self.send_header("Content-Type", "text/vtt; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if write_body:
+            self.wfile.write(body)
+
     def _serve_target(self, path: str, content_type: str, *, write_body: bool) -> None:
         if content_type == _HLS_PLAYLIST_TYPE:
             self._serve_playlist(path, write_body=write_body)
+            return
+        shift = self.server.sub_shift() if content_type.startswith("text/vtt") else 0.0
+        if shift:
+            self._serve_shifted_vtt(path, shift, write_body=write_body)
             return
         try:
             size = os.path.getsize(path)
@@ -417,6 +437,17 @@ class _FileServer(ThreadingHTTPServer):
         with self._activity_lock:
             self._bases[first] = base
         return base
+
+    def sub_shift(self) -> float:
+        """The live cast's subtitle shift in seconds (`<live dir>/sub_shift`, written by
+        `remux.live_sub_shift`), 0 when none."""
+        if not self.hls_dir:
+            return 0.0
+        try:
+            with open(os.path.join(self.hls_dir, SUB_SHIFT), encoding="utf-8") as f:
+                return float(f.read().strip() or 0.0)
+        except (OSError, ValueError):
+            return 0.0
 
     def generation_codecs(self, path: str) -> str:
         """`CODECS` for a master playlist, from its generation's first segment (cached)."""
@@ -657,6 +688,7 @@ def _exit_when_idle(server: _FileServer, idle_s: float) -> None:
 
 
 RESTART_REQUEST = "restart.json"
+SUB_SHIFT = "sub_shift"  # seconds the served WebVTT cues move (`--sub-shift`)
 
 
 def _start_pts(segment: str) -> float | None:

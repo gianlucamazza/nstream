@@ -810,6 +810,8 @@ def _cast_live_menu(cfg: Config) -> str | None:
         (f"{g.down}  Seek −30s", "seek-30"),
         (f"{g.down}  Seek +30s", "seek+30"),
         (f"{g.down}  Seek +5 min", "seek+300"),
+        (f"{g.tv}  Sottotitoli −0.5s (prima)", "sub-0.5"),
+        (f"{g.tv}  Sottotitoli +0.5s (dopo)", "sub+0.5"),
         (f"{g.audio}  Volume 35%", "vol35"),
         (f"{g.audio}  Volume 50%", "vol50"),
         (f"{g.audio}  Volume 70%", "vol70"),
@@ -840,6 +842,12 @@ def _cast_live_menu(cfg: Config) -> str | None:
         pos = float(st.get("position") or 0.0)
         target = max(0.0, pos + delta)
         ok, msg = cast_control.media_control("seek", value=target, device=device or None)
+        ui.status(msg, kind="tv" if ok else "fail")
+        return msg
+    if pick.startswith("sub"):
+        ok, msg = cast_control.shift_subtitles(
+            float(pick.removeprefix("sub")), device=device or None
+        )
         ui.status(msg, kind="tv" if ok else "fail")
         return msg
     if pick.startswith("vol"):

@@ -180,6 +180,8 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         return _run_stop(cfg, args)
     if args.status:
         return _run_status(cfg, args)
+    if getattr(args, "sub_shift", None) is not None:
+        return _run_sub_shift(cfg, args)
     if args.pause or args.resume or args.seek is not None:
         return _run_control(cfg, args)
     query = " ".join(args.query)
@@ -512,6 +514,22 @@ def _run_control(cfg: Config, args: argparse.Namespace) -> int:
         }
     )
     return 0 if ok else 1
+
+
+def _run_sub_shift(cfg: Config, args: argparse.Namespace) -> int:
+    """`--json --sub-shift S`: move the live cast's subtitles (ADR 0040 point 3)."""
+    device = _headless_device(cfg, args)
+    if device is None:
+        return 1
+    total = remux.live_sub_shift(device, float(args.sub_shift))
+    if total is None:
+        _emit_json({
+            "ok": False, "error": "usage",
+            "message": "--sub-shift funziona solo su un cast in diretta (delivery live)",
+        })  # fmt: skip
+        return 2
+    _emit_json({"ok": True, "action": "sub_shift", "device": device, "shift": total})
+    return 0
 
 
 def _run_volume(cfg: Config, args: argparse.Namespace) -> int:
