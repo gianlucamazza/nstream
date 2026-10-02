@@ -7,13 +7,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.42.0] — 2026-10-02
+
+### Added
+
+- **ADR 0044 Accepted:** live `started` is an observed player state
+  (PLAYING/PAUSED/BUFFERING). Dual-layer Dolby Vision and a first HLS segment the DMR
+  cannot decode skip live; the complete-file remux is the fallback.
+
 ### Fixed
 
-- Live fire-and-return no longer reports `ok: true` on a mere LOAD ack: `started` waits
-  for PLAYING/PAUSED/BUFFERING, so a DMR that fetches the playlist and then ERRORs falls
-  back to the complete-file remux (ADR 0044).
+- Live fire-and-return no longer reports `ok: true` on a mere LOAD ack, so a DMR that
+  fetches the playlist and then ERRORs falls back to the complete-file remux.
 - Dual-layer Dolby Vision (enhancement layer) and a first HLS segment without decodable
-  audio skip the live path (same ADR). Profile 8 single-layer stays live. Field 2026-10-02:
+  audio skip the live path. Profile 8 single-layer stays live. Field 2026-10-02:
   *After Hours* live head refused → `delivery: file` → PLAYING.
 
 ## [1.41.0] — 2026-10-02
