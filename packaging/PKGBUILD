@@ -3,7 +3,7 @@
 pkgname=nstream
 # Keep pkgver in sync with __version__ in src/nstream/__init__.py
 # (build-local.sh asserts they match; .SRCINFO follows).
-pkgver=1.42.0
+pkgver=1.43.0
 pkgrel=1
 pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/debrid or local P2P + mpv)"
 arch=('any')
@@ -20,28 +20,28 @@ optdepends=(
 # The castbridge metadata sender and the --mirror realtime sender are separate
 # openscreen-fork builds (CASTBRIDGE_BIN / CAST_MIRROR_BIN), not packaged; nstream
 # falls back to catt / the DMR path without them.
-makedepends=('git' 'python-build' 'python-installer' 'python-wheel' 'python-hatchling')
+makedepends=('python-build' 'python-installer' 'python-wheel' 'python-hatchling')
 checkdepends=('python-pytest')
 install="$pkgname.install"
-# The GitHub repo is private: an anonymous tarball download 404s, so the source is
-# a git clone over SSH (authenticated by the builder's key), pinned to the release tag.
-source=("$pkgname::git+ssh://git@github.com/gianlucamazza/nstream.git#tag=v$pkgver")
+# GitHub auto-generated source tarball (directory inside: nstream-$pkgver).
+# sha256 is filled on the release commit once the tag exists; SKIP until then.
+source=("$pkgname-$pkgver.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
 build() {
-  cd "$pkgname"
+  cd "$pkgname-$pkgver"
   python -m build --wheel --no-isolation
 }
 
 check() {
-  cd "$pkgname"
+  cd "$pkgname-$pkgver"
   # Runtime is stdlib-only, so the source tree on PYTHONPATH is enough to run the
   # suite without installing first.
   PYTHONPATH="$PWD/src" python -m pytest -q
 }
 
 package() {
-  cd "$pkgname"
+  cd "$pkgname-$pkgver"
   python -m installer --destdir="$pkgdir" dist/*.whl
 
   install -Dm755 nstream-fuzzel "$pkgdir/usr/bin/nstream-fuzzel"

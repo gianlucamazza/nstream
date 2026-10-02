@@ -1,0 +1,28 @@
+name: Publish to PyPI
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: read
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  pypi:
+    if: github.repository == 'gianlucamazza/nstream'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/p/nstream
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1

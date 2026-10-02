@@ -41,10 +41,15 @@ Install/dev tooling: `uv`.
 
 | Method | Command | Notes |
 | ------ | ------- | ----- |
-| Arch repo | `sudo pacman -Syu nstream` | `[gianluca]` personal repo |
-| Arch (local) | `cd packaging && makepkg -si` | from tagged source tarball |
-| PyPI | `pipx install nstream` | or `pip install --user nstream` |
 | From source (dev) | `./install.sh` | `uv tool install` → `~/.local/bin/nstream` |
+| Git | `uv tool install git+https://github.com/gianlucamazza/nstream` | tagged releases too: `…@vX.Y.Z` |
+| Arch (local) | `cd packaging && makepkg -si` | from the GitHub source tarball |
+
+PyPI (`pipx install nstream`) and AUR (`yay -S nstream`) land after the first public
+release; this table will say so when they exist.
+
+nstream does not host, index, or distribute video files. Catalogs, stream addons, and
+debrid backends are configured by the user. Use only sources you are entitled to access.
 
 The Arch package installs binaries + desktop entry + `config.example.json` under
 `/usr/share/nstream/`; it does **not** write `$HOME`. `./install.sh` bootstraps

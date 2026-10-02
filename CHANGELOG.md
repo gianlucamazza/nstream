@@ -7,6 +7,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.43.0] — 2026-10-02
+
+### Added
+
+- `SECURITY.md`: report debrid-token leaks and LAN/remux-server issues via GitHub
+  private advisories.
+- GitHub Actions Trusted Publisher workflow publishes to PyPI on `v*` tags (OIDC, no
+  API token in secrets).
+
+### Changed
+
+- Field notes and tests use RFC 5737 TEST-NET-1 (`192.0.2.10`) and a dummy Cast
+  application id (`CA5T0001`) in place of a home LAN address and a personal receiver id.
+- Arch `PKGBUILD` source is the GitHub tag tarball over HTTPS (directory
+  `nstream-$pkgver`). `sha256sums` stays `SKIP` until the public `v1.43.0` tarball exists.
+
 ## [1.42.0] — 2026-10-02
 
 ### Added

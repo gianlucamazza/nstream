@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # Build the Arch package for the current release tag.
 #
-# The PKGBUILD `source` is a git clone over SSH pinned to `v<pkgver>` (the GitHub
-# repo is private, so the anonymous tarball URL would 404): makepkg fetches by
-# itself as long as the tag is pushed and the builder's SSH key is loaded.
-# This wrapper only adds the guard rails: it asserts pkgver matches
-# src/nstream/__init__.py (so the two can never drift), checks the tag is on
-# origin, and regenerates .SRCINFO.
+# The PKGBUILD `source` is the GitHub source tarball for `v<pkgver>`. This wrapper
+# asserts pkgver matches src/nstream/__init__.py, checks the tag is on origin,
+# and regenerates .SRCINFO. After a public tag, replace sha256sums=('SKIP') with
+# the tarball hash before uploading to AUR.
 #
 # Usage:  packaging/build-local.sh [--install]
 set -euo pipefail
@@ -28,7 +26,7 @@ if [[ "$ver" != "$pkgver" ]]; then
 fi
 
 if ! git -C "$root" ls-remote --tags origin "v$ver" | grep -q .; then
-	echo "build-local: tag v$ver not on origin — push it first (the PKGBUILD clones it)" >&2
+	echo "build-local: tag v$ver not on origin — push it first (the PKGBUILD fetches the GitHub tarball)" >&2
 	exit 1
 fi
 
@@ -37,7 +35,7 @@ cd "$here"
 # (all of these are gitignored; only PKGBUILD + helpers are tracked).
 rm -rf src pkg nstream
 rm -f ./*.pkg.tar.zst ./*.tar.gz ./*.sig
-echo "==> makepkg (clone v$ver over SSH + build + check)"
+echo "==> makepkg (GitHub tarball v$ver + build + check)"
 makepkg -f --noconfirm
 echo "==> regenerating .SRCINFO"
 makepkg --printsrcinfo >.SRCINFO
