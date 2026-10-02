@@ -1253,3 +1253,19 @@ def test_live_sub_shift_accumulates_and_reloads(monkeypatch, tmp_path):
 
 def test_live_sub_shift_without_a_live_cast_is_none():
     assert remux.live_sub_shift("10.0.0.5", 1.0) is None
+
+
+def test_stop_and_replace_never_signal_an_inproc_live_owner(monkeypatch, tmp_path):
+    """A followed (TUI) live cast records its own pid: --stop and a new cast must stop the
+    receiver, not SIGTERM the interactive process (killpg would take the terminal)."""
+    killed, stopped = [], []
+    monkeypatch.setattr(remux, "_kill", lambda pid: killed.append(pid))
+    monkeypatch.setattr(remux.bridge, "stop", lambda dev: stopped.append(dev))
+    d = tmp_path / "cast-x.hls"
+    d.mkdir()
+    remux._write_state(os.getpid(), str(d), "10.0.0.5", mode="live", inproc=True)
+    assert remux.stop() is True
+    assert stopped == ["10.0.0.5"] and killed == [] and d.exists()
+    remux._write_state(os.getpid(), str(d), "10.0.0.5", mode="live", inproc=True)
+    remux._replace_previous(remux._read_state() or {})
+    assert killed == [] and remux._read_state() is None

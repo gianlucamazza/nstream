@@ -578,7 +578,7 @@ def cast_file(
         # The state slot is single: a new Tier-2 cast replaces the previous one. Reap the
         # old detached server first, or it would be orphaned by the overwrite below and
         # keep listening (and holding its multi-GB temp) until reboot.
-        _teardown(prev.get("pid"), prev.get("file"))
+        _replace_previous(prev)
     if device:
         # The receiver fetches the file from us over the LAN, so the host firewall must let it
         # in. Best-effort + idempotent; covers both the castbridge-serve and catt-serve paths.
@@ -834,6 +834,8 @@ _HLS_TYPE = "application/vnd.apple.mpegurl"
 # The first segment of a 4K source over a slow debrid can take a while; no growth for this
 # long means the producer is stuck (or dead) and the complete-file path takes over.
 _LIVE_STALL_S = 45.0
+# Producers this process runs for a followed (interactive) live cast, by live dir.
+_INPROC: dict[str, live.Producer] = {}
 _LIVE_POLL_S = 0.5
 
 
@@ -1025,7 +1027,7 @@ def cast_live(
     serve.reap_sub_server()
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
-        _teardown(prev.get("pid"), prev.get("file"))
+        _replace_previous(prev)
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
     out_dir = _new_remux_temp(".hls")
@@ -1046,6 +1048,7 @@ def cast_live(
         server.producer = producer
         producer.run_pacing()
         live.Aligner(producer, side_loaded=vtt or "").run()
+        _INPROC[out_dir] = producer
         token = server.token
     else:
         spawned = serve.spawn_detached(bind_ip, sub_path=vtt, hls_dir=out_dir, job=job)
@@ -1059,6 +1062,10 @@ def cast_live(
             server.shutdown()
         if producer is not None:
             producer.stop()
+            _INPROC.pop(out_dir, None)
+            st = _read_state()
+            if st and st.get("file") == out_dir:  # our in-process live state
+                _clear_state()
         _kill(pid)
         _rm(out_dir)
 
@@ -1116,16 +1123,34 @@ def cast_live(
             ev["duration"] = round(duration, 1)
         on_event(ev)
 
+    def started() -> None:
+        ui.cast_live(device, follow=follow)
+        if follow:
+            # The in-process cast gets the same live state as a detached one, so the TUI's
+            # seeks, sub-shift and status read it; `inproc` keeps --stop and GC from ever
+            # killing this process (the owner tears down when the cast ends).
+            _write_state(
+                os.getpid(), out_dir, device, mode="live",
+                url=load_url, title=title, base=base, duration=duration,
+                subs=job.subs, text_language=kwargs.get("text_language", ""), inproc=True,
+            )  # fmt: skip
+
+    def disconnected(pos: float) -> None:
+        _log.warning("daemon castbridge disconnesso a metà cast live (pos=%.0fs)", pos)
+
     out: cast_delivery.BridgeOutcome | None = None
     try:
         out = cast_delivery.drive_bridge(
             device, load_url, follow=follow,
             load_kwargs=kwargs, on_event=film_time if on_event else None,
-            on_started=lambda: ui.cast_live(device, follow=follow), on_interrupt=abort,
+            on_started=started, on_interrupt=abort,
+            on_disconnect=disconnected if follow else None,
         )  # fmt: skip
     finally:
-        if follow and out is not None and out.started:
-            teardown()  # the followed cast ended: its producer and segments go with it
+        # The followed cast ended: its producer and segments go with it. A daemon
+        # disconnect is not an end — the TV may still be playing from our server.
+        if follow and out is not None and out.started and not out.disconnected:
+            teardown()
     if out is None or not out.started:
         if out is not None and out.error:
             _log.warning("live: il ricevitore ha rifiutato la playlist (%s)", out.error)
@@ -1268,15 +1293,21 @@ def _live_restart(st: dict, dev: str, target: float) -> bool:
     subs = bool(st.get("subs"))
     gen = int(st.get("gen") or 0) + 1
     target = max(target, 0.0)
-    try:
-        util.atomic_write_bytes(
-            Path(out_dir, serve.RESTART_REQUEST),
-            json.dumps({"ss": target, "gen": gen}).encode(),
-            prefix=".restart-",
-        )
-        os.kill(int(pid or 0), signal.SIGUSR1)
-    except (OSError, ValueError):
-        return False
+    if st.get("inproc"):
+        producer = _INPROC.get(out_dir)
+        if producer is None or int(pid or 0) != os.getpid():
+            return False  # another process follows this cast: only it can restart
+        producer.request_restart(target, gen)
+    else:
+        try:
+            util.atomic_write_bytes(
+                Path(out_dir, serve.RESTART_REQUEST),
+                json.dumps({"ss": target, "gen": gen}).encode(),
+                prefix=".restart-",
+            )
+            os.kill(int(pid or 0), signal.SIGUSR1)
+        except (OSError, ValueError):
+            return False
     if not _await_live(
         out_dir, 2 * live.SEGMENT_S, failed=lambda: not _pid_alive(pid), label="",
         gen=gen, subs=subs,
@@ -1318,6 +1349,16 @@ def _await_start(device: str | None) -> bool:
     return False
 
 
+def _replace_previous(prev: dict) -> None:
+    """A new cast takes the single state slot: tear the previous one down — except a live
+    cast another (interactive) process follows: never signal that process, it tears its
+    own cast down once the receiver moves on."""
+    if prev.get("inproc"):
+        _clear_state()
+        return
+    _teardown(prev.get("pid"), prev.get("file"))
+
+
 def _teardown(pid: int | None, file_path: str | None) -> None:
     _kill(pid)
     _rm(file_path)
@@ -1339,6 +1380,10 @@ def stop(device: str | None = None) -> bool:
     if not st:
         return reaped_sub
     dev = st.get("device") if device is None else device
+    if st.get("inproc"):
+        # A followed live cast: stopping the receiver ends it, and its owner tears down.
+        bridge.stop(dev)
+        return True
     if st.get("mode") in ("serve", "live"):
         # Native path: castbridge owns the receiver session; our process is the file server.
         bridge.stop(dev)
