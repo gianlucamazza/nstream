@@ -1142,6 +1142,7 @@ def test_cast_live_fast_resume_starts_the_producer_at_the_resume_point(monkeypat
     producer's second input (a rendition, ADR 0042), never a side-loaded track."""
     seen = _live_wiring(monkeypatch, writes_segments=True)
     monkeypatch.setattr(remux.live, "first_pts", lambda d, gen=0, subs=False: 3027.125)
+    monkeypatch.setattr(remux.subalign, "available", lambda: True)  # CI has no ffmpeg
     sub = tmp_path / "s.srt"
     sub.write_text("1\n00:50:30,000 --> 00:50:32,000\nciao\n")
     out = remux.cast_live(
