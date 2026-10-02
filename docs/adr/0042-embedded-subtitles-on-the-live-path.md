@@ -67,6 +67,27 @@ tracks serve the complete-file path.
 - **Gate 2 is not reached yet.** It needs the track active. Open questions remain: the
   missing `X-TIMESTAMP-MAP` and the raw cue text.
 
+### Phase 0, round 2 (2026-10-02, castbridge 0.4.1, "In the Mood for Love")
+
+- **Gate 3 passes with castbridge `textLanguage`.** After the LOAD, `EDIT_TRACKS_INFO
+  {language: "it"}` makes the receiver report `activeTrackIds [1]` and fetch `v0_vtt.m3u8`
+  and its segments. The viewer saw the subtitles.
+- **Pick the right embedded track.** This release's first ita track is `forced`: 561 empty
+  segments, only foreign-language lines. The viewer saw nothing until the full ita track
+  (subtitle index 1) was mapped. `embedded_pick` must skip `forced` when the user asked
+  for subtitles; `forced` is right only as a default with primary-language audio.
+- **Gate 2 (sync) is inconclusive, with a lesson.** With the film-time gap playlists for
+  media and rendition, the cues showed 1–2 s early (viewer). An objective check measured
+  the overlap of the release's cues with speech detected in the produced AAC (1330 s
+  window). It peaks at +3.2 s: the cues are early versus the audio in the release itself.
+  The peak is shallow (62 % vs 60 % at 0 s; `subalign` refused: `cross_window_disagree`,
+  sparse dialogue). A side-loaded control on the same stream could not be read by the
+  viewer.
+- **Revised assumption: embedded is not "synced by construction".** A muxer can carry a
+  mistimed track. Embedded tracks stay first, since they match the exact file, but the
+  after-start alignment (ADR 0040 point 2) must also run on them, and `--sub-shift` is
+  needed for both.
+
 ## Consequences
 
 - castbridge (cast repo) gains text-track activation for in-manifest tracks.
