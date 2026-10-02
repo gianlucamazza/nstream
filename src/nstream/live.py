@@ -381,7 +381,10 @@ def _remove_generation(out_dir: str, gen: int) -> None:
                 playlist_generation(entry.name) == gen
                 and (gen != 0 or entry.name == PLAYLIST or entry.name.startswith("s0"))
             )
-            own_input = entry.name == os.path.basename(sub_input_path(out_dir, gen))
+            own_input = entry.name in (
+                os.path.basename(sub_input_path(out_dir, gen)),
+                os.path.basename(rms_path(out_dir, gen)),
+            )
             if (sid is not None and sid[0] == gen) or own_playlist or own_input:
                 with contextlib.suppress(OSError):
                     os.unlink(entry.path)
@@ -402,6 +405,8 @@ class Producer:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _stopped: bool = False
     _pending: tuple[float, int] | None = None
+    # Generations a restart replaced, kept until the receiver asks for the new one.
+    _retired: list[int] = field(default_factory=list)
 
     @classmethod
     def start(cls, job: Job, out_dir: str, gen: int = 0) -> Producer | None:
@@ -420,7 +425,10 @@ class Producer:
 
     def restart(self, ss_s: float, gen: int) -> bool:
         """Stop this producer and start generation `gen` at film time `ss_s` (fast-resume
-        style: the new playlist counts from 0). The previous generation's files go."""
+        style: the new playlist counts from 0). The previous generation's files stay
+        until the receiver requests the new one: it keeps playing them until the LOAD of
+        the new playlist lands, and removing them first sent it IDLE (ERROR) (field
+        2026-10-02, seek to 50 min)."""
         if self.job is None or gen <= self.gen:
             return False
         job = dataclasses.replace(self.job, ss_s=max(ss_s, 0.0), head_s=0.0)
@@ -431,8 +439,8 @@ class Producer:
             old, old_gen = self.proc, self.gen
             self.proc, self.gen, self.job = proc, gen, job
             self.newest_s, self.paused = 0.0, False
+            self._retired.append(old_gen)
         _terminate(old)
-        _remove_generation(self.out_dir, old_gen)
         return True
 
     def failed(self) -> bool:
@@ -453,12 +461,17 @@ class Producer:
             return ""
 
     def on_request(self, name: str) -> None:
-        """Segment `name` was requested: advance the play head, prune behind it. Requests
-        for another generation (a receiver still on the old playlist) are ignored."""
+        """Segment `name` was requested: advance the play head, prune behind it, and drop
+        the generations a restart replaced. Requests for another generation (a receiver
+        still on the old playlist) are ignored."""
         sid = segment_id(name)
         if sid is None or sid[0] != self.gen:
             return
         gen, index = sid
+        with self._lock:
+            retired, self._retired = self._retired, []
+        for old in retired:  # the receiver moved to this generation
+            _remove_generation(self.out_dir, old)
         tl = timeline(self.out_dir, gen, self.subs)
         start = next((t for i, t, _ in tl if i == index), None)
         if start is None:

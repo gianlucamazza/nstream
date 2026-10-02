@@ -212,7 +212,9 @@ def test_producer_cmd_fast_resume_seeks_input_and_keeps_timestamps(tmp_path):
 
 def test_restart_moves_to_a_new_generation(tmp_path, monkeypatch):
     """Seek anywhere: generation N+1 starts at the requested film time; the old
-    generation's playlist and segments are removed; stale requests are ignored."""
+    generation stays while the receiver still plays it (removing it first sent the TV
+    IDLE (ERROR)) and goes at the first request of the new one; stale requests are
+    ignored."""
     _playlist(tmp_path, 3)
     spawned = []
 
@@ -225,10 +227,15 @@ def test_restart_moves_to_a_new_generation(tmp_path, monkeypatch):
     p = live.Producer(str(tmp_path), cast(Any, _Proc()), job=live.Job("u"), newest_s=100.0)
     assert p.restart(4000.0, 1) is True
     assert spawned == [(4000.0, 1)] and p.gen == 1 and p.newest_s == 0.0
-    assert not (tmp_path / live.PLAYLIST).exists() and not list(tmp_path.glob("index*.ts"))
+    assert (tmp_path / live.PLAYLIST).exists() and len(list(tmp_path.glob("index*.ts"))) == 3
     assert p.restart(10.0, 1) is False  # a stale/duplicate request never goes back
-    p.on_request("index2.ts")  # the old generation: ignored
-    assert p.newest_s == 0.0
+    p.on_request("index2.ts")  # the old generation: ignored, and still kept
+    assert p.newest_s == 0.0 and len(list(tmp_path.glob("index*.ts"))) == 3
+    (tmp_path / live.playlist_name(1)).write_text("#EXTM3U\n#EXTINF:6.0,\ng1_0.ts\n")
+    (tmp_path / "g1_0.ts").write_bytes(b"x")
+    p.on_request("g1_0.ts")  # the receiver moved on: the old generation goes
+    assert not (tmp_path / live.PLAYLIST).exists() and not list(tmp_path.glob("index*.ts"))
+    assert (tmp_path / "g1_0.ts").exists()
 
 
 def test_generation_names():
@@ -469,9 +476,11 @@ def test_generation_sub_input_keeps_only_cues_from_its_start(tmp_path):
     )
     job = live.Job("u", ss_s=20.0, sub_map="1:0", sub_file=str(full))
     assert live._write_sub_input(job, str(tmp_path), 2)
+    Path(live.rms_path(str(tmp_path), 2)).write_text("")
     assert srt.cue_spans(live.sub_input_path(str(tmp_path), 2)) == ((19.0, 21.0), (31.0, 33.0))
     live._remove_generation(str(tmp_path), 2)
     assert not os.path.exists(live.sub_input_path(str(tmp_path), 2)) and full.exists()
+    assert not os.path.exists(live.rms_path(str(tmp_path), 2))
 
 
 @pytest.mark.skipif(not __import__("shutil").which("ffmpeg"), reason="ffmpeg missing")

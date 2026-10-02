@@ -61,7 +61,15 @@ Phase 0 (2026-10-02, 43PUS9235):
    cues in the window equal the file's to the millisecond. An `-ss` on the subtitle input
    does not trim it: every earlier cue still came through, hence the per-generation trim.
 4. **castbridge reused session.** A LOAD during playback causes no LAUNCH and no
-   INTERRUPTED. (Field result recorded below.)
+   INTERRUPTED. Passed with castbridge 0.4.2: one `launching media app` per cast.
+   - A +300 s seek (re-LOAD) played on at 332 s.
+   - Seeks to 3000 s and back to 1500 s (producer restarts) played on with the text track
+     active.
+
+   The first restart exposed that the producer removed the old generation before the new
+   LOAD landed: the TV went IDLE (ERROR) for a few seconds, which the old relaunch had
+   masked. A retired generation now goes at the receiver's first request of the new one
+   (`live.Producer.on_request`).
 
 ## Consequences
 

@@ -33,6 +33,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 - `--sub-shift` on a live cast no longer leaves the TV IDLE or stuck in BUFFERING (it
   re-LOADed the media).
+- A live seek that restarts the producer no longer sends the TV IDLE (ERROR) before the new
+  playlist loads: the old generation is kept until the receiver moves on.
 - `tests/test_e2e.py` no longer spawns the real castbridge (216 orphaned daemons found).
 - `--follow` events report film time and the probed duration on live casts.
 
