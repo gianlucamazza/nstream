@@ -42,11 +42,10 @@ Install/dev tooling: `uv`.
 | Method | Command | Notes |
 | ------ | ------- | ----- |
 | From source (dev) | `./install.sh` | `uv tool install` → `~/.local/bin/nstream` |
+| PyPI | `pipx install nstream` | or `uv tool install nstream` |
 | Git | `uv tool install git+https://github.com/gianlucamazza/nstream` | tagged releases too: `…@vX.Y.Z` |
 | AUR | `yay -S nstream` | source package |
 | Arch (local) | `cd packaging && makepkg -si` | from the GitHub source tarball |
-
-PyPI (`pipx install nstream`) lands once Trusted Publisher is registered.
 
 nstream does not host, index, or distribute video files. Catalogs, stream addons, and
 debrid backends are configured by the user. Use only sources you are entitled to access.
