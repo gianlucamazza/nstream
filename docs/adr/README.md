@@ -18,7 +18,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | Theme                         | ADRs                                  |
 | ----------------------------- | ------------------------------------- |
 | Debrid / backends             | 0001–0004                             |
-| Cast delivery & discovery     | 0005–0013, 0015–0017, 0022–0023, 0031, 0035 |
+| Cast delivery & discovery     | 0005–0013, 0015–0017, 0022–0023, 0031, 0035, 0039, 0044 |
 | Selection / sources / privacy | 0014, 0021, 0024–0030, 0032           |
 | Subtitles                     | 0012, 0018–0020                       |
 | Series / UX structure         | 0009, 0029                            |
@@ -70,6 +70,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0041](0041-live-tier-before-another-dub.md) | With the live tier, a soft language preference no longer yields to another dub | Accepted | 2026-10-01 |
 | [0042](0042-embedded-subtitles-on-the-live-path.md) | Embedded text subtitles first, delivered as an HLS rendition on the live path | Accepted (point 4 revised by 0043) | 2026-10-02 |
 | [0043](0043-live-subtitle-timing-without-reload.md) | Live subtitle timing changes never reload the media | Accepted | 2026-10-02 |
+| [0044](0044-live-started-is-observed-state.md) | Live `started` is an observed player state; dual-layer DV is not live-HLS-native | Accepted | 2026-10-02 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

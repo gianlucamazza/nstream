@@ -12,10 +12,11 @@ spawn it under the same `spawn.lock` flock the relay uses, so concurrent starts 
 The binary is located like `mirror.py` locates `cast_sender` — an env override, else the
 openscreen-fork build output.
 
-Key difference from catt: **the session lives in the daemon, not in our connection.** Once the
-LOAD is acknowledged the cast keeps playing even if we disconnect — so a headless
-fire-and-return just loads and closes, while `follow` keeps reading events until the session
-ends. See `docs/adr/0007`.
+Key difference from catt: **the session lives in the daemon, not in our connection.** Once
+the receiver has entered PLAYING/PAUSED/BUFFERING the cast keeps playing even if we
+disconnect — so a headless fire-and-return waits for that observed state (ADR 0044) and
+closes, while `follow` keeps reading events until the session ends. A `media-load` ack
+without a player state is not a start. See `docs/adr/0007` and `docs/adr/0044`.
 """
 
 from __future__ import annotations
@@ -300,9 +301,11 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
 
     `meta` accepts title/poster/subtitle/series_title/season/episode/content_type/current_time
     plus subtitle_url/subtitle_lang/subtitle_name (a side-loaded WebVTT caption track).
-    With `follow=False` it loads, confirms the handoff, emits `started`, and returns (the daemon
-    keeps the session alive). With `follow=True` it streams events until the session ends.
-    Never raises: any transport failure becomes a `failed` event so the caller can fall back."""
+    With `follow=False` it loads, waits for PLAYING/PAUSED/BUFFERING, emits `started`, and
+    returns (the daemon keeps the session alive). A `media-load` ack without that state is
+    `failed` / `cast_startup_failed` (ADR 0044) — the caller falls back. With `follow=True`
+    it streams events until the session ends. Never raises: any transport failure becomes a
+    `failed` event so the caller can fall back."""
     if not ensure_daemon():
         yield {
             "kind": "failed",
@@ -327,7 +330,6 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
         )
 
         started = False
-        load_ok = False  # the daemon acknowledged our media-load
         last_state = ""
         pos = dur = 0.0
         title = str(meta.get("title") or "")
@@ -358,7 +360,6 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
                         "message": err.get("message", "media-load fallito"),
                     }
                     return
-                load_ok = True
                 sock.settimeout(_FOLLOW_TIMEOUT)
                 continue
 
@@ -419,11 +420,9 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
         # still-playing TV and make the --follow JSONL lie.
         if started:
             yield {"kind": "disconnected", "position": round(pos, 1), "duration": round(dur, 1)}
-        elif not follow and load_ok:
-            # Non-follow that never observed a state but the load was acknowledged:
-            # best-effort started. Without that ack nothing proves a handoff (ADR 0031).
-            yield {"kind": "started", "title": title}
         else:
+            # LOAD ack is not a player state (ADR 0044): the DMR can fetch the playlist
+            # and refuse the media. Fire-and-return must not invent `started`.
             yield {
                 "kind": "failed",
                 "error": "cast_startup_failed",

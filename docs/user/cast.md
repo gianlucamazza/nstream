@@ -76,8 +76,11 @@ when only Dolby/DTS exist and `cast_remux` is on, the host remuxes (video `-c co
   (ADR 0015), if the mirror binary is available
 
 With `cast_live` on (default) the conversion is streamed: the TV starts on the first
-segments, in stereo AAC (5.1 AAC stalls the receiver over HLS). The complete-file remux is the
-fallback when the live start fails. JSON `delivery` says which ran (`live` / `file`).
+segments, in stereo AAC (5.1 AAC stalls the receiver over HLS). Headless `ok: true` on that
+path requires the receiver to enter PLAYING/PAUSED/BUFFERING — a playlist GET is not a start
+(ADR 0044). Dual-layer Dolby Vision (enhancement layer) and a first segment the DMR cannot
+decode skip live. The complete-file remux is the fallback when the live start fails. JSON
+`delivery` says which ran (`live` / `file`).
 
 stderr shows a prepare message during remux. JSON field `reencoded: true` when remux was used.
 `--stop` tears down the remux server and temp file; stale temps are GC'd on the next run.

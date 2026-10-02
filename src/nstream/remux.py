@@ -967,10 +967,34 @@ def live_refusal(size_gb: float, duration: float) -> str | None:
 
 def live_feasible(cfg: Config, url: str, size_gb: float) -> bool:
     """Whether a live start can be attempted for `url` (decision time, ADR 0036): config,
-    tools, and the disk window. The probe is the memoized one the vetting already ran."""
+    tools, disk window, and not a dual-layer DV source (ADR 0044). The probe is the
+    memoized one the vetting already ran."""
     if not live_available(cfg) or not bridge.bridge_available():
         return False
-    return live_refusal(size_gb, _probe_meta(url)[2]) is None
+    _t, n_video, duration = _probe_meta(url)
+    if n_video >= 2:
+        return False  # EL in MPEG-TS: the DMR refuses; complete-file drops 0:v:1
+    return live_refusal(size_gb, duration) is None
+
+
+def _live_head_ok(out_dir: str, *, gen: int = 0, subs: bool = False) -> bool:
+    """Whether the first produced TS is DMR-sane (ADR 0044): a decodable video codec and
+    audio with channels. Local path only — never a debrid URL."""
+    from . import quality, tracks
+
+    tl = live.timeline(out_dir, gen, subs)
+    if not tl:
+        return False
+    path = os.path.join(out_dir, live.segment_name(gen, tl[0][0], subs))
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < 1:
+            return False
+    except OSError:
+        return False
+    t = tracks.probe_tracks(path, timeout=10.0)
+    if t.video_codec not in quality.CAST_VIDEO_DECODABLE:
+        return False
+    return bool(t.audio and (t.audio[0].channels or 0) > 0)
 
 
 def _live_job(url: str, cfg: Config, audio: list, audio_index: int, head_s: float) -> live.Job:
@@ -1089,7 +1113,10 @@ def cast_live(
     live playlist at its edge and cannot seek it."""
     if not live_available(cfg) or not bridge.bridge_available():
         return None
-    t, _n_video, duration = _probe_meta(url)
+    t, n_video, duration = _probe_meta(url)
+    if n_video >= 2:
+        _log.info("live: Dolby Vision dual-layer (EL) — complete-file remux")
+        return None
     why = live_refusal(size_gb, duration)
     if why:
         _log.info("live: %s", why)
@@ -1188,6 +1215,10 @@ def cast_live(
             "live: il produttore non è partito%s",
             f" ({producer.failure_reason()})" if producer is not None else "",
         )
+        teardown()
+        return None
+    if not _live_head_ok(out_dir, gen=0, subs=job.subs):
+        _log.warning("live: primo segmento non riproducibile dal DMR — complete-file remux")
         teardown()
         return None
     _report_rate(url, measure)

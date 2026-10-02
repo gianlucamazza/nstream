@@ -1002,6 +1002,9 @@ def _live_wiring(monkeypatch, *, writes_segments: bool):
     alive = {"v": True}
     monkeypatch.setattr(remux, "_pid_alive", lambda pid: alive["v"] and pid == 4242)
     monkeypatch.setattr(remux, "_kill", lambda pid: alive.update(v=False))
+    # Playlist lines without real .ts files: the producer-health probe is the unit under
+    # test elsewhere (`test_live_head_ok_*`, `test_cast_live_skips_rotten_head`).
+    monkeypatch.setattr(remux, "_live_head_ok", lambda *a, **k: True)
 
     def drive(device, url, *, follow, load_kwargs, **k):
         seen["url"], seen["kwargs"] = url, load_kwargs
@@ -1037,6 +1040,72 @@ def test_cast_live_without_segments_cleans_up_and_yields(monkeypatch):
     assert out is None
     assert not Path(seen["dir"]).exists()
     assert remux._read_state() is None
+
+
+def test_live_feasible_false_for_dual_layer(monkeypatch):
+    monkeypatch.setattr(remux, "live_available", lambda cfg: True)
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(remux, "live_refusal", lambda *a: None)
+    monkeypatch.setattr(remux, "_probe_meta", lambda u: _meta(n_video=2, duration=100.0))
+    assert remux.live_feasible(_cfg(), "http://x", 2.0) is False
+    monkeypatch.setattr(remux, "_probe_meta", lambda u: _meta(n_video=1, duration=100.0))
+    assert remux.live_feasible(_cfg(), "http://x", 2.0) is True
+
+
+def test_cast_live_skips_dual_layer_without_spawning(monkeypatch):
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    monkeypatch.setattr(
+        remux, "_probe_meta",
+        lambda url: (Tracks(audio=[Track(id=1, codec="ac3", channels=6)]), 2, 6000.0),
+    )  # fmt: skip
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, follow=False
+    )
+    assert out is None
+    assert "dir" not in seen
+
+
+def test_cast_live_skips_rotten_head(monkeypatch):
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    monkeypatch.setattr(remux, "_live_head_ok", lambda *a, **k: False)
+    out = remux.cast_live(
+        _cfg(), "T", "http://debrid/x", device="10.0.0.5", audio_index=0, follow=False
+    )
+    assert out is None
+    assert not Path(seen["dir"]).exists()
+    assert remux._read_state() is None
+
+
+def test_live_head_ok_rejects_zero_channel_aac(tmp_path, monkeypatch):
+    from nstream import live
+
+    d = tmp_path / "hls"
+    d.mkdir()
+    (d / live.PLAYLIST).write_text("#EXTM3U\n#EXTINF:6.0,\nindex0.ts\n")
+    (d / "index0.ts").write_bytes(b"x")
+    monkeypatch.setattr(
+        "nstream.tracks.probe_tracks",
+        lambda path, timeout=10.0: Tracks(
+            audio=[Track(id=1, codec="aac", channels=0)], n_video=1, video_codec="hevc",
+        ),
+    )  # fmt: skip
+    assert remux._live_head_ok(str(d)) is False
+
+
+def test_live_head_ok_accepts_hevc_aac_stereo(tmp_path, monkeypatch):
+    from nstream import live
+
+    d = tmp_path / "hls"
+    d.mkdir()
+    (d / live.PLAYLIST).write_text("#EXTM3U\n#EXTINF:6.0,\nindex0.ts\n")
+    (d / "index0.ts").write_bytes(b"x")
+    monkeypatch.setattr(
+        "nstream.tracks.probe_tracks",
+        lambda path, timeout=10.0: Tracks(
+            audio=[Track(id=1, codec="aac", channels=2)], n_video=1, video_codec="hevc",
+        ),
+    )  # fmt: skip
+    assert remux._live_head_ok(str(d)) is True
 
 
 def test_live_job_copies_stereo_aac_and_downmixes_the_rest():

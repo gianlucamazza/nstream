@@ -451,10 +451,9 @@ def test_cast_load_pre_start_deadline_yields_startup_failed(monkeypatch):
     assert events[0]["error"] == "cast_startup_failed"
 
 
-def test_cast_load_eof_before_any_state_no_follow_yields_started(monkeypatch):
-    """Photographs current behavior: load acked, then daemon EOF before any media-status,
-    with follow=False → best-effort `started` (the LOAD was acknowledged, the session lives
-    in the daemon; a fire-and-return caller must not see a failure)."""
+def test_cast_load_eof_before_any_state_no_follow_is_not_started(monkeypatch):
+    """Load acked, then daemon EOF before any media-status, follow=False: a playlist GET
+    is not PLAYING (ADR 0044). Fire-and-return must fail so live falls back to the file."""
     frames = [{"id": 1, "action": "media-load", "ok": True, "data": {"loaded": True}}]
     server = _fake_daemon(monkeypatch, frames)
     server.shutdown(socket.SHUT_WR)  # EOF right after the ack, before any state
@@ -462,7 +461,8 @@ def test_cast_load_eof_before_any_state_no_follow_yields_started(monkeypatch):
         events = list(bridge.cast_load("ip", "http://x", follow=False, title="Dune"))
     finally:
         server.close()
-    assert events == [{"kind": "started", "title": "Dune"}]
+    assert [e["kind"] for e in events] == ["failed"]
+    assert events[0]["error"] == "cast_startup_failed"
 
 
 def test_cast_load_eof_without_load_ack_is_not_started(monkeypatch):
