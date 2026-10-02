@@ -92,8 +92,11 @@ def playback_environment(tmp_path, monkeypatch):
         executable.write_text(f"#!{sys.executable}\n" + script)
         executable.chmod(0o700)
     monkeypatch.setenv("PATH", str(binaries))
+    # Point the native helpers at nothing. Unset, `bridge._binary` falls back to the
+    # developer's real castbridge path: on a dev machine the subprocess then spawned a
+    # REAL daemon per cast test, orphaned past the suite (216 found on 2026-10-02).
     for variable in ("CASTBRIDGE_BIN", "CAST_MIRROR_BIN"):
-        monkeypatch.delenv(variable, raising=False)
+        monkeypatch.setenv(variable, str(tmp_path / f"no-{variable.lower()}"))
     try:
         yield
     finally:
