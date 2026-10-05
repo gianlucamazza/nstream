@@ -233,7 +233,8 @@ def test_run_auto_year_disambiguates(monkeypatch, capsys):
 
 def test_run_auto_id_untranslated(monkeypatch, capsys):
     monkeypatch.setattr(
-        headless.api, "search",
+        headless.api,
+        "search",
         lambda cfg, q: [{"id": "tmdb:1", "type": "movie", "name": "X"}],
     )
     rc = headless.run_auto(CFG, _hns(query=["x"]), _hopts())

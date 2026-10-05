@@ -399,7 +399,9 @@ def test_streams_translates_before_fetch(monkeypatch):
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [torrentio])
     monkeypatch.setattr(api, "meta_cached_disk", lambda cfg, typ, vid: {"imdb_id": "tt5"})
     monkeypatch.setattr(
-        api, "http_get_json", lambda url, **k: seen.append(url) or {"streams": [{"url": "http://u"}]}
+        api,
+        "http_get_json",
+        lambda url, **k: seen.append(url) or {"streams": [{"url": "http://u"}]},
     )
     rows = api.streams(CFG, "movie", "tmdb:9")
     assert seen == ["http://t/stream/movie/tt5.json"]
@@ -414,8 +416,7 @@ def test_episodes_translates_before_fetch(monkeypatch):
     monkeypatch.setattr(
         api,
         "http_get_json",
-        lambda url, **k: seen.append(url)
-        or {"meta": {"videos": [{"season": 1, "episode": 1}]}},
+        lambda url, **k: seen.append(url) or {"meta": {"videos": [{"season": 1, "episode": 1}]}},
     )
     vids = api.episodes(CFG, "tmdb:8")
     assert seen == ["http://m/meta/series/tt3.json"]
