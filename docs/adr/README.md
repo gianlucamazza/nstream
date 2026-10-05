@@ -72,7 +72,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0043](0043-live-subtitle-timing-without-reload.md) | Live subtitle timing changes never reload the media | Accepted | 2026-10-02 |
 | [0044](0044-live-started-is-observed-state.md) | Live `started` is an observed player state; dual-layer DV is not live-HLS-native | Accepted | 2026-10-02 |
 | [0045](0045-philips-cast-volume-and-hevc-delivery.md) | Philips Chromecast: MASTER volume is 0–1; HEVC stutter is delivery, not codec | **Proposed** | 2026-10-05 |
-| [0046](0046-board-catalogs-from-unlocked-manifests.md) | Board catalogs from unlocked addon manifests (not a marketplace) | **Proposed** | 2026-10-05 |
+| [0046](0046-board-catalogs-from-unlocked-manifests.md) | Board catalogs from unlocked addon manifests (not a marketplace) | Accepted | 2026-10-05 |
 | [0047](0047-catalog-id-to-imdb.md) | Translate catalog ids (`tmdb:`, `kitsu:`, …) to IMDb before stream discovery | **Proposed** | 2026-10-05 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,

@@ -1,6 +1,6 @@
 # 0046. Board catalogs from unlocked addon manifests (not a marketplace)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-05
 - **Deciders:** Odroid/CoS planning
 
