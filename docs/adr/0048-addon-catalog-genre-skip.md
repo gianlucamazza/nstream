@@ -1,6 +1,6 @@
 # 0048. Genre and skip extras for unlocked addon catalogs
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-05
 - **Deciders:** Odroid/CoS planning
 
