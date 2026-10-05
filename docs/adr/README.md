@@ -21,7 +21,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | Cast delivery & discovery     | 0005–0013, 0015–0017, 0022–0023, 0031, 0035, 0039, 0044–0045 |
 | Selection / sources / privacy | 0014, 0021, 0024–0030, 0032           |
 | Subtitles                     | 0012, 0018–0020                       |
-| Series / UX structure         | 0009, 0029                            |
+| Series / UX structure         | 0009, 0029, 0046                      |
 
 ## Index
 
@@ -72,6 +72,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0043](0043-live-subtitle-timing-without-reload.md) | Live subtitle timing changes never reload the media | Accepted | 2026-10-02 |
 | [0044](0044-live-started-is-observed-state.md) | Live `started` is an observed player state; dual-layer DV is not live-HLS-native | Accepted | 2026-10-02 |
 | [0045](0045-philips-cast-volume-and-hevc-delivery.md) | Philips Chromecast: MASTER volume is 0–1; HEVC stutter is delivery, not codec | **Proposed** | 2026-10-05 |
+| [0046](0046-board-catalogs-from-unlocked-manifests.md) | Board catalogs from unlocked addon manifests (not a marketplace) | **Proposed** | 2026-10-05 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

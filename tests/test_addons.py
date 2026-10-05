@@ -161,6 +161,123 @@ def test_parse_manifest_search_catalogs():
     assert a.search_catalogs == (("anime", "kitsu-anime-list"), ("movie", "legacy"))
     assert addons.search_catalog(a, "movie") == "legacy"
     assert addons.search_catalog(a, "series") is None
+    # optional extras stay board-browsable; required search is dropped (next test)
+    assert ("movie", "trending", "trending") in a.board_catalogs
+
+
+def test_parse_manifest_skips_required_search_from_board():
+    data = {
+        "name": "TMDB",
+        "resources": ["catalog"],
+        "types": ["movie", "series"],
+        "catalogs": [
+            {"type": "movie", "id": "tmdb.top", "name": "Popular", "extra": [{"name": "skip"}]},
+            {
+                "type": "movie",
+                "id": "tmdb.search",
+                "name": "Search",
+                "extra": [{"name": "search", "isRequired": True}],
+            },
+            {
+                "type": "anime",
+                "id": "kitsu-anime-list",
+                "name": "Kitsu",
+                "extraRequired": ["search"],
+            },
+        ],
+    }
+    a = addons._parse_manifest("https://t/manifest.json", data)
+    assert a.board_catalogs == (("movie", "tmdb.top", "Popular"),)
+    assert ("movie", "tmdb.search", "Search") in a.catalogs
+    assert ("anime", "kitsu-anime-list", "Kitsu") in a.catalogs
+
+
+def test_catalog_fetch_type_prefers_section_then_declared():
+    a = addons.Addon(
+        base="https://k",
+        name="Kitsu",
+        resources={"catalog": {"types": ["anime", "movie"], "idPrefixes": ["kitsu"]}},
+        catalogs=(
+            ("anime", "kitsu-anime-trending", "Kitsu Trending"),
+            ("movie", "tmdb.top", "Popular"),
+        ),
+    )
+    assert addons.catalog_fetch_type(a, "movie", "tmdb.top") == "movie"
+    assert addons.catalog_fetch_type(a, "movie", "kitsu-anime-trending") == "anime"
+    assert addons.catalog_fetch_type(a, "series", "missing") is None
+
+
+def test_extra_catalogs_from_unlocked_manifests(monkeypatch):
+    """Board rows come from cfg.addons manifests — not a marketplace, not Cinemeta pins."""
+    tmdb = addons._parse_manifest(
+        "https://tmdb/manifest.json",
+        {
+            "name": "The Movie Database Addon",
+            "resources": ["catalog"],
+            "types": ["movie", "series"],
+            "catalogs": [
+                {"type": "movie", "id": "tmdb.top", "name": "Popular", "extra": [{"name": "skip"}]},
+                {"type": "series", "id": "tmdb.top", "name": "Popular", "extra": [{"name": "skip"}]},
+                {
+                    "type": "movie",
+                    "id": "tmdb.search",
+                    "name": "Search",
+                    "extra": [{"name": "search", "isRequired": True}],
+                },
+            ],
+        },
+    )
+    kitsu = addons._parse_manifest(
+        "https://kitsu/manifest.json",
+        {
+            "name": "Anime Kitsu",
+            "resources": ["catalog"],
+            "types": ["anime", "movie", "series"],
+            "catalogs": [
+                {"type": "anime", "id": "kitsu-anime-trending", "name": "Kitsu Trending"},
+                {
+                    "type": "anime",
+                    "id": "kitsu-anime-list",
+                    "name": "Kitsu",
+                    "extra": [{"name": "search", "isRequired": True}],
+                },
+            ],
+        },
+    )
+    by_url = {
+        "https://tmdb/manifest.json": tmdb,
+        "https://kitsu/manifest.json": kitsu,
+    }
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: by_url.get(url))
+    cfg = Config(
+        torrentio_base="tb",
+        addons=["https://tmdb/manifest.json", "https://kitsu/manifest.json"],
+    )
+    movie = addons.extra_catalogs(cfg, "movie")
+    series = addons.extra_catalogs(cfg, "series")
+    assert movie == [
+        ("tmdb.top", "The Movie Database Addon · Popular"),
+        ("kitsu-anime-trending", "Anime Kitsu · Kitsu Trending"),
+    ]
+    assert series == [
+        ("tmdb.top", "The Movie Database Addon · Popular"),
+        ("kitsu-anime-trending", "Anime Kitsu · Kitsu Trending"),
+    ]
+    assert "tmdb.search" not in {c for c, _ in movie}
+    assert "kitsu-anime-list" not in {c for c, _ in movie}
+
+
+def test_extra_catalogs_skips_builtin_ids(monkeypatch):
+    extra = addons.Addon(
+        base="https://x",
+        name="Clone",
+        resources={"catalog": {"types": ["movie"], "idPrefixes": ["tt"]}},
+        catalogs=(("movie", "top", "Popolari"), ("movie", "mine", "Mine")),
+        board_catalogs=(("movie", "top", "Popolari"), ("movie", "mine", "Mine")),
+    )
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: extra)
+    cfg = Config(torrentio_base="tb", addons=["https://x/manifest.json"])
+    assert addons.extra_catalogs(cfg, "movie") == [("mine", "Clone · Mine")]
 
 
 def test_cinemeta_builtin_is_searchable(monkeypatch):

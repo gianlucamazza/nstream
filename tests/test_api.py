@@ -272,9 +272,12 @@ def test_subtitles_without_hash_single_query(monkeypatch):
 
 def test_catalog_extra_must_declare_catalog(monkeypatch):
     builtin = addons.Addon(
-        base="http://cine", name="Cinemeta", builtin=True,
+        base="http://cine",
+        name="Cinemeta",
+        builtin=True,
         resources={"catalog": {"types": ["movie"], "idPrefixes": ["tt"]}},
-    )  # fmt: skip
+        catalogs=(("movie", "top", "top"),),
+    )
     extra_no = _addon("X", "http://x", "catalog", catalogs=())  # declares no catalogs
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [builtin, extra_no])
     seen = []
@@ -286,7 +289,81 @@ def test_catalog_extra_must_declare_catalog(monkeypatch):
     monkeypatch.setattr(api, "http_get_json", fake_get)
     api.catalog(CFG, "movie", "top")
     # only the built-in is queried; the extra didn't declare (movie, top)
-    assert all("http://cine" in u for u in seen)
+    assert seen and all("http://cine" in u for u in seen)
+
+
+def test_catalog_does_not_query_cinemeta_for_extra_id(monkeypatch):
+    cine = addons.Addon(
+        base="http://cine",
+        name="Cinemeta",
+        builtin=True,
+        resources={"catalog": {"types": ["movie"], "idPrefixes": ["tt"]}},
+        catalogs=(("movie", "top", "top"),),
+    )
+    tmdb = addons.Addon(
+        base="http://tmdb",
+        name="TMDB",
+        resources={"catalog": {"types": ["movie"], "idPrefixes": ["tmdb:"]}},
+        catalogs=(("movie", "tmdb.top", "Popular"),),
+    )
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine, tmdb])
+    seen = []
+    monkeypatch.setattr(
+        api, "http_get_json", lambda url, **k: seen.append(url) or {"metas": []}
+    )
+    api.catalog(CFG, "movie", "tmdb.top")
+    assert seen == ["http://tmdb/catalog/movie/tmdb.top.json"]
+
+
+def test_catalog_fetches_declared_type_for_other_type_catalog(monkeypatch):
+    kitsu = addons.Addon(
+        base="http://kitsu",
+        name="Kitsu",
+        resources={"catalog": {"types": ["anime", "movie", "series"], "idPrefixes": ["kitsu"]}},
+        catalogs=(("anime", "kitsu-anime-trending", "Kitsu Trending"),),
+    )
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [kitsu])
+    seen = []
+    monkeypatch.setattr(
+        api,
+        "http_get_json",
+        lambda url, **k: seen.append(url)
+        or {
+            "metas": [
+                {"id": "kitsu:1", "type": "movie", "name": "Film"},
+                {"id": "kitsu:2", "type": "series", "name": "Serie"},
+            ]
+        },
+    )
+    rows = api.catalog(CFG, "movie", "kitsu-anime-trending")
+    assert seen == ["http://kitsu/catalog/anime/kitsu-anime-trending.json"]
+    assert [m["id"] for m in rows] == ["kitsu:1"]
+
+
+def test_play_id_uses_imdb_already_on_the_row():
+    assert api.play_id({"id": "tmdb:1", "imdb_id": "tt99"}) == "tt99"
+    assert api.play_id({"id": "tmdb:1", "behaviorHints": {"defaultVideoId": "tt88"}}) == "tt88"
+    assert api.play_id({"id": "kitsu:4"}) == "kitsu:4"
+    assert api.play_id({"id": "tt1", "imdb_id": "tt2"}) == "tt1"
+
+
+def test_catalog_rewrites_tmdb_id_to_imdb_on_the_row(monkeypatch):
+    tmdb = addons.Addon(
+        base="http://tmdb",
+        name="TMDB",
+        resources={"catalog": {"types": ["movie"], "idPrefixes": ["tmdb:"]}},
+        catalogs=(("movie", "tmdb.top", "Popular"),),
+    )
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [tmdb])
+    monkeypatch.setattr(
+        api,
+        "http_get_json",
+        lambda url, **k: {
+            "metas": [{"id": "tmdb:9", "type": "movie", "name": "X", "imdb_id": "tt22084616"}]
+        },
+    )
+    rows = api.catalog(CFG, "movie", "tmdb.top")
+    assert [m["id"] for m in rows] == ["tt22084616"]
 
 
 def test_episodes_returns_first_with_videos(monkeypatch):
@@ -549,6 +626,7 @@ def test_catalog_caches_within_ttl(monkeypatch):
         name="Cine",
         builtin=True,
         resources={"catalog": {"types": ["movie"], "idPrefixes": ["tt"]}},
+        catalogs=(("movie", "top", "top"),),
     )
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine])
     calls = {"n": 0}
