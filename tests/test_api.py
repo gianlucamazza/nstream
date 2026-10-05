@@ -308,9 +308,7 @@ def test_catalog_does_not_query_cinemeta_for_extra_id(monkeypatch):
     )
     monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [cine, tmdb])
     seen = []
-    monkeypatch.setattr(
-        api, "http_get_json", lambda url, **k: seen.append(url) or {"metas": []}
-    )
+    monkeypatch.setattr(api, "http_get_json", lambda url, **k: seen.append(url) or {"metas": []})
     api.catalog(CFG, "movie", "tmdb.top")
     assert seen == ["http://tmdb/catalog/movie/tmdb.top.json"]
 
@@ -327,13 +325,15 @@ def test_catalog_fetches_declared_type_for_other_type_catalog(monkeypatch):
     monkeypatch.setattr(
         api,
         "http_get_json",
-        lambda url, **k: seen.append(url)
-        or {
-            "metas": [
-                {"id": "kitsu:1", "type": "movie", "name": "Film"},
-                {"id": "kitsu:2", "type": "series", "name": "Serie"},
-            ]
-        },
+        lambda url, **k: (
+            seen.append(url)
+            or {
+                "metas": [
+                    {"id": "kitsu:1", "type": "movie", "name": "Film"},
+                    {"id": "kitsu:2", "type": "series", "name": "Serie"},
+                ]
+            }
+        ),
     )
     rows = api.catalog(CFG, "movie", "kitsu-anime-trending")
     assert seen == ["http://kitsu/catalog/anime/kitsu-anime-trending.json"]

@@ -362,11 +362,12 @@ def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
             if not cat_id or cat_id in _BUILTIN_CATALOG_IDS or cat_id in seen:
                 continue
             if t == typ:
-                if not serves(addon, "catalog", typ):
-                    continue
+                include = serves(addon, "catalog", typ)
             elif t in _BOARD_TYPES:
-                continue
-            elif not (serves(addon, "catalog", typ) or (t and serves(addon, "catalog", t))):
+                include = False
+            else:
+                include = serves(addon, "catalog", typ) or bool(t and serves(addon, "catalog", t))
+            if not include:
                 continue
             seen.add(cat_id)
             shown = name.strip() if name else cat_id

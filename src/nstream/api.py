@@ -357,9 +357,7 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
         primary += t_primary
     outcome: dict = {}
     gathered = _gather(tasks, labels=labels, keys=keys, primary=primary, outcome=outcome)
-    results = _dedup(
-        [_play_id_meta(m) for m in gathered], lambda m: m.get("id") or id(m)
-    )
+    results = _dedup([_play_id_meta(m) for m in gathered], lambda m: m.get("id") or id(m))
     if not results and outcome.get("primary") and not outcome.get("primary_ok"):
         # The catalog authority never answered (timeout, network, breaker): "no result"
         # would tell the caller the title doesn't exist, and nobody would retry (#4).
@@ -403,11 +401,7 @@ def _filter_type(rows: list, typ: str) -> list:
     """Keep section-typed rows when a Film/Serie browse fetched a mixed catalog."""
     if typ not in ("movie", "series"):
         return rows
-    matched = [
-        m
-        for m in rows
-        if not isinstance(m, dict) or m.get("type") in (typ, None, "")
-    ]
+    matched = [m for m in rows if not isinstance(m, dict) or m.get("type") in (typ, None, "")]
     return matched
 
 

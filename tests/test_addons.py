@@ -217,7 +217,12 @@ def test_extra_catalogs_from_unlocked_manifests(monkeypatch):
             "types": ["movie", "series"],
             "catalogs": [
                 {"type": "movie", "id": "tmdb.top", "name": "Popular", "extra": [{"name": "skip"}]},
-                {"type": "series", "id": "tmdb.top", "name": "Popular", "extra": [{"name": "skip"}]},
+                {
+                    "type": "series",
+                    "id": "tmdb.top",
+                    "name": "Popular",
+                    "extra": [{"name": "skip"}],
+                },
                 {
                     "type": "movie",
                     "id": "tmdb.search",
