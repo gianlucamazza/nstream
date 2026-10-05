@@ -862,12 +862,12 @@ def _cast_live_menu(cfg: Config) -> str | None:
         (f"{g.down}  Seek +5 min", "seek+300"),
         (f"{g.tv}  Sottotitoli −0.5s (prima)", "sub-0.5"),
         (f"{g.tv}  Sottotitoli +0.5s (dopo)", "sub+0.5"),
-        (f"{g.audio}  Volume 35%", "vol35"),
-        (f"{g.audio}  Volume 50%", "vol50"),
-        (f"{g.audio}  Volume 70%", "vol70"),
+        (f"{g.audio}  Volume Cast 35%", "vol35"),
+        (f"{g.audio}  Volume Cast 50%", "vol50"),
+        (f"{g.audio}  Volume Cast 70%", "vol70"),
         (f"{g.fail}  Ferma cast", "stop"),
     ]
-    header = state.cast_session_label(session) or "cast"
+    header = (state.cast_session_label(session) or "cast") + " · volume Cast % ≠ OSD TV"
     pick = fzf(items, "cast> ", header=header)
     if pick is None:
         return None

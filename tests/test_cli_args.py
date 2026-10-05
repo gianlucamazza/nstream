@@ -41,3 +41,14 @@ def test_audio_lang_is_not_headless_only():
     args = p.parse_args(["--audio-lang", "eng", "dune"])
     assert headless_only_misuse(args) is None
     assert args.audio_lang == "eng"
+
+
+def test_volume_help_names_cast_percent_and_osd_mismatch():
+    """`--volume` is Cast 0–100%, not TV OSD; Phase 0 MASTER / step=null / 14→13."""
+    help_txt = build_parser().format_help()
+    assert "volume Cast 0-100%" in help_txt
+    assert "SET_VOLUME 0-1" in help_txt
+    assert "OSD" in help_txt
+    assert "volume_control_type=master" in help_txt
+    assert "volume_step_interval=null" in help_txt
+    assert "14→13" in help_txt

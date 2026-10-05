@@ -33,7 +33,7 @@ nstream --json --explain --cast "title"
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
 | Silent | Dolby/DTS on DMR | Ensure `cast_remux: true` (default); or pick AAC; check Cast volume ≠ 0 |
-| Quiet / OSD ≠ `--volume` | Cast 0–1 MASTER vs TV OSD ticks | `--volume` is Cast percent, not OSD. On Philips, Cast 14 ≈ OSD 8 if the OSD is 0–60. `--status` reports `volume_control_type`. Target OSD 12–15 ⇒ raise Cast percent after measuring the OSD, do not invent a scale (ADR 0045) |
+| Quiet / OSD ≠ `--volume` | Cast 0–1 MASTER vs TV OSD ticks | `--volume` is Cast percent, not OSD. This Philips DMR reports `volume_control_type=master`, `volume_step_interval=null`; catt may show 13 after `--volume 14`. `--status` adds `volume_percent`. Target OSD 12–15 ⇒ try Cast % and read the TV — no `osd_max` factor (ADR 0045) |
 | Stutter on 1080 HEVC, `ok: true` | Direct catt: TV pulls the remote URL | Not a decoder miss on this class of TV (HEVC/4K/HDR already plays from LAN Range / live HLS). Need castbridge for live; a video-copy remux if disk allows. **Not** a 720 H.264 default. Missing `cast_sender` only blocks mirror |
 | Custom `cast_receiver_app_id` but session is `CC1AD845` | catt cannot launch that id | Install/use castbridge, or expect `receiver_app_ignored`. Live HLS always uses the DMR |
 | Black video | Unsupported real video codec | Headless `video_codec_unsupported`; use `--local` or other quality; mirror if available |

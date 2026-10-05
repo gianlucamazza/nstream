@@ -540,6 +540,32 @@ def test_set_volume_clamps_and_calls(monkeypatch):
     assert seen["cmd"] == ["catt", "-d", "1.2.3.4", "volume", "100"]
 
 
+def test_volume_percent_level_roundtrip_and_phase0_quantization():
+    """CLI 0–100% ↔ Cast 0–1. Phase 0 readback ≈0.133 displays as 13, not 14."""
+    assert caster.clamp_volume_percent(150) == 100
+    assert caster.clamp_volume_percent(-3) == 0
+    assert caster.clamp_volume_percent(14) == 14
+    assert caster.volume_percent_to_level(0) == 0.0
+    assert caster.volume_percent_to_level(14) == 0.14
+    assert caster.volume_percent_to_level(25) == 0.25
+    assert caster.volume_percent_to_level(50) == 0.5
+    assert caster.volume_percent_to_level(100) == 1.0
+    assert caster.volume_level_to_percent(0.0) == 0
+    assert caster.volume_level_to_percent(0.14) == 14  # do not truncate 13.999…
+    assert caster.volume_level_to_percent(0.25) == 25
+    assert caster.volume_level_to_percent(0.5) == 50
+    assert caster.volume_level_to_percent(1.0) == 100
+    assert caster.volume_level_to_percent(0.13333334028720856) == 13
+    assert caster.volume_level_to_percent(None) is None
+    assert caster.volume_level_to_percent(35) == 35  # already-percent defensive
+    bits = caster.format_volume_bits(0.13333334028720856, control_type="master")
+    assert bits == "vol 13% · master · step=null · ≠ OSD"
+    assert caster.format_volume_bits(0.5, control_type="master", step_interval=0.05) == (
+        "vol 50% · master · step=0.05 · ≠ OSD"
+    )
+    assert caster.format_volume_bits(0.4, osd_mismatch=False) == "vol 40%"
+
+
 def test_status_normalizes(monkeypatch):
     info = {
         "player_state": "PLAYING",
@@ -563,7 +589,7 @@ def test_status_normalizes(monkeypatch):
     monkeypatch.setattr(caster.subprocess, "run", lambda cmd, **k: _R())
     st = caster.status("1.2.3.4")
     assert st["player_state"] == "PLAYING" and st["title"] == "The Matrix"
-    assert st["volume"] == 0.4 and st["muted"] is False
+    assert st["volume"] == 0.4 and st["volume_percent"] == 40 and st["muted"] is False
     assert st["volume_control_type"] == "master"
     assert st["volume_step_interval"] == 0.05
     assert st["app_id"] == "CC1AD845"
@@ -737,6 +763,7 @@ def test_status_asks_the_receiver_once(monkeypatch):
     monkeypatch.setattr(caster, "_bridge_track_info", lambda dev: ([], None))
     st = caster.status("10.0.0.9")
     assert calls == ["10.0.0.9"] and st["player_state"] == "IDLE" and st["volume"] is None
+    assert st["volume_percent"] is None
     assert st["volume_control_type"] is None and st["app_id"] is None
     assert st["content_type"] is None and st["stream_type"] is None
     assert st["volume_step_interval"] is None

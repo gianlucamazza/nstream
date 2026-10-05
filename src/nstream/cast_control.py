@@ -65,9 +65,15 @@ def cast_status(*, device: str | None = None) -> tuple[bool, str]:
         bits.append(f"{pos:.0f}/{dur:.0f}s")
     elif pos > 0:
         bits.append(f"{pos:.0f}s")
-    if isinstance(vol, (int, float)):
-        pct = int(vol * 100) if float(vol) <= 1.0 else int(vol)
-        bits.append(f"vol {pct}%")
+    ctl = st.get("volume_control_type")
+    step = st.get("volume_step_interval")
+    vol_bits = caster.format_volume_bits(
+        vol if isinstance(vol, (int, float)) else None,
+        control_type=ctl if isinstance(ctl, str) else None,
+        step_interval=step if isinstance(step, (int, float)) else None,
+    )
+    if vol_bits:
+        bits.append(vol_bits)
     return True, f"{dev}: " + " · ".join(bits)
 
 
@@ -87,13 +93,19 @@ def refresh_session_from_status(cfg: Config, *, device: str | None = None) -> No
 
 
 def set_cast_volume(level: int, *, device: str | None = None) -> tuple[bool, str]:
-    """Set receiver volume 0–100. Returns (ok, message)."""
-    level = max(0, min(100, int(level)))
+    """Set receiver Cast percent 0–100 (internally 0–1). Returns (ok, message).
+
+    The percent is not TV OSD. On a MASTER DMR catt may quantize (14→13).
+    """
+    level = caster.clamp_volume_percent(level)
     dev = resolve_session_device(device)
     if dev is None:
         return False, "nessun cast attivo"
     ok = caster.set_volume(dev, level)
-    return (ok, f"volume {level}% su {dev}" if ok else f"volume non impostato su {dev}")
+    return (
+        ok,
+        f"volume Cast {level}% su {dev} (≠ OSD TV)" if ok else f"volume non impostato su {dev}",
+    )
 
 
 def media_control(

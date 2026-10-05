@@ -25,11 +25,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **ADR 0047 Accepted:** translate `tmdb:` / `kitsu:` (and similar catalog ids) to
   IMDb `tt…` via existing meta endpoints before stream discovery. Soft-fail: never
   invent a `tt`; `--json` `error: id_untranslated` when nothing streamable remains.
-- **ADR 0045 Proposed:** Philips / catt-only Chromecast RCA. Cast volume is 0–1
-  MASTER (OSD is the TV's own scale). 1080 HEVC stutter on a direct remote URL is
-  delivery, not a codec miss. No remux-720 default.
-- `--json --status` reports `volume_control_type`, `volume_step_interval`, `app_id`,
-  `content_type`, `stream_type` (ADR 0045). Never `content_id`.
+- **ADR 0045 Proposed:** Philips / catt-only Chromecast RCA. Cast volume CLI is
+  0–100% ↔ `SET_VOLUME` 0–1 MASTER (Phase 0: this DMR reports
+  `volume_control_type=master`, `volume_step_interval=null`; catt may quantize
+  14→13). Cast % is not TV OSD — no `osd_max`. 1080 HEVC stutter on a direct
+  remote URL is delivery, not a codec miss. No remux-720 default. Open: OSD
+  photo table, HEVC HEAD/Range, JointSpace pairing.
+- `--json --status` reports `volume_control_type`, `volume_step_interval`,
+  `volume_percent`, `app_id`, `content_type`, `stream_type` (ADR 0045). Never
+  `content_id`. `--volume` / TUI copy names Cast % ≠ OSD.
 
 ### Fixed
 

@@ -117,7 +117,7 @@ External subs (when requested) go as a **WebVTT text track** on the castbridge p
 
 | Command | Effect |
 | ------- | ------ |
-| `--json --status` | Receiver state, position, Cast volume 0–1, `volume_control_type`, `app_id`, `content_type`, `stream_type`, `active_tracks`, `receiver_error` |
+| `--json --status` | Receiver state, position, Cast volume 0–1 + `volume_percent`, `volume_control_type`, `volume_step_interval`, `app_id`, `content_type`, `stream_type`, `active_tracks`, `receiver_error` |
 | `--json --stop` | Stop + persist position to history |
 | `--json --pause` / `--resume` / `--seek SEC` / `--volume N` | Control in-progress cast |
 | TUI home → 📺 In onda | Same controls without `--json` (pause, relative seek, volume, stop) |
@@ -134,9 +134,12 @@ See the **Cast** table in [config.md](config.md). Related ADRs: 0005–0008, 001
 
 `--volume N` / `catt volume N` is Cast percent (0–100 → `SET_VOLUME` 0–1). On
 `volume_control_type: master` that is the device master, not a second stream fader.
-TV OSD ticks are the display's own scale (a Philips 0–60 OSD makes Cast 14 show as
-OSD ~8). Perceived OSD 12–15 is the Cast level that maps to those ticks after a
-measured OSD table — not a remapped CLI. HEVC 1080 stutter on a **direct** catt
-cast (TV pulls a remote URL) is a delivery path; this DMR already plays HEVC/4K/HDR
-from a LAN Range file or live HLS (video copy). A 720 H.264 remux is triage, not
-the default. Missing `cast_sender` only blocks the mirror fallback.
+The Philips 43PUS9235/12 DMR (app `CC1AD845`) reports `master` and
+`volume_step_interval: null` at every Phase 0 grid point; catt integer % can
+quantize (14→13). TV OSD ticks are a **different** scale — there is no
+`osd_max` and no linear map (a remembered 14 ≈ OSD 8 / 0–60 guess was rejected).
+Comfortable OSD ~12–15 means try Cast percents and read the TV, not a remapped
+CLI. HEVC 1080 stutter on a **direct** catt cast (TV pulls a remote URL) is a
+delivery path; this DMR already plays HEVC/4K/HDR from a LAN Range file or live
+HLS (video copy). A 720 H.264 remux is triage, not the default. Missing
+`cast_sender` only blocks the mirror fallback.

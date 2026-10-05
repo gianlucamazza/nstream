@@ -74,7 +74,7 @@ def test_set_cast_volume(monkeypatch):
     monkeypatch.setattr(cast_control.state, "cast_session_device", lambda: "tv")
     monkeypatch.setattr(cast_control.caster, "set_volume", lambda d, n: n == 50)
     ok, msg = cast_control.set_cast_volume(50)
-    assert ok and "50%" in msg
+    assert ok and "50%" in msg and "Cast" in msg and "OSD" in msg
 
 
 def test_runtime_health_shape():
@@ -115,6 +115,29 @@ def test_cast_status_with_device(monkeypatch):
     ok, msg = cast_control.cast_status()
     assert ok is True
     assert "Film" in msg and "42" in msg and "vol 50%" in msg
+    assert "≠ OSD" in msg
+
+
+def test_cast_status_names_master_null_step(monkeypatch):
+    monkeypatch.setattr(cast_control.state, "expire_cast_session", lambda: None)
+    monkeypatch.setattr(cast_control.state, "cast_session_device", lambda: "10.0.0.2")
+    monkeypatch.setattr(
+        cast_control.caster,
+        "status",
+        lambda d: {
+            "title": "Film",
+            "player_state": "IDLE",
+            "position": 0.0,
+            "duration": 0.0,
+            "volume": 0.13333334028720856,
+            "volume_control_type": "master",
+            "volume_step_interval": None,
+        },
+    )
+    ok, msg = cast_control.cast_status()
+    assert ok is True
+    assert "vol 13%" in msg and "master" in msg and "step=null" in msg
+    assert "≠ OSD" in msg
 
 
 def test_media_control_pause_via_bridge(monkeypatch):
