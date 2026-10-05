@@ -18,7 +18,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -367,7 +367,7 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     return sorted(results, key=lambda m: tuple(-x for x in _search_score(m, query)))
 
 
-def play_id(meta: dict) -> str:
+def play_id(meta: Mapping[str, object]) -> str:
     """Id to hand to `streams` / `meta` / `episodes`. Prefer a `tt` already on the
     catalog row (`imdb_id` or `behaviorHints.defaultVideoId`) so TMDB `tmdb:` rows
     stay on the existing stream path. Not a translator (ADR 0046 / 0047)."""
@@ -375,7 +375,11 @@ def play_id(meta: dict) -> str:
     if mid.startswith("tt"):
         return mid
     hints = meta.get("behaviorHints")
-    default = hints.get("defaultVideoId") if isinstance(hints, dict) else None
+    default = (
+        cast(Mapping[str, object], hints).get("defaultVideoId")
+        if isinstance(hints, Mapping)
+        else None
+    )
     for cand in (meta.get("imdb_id"), default):
         if isinstance(cand, str) and cand.startswith("tt"):
             return cand
@@ -389,10 +393,11 @@ def play_id(meta: dict) -> str:
 def _play_id_meta(meta: object) -> object:
     if not isinstance(meta, dict):
         return meta
-    wanted = play_id(meta)
-    if wanted == meta.get("id"):
+    row = cast(Mapping[str, object], meta)
+    wanted = play_id(row)
+    if wanted == row.get("id"):
         return meta
-    out = dict(meta)
+    out = dict(row)
     out["id"] = wanted
     return out
 
@@ -401,7 +406,11 @@ def _filter_type(rows: list, typ: str) -> list:
     """Keep section-typed rows when a Film/Serie browse fetched a mixed catalog."""
     if typ not in ("movie", "series"):
         return rows
-    matched = [m for m in rows if not isinstance(m, dict) or m.get("type") in (typ, None, "")]
+    matched = [
+        m
+        for m in rows
+        if not isinstance(m, dict) or cast(Mapping[str, object], m).get("type") in (typ, None, "")
+    ]
     return matched
 
 
