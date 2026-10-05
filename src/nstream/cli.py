@@ -630,6 +630,21 @@ def run_recent_searches(cfg: Config, opts: PlayOpts, typ: str | None = None) -> 
     return run_search(cfg, query, opts, typ)
 
 
+def _pick_catalog_genre(options: tuple[str, ...], *, required: bool) -> str | None:
+    """Pick a genre extra for an addon catalog. None is ESC; empty string is Tutti."""
+    items: list[tuple[str, object]] = []
+    if not required:
+        items.append(("Tutti i generi", _ALL_GENRES))
+    items += [(name, name) for name in options]
+    header = "scegli un genere · ESC: indietro" if required else "filtra per genere · ESC: indietro"
+    picked = fzf(items, "genere> ", header=header)
+    if picked is None:
+        return None
+    if picked is _ALL_GENRES:
+        return ""
+    return typecast(str, picked)
+
+
 def run_browse(
     cfg: Config,
     cat: str,
@@ -640,7 +655,14 @@ def run_browse(
 ) -> int:
     """Browse a catalog id (Cinemeta or user-addon), typed or mixed, with optional
     genre filter and in-place pagination via a trailing «altri…» row when a full
-    page is returned."""
+    page is returned (Cinemeta pins, or an addon catalog that declares `skip`)."""
+    extra = addons.catalog_extra_info(cfg, typ, cat)
+    pageable = extra is None or extra.supports_skip
+    if extra is not None and extra.supports_genre and genre is None:
+        picked = _pick_catalog_genre(extra.genres or GENRES, required=extra.genre_required)
+        if picked is None:
+            return 0
+        genre = picked or None
     skip = 0
     header: str | None = None
     g = ui.glyphs(ui.active_caps())
@@ -661,7 +683,7 @@ def run_browse(
             return 0
 
         items: list[tuple[str, Meta | object]] = list(_meta_rows(cfg, metas))
-        if len(metas) >= CATALOG_PAGE:
+        if pageable and len(metas) >= CATALOG_PAGE:
             items.append((f"{g.down}  altri…", _MORE))
 
         page_header = header
@@ -782,6 +804,8 @@ _RECENT_SEARCH = "recent_search"
 _WATCHLIST = "watchlist"
 _BROWSE = "browse"
 _GENRE = "genre"
+# Genre picker: Tutti (optional extra) vs ESC (None — back to the board). ADR 0048.
+_ALL_GENRES = object()
 _SECTION = "section"
 _SETTINGS = "settings"
 _CAST_LIVE = "cast_live"
@@ -814,8 +838,9 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 def run_section(cfg: Config, typ: str, opts: PlayOpts) -> int:
     """A type-scoped home section: type-filtered continue-watching, search, the three
     Cinemeta catalogs, and extra catalogs declared by unlocked user-addon manifests
-    (ADR 0046) — Cinemeta-shaped rows pinned to `typ`, other types (anime) in both
-    sections. ESC returns to the home menu."""
+    (ADR 0046 / 0048) — Cinemeta-shaped rows pinned to `typ`, other types (anime) in both
+    sections. Addon catalogs that declare genre/skip get a picker and/or paging.
+    ESC returns to the home menu."""
     return _home_menu(cfg, opts, typ=typ)
 
 

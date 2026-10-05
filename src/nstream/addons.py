@@ -33,6 +33,27 @@ _failed_at: dict[str, float] = {}
 
 
 @dataclass(frozen=True)
+class CatalogExtraInfo:
+    """Declared extras for one catalog (`extra` / legacy `extraSupported`). ADR 0048."""
+
+    extras: frozenset[str]
+    required: frozenset[str]
+    genres: tuple[str, ...] = ()
+
+    @property
+    def supports_genre(self) -> bool:
+        return "genre" in self.extras
+
+    @property
+    def supports_skip(self) -> bool:
+        return "skip" in self.extras
+
+    @property
+    def genre_required(self) -> bool:
+        return "genre" in self.required
+
+
+@dataclass(frozen=True)
 class Addon:
     base: str
     name: str
@@ -45,8 +66,10 @@ class Addon:
     # with unrelated rows (anime-kitsu returned "Hong Gil Dong 2084" for "Il grande Gatsby").
     search_catalogs: tuple[tuple[str, str], ...] = ()
     # (type, id, name) that the board may list: no required extra other than `skip`
-    # (search-only catalogs stay off the menu — ADR 0046).
+    # / `genre` (search-only catalogs stay off the menu — ADR 0046 / 0048).
     board_catalogs: tuple[tuple[str, str, str], ...] = ()
+    # (type, id, extras) for every parsed catalog — genre options + skip/genre flags.
+    catalog_extra: tuple[tuple[str, str, CatalogExtraInfo], ...] = ()
     manifest_url: str = ""
 
 
@@ -57,9 +80,9 @@ _BUILTIN_CATALOG_IDS = frozenset({"top", "year", "imdbRating"})
 # Film / Serie TV section types (ADR 0009). A catalog whose type is outside this set
 # (today: `anime`) is still offered on both sections.
 _BOARD_TYPES = frozenset({"movie", "series"})
-# Required extras the board already sends (`api._extras` skip=). Anything else (search,
-# genre, …) keeps the catalog off `extra_catalogs` — genre/skip UI is a later slice.
-_BOARD_REQUIRED_EXTRAS = frozenset({"skip"})
+# Required extras the board can send (`api._extras` genre= / skip=). Anything else
+# (search, …) keeps the catalog off `extra_catalogs` — ADR 0048.
+_BOARD_REQUIRED_EXTRAS = frozenset({"skip", "genre"})
 
 
 # --- manifest cache (user addons only) -----------------------------------
@@ -120,6 +143,44 @@ def _required_extra_names(catalog: dict) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _declared_extra_names(catalog: dict) -> tuple[str, ...]:
+    """Supported extra names (`extra[].name` or legacy `extraSupported`), first-wins."""
+    names: list[str] = []
+    extra = catalog.get("extra")
+    if isinstance(extra, list):
+        for e in extra:
+            if isinstance(e, dict) and e.get("name"):
+                names.append(str(e["name"]))
+            elif isinstance(e, str) and e:
+                names.append(e)
+    legacy = catalog.get("extraSupported")
+    if isinstance(legacy, list):
+        names.extend(str(x) for x in legacy if x)
+    return tuple(dict.fromkeys(names))
+
+
+def _genre_options(catalog: dict) -> tuple[str, ...]:
+    """`options` on the `genre` extra; empty when the addon lists no tokens."""
+    extra = catalog.get("extra")
+    if not isinstance(extra, list):
+        return ()
+    for e in extra:
+        if isinstance(e, dict) and e.get("name") == "genre":
+            opts = e.get("options")
+            if isinstance(opts, list):
+                return tuple(str(x) for x in opts if str(x).strip())
+            return ()
+    return ()
+
+
+def _catalog_extra_info(catalog: dict) -> CatalogExtraInfo:
+    return CatalogExtraInfo(
+        extras=frozenset(_declared_extra_names(catalog)),
+        required=frozenset(_required_extra_names(catalog)),
+        genres=_genre_options(catalog),
+    )
+
+
 def _board_ok(catalog: dict) -> bool:
     """True if the board can GET this catalog without extras we do not send."""
     return all(n in _BOARD_REQUIRED_EXTRAS for n in _required_extra_names(catalog))
@@ -142,6 +203,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
     catalogs: list[tuple[str, str, str]] = []
     search_catalogs: list[tuple[str, str]] = []
     board_catalogs: list[tuple[str, str, str]] = []
+    catalog_extra: list[tuple[str, str, CatalogExtraInfo]] = []
     for c in data.get("catalogs", []):
         if not isinstance(c, dict):
             continue
@@ -151,6 +213,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
         typ = str(c.get("type") or "")
         name = str(c.get("name") or cat_id).strip() or cat_id
         catalogs.append((typ, cat_id, name))
+        catalog_extra.append((typ, cat_id, _catalog_extra_info(c)))
         if _declares_search(c):
             search_catalogs.append((typ, cat_id))
         if _board_ok(c):
@@ -164,6 +227,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
         manifest_url=manifest_url,
         search_catalogs=tuple(search_catalogs),
         board_catalogs=tuple(board_catalogs),
+        catalog_extra=tuple(catalog_extra),
     )
 
 
@@ -341,6 +405,17 @@ def catalog_fetch_type(addon: Addon, typ: str, cat: str) -> str | None:
     return next((t for t, c, *_ in addon.catalogs if c == cat), None) or None
 
 
+def _section_lists(addon: Addon, section_typ: str, catalog_typ: str) -> bool:
+    """True if this catalog type belongs on the Film/Serie section (ADR 0046)."""
+    if catalog_typ == section_typ:
+        return serves(addon, "catalog", section_typ)
+    if catalog_typ in _BOARD_TYPES:
+        return False
+    return serves(addon, "catalog", section_typ) or bool(
+        catalog_typ and serves(addon, "catalog", catalog_typ)
+    )
+
+
 def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
     """User-addon catalogs for a typed board section as `(catalog_id, display_label)`.
 
@@ -361,18 +436,30 @@ def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
         for t, cat_id, name in rows:
             if not cat_id or cat_id in _BUILTIN_CATALOG_IDS or cat_id in seen:
                 continue
-            if t == typ:
-                include = serves(addon, "catalog", typ)
-            elif t in _BOARD_TYPES:
-                include = False
-            else:
-                include = serves(addon, "catalog", typ) or bool(t and serves(addon, "catalog", t))
-            if not include:
+            if not _section_lists(addon, typ, t):
                 continue
             seen.add(cat_id)
             shown = name.strip() if name else cat_id
             out.append((cat_id, f"{addon.name} · {shown}"))
     return out
+
+
+def catalog_extra_info(cfg: Config, typ: str | None, cat: str) -> CatalogExtraInfo | None:
+    """Extras on the unlocked addon catalog that `extra_catalogs` would list for `cat`.
+
+    None for Cinemeta pins (`top` / `year` / `imdbRating`), missing `typ`, or an
+    unknown id — callers then keep Cinemeta paging and skip the addon genre picker.
+    """
+    if not typ or cat in _BUILTIN_CATALOG_IDS:
+        return None
+    for addon in effective_addons(cfg):
+        if addon.builtin:
+            continue
+        for t, cat_id, info in addon.catalog_extra:
+            if cat_id != cat or not _section_lists(addon, typ, t):
+                continue
+            return info
+    return None
 
 
 def serves(addon: Addon, resource: str, typ: str, video_id: str | None = None) -> bool:

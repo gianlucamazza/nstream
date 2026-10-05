@@ -23,6 +23,7 @@ date, or reject via a superseding ADR.
 | [0040](adr/0040-subtitles-off-the-start-path.md) | Subtitles off the cast start path | Embedded text track first; alignment from the producer pass after the start; `--sub-shift` during the cast. Phase 0: three gates on the TV. |
 | [0045](adr/0045-philips-cast-volume-and-hevc-delivery.md) | Philips Cast volume + HEVC delivery | MASTER volume is Cast 0–1 (OSD is the TV scale). 1080 HEVC stutter on catt-direct WAN is delivery, not a codec miss. No remux-720 default. Phase 0: OSD table + HEVC `contentType`/Range traces. |
 | [0047](adr/0047-catalog-id-to-imdb.md) | Catalog id → IMDb before streams | `tmdb:` / `kitsu:` (and similar) become `tt…` via existing meta endpoints before `api.streams` / `prepare_stream`. Soft-fail: no fake `tt`; `id_untranslated` when nothing streamable remains. |
+| [0048](adr/0048-addon-catalog-genre-skip.md) | Genre / skip extras for addon catalogs | Unlocked manifests that declare `genre` and/or `skip` get a genre picker and/or «altri…» paging on Film/Serie (and `run_browse`). Cinemeta Generi… unchanged. No marketplace, Trakt, or new `--browse` keywords. |
 
 ## Possible product extensions
 
