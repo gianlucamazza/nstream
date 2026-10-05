@@ -460,6 +460,17 @@ def test_cast_file_catt_headless_detaches_and_keeps_state(monkeypatch, tmp_path)
     assert list(tmp_path.glob("catt-*.log")) == []  # diagnosis capture removed on startup
 
 
+def test_cast_file_catt_warns_when_custom_receiver_ignored(monkeypatch, tmp_path):
+    f = _tmp_remux(tmp_path)
+    _catt_wiring(monkeypatch)
+    with remux.notices.capture() as bag:
+        remux.cast_file(
+            _cfg(cast_receiver_app_id="07841171"), "T", str(f),
+            device="10.0.0.5", follow=False,
+        )  # fmt: skip
+    assert any(n.code == "receiver_app_ignored" for n in bag)
+
+
 def test_cast_file_catt_follow_waits_then_tears_down(monkeypatch, tmp_path):
     f = _tmp_remux(tmp_path)
     rec, proc = _catt_wiring(monkeypatch)

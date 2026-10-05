@@ -18,8 +18,10 @@ Without castbridge, nstream falls back to `catt` (same cast, no now-playing meta
 events). Without the mirror binary, `--mirror` / auto mirror-over-remux is unavailable.
 
 A registered Custom Receiver is optional (`cast_receiver_app_id` in config). Empty keeps
-Google's Default Media Receiver. An unpublished id only launches on devices registered in
-the Cast Developer Console (ADR 0013).
+Google's Default Media Receiver. The id is forwarded only when **castbridge** is the
+sender (ADR 0013). catt has no arbitrary-app-id switch and always launches `CC1AD845`;
+nstream emits `receiver_app_ignored` on that path (ADR 0045). An unpublished id only
+launches on devices registered in the Cast Developer Console.
 
 ## How to cast
 
@@ -115,7 +117,7 @@ External subs (when requested) go as a **WebVTT text track** on the castbridge p
 
 | Command | Effect |
 | ------- | ------ |
-| `--json --status` | Receiver state, position, volume, `active_tracks`, `receiver_error` |
+| `--json --status` | Receiver state, position, Cast volume 0–1, `volume_control_type`, `app_id`, `content_type`, `stream_type`, `active_tracks`, `receiver_error` |
 | `--json --stop` | Stop + persist position to history |
 | `--json --pause` / `--resume` / `--seek SEC` / `--volume N` | Control in-progress cast |
 | TUI home → 📺 In onda | Same controls without `--json` (pause, relative seek, volume, stop) |
@@ -128,4 +130,13 @@ Continuation policy (who decides “next episode”): ADR 0029. Delivery must re
 ## Config keys
 
 See the **Cast** table in [config.md](config.md). Related ADRs: 0005–0008, 0010–0013,
-0015–0017, 0022–0023, 0031.
+0015–0017, 0022–0023, 0031, 0045.
+
+`--volume N` / `catt volume N` is Cast percent (0–100 → `SET_VOLUME` 0–1). On
+`volume_control_type: master` that is the device master, not a second stream fader.
+TV OSD ticks are the display's own scale (a Philips 0–60 OSD makes Cast 14 show as
+OSD ~8). Perceived OSD 12–15 is the Cast level that maps to those ticks after a
+measured OSD table — not a remapped CLI. HEVC 1080 stutter on a **direct** catt
+cast (TV pulls a remote URL) is a delivery path; this DMR already plays HEVC/4K/HDR
+from a LAN Range file or live HLS (video copy). A 720 H.264 remux is triage, not
+the default. Missing `cast_sender` only blocks the mirror fallback.

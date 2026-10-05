@@ -548,6 +548,12 @@ def test_status_normalizes(monkeypatch):
         "media_metadata": {"title": "The Matrix"},
         "volume_level": 0.4,
         "volume_muted": False,
+        "volume_control_type": "master",
+        "volume_step_interval": 0.05,
+        "app_id": "CC1AD845",
+        "content_type": "video/mp4",
+        "stream_type": "BUFFERED",
+        "content_id": "https://debrid.example/token",  # must never leak into status
     }
 
     class _R:
@@ -558,6 +564,11 @@ def test_status_normalizes(monkeypatch):
     st = caster.status("1.2.3.4")
     assert st["player_state"] == "PLAYING" and st["title"] == "The Matrix"
     assert st["volume"] == 0.4 and st["muted"] is False
+    assert st["volume_control_type"] == "master"
+    assert st["volume_step_interval"] == 0.05
+    assert st["app_id"] == "CC1AD845"
+    assert st["content_type"] == "video/mp4" and st["stream_type"] == "BUFFERED"
+    assert "content_id" not in st
 
 
 def test_status_idle_on_failure(monkeypatch):
@@ -642,8 +653,36 @@ def test_cast_forwards_custom_receiver_app_id(monkeypatch):
 
     monkeypatch.setattr(caster.bridge, "cast_load", fake_load)
     cfg = Config(torrentio_base="tb", cast_receiver_app_id="CA5T0001")
-    caster.cast(cfg, "Dune", "http://x", device="1.2.3.4")
+    with caster.notices.capture() as bag:
+        caster.cast(cfg, "Dune", "http://x", device="1.2.3.4")
     assert seen.get("app_id") == "CA5T0001"
+    assert all(n.code != "receiver_app_ignored" for n in bag)
+
+
+def test_catt_path_warns_when_custom_receiver_ignored(monkeypatch):
+    """catt cannot launch cast_receiver_app_id (ADR 0045): say so, stay on CC1AD845."""
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(
+        caster,
+        "_cast_via_catt",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, started=True),
+    )
+    cfg = Config(torrentio_base="tb", cast_receiver_app_id="07841171")
+    with caster.notices.capture() as bag:
+        caster.cast(cfg, "Dune", "http://x", device="1.2.3.4")
+    assert any(n.code == "receiver_app_ignored" for n in bag)
+
+
+def test_catt_path_silent_when_no_custom_receiver(monkeypatch):
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(
+        caster,
+        "_cast_via_catt",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, started=True),
+    )
+    with caster.notices.capture() as bag:
+        caster.cast(CFG, "Dune", "http://x", device="1.2.3.4")
+    assert all(n.code != "receiver_app_ignored" for n in bag)
 
 
 def test_cast_falls_back_to_catt_when_bridge_never_starts(monkeypatch):
@@ -698,6 +737,9 @@ def test_status_asks_the_receiver_once(monkeypatch):
     monkeypatch.setattr(caster, "_bridge_track_info", lambda dev: ([], None))
     st = caster.status("10.0.0.9")
     assert calls == ["10.0.0.9"] and st["player_state"] == "IDLE" and st["volume"] is None
+    assert st["volume_control_type"] is None and st["app_id"] is None
+    assert st["content_type"] is None and st["stream_type"] is None
+    assert st["volume_step_interval"] is None
 
 
 def test_headless_bridge_ctrl_c_aborts_without_catt_fallback(monkeypatch):

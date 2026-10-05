@@ -594,6 +594,7 @@ def cast_file(
         if result is not None:
             return result
         # castbridge couldn't start → fall back to catt serving+casting below.
+    caster.warn_catt_ignores_app_id(cfg)
     if sub_paths:
         sub_paths = (caster.catt_sub(sub_paths[0]),)
     if sub_paths and not follow:

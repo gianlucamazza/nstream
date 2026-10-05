@@ -100,7 +100,9 @@ class Config:
     prefer_cast: bool = False
     cast_device: str = ""
     # Registered Cast application id (Custom Receiver). Empty keeps the Default Media
-    # Receiver (`CC1AD845`). A non-empty value is forwarded on media-load (ADR 0013).
+    # Receiver (`CC1AD845`). A non-empty value is forwarded on **castbridge** media-load
+    # only (ADR 0013). catt cannot launch an arbitrary id — it stays on CC1AD845 and the
+    # catt path emits `receiver_app_ignored` (ADR 0045).
     cast_receiver_app_id: str = ""
     # Tier-2 cast: when the chosen stream's audio is one the Chromecast Default Media
     # Receiver can't decode (AC-3/E-AC-3/DTS/TrueHD → silent), remux on the host (video
