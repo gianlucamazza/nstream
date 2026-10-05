@@ -428,6 +428,79 @@ def test_sources_status():
         settings._sources_status(Config(torrentio_base="tb", addons=["http://x/manifest.json"]))
         == "T on · 1 extra"
     )
+    assert (
+        settings._sources_status(Config(torrentio_base="tb", trakt_addon="https://t/manifest.json"))
+        == "T on · Trakt"
+    )
+
+
+def test_set_trakt_addon_rejects_non_trakt(monkeypatch, capsys):
+    saved = _capture_save(monkeypatch)
+    fake = Addon(base="http://x", name="TMDB", resources={"catalog": {}}, manifest_url="http://x/m")
+    monkeypatch.setattr(settings, "_ask", lambda *a: "http://x/manifest.json")
+    monkeypatch.setattr(settings.addons, "load_addon", lambda url, **k: fake)
+    monkeypatch.setattr(settings.addons, "is_trakt_catalog_addon", lambda a: False)
+    settings._set_trakt_addon(Config(torrentio_base="tb"))
+    assert saved == []
+    assert "non è un catalogo Trakt" in capsys.readouterr().err
+
+
+def test_set_trakt_addon_saves_url(monkeypatch, capsys):
+    saved = _capture_save(monkeypatch)
+    fake = Addon(
+        base="http://trakt",
+        name="Trakt Tv",
+        resources={"meta": {}},
+        manifest_url="http://trakt/manifest.json",
+    )
+    monkeypatch.setattr(settings, "_ask", lambda *a: "http://trakt/manifest.json")
+    monkeypatch.setattr(settings.addons, "load_addon", lambda url, **k: fake)
+    monkeypatch.setattr(settings.addons, "is_trakt_catalog_addon", lambda a: True)
+    settings._set_trakt_addon(Config(torrentio_base="tb"))
+    assert saved == [{"trakt_addon": "http://trakt/manifest.json"}]
+    assert "solo cataloghi" in capsys.readouterr().err
+
+
+def test_set_trakt_addon_empty_clears(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    monkeypatch.setattr(settings, "_ask", lambda *a: "")
+    settings._set_trakt_addon(Config(torrentio_base="tb", trakt_addon="http://trakt/manifest.json"))
+    assert saved == [{"trakt_addon": ""}]
+
+
+def test_addons_menu_trakt_row_calls_set(monkeypatch):
+    cfg = Config(torrentio_base="tb")
+    monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [])
+    monkeypatch.setattr(settings.config, "load", lambda: cfg)
+    # empty eff → Torrentio(0), preset(1), custom(2), trakt(3)
+    idxs = iter([3, None])
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
+    called = []
+    monkeypatch.setattr(settings, "_set_trakt_addon", lambda c: called.append(1))
+    settings._addons_menu(cfg)
+    assert called == [1]
+
+
+def test_addons_menu_removes_trakt_addon_key(monkeypatch):
+    saved = _capture_save(monkeypatch)
+    extra = Addon(
+        base="http://trakt",
+        name="Trakt Tv",
+        resources={"meta": {}},
+        manifest_url="http://trakt/manifest.json",
+    )
+    cfg = Config(
+        torrentio_base="tb",
+        addons=["http://trakt/manifest.json"],
+        trakt_addon="http://trakt/manifest.json",
+    )
+    monkeypatch.setattr(settings.addons, "effective_addons", lambda c: [extra])
+    monkeypatch.setattr(settings.config, "load", lambda: cfg)
+    idxs = iter([1, None])
+    monkeypatch.setattr(settings, "_fzf_select", lambda *a, **k: next(idxs))
+    monkeypatch.setattr(settings, "_ask", lambda *a: "y")
+    settings._addons_menu(cfg)
+    assert saved == [{"addons": [], "trakt_addon": ""}]
 
 
 # --- onboard ---------------------------------------------------------------

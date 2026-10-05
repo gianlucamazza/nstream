@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **ADR 0049 Proposed:** Trakt as a user-configured *catalog* addon on Film/Serie
+  (**── Trakt ──**). Watch-history / lists / popular hang on `run_browse` →
+  `api.catalog` → play. Not an indexer, not a sync of local continue-watching or
+  the local watchlist. Secret URL: `trakt_addon` or `NSTREAM_TRAKT_ADDON` (env
+  wins), or a Fonti paste. No marketplace, no hardcoded Trakt host, no remux /
+  volume change.
 - **ADR 0048 Proposed:** genre and skip extras for unlocked addon catalogs on
   Film/Serie. Manifest `genre` options (else Cinemeta tokens) and `skip` paging
   via the existing `run_browse` path. Cinemeta Generi… unchanged. No marketplace

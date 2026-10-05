@@ -799,6 +799,37 @@ def test_run_section_offers_genres(monkeypatch):
     assert (cli._GENRE, "") in seen["actions"]
 
 
+def test_run_section_lists_trakt_catalogs_separate_group(monkeypatch):
+    """Film board shows Trakt under ── Trakt ──, not cataloghi addon (ADR 0049)."""
+    seen = {}
+
+    def fake(items, prompt, *, header=None, expect=("tab",), preview=None):
+        seen["actions"] = [v for _, v in items if isinstance(v, tuple)]
+        seen["labels"] = [lab for lab, _ in items]
+        return None
+
+    monkeypatch.setattr(cli, "fzf_key", fake)
+    monkeypatch.setattr(
+        cli.addons,
+        "extra_catalogs",
+        lambda cfg, typ: [("tmdb.top", "The Movie Database Addon · Popular")],
+    )
+    monkeypatch.setattr(
+        cli.addons,
+        "trakt_catalogs",
+        lambda cfg, typ: [("trakt_watchlist", "trakt - Watchlist")],
+    )
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_section(CFG, "movie", opts) == 0
+    assert (cli._BROWSE, "tmdb.top") in seen["actions"]
+    assert (cli._BROWSE, "trakt_watchlist") in seen["actions"]
+    assert any("cataloghi addon" in lab for lab in seen["labels"])
+    assert any("── Trakt ──" in lab for lab in seen["labels"])
+    assert any("Watchlist" in lab for lab in seen["labels"])
+
+
 def test_run_section_lists_unlocked_addon_catalogs(monkeypatch):
     """Film/Serie board shows extra catalogs from unlocked manifests (ADR 0046)."""
     seen = {}

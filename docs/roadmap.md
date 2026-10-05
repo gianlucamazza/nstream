@@ -24,10 +24,11 @@ date, or reject via a superseding ADR.
 | [0045](adr/0045-philips-cast-volume-and-hevc-delivery.md) | Philips Cast volume + HEVC delivery | MASTER volume is Cast 0–1 (OSD is the TV scale). 1080 HEVC stutter on catt-direct WAN is delivery, not a codec miss. No remux-720 default. Phase 0: OSD table + HEVC `contentType`/Range traces. |
 | [0047](adr/0047-catalog-id-to-imdb.md) | Catalog id → IMDb before streams | `tmdb:` / `kitsu:` (and similar) become `tt…` via existing meta endpoints before `api.streams` / `prepare_stream`. Soft-fail: no fake `tt`; `id_untranslated` when nothing streamable remains. |
 | [0048](adr/0048-addon-catalog-genre-skip.md) | Genre / skip extras for addon catalogs | Unlocked manifests that declare `genre` and/or `skip` get a genre picker and/or «altri…» paging on Film/Serie (and `run_browse`). Cinemeta Generi… unchanged. No marketplace, Trakt, or new `--browse` keywords. |
+| [0049](adr/0049-trakt-catalogs-on-the-board.md) | Trakt catalogs on the board | User-configured Trakt catalog addon (Fonti / `trakt_addon` / `NSTREAM_TRAKT_ADDON`) lists watch-history / lists / popular on Film/Serie under **── Trakt ──**. Not an indexer, not a sync of local history. No marketplace, no hardcoded host. |
 
 ## Possible product extensions
 
-- Trakt (or similar) watch-history sync
+- Bidirectional Trakt history sync / scrobble (0049 is catalogs only)
 - Richer catalog addons beyond Cinemeta-shaped sources
 - Packaging of castbridge / mirror binaries alongside nstream (still separate projects today)
 

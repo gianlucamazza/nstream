@@ -313,6 +313,33 @@ def test_catalog_does_not_query_cinemeta_for_extra_id(monkeypatch):
     assert seen == ["http://tmdb/catalog/movie/tmdb.top.json"]
 
 
+def test_catalog_fetches_trakt_type_without_catalog_resource(monkeypatch):
+    """ADR 0049: Trakt Tv lists catalogs[] but only declares meta — still GET /catalog/trakt/…"""
+    trakt = addons._parse_manifest(
+        "https://trakt.example/manifest.json",
+        {
+            "name": "Trakt Tv",
+            "resources": [{"name": "meta", "types": ["movie"], "idPrefixes": ["trakt:"]}],
+            "catalogs": [
+                {"type": "trakt", "id": "trakt_popular_movies", "name": "Popular movies"},
+            ],
+        },
+    )
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [trakt])
+    seen = []
+    monkeypatch.setattr(
+        api,
+        "http_get_json",
+        lambda url, **k: (
+            seen.append(url)
+            or {"metas": [{"id": "trakt:1", "type": "movie", "name": "Film", "imdb_id": "tt1"}]}
+        ),
+    )
+    rows = api.catalog(CFG, "movie", "trakt_popular_movies")
+    assert seen == ["https://trakt.example/catalog/trakt/trakt_popular_movies.json"]
+    assert [m["id"] for m in rows] == ["tt1"]
+
+
 def test_catalog_fetches_declared_type_for_other_type_catalog(monkeypatch):
     kitsu = addons.Addon(
         base="http://kitsu",

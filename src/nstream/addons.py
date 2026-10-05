@@ -373,7 +373,10 @@ def _builtins(cfg: Config) -> list[Addon]:
 def effective_addons(cfg: Config) -> list[Addon]:
     """Built-in providers plus the user's extra addons, deduped by base."""
     result = _builtins(cfg)
-    for url in cfg.addons:
+    urls = list(cfg.addons)
+    if cfg.trakt_addon and cfg.trakt_addon not in urls:
+        urls.append(cfg.trakt_addon)
+    for url in urls:
         addon = load_addon(url)
         if addon is not None:
             result.append(addon)
@@ -405,8 +408,61 @@ def catalog_fetch_type(addon: Addon, typ: str, cat: str) -> str | None:
     return next((t for t, c, *_ in addon.catalogs if c == cat), None) or None
 
 
-def _section_lists(addon: Addon, section_typ: str, catalog_typ: str) -> bool:
-    """True if this catalog type belongs on the Film/Serie section (ADR 0046)."""
+def is_trakt_catalog_addon(addon: Addon) -> bool:
+    """True if this unlocked addon is a Trakt *catalog* source (ADR 0049).
+
+    Not an indexer: presence of `stream` does not matter. Detects the shipping
+    Trakt Tv shape (name, `catalogs[].type == trakt`, `trakt*` ids, `trakt:` meta).
+    """
+    if addon.builtin:
+        return False
+    if "trakt" in (addon.name or "").lower():
+        return True
+    if any(t == "trakt" or "trakt" in c.lower() for t, c, *_ in addon.catalogs):
+        return True
+    for spec in addon.resources.values():
+        prefixes = spec.get("idPrefixes") or []
+        if any(str(p).lower().startswith("trakt") for p in prefixes):
+            return True
+    return False
+
+
+def trakt_board_section(catalog_typ: str, cat_id: str, name: str = "") -> str | None:
+    """Film/Serie placement for a Trakt catalog. None = both sections (ADR 0049)."""
+    if catalog_typ in _BOARD_TYPES:
+        return catalog_typ
+    blob = f"{catalog_typ} {cat_id} {name}".lower()
+    movieish = any(token in blob for token in ("movie", "movies", "film"))
+    seriesish = any(token in blob for token in ("series", "show", "shows"))
+    if movieish and not seriesish:
+        return "movie"
+    if seriesish and not movieish:
+        return "series"
+    return None
+
+
+def can_fetch_catalog(addon: Addon, fetch_typ: str) -> bool:
+    """True if `api.catalog` may GET this addon's catalog path (ADR 0046 / 0049).
+
+    The shipping Trakt Tv addon lists `catalogs[]` but omits the `catalog` resource
+    (`meta` + `trakt:` only). `serves(..., "catalog")` is enough for everyone else.
+    """
+    if serves(addon, "catalog", fetch_typ):
+        return True
+    return is_trakt_catalog_addon(addon)
+
+
+def _section_lists(
+    addon: Addon,
+    section_typ: str,
+    catalog_typ: str,
+    cat_id: str = "",
+    name: str = "",
+) -> bool:
+    """True if this catalog type belongs on the Film/Serie section (ADR 0046 / 0049)."""
+    if is_trakt_catalog_addon(addon):
+        wanted = trakt_board_section(catalog_typ, cat_id, name)
+        return wanted is None or wanted == section_typ
     if catalog_typ == section_typ:
         return serves(addon, "catalog", section_typ)
     if catalog_typ in _BOARD_TYPES:
@@ -421,14 +477,28 @@ def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
 
     Includes Cinemeta-shaped rows of `typ` and catalogs whose type is not a board
     type (they appear in both Film and Serie). Skips built-ins, pinned Cinemeta ids,
-    and catalogs that require extras the board does not send. Dedupes by catalog id
-    (first declaration wins). Labels are ``Addon · name`` so TMDB "Popular" is not
-    confused with Cinemeta "Popolari".
+    Trakt catalog addons (those are `trakt_catalogs` — ADR 0049), and catalogs that
+    require extras the board does not send. Dedupes by catalog id (first declaration
+    wins). Labels are ``Addon · name`` so TMDB "Popular" is not confused with
+    Cinemeta "Popolari".
     """
+    return _board_catalog_rows(cfg, typ, trakt=False)
+
+
+def trakt_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
+    """Trakt catalog-addon rows for a typed board section (ADR 0049).
+
+    Same board-ok extras as `extra_catalogs`. Labels are the manifest catalog name
+    (Italian chrome is the **── Trakt ──** group). Not local history / watchlist.
+    """
+    return _board_catalog_rows(cfg, typ, trakt=True)
+
+
+def _board_catalog_rows(cfg: Config, typ: str, *, trakt: bool) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for addon in effective_addons(cfg):
-        if addon.builtin:
+        if addon.builtin or is_trakt_catalog_addon(addon) != trakt:
             continue
         rows = addon.board_catalogs or addon.catalogs
         if not rows:
@@ -436,19 +506,21 @@ def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
         for t, cat_id, name in rows:
             if not cat_id or cat_id in _BUILTIN_CATALOG_IDS or cat_id in seen:
                 continue
-            if not _section_lists(addon, typ, t):
+            if not _section_lists(addon, typ, t, cat_id, name):
                 continue
             seen.add(cat_id)
             shown = name.strip() if name else cat_id
-            out.append((cat_id, f"{addon.name} · {shown}"))
+            label = shown if trakt else f"{addon.name} · {shown}"
+            out.append((cat_id, label))
     return out
 
 
 def catalog_extra_info(cfg: Config, typ: str | None, cat: str) -> CatalogExtraInfo | None:
-    """Extras on the unlocked addon catalog that `extra_catalogs` would list for `cat`.
+    """Extras on the unlocked addon catalog that the board would list for `cat`.
 
     None for Cinemeta pins (`top` / `year` / `imdbRating`), missing `typ`, or an
     unknown id — callers then keep Cinemeta paging and skip the addon genre picker.
+    Covers both `extra_catalogs` and `trakt_catalogs` (ADR 0048 / 0049).
     """
     if not typ or cat in _BUILTIN_CATALOG_IDS:
         return None
@@ -456,7 +528,7 @@ def catalog_extra_info(cfg: Config, typ: str | None, cat: str) -> CatalogExtraIn
         if addon.builtin:
             continue
         for t, cat_id, info in addon.catalog_extra:
-            if cat_id != cat or not _section_lists(addon, typ, t):
+            if cat_id != cat or not _section_lists(addon, typ, t, cat_id):
                 continue
             return info
     return None

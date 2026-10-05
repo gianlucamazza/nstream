@@ -146,14 +146,16 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | Module | Role |
 |--------|------|
 | `api` | Resource dispatch, gather budget, per-addon breaker (ADR 0027), fuse/dedup streams; `play_id` for catalog rows (ADR 0046); catalog-id → IMDb (`translate_id`, ADR 0047) |
-| `addons` | Manifest client + cache; `extra_catalogs` / `catalog_fetch_type` for the board (ADR 0046) |
+| `addons` | Manifest client + cache; `extra_catalogs` / `catalog_fetch_type` for the board (ADR 0046); `trakt_catalogs` / `can_fetch_catalog` (ADR 0049) |
 | `net` | Retrying HTTP JSON + URL probe classification |
 
 The Film / Serie board (`cli.run_section`) lists unlocked-manifest catalogs via
-`addons.extra_catalogs` under **── cataloghi addon ──** (not a marketplace). `api.catalog`
-fetches with `addons.catalog_fetch_type`. `api.play_id` prefers a `tt` already on the row
-(`imdb_id` or `behaviorHints.defaultVideoId`) so a `tmdb:` catalog id can still enter
-`api.streams` — not a translator (ADR 0046).
+`addons.extra_catalogs` under **── cataloghi addon ──** (not a marketplace). A user-configured
+Trakt catalog addon (ADR 0049; `cfg.trakt_addon` / `NSTREAM_TRAKT_ADDON` / Fonti paste) lists
+under **── Trakt ──** — catalogs only, not an indexer and not a sync of local history.
+`api.catalog` fetches with `addons.catalog_fetch_type` (Trakt may omit the `catalog` resource).
+`api.play_id` prefers a `tt` already on the row (`imdb_id` or `behaviorHints.defaultVideoId`)
+so a `tmdb:` catalog id can still enter `api.streams` — not a translator (ADR 0046).
 
 `net.AddonPool` bounds daemon workers and queued work. `api._gather` alone records
 breaker outcomes; HTTP work inherits its monotonic deadline. `util.state_update`

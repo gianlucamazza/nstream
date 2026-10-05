@@ -42,12 +42,14 @@ Provider tokens live only in `torrentio_base` as `<provider>=<KEY>`. Supported k
 | --- | ------- | ------- |
 | `torrentio_enabled` | `true` | Built-in Torrentio provider |
 | `addons` | `[]` | Extra Stremio manifest URLs (stream / subtitle / catalog) |
+| `trakt_addon` | `""` | Trakt *catalog* manifest URL (ADR 0049). Env `NSTREAM_TRAKT_ADDON` wins. Not an indexer. |
 | `torrentio_base` | `"sort=qualitysize"` | Torrentio config path segment (sort + optional debrid key) |
 
 Manage sources from **settings → Fonti stream / plugin** (toggle Torrentio, curated presets
-Comet / MediaFusion / AIOStreams / TorrentsDB, or paste a user-generated `…/manifest.json`).
-Presets open the public configure page; **you** paste the URL (tokens in the path — never
-hard-coded). Aggregation and fuse/dedup: ADR 0024.
+Comet / MediaFusion / AIOStreams / TorrentsDB, paste a user-generated `…/manifest.json`, or
+**Trakt (cataloghi)** — ADR 0049, not a stream indexer). Presets open the public configure
+page; **you** paste the URL (tokens in the path — never hard-coded). Aggregation and
+fuse/dedup: ADR 0024.
 
 ## Keys by group
 
@@ -62,6 +64,7 @@ Defaults and bounds come from `Config` / `INT_BOUNDS` / `_ENUM_VALUES` in `confi
 | `opensubtitles` | str | `https://opensubtitles-v3.strem.io` | Subtitle addon |
 | `torrentio_enabled` | bool | `true` | |
 | `addons` | list[str] | `[]` | Manifest URLs |
+| `trakt_addon` | str | `""` | Trakt catalog `…/manifest.json` (token in the path stays here or in `NSTREAM_TRAKT_ADDON`). Empty = off. Not a stream source. |
 
 ### Languages
 
@@ -162,4 +165,5 @@ Details: [../selection.md](../selection.md).
 | `$XDG_STATE_HOME/nstream/torrserver.log` | Spawned TorrServer output |
 | `$XDG_CACHE_HOME/nstream/` | manifests, hwcaps, devices, meta, posters, torrents |
 
-No stream URL or debrid token is stored outside `config.json`.
+No stream URL, debrid token, or Trakt session is stored outside `config.json` (or
+`NSTREAM_TRAKT_ADDON` in the environment).
