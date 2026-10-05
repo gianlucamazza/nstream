@@ -16,9 +16,17 @@ Interactive UI language is **Italian**. Launch from the app menu (`nstream.deskt
 | ⚙ Impostazioni | Settings (`nstream --settings`) — cast, P2P, quality default, diagnostics |
 | Aiuto tasti | Tab / Alt-C / Alt-W / Ctrl-/ / ESC |
 
-Film/Serie sections each have popular / new / top IMDb catalogs. Full catalog pages show
-**↓ altri…** for pagination. Multi-season series open a **season menu** before episodes.
-ESC steps back one level; after play (or no sources) you return to the list (app does not quit).
+Film/Serie sections each have popular / new / top IMDb catalogs and **Generi…**. When
+unlocked addon manifests (`cfg.addons`, Impostazioni → Fonti) declare browsable catalogs,
+those appear under **── cataloghi addon ──** (labels `Addon · name`; Italian chrome, manifest
+name as-is). Cinemeta-shaped (`movie` / `series`) catalogs stay in their section; a catalog
+whose type is not a board type (today: `anime`) appears in both. Selecting a row opens the
+usual browse → play path. Catalogs that require an extra other than `skip` (search-only, …)
+stay off the board. No marketplace, no new config key.
+
+Full catalog pages show **↓ altri…** for pagination. Multi-season series open a **season
+menu** before episodes. ESC steps back one level; after play (or no sources) you return to
+the list (app does not quit).
 
 ## Leaf-list keys
 
