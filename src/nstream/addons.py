@@ -44,6 +44,9 @@ class Addon:
     # queried with `search=`: an addon ignores the extra on any other catalog and answers
     # with unrelated rows (anime-kitsu returned "Hong Gil Dong 2084" for "Il grande Gatsby").
     search_catalogs: tuple[tuple[str, str], ...] = ()
+    # (type, id, name) that the board may list: no required extra other than `skip`
+    # (search-only catalogs stay off the menu — ADR 0046).
+    board_catalogs: tuple[tuple[str, str, str], ...] = ()
     manifest_url: str = ""
 
 
@@ -51,6 +54,12 @@ class Addon:
 # User addons that re-declare these still contribute to the fetch fan-out; they just don't
 # get a duplicate menu entry.
 _BUILTIN_CATALOG_IDS = frozenset({"top", "year", "imdbRating"})
+# Film / Serie TV section types (ADR 0009). A catalog whose type is outside this set
+# (today: `anime`) is still offered on both sections.
+_BOARD_TYPES = frozenset({"movie", "series"})
+# Required extras the board already sends (`api._extras` skip=). Anything else (search,
+# genre, …) keeps the catalog off `extra_catalogs` — genre/skip UI is a later slice.
+_BOARD_REQUIRED_EXTRAS = frozenset({"skip"})
 
 
 # --- manifest cache (user addons only) -----------------------------------
@@ -97,6 +106,25 @@ def _declares_search(catalog: dict) -> bool:
     return isinstance(legacy, list) and "search" in legacy
 
 
+def _required_extra_names(catalog: dict) -> tuple[str, ...]:
+    """Names the addon marks required (`extra[].isRequired` or legacy `extraRequired`)."""
+    names: list[str] = []
+    extra = catalog.get("extra")
+    if isinstance(extra, list):
+        for e in extra:
+            if isinstance(e, dict) and e.get("isRequired") and e.get("name"):
+                names.append(str(e["name"]))
+    legacy = catalog.get("extraRequired")
+    if isinstance(legacy, list):
+        names.extend(str(x) for x in legacy if x)
+    return tuple(names)
+
+
+def _board_ok(catalog: dict) -> bool:
+    """True if the board can GET this catalog without extras we do not send."""
+    return all(n in _BOARD_REQUIRED_EXTRAS for n in _required_extra_names(catalog))
+
+
 def _parse_manifest(manifest_url: str, data: dict) -> Addon:
     if not isinstance(data, dict):  # guard against a corrupt/partial cache entry
         data = {}
@@ -113,6 +141,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
             }
     catalogs: list[tuple[str, str, str]] = []
     search_catalogs: list[tuple[str, str]] = []
+    board_catalogs: list[tuple[str, str, str]] = []
     for c in data.get("catalogs", []):
         if not isinstance(c, dict):
             continue
@@ -124,6 +153,8 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
         catalogs.append((typ, cat_id, name))
         if _declares_search(c):
             search_catalogs.append((typ, cat_id))
+        if _board_ok(c):
+            board_catalogs.append((typ, cat_id, name))
     base = _base_of(manifest_url)
     return Addon(
         base=base,
@@ -132,6 +163,7 @@ def _parse_manifest(manifest_url: str, data: dict) -> Addon:
         catalogs=tuple(catalogs),
         manifest_url=manifest_url,
         search_catalogs=tuple(search_catalogs),
+        board_catalogs=tuple(board_catalogs),
     )
 
 
@@ -247,6 +279,9 @@ def _builtins(cfg: Config) -> list[Addon]:
                 (t, c, c) for c in ("top", "year", "imdbRating") for t in ("movie", "series")
             ),
             search_catalogs=(("movie", "top"), ("series", "top")),
+            board_catalogs=tuple(
+                (t, c, c) for c in ("top", "year", "imdbRating") for t in ("movie", "series")
+            ),
         ),
     ]
     # Torrentio is optional: when disabled, stream discovery is only from cfg.addons
@@ -297,24 +332,46 @@ def has_catalog(addon: Addon, typ: str, cat: str) -> bool:
     return any(t == typ and c == cat for t, c, *_ in addon.catalogs)
 
 
-def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
-    """User-addon catalogs for `typ` as `(catalog_id, display_label)`, in addon order.
+def catalog_fetch_type(addon: Addon, typ: str, cat: str) -> str | None:
+    """Path type for ``/catalog/{type}/{id}``. Prefer `typ` when the addon declares
+    that pair; otherwise the addon's own type for `cat` (anime catalogs opened from
+    a Film/Serie section — ADR 0046). None if this addon does not declare `cat`."""
+    if has_catalog(addon, typ, cat):
+        return typ
+    return next((t for t, c, *_ in addon.catalogs if c == cat), None) or None
 
-    Skips built-ins and the Cinemeta-shaped ids already pinned in the TUI section menu.
-    Dedupes by catalog id (first declaration wins the label). Labels prefer the manifest
-    name and fall back to ``Addon · id`` when the name is just the bare id.
+
+def extra_catalogs(cfg: Config, typ: str) -> list[tuple[str, str]]:
+    """User-addon catalogs for a typed board section as `(catalog_id, display_label)`.
+
+    Includes Cinemeta-shaped rows of `typ` and catalogs whose type is not a board
+    type (they appear in both Film and Serie). Skips built-ins, pinned Cinemeta ids,
+    and catalogs that require extras the board does not send. Dedupes by catalog id
+    (first declaration wins). Labels are ``Addon · name`` so TMDB "Popular" is not
+    confused with Cinemeta "Popolari".
     """
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for addon in effective_addons(cfg):
-        if addon.builtin or not serves(addon, "catalog", typ):
+        if addon.builtin:
             continue
-        for t, cat_id, name in addon.catalogs:
-            if t != typ or not cat_id or cat_id in _BUILTIN_CATALOG_IDS or cat_id in seen:
+        rows = addon.board_catalogs or addon.catalogs
+        if not rows:
+            continue
+        for t, cat_id, name in rows:
+            if not cat_id or cat_id in _BUILTIN_CATALOG_IDS or cat_id in seen:
+                continue
+            if t == typ:
+                include = serves(addon, "catalog", typ)
+            elif t in _BOARD_TYPES:
+                include = False
+            else:
+                include = serves(addon, "catalog", typ) or bool(t and serves(addon, "catalog", t))
+            if not include:
                 continue
             seen.add(cat_id)
-            label = name if name and name != cat_id else f"{addon.name} · {cat_id}"
-            out.append((cat_id, label))
+            shown = name.strip() if name else cat_id
+            out.append((cat_id, f"{addon.name} · {shown}"))
     return out
 
 

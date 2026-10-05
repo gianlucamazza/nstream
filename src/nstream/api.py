@@ -18,7 +18,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
@@ -357,7 +357,7 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
         primary += t_primary
     outcome: dict = {}
     gathered = _gather(tasks, labels=labels, keys=keys, primary=primary, outcome=outcome)
-    results = _dedup(gathered, lambda m: m.get("id") or id(m))
+    results = _dedup([_play_id_meta(m) for m in gathered], lambda m: m.get("id") or id(m))
     if not results and outcome.get("primary") and not outcome.get("primary_ok"):
         # The catalog authority never answered (timeout, network, breaker): "no result"
         # would tell the caller the title doesn't exist, and nobody would retry (#4).
@@ -367,6 +367,58 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     return sorted(results, key=lambda m: tuple(-x for x in _search_score(m, query)))
 
 
+def play_id(meta: Mapping[str, object]) -> str:
+    """Id to hand to `streams` / `meta` / `episodes`. Prefer a `tt` already on the
+    catalog row (`imdb_id` or `behaviorHints.defaultVideoId`) so TMDB `tmdb:` rows
+    stay on the existing stream path. Not a translator (ADR 0046 / 0047)."""
+    mid = str(meta.get("id") or "")
+    if mid.startswith("tt"):
+        return mid
+    hints = meta.get("behaviorHints")
+    default = (
+        cast(Mapping[str, object], hints).get("defaultVideoId")
+        if isinstance(hints, Mapping)
+        else None
+    )
+    for cand in (meta.get("imdb_id"), default):
+        if isinstance(cand, str) and cand.startswith("tt"):
+            return cand
+    if mid.startswith("kitsu"):
+        return mid
+    if isinstance(default, str) and default.startswith("kitsu"):
+        return default
+    return mid
+
+
+def _play_id_meta(meta: object) -> object:
+    if not isinstance(meta, dict):
+        return meta
+    row = cast(Mapping[str, object], meta)
+    wanted = play_id(row)
+    if wanted == row.get("id"):
+        return meta
+    out = dict(row)
+    out["id"] = wanted
+    return out
+
+
+def _filter_type(rows: list, typ: str) -> list:
+    """Keep section-typed rows when a Film/Serie browse fetched a mixed catalog."""
+    if typ not in ("movie", "series"):
+        return rows
+    matched = [
+        m
+        for m in rows
+        if not isinstance(m, dict) or cast(Mapping[str, object], m).get("type") in (typ, None, "")
+    ]
+    return matched
+
+
+def _catalog_rows(gathered: list, typ: str) -> list[Meta]:
+    rows = [_play_id_meta(m) for m in gathered]
+    return _filter_type(_dedup(rows, lambda m: m.get("id") or id(m)), typ)
+
+
 def _catalog_addon_tasks(
     cfg: Config, typ: str, cat: str, extras: str
 ) -> tuple[list[Callable[[], list]], list[str], list[str]]:
@@ -374,12 +426,10 @@ def _catalog_addon_tasks(
     labels: list[str] = []
     keys: list[str] = []
     for addon in addons.effective_addons(cfg):
-        if not addons.serves(addon, "catalog", typ):
+        fetch_typ = addons.catalog_fetch_type(addon, typ, cat)
+        if fetch_typ is None or not addons.serves(addon, "catalog", fetch_typ):
             continue
-        # Built-in Cinemeta has these catalogs; a user addon must declare them.
-        if not addon.builtin and not addons.has_catalog(addon, typ, cat):
-            continue
-        url = f"{addon.base}/catalog/{typ}/{cat}{extras}.json"
+        url = f"{addon.base}/catalog/{fetch_typ}/{cat}{extras}.json"
         tasks.append(
             lambda url=url, name=addon.name: _cached_json(url, what=f"catalogo ({name})").get(
                 "metas", []
@@ -436,7 +486,7 @@ def catalog(
     cfg: Config, typ: str, cat: str = "top", *, genre: str | None = None, skip: int = 0
 ) -> list[Meta]:
     tasks, labels, keys = _catalog_addon_tasks(cfg, typ, cat, _extras(genre, skip))
-    return _dedup(_gather(tasks, labels=labels, keys=keys), lambda m: m.get("id") or id(m))
+    return _catalog_rows(_gather(tasks, labels=labels, keys=keys), typ)
 
 
 def browse(cfg: Config, cat: str = "top", *, genre: str | None = None, skip: int = 0) -> list[Meta]:
@@ -444,10 +494,9 @@ def browse(cfg: Config, cat: str = "top", *, genre: str | None = None, skip: int
     extras = _extras(genre, skip)
     m_tasks, m_labels, m_keys = _catalog_addon_tasks(cfg, "movie", cat, extras)
     s_tasks, s_labels, s_keys = _catalog_addon_tasks(cfg, "series", cat, extras)
-    return _dedup(
-        _gather(m_tasks + s_tasks, labels=m_labels + s_labels, keys=m_keys + s_keys),
-        lambda m: m.get("id") or id(m),
-    )
+    gathered = _gather(m_tasks + s_tasks, labels=m_labels + s_labels, keys=m_keys + s_keys)
+    rows = [_play_id_meta(m) for m in gathered]
+    return _dedup(rows, lambda m: m.get("id") or id(m))
 
 
 def meta(cfg: Config, typ: str, video_id: str) -> dict:

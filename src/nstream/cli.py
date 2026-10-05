@@ -798,8 +798,9 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 
 def run_section(cfg: Config, typ: str, opts: PlayOpts) -> int:
     """A type-scoped home section: type-filtered continue-watching, search, the three
-    Cinemeta catalogs, and any extra catalogs declared by user addons — all pinned
-    to `typ`. ESC returns to the home menu."""
+    Cinemeta catalogs, and extra catalogs declared by unlocked user-addon manifests
+    (ADR 0046) — Cinemeta-shaped rows pinned to `typ`, other types (anime) in both
+    sections. ESC returns to the home menu."""
     return _home_menu(cfg, opts, typ=typ)
 
 

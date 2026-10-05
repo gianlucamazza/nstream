@@ -22,6 +22,7 @@ date, or reject via a superseding ADR.
 | [0013](adr/0013-custom-cast-receiver.md) | Custom CAF receiver | Would reduce Tier-2 remux and unlock track switching. Large external build; remains **Proposed**. |
 | [0040](adr/0040-subtitles-off-the-start-path.md) | Subtitles off the cast start path | Embedded text track first; alignment from the producer pass after the start; `--sub-shift` during the cast. Phase 0: three gates on the TV. |
 | [0045](adr/0045-philips-cast-volume-and-hevc-delivery.md) | Philips Cast volume + HEVC delivery | MASTER volume is Cast 0–1 (OSD is the TV scale). 1080 HEVC stutter on catt-direct WAN is delivery, not a codec miss. No remux-720 default. Phase 0: OSD table + HEVC `contentType`/Range traces. |
+| [0046](adr/0046-board-catalogs-from-unlocked-manifests.md) | Board catalogs from unlocked manifests | Catalogs come only from manifests of unlock/configured addons — not a marketplace. Film/Serie list extra catalogs; play stays `api.streams`. No id translator (0047), Trakt, or addon genre/skip extras. |
 
 ## Possible product extensions
 
