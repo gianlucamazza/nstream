@@ -347,6 +347,81 @@ def test_play_id_uses_imdb_already_on_the_row():
     assert api.play_id({"id": "tt1", "imdb_id": "tt2"}) == "tt1"
 
 
+def test_translate_id_passthrough_tt():
+    assert api.translate_id(CFG, "movie", "tt1") == "tt1"
+    assert api.translate_id(CFG, "series", "tt1:1:2") == "tt1:1:2"
+
+
+def test_translate_id_uses_meta_imdb(monkeypatch):
+    seen: list[str] = []
+
+    def fake_meta(cfg, typ, vid):
+        seen.append(f"{typ}:{vid}")
+        return {"imdb_id": "tt99"}
+
+    monkeypatch.setattr(api, "meta_cached_disk", fake_meta)
+    assert api.translate_id(CFG, "movie", "tmdb:1") == "tt99"
+    assert seen == ["movie:tmdb:1"]
+
+
+def test_translate_id_reattaches_episode_suffix(monkeypatch):
+    monkeypatch.setattr(api, "meta_cached_disk", lambda cfg, typ, vid: {"imdb_id": "tt77"})
+    assert api.translate_id(CFG, "series", "tmdb:9:1:2") == "tt77:1:2"
+
+
+def test_translate_id_tries_anime_meta(monkeypatch):
+    seen: list[str] = []
+
+    def fake_meta(cfg, typ, vid):
+        seen.append(typ)
+        return {"imdb_id": "tt8"} if typ == "anime" else {}
+
+    monkeypatch.setattr(api, "meta_cached_disk", fake_meta)
+    assert api.translate_id(CFG, "movie", "kitsu:1") == "tt8"
+    assert seen == ["movie", "anime"]
+
+
+def test_translate_id_keeps_streamable_kitsu(monkeypatch):
+    monkeypatch.setattr(api, "meta_cached_disk", lambda *a: {})
+    assert api.translate_id(CFG, "movie", "kitsu:4") == "kitsu:4"
+
+
+def test_translate_id_raises_when_unmapped(monkeypatch):
+    monkeypatch.setattr(api, "meta_cached_disk", lambda *a: {})
+    with pytest.raises(api.IdUntranslated) as exc:
+        api.translate_id(CFG, "movie", "tmdb:1")
+    assert exc.value.video_id == "tmdb:1"
+
+
+def test_streams_translates_before_fetch(monkeypatch):
+    seen: list[str] = []
+    torrentio = _addon("T", "http://t", "stream", idp=("tt",))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [torrentio])
+    monkeypatch.setattr(api, "meta_cached_disk", lambda cfg, typ, vid: {"imdb_id": "tt5"})
+    monkeypatch.setattr(
+        api, "http_get_json", lambda url, **k: seen.append(url) or {"streams": [{"url": "http://u"}]}
+    )
+    rows = api.streams(CFG, "movie", "tmdb:9")
+    assert seen == ["http://t/stream/movie/tt5.json"]
+    assert [s["url"] for s in rows] == ["http://u"]
+
+
+def test_episodes_translates_before_fetch(monkeypatch):
+    seen: list[str] = []
+    meta = _addon("M", "http://m", "meta", types=("series",), idp=("tt",))
+    monkeypatch.setattr(api.addons, "effective_addons", lambda cfg: [meta])
+    monkeypatch.setattr(api, "meta_cached_disk", lambda cfg, typ, vid: {"imdb_id": "tt3"})
+    monkeypatch.setattr(
+        api,
+        "http_get_json",
+        lambda url, **k: seen.append(url)
+        or {"meta": {"videos": [{"season": 1, "episode": 1}]}},
+    )
+    vids = api.episodes(CFG, "tmdb:8")
+    assert seen == ["http://m/meta/series/tt3.json"]
+    assert [(v["season"], v["episode"]) for v in vids] == [(1, 1)]
+
+
 def test_catalog_rewrites_tmdb_id_to_imdb_on_the_row(monkeypatch):
     tmdb = addons.Addon(
         base="http://tmdb",

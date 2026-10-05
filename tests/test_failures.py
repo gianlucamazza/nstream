@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nstream import availability, cast_flow, failures, stream_select
+from nstream import api, availability, cast_flow, failures, stream_select
 from nstream.caster import CastUnavailable
 
 
@@ -50,3 +50,11 @@ def test_truncated_fields():
 def test_unknown_exception_is_a_programming_error():
     with pytest.raises(TypeError):
         failures.describe(ValueError("x"))
+
+
+def test_id_untranslated_code_and_catalog_id():
+    f = failures.describe(api.IdUntranslated("tmdb:1"), title="X")
+    assert f.code == "id_untranslated"
+    assert f.fields == {"catalog_id": "tmdb:1"}
+    assert "tmdb:1" in f.message and "IMDb" in f.message
+    assert f.payload()["error"] == "id_untranslated"

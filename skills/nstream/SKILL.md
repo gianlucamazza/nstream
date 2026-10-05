@@ -100,10 +100,10 @@ relevant: `quality`, `available_resolutions`, `audio_lang` / `available_audio` /
 `audio_verified`, `duration_verified`, `reencoded`, `selection` (`exact`|`year`|`first`).
 
 Full error table and recovery: **`docs/headless.md`** (codes include `no_result`,
-`no_stream_sources`, `no_streams`, `no_playable_stream`, `cast_failed`, `sources_removed`,
-`sources_truncated`, `video_codec_unsupported`, `remux_infeasible`, `audio_lang_unavailable`,
-`quality_unavailable`, `episode_not_found`, `series_completed`, `device_not_found`,
-`network`, `usage`, `config`).
+`no_stream_sources`, `no_streams`, `id_untranslated`, `no_playable_stream`, `cast_failed`,
+`sources_removed`, `sources_truncated`, `video_codec_unsupported`, `remux_infeasible`,
+`audio_lang_unavailable`, `quality_unavailable`, `episode_not_found`, `series_completed`,
+`device_not_found`, `network`, `usage`, `config`).
 
 ## Related repo docs
 

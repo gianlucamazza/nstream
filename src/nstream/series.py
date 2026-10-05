@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import NamedTuple, Protocol
 
-from . import api, state, ui
+from . import api, failures, state, ui
 from .caster import CastMeta
 from .config import Config, PlayOpts
 from .labels import display_title, episode_label
@@ -167,7 +167,10 @@ def play(
     get a season menu first. `pick_hint`/`apply_key` are cli's leaf-list helpers,
     injected like the player. Returns a notice, or None."""
     name = meta.get("name", "nstream")
-    eps = api.episodes(cfg, meta["id"])
+    try:
+        eps = api.episodes(cfg, meta["id"])
+    except api.IdUntranslated as e:
+        return failures.describe(e, title=name).message
     if not eps:
         return f"nessun episodio per «{name}»"
     sid = meta["id"]
@@ -226,7 +229,10 @@ def resume(
     series_id = entry.get("series_id", "")
     target: Video | None = None  # the next episode, when the entry's one is finished
     if series_id:
-        eps = api.episodes(cfg, series_id)
+        try:
+            eps = api.episodes(cfg, series_id)
+        except api.IdUntranslated as e:
+            return failures.describe(e, title=name).message
         nu = next_up(cfg, entry, eps=eps)
         if nu.selection == "completed":
             return f"«{name}» è finita: nessun episodio dopo questo"

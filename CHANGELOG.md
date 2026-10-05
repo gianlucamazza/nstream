@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **ADR 0046 Proposed** (already on main): board catalogs from unlocked addon
+  manifests — not a marketplace. Film/Serie list extra catalogs; play uses a `tt`
+  already on the row when present. No translator, Trakt, or addon genre/skip extras.
+- **ADR 0047 Proposed:** translate `tmdb:` / `kitsu:` (and similar catalog ids) to
+  IMDb `tt…` via existing meta endpoints before stream discovery. Soft-fail: never
+  invent a `tt`; `--json` `error: id_untranslated` when nothing streamable remains.
 - **ADR 0045 Proposed:** Philips / catt-only Chromecast RCA. Cast volume is 0–1
   MASTER (OSD is the TV's own scale). 1080 HEVC stutter on a direct remote URL is
   delivery, not a codec miss. No remux-720 default.

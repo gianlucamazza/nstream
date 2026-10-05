@@ -145,7 +145,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 
 | Module | Role |
 |--------|------|
-| `api` | Resource dispatch, gather budget, per-addon breaker (ADR 0027), fuse/dedup streams |
+| `api` | Resource dispatch, gather budget, per-addon breaker (ADR 0027), fuse/dedup streams, catalog-id → IMDb (`translate_id`, ADR 0047) |
 | `addons` | Manifest client + cache |
 | `net` | Retrying HTTP JSON + URL probe classification |
 
