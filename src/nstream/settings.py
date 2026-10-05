@@ -403,7 +403,7 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Fonti stream / plugin",
             "submenu",
             _sources_status(cfg),
-            "Torrentio on/off · preset Comet/MediaFusion/AIOStreams/… · addon custom · Trakt cataloghi.",
+            "Torrentio on/off · preset Comet/MediaFusion/AIO · addon custom · Trakt cataloghi.",
         ),
         (
             "__health__",

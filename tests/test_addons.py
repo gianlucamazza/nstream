@@ -472,7 +472,9 @@ def test_is_trakt_catalog_addon_shipping_shape():
 
 def test_trakt_board_section_from_id_or_type():
     assert addons.trakt_board_section("trakt", "trakt_popular_movies", "Popular movies") == "movie"
-    assert addons.trakt_board_section("trakt", "trakt_trending_series", "Trending series") == "series"
+    assert (
+        addons.trakt_board_section("trakt", "trakt_trending_series", "Trending series") == "series"
+    )
     assert addons.trakt_board_section("movie", "watchlist", "Watchlist") == "movie"
     assert addons.trakt_board_section("trakt", "trakt_watchlist", "Watchlist") is None
 
