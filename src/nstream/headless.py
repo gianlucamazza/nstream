@@ -24,6 +24,7 @@ from . import (
     bridge,
     caster,
     explain,
+    failures,
     headless_play,
     log,
     mirror,
@@ -149,6 +150,9 @@ def run(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
         except api.NetworkError as e:
             _emit_json({"ok": False, "error": "network", "message": str(e)})
             return 1
+        except api.IdUntranslated as e:
+            _emit_json(failures.describe(e).payload())
+            return 1
 
 
 def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
@@ -233,6 +237,11 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     typ = meta.get("type", "movie")
     name = meta.get("name", "?")
     imdb_id = meta.get("id", "")
+    try:
+        imdb_id = api.translate_id(cfg, typ, imdb_id)
+    except api.IdUntranslated as e:
+        _emit_json(failures.describe(e, title=name).payload())
+        return 1
     season: int | None = None
     episode: int | None = None
     video_id = imdb_id

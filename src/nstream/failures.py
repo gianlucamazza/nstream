@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from . import cast_flow, stream_select
+from . import api, cast_flow, stream_select
 from .caster import CastUnavailable
 
 
@@ -31,6 +31,7 @@ class Failure:
 
 # Exceptions `describe` knows; frontends catch exactly these.
 KNOWN: tuple[type[BaseException], ...] = (
+    api.IdUntranslated,
     stream_select.QualityUnavailable,
     stream_select.AudioLangUnavailable,
     stream_select.ContentTooShort,
@@ -51,6 +52,13 @@ def describe(
     """The `Failure` for one of `KNOWN`. `available_*` fill the lists when the exception
     doesn't carry its own."""
     of = f" per «{title}»" if title else ""
+    if isinstance(exc, api.IdUntranslated):
+        raw = exc.video_id or "—"
+        return Failure(
+            "id_untranslated",
+            f"nessun id IMDb{of} per il catalogo {raw} — lo stream richiede un tt",
+            fields={"catalog_id": raw},
+        )
     if isinstance(exc, stream_select.QualityUnavailable):
         have = list(exc.available) or list(available_resolutions)
         return Failure(

@@ -367,19 +367,40 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
     return sorted(results, key=lambda m: tuple(-x for x in _search_score(m, query)))
 
 
-def play_id(meta: Mapping[str, object]) -> str:
-    """Id to hand to `streams` / `meta` / `episodes`. Prefer a `tt` already on the
-    catalog row (`imdb_id` or `behaviorHints.defaultVideoId`) so TMDB `tmdb:` rows
-    stay on the existing stream path. Not a translator (ADR 0046 / 0047)."""
-    mid = str(meta.get("id") or "")
-    if mid.startswith("tt"):
-        return mid
+class IdUntranslated(Exception):
+    """Catalog id has no IMDb `tt` after meta lookup (ADR 0047). Never invents a tt."""
+
+    def __init__(self, video_id: str) -> None:
+        self.video_id = video_id
+        super().__init__(video_id)
+
+
+def _row_default_video_id(meta: Mapping[str, object]) -> object:
     hints = meta.get("behaviorHints")
-    default = (
+    return (
         cast(Mapping[str, object], hints).get("defaultVideoId")
         if isinstance(hints, Mapping)
         else None
     )
+
+
+def _tt_root(value: object) -> str | None:
+    """IMDb title id (`tt…`) without a `:season:episode` suffix, or None."""
+    if not isinstance(value, str) or not value.startswith("tt"):
+        return None
+    head = value.split(":", 1)[0]
+    return head if len(head) > 2 else None
+
+
+def play_id(meta: Mapping[str, object]) -> str:
+    """Id to hand to `streams` / `meta` / `episodes`. Prefer a `tt` already on the
+    catalog row (`imdb_id` or `behaviorHints.defaultVideoId`) so TMDB `tmdb:` rows
+    stay on the existing stream path. Not a translator — that is `translate_id`
+    (ADR 0046 / 0047)."""
+    mid = str(meta.get("id") or "")
+    if mid.startswith("tt"):
+        return mid
+    default = _row_default_video_id(meta)
     for cand in (meta.get("imdb_id"), default):
         if isinstance(cand, str) and cand.startswith("tt"):
             return cand
@@ -388,6 +409,65 @@ def play_id(meta: Mapping[str, object]) -> str:
     if isinstance(default, str) and default.startswith("kitsu"):
         return default
     return mid
+
+
+def _meta_lookup_id(video_id: str) -> str:
+    """Catalog id for a meta fetch: strip a trailing `:season:episode` pair."""
+    parts = video_id.split(":")
+    if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit():
+        return ":".join(parts[:-2])
+    return video_id
+
+
+def _tt_from_meta(meta: Mapping[str, object]) -> str | None:
+    for cand in (meta.get("imdb_id"), _row_default_video_id(meta), meta.get("id")):
+        root = _tt_root(cand)
+        if root:
+            return root
+    return None
+
+
+def _resolved_meta(cfg: Config, typ: str, video_id: str) -> dict:
+    """Token-free meta for `video_id`. Board rows can be `movie`/`series` while the
+    addon only serves `anime` meta (ADR 0046), so retry that type on a miss."""
+    obj = meta_cached_disk(cfg, typ, video_id)
+    if obj or typ not in ("movie", "series"):
+        return obj
+    return meta_cached_disk(cfg, "anime", video_id)
+
+
+def _stream_served(cfg: Config, typ: str, video_id: str) -> bool:
+    return any(
+        addons.serves(addon, "stream", typ, video_id) for addon in addons.effective_addons(cfg)
+    )
+
+
+def translate_id(cfg: Config, typ: str, video_id: str) -> str:
+    """IMDb id for stream / episode discovery (ADR 0047).
+
+    `tt…` (and `tt…:s:e`) pass through. Other catalog ids (`tmdb:`, `kitsu:`, …) are
+    resolved via `meta_cached_disk` on addons that already serve that prefix. A
+    trailing episode suffix is reattached to the `tt` root. If meta has no IMDb id
+    and a stream addon already serves the original prefix, the original id is kept.
+    Otherwise raises `IdUntranslated`. Never invents a fake `tt`.
+    """
+    if not video_id:
+        raise IdUntranslated(video_id)
+    if video_id.startswith("tt"):
+        return video_id
+    lookup = _meta_lookup_id(video_id)
+    tt = _tt_from_meta(_resolved_meta(cfg, typ, lookup))
+    if tt:
+        if lookup != video_id and video_id.startswith(lookup + ":"):
+            out = tt + video_id[len(lookup) :]
+        else:
+            out = tt
+        if out != video_id:
+            _log.info("id tradotto %s → %s", video_id, out)
+        return out
+    if _stream_served(cfg, typ, video_id):
+        return video_id
+    raise IdUntranslated(video_id)
 
 
 def _play_id_meta(meta: object) -> object:
@@ -592,6 +672,7 @@ def expected_runtime_s(cfg: Config, typ: str, video_id: str) -> float:
 
 
 def episodes(cfg: Config, series_id: str) -> list[Video]:
+    series_id = translate_id(cfg, "series", series_id)
     for addon in addons.effective_addons(cfg):
         if not addons.serves(addon, "meta", "series", series_id):
             continue
@@ -617,6 +698,10 @@ def streams(cfg: Config, typ: str, video_id: str) -> list[Stream]:
     # externalUrl only) are dropped; ready-url and pure-torrent rows are fused by
     # filename so a debrid hit can fall back to local P2P (any source, not only
     # Torrentio).
+    # ADR 0047: catalog ids (`tmdb:`, `kitsu:`, …) become `tt…` before this fan-out
+    # so Torrentio and friends see an IMDb id. Raises `IdUntranslated` when neither
+    # a tt nor a streamable prefix remains — never a fabricated tt.
+    video_id = translate_id(cfg, typ, video_id)
     tasks: list[Callable[[], list]] = []
     labels: list[str] = []
     keys: list[str] = []

@@ -212,8 +212,8 @@ def test_run_auto_exact_match_over_first(monkeypatch, capsys):
 
 def test_run_auto_year_disambiguates(monkeypatch, capsys):
     metas = [
-        {"id": "old", "type": "movie", "name": "Dune", "releaseInfo": "1984"},
-        {"id": "new", "type": "movie", "name": "Dune", "releaseInfo": "2021"},
+        {"id": "tt1984", "type": "movie", "name": "Dune", "releaseInfo": "1984"},
+        {"id": "tt2021", "type": "movie", "name": "Dune", "releaseInfo": "2021"},
     ]
     monkeypatch.setattr(headless.api, "search", lambda cfg, q: metas)
     monkeypatch.setattr(
@@ -228,7 +228,19 @@ def test_run_auto_year_disambiguates(monkeypatch, capsys):
         headless_play, "play", lambda *a, **k: PlaybackOutcome(0.0, 0.0, "", started=True)
     )
     headless.run_auto(CFG, _hns(query=["dune"], year="2021"), _hopts())
-    assert json.loads(capsys.readouterr().out)["imdb_id"] == "new"
+    assert json.loads(capsys.readouterr().out)["imdb_id"] == "tt2021"
+
+
+def test_run_auto_id_untranslated(monkeypatch, capsys):
+    monkeypatch.setattr(
+        headless.api,
+        "search",
+        lambda cfg, q: [{"id": "tmdb:1", "type": "movie", "name": "X"}],
+    )
+    rc = headless.run_auto(CFG, _hns(query=["x"]), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["ok"] is False and out["error"] == "id_untranslated"
+    assert out["catalog_id"] == "tmdb:1" and "tmdb:1" in out["message"]
 
 
 def test_run_auto_no_result(monkeypatch, capsys):

@@ -110,6 +110,13 @@ def _play_video(
 
     `auto` overrides `opts.auto` for this single video: the binge loop forces it
     True from the second episode on, so use `auto` (not `opts.auto`) here."""
+    try:
+        video_id = api.translate_id(cfg, typ, video_id)
+    except api.IdUntranslated as e:
+        notice = failures.describe(e, title=title).message
+        ui.status(notice, kind="fail")
+        print(f"nstream: {notice}", file=sys.stderr)
+        return (notice, False, opts.quality if opts.quality is not None else 0)
     # Resolve the cast device BEFORE stream selection: ranking is profile-dependent
     # (Chromecast receiver caps vs the local GPU), so when no device is reachable we
     # must select for local mpv — not play a TV-filtered pick (e.g. AV1 dropped as
@@ -461,13 +468,21 @@ def play_meta(cfg: Config, meta: Meta, opts: PlayOpts) -> str | None:
     """Play a title; returns a notice to show above the list, or None.
     Thin type dispatch: series (episode picker + binge) live in `series.py`."""
     typ = meta.get("type", "movie")
+    name = meta.get("name", "nstream")
+    try:
+        wanted = api.translate_id(cfg, typ, str(meta.get("id") or ""))
+    except api.IdUntranslated as e:
+        notice = failures.describe(e, title=name).message
+        ui.status(notice, kind="fail")
+        return notice
+    if wanted != meta.get("id"):
+        meta = typecast(Meta, {**dict(meta), "id": wanted})
     if typ == "series":
         return series.play(
             cfg, meta, opts,
             play_video=_series_player(cfg), pick_hint=_pick_hint, apply_key=_apply_key,
         )  # fmt: skip
 
-    name = meta.get("name", "nstream")
     movie_id = meta["id"]
 
     on_save = state.progress_saver(cfg, movie_id, name, typ)

@@ -308,6 +308,33 @@ def test_play_meta_movie_skips_series(monkeypatch):
     assert cli.play_meta(CFG, Meta(id="tt1", type="movie", name="Dune"), opts) == "notice"
 
 
+def test_play_meta_rewrites_catalog_id(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(cli.api, "translate_id", lambda cfg, typ, vid: "tt99")
+    monkeypatch.setattr(
+        cli, "_play_video", lambda cfg, typ, vid, *a, **k: seen.update(vid=vid) or ("ok", False, 0)
+    )
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.play_meta(CFG, Meta(id="tmdb:1", type="movie", name="X"), opts) == "ok"
+    assert seen["vid"] == "tt99"
+
+
+def test_play_video_untranslated_id_returns_notice(monkeypatch):
+    def boom(*a, **k):
+        raise cli.api.IdUntranslated("tmdb:1")
+
+    monkeypatch.setattr(cli.api, "translate_id", boom)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    notice, advance, _q = cli._play_video(
+        CFG, "movie", "tmdb:1", "X", opts, auto=True, next_label=None, on_save=None
+    )
+    assert advance is False and notice and "tmdb:1" in notice
+
+
 def test_play_history_series_dispatches_to_resume(monkeypatch):
     seen = {}
     monkeypatch.setattr(

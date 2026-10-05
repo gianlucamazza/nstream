@@ -6,6 +6,7 @@
 | ------- | ------------ | ---------- |
 | Immediate empty / config error | No sources | Enable Torrentio or add manifests (`settings → Fonti stream`). Headless: `error: no_stream_sources` |
 | Title found, zero sources | Not released / catalog gap | Retry later; try another addon; headless `no_streams` |
+| Board row / `id_untranslated` | Catalog id (`tmdb:`, `kitsu:`, …) has no IMDb `tt` (ADR 0047) | Unlock that addon's meta; retry. nstream will not invent a `tt` |
 | Sources exist, none playable | Filters or debrid still downloading | Lower `--quality`; wait for `[RD download]`; try `--local`; check `hw_filter` / `max_resolution` |
 | Headless `sources_removed` | Every url answered 404/410 | Do **not** retry same command; try P2P/`--local`; if you believe sources returned, `nstream --forget-dead` |
 | One addon always missing / long freezes stopped | Circuit breaker Open (ADR 0027) | `nstream --explain` lists Open addons; `nstream --forget-breakers` to reset |
