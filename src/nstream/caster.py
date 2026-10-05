@@ -312,6 +312,7 @@ def cast(
         )
         if result is not None:
             return result  # else castbridge couldn't start → fall back to catt below
+    warn_catt_ignores_app_id(cfg)
     catt_result = _cast_via_catt(
         cfg,
         title,
@@ -630,11 +631,25 @@ def _bridge_track_info(device: str | None) -> tuple[list[int], str | None]:
     return tracks, (str(err) if err else None)
 
 
+def warn_catt_ignores_app_id(cfg: Config) -> None:
+    """catt 0.13 launches the Default Media Receiver only. A configured custom id is a
+    castbridge `media-load` argument (ADR 0013) — say so when the catt path is the one
+    that will run (ADR 0045). No-op when the id is empty."""
+    app_id = (cfg.cast_receiver_app_id or "").strip()
+    if app_id:
+        notices.emit(
+            f"ricevitore custom {app_id} richiede castbridge — catt lancia CC1AD845",
+            code="receiver_app_ignored",
+        )
+
+
 def status(device: str | None) -> dict:
     """Best-effort normalized receiver status for the headless `--status` action:
     player_state, title, position, duration, volume, muted, plus the receiver's confirmed
-    active_tracks + receiver_error (from castbridge, ADR 0016). Empty player_state when the
-    receiver is idle/unreachable. Never raises."""
+    active_tracks + receiver_error (from castbridge, ADR 0016). Cast session fields the
+    next field capture needs (ADR 0045): volume_control_type, volume_step_interval,
+    app_id, content_type, stream_type — never content_id (may carry a debrid URL).
+    Empty player_state when the receiver is idle/unreachable. Never raises."""
     info = receiver_info(device)
     pos, dur, state = _cast_progress(info)
     if dur <= 0:
@@ -652,6 +667,13 @@ def status(device: str | None) -> dict:
         "duration": round(dur, 1) if dur else 0.0,
         "volume": vol,
         "muted": muted,
+        "volume_control_type": _opt_str(info, "volume_control_type"),
+        "volume_step_interval": _opt_float(
+            info, "volume_step_interval", "step_interval", "stepInterval"
+        ),
+        "app_id": _opt_str(info, "app_id"),
+        "content_type": _opt_str(info, "content_type"),
+        "stream_type": _opt_str(info, "stream_type"),
         "active_tracks": active_tracks,
         "receiver_error": receiver_error,
     }
@@ -664,6 +686,25 @@ def _vol_muted(info: dict) -> tuple[float | None, bool]:
     except (TypeError, ValueError):
         vol = None
     return (vol, bool(info.get("volume_muted")))
+
+
+def _opt_str(info: dict, key: str) -> str | None:
+    raw = info.get(key)
+    if raw is None or raw == "":
+        return None
+    return str(raw)
+
+
+def _opt_float(info: dict, *keys: str) -> float | None:
+    for key in keys:
+        raw = info.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def stop(device: str | None) -> bool:
