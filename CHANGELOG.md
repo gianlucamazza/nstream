@@ -9,6 +9,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **ADR 0048 Proposed:** genre and skip extras for unlocked addon catalogs on
+  Film/Serie. Manifest `genre` options (else Cinemeta tokens) and `skip` paging
+  via the existing `run_browse` path. Cinemeta Generi… unchanged. No marketplace
+  or Trakt.
 - **ADR 0046 Accepted:** catalog board from unlocked addon manifests. Film / Serie TV
   list extra catalogs under **── cataloghi addon ──** (`Addon · name`). No marketplace,
   no new config key. `api.play_id` uses a `tt` already on the row.

@@ -192,6 +192,41 @@ def test_parse_manifest_skips_required_search_from_board():
     assert ("anime", "kitsu-anime-list", "Kitsu") in a.catalogs
 
 
+def test_parse_manifest_required_genre_is_board_ok():
+    """Required genre (and skip) stay on the board; required search still does not (ADR 0048)."""
+    data = {
+        "name": "TMDB",
+        "resources": ["catalog"],
+        "types": ["movie"],
+        "catalogs": [
+            {
+                "type": "movie",
+                "id": "tmdb.genres",
+                "name": "Genres",
+                "extra": [
+                    {
+                        "name": "genre",
+                        "isRequired": True,
+                        "options": ["Action", "Comedy"],
+                    },
+                    {"name": "skip"},
+                ],
+            },
+            {
+                "type": "movie",
+                "id": "tmdb.search",
+                "name": "Search",
+                "extra": [{"name": "search", "isRequired": True}],
+            },
+        ],
+    }
+    a = addons._parse_manifest("https://t/manifest.json", data)
+    assert a.board_catalogs == (("movie", "tmdb.genres", "Genres"),)
+    info = next(i for t, c, i in a.catalog_extra if c == "tmdb.genres")
+    assert info.supports_genre and info.supports_skip and info.genre_required
+    assert info.genres == ("Action", "Comedy")
+
+
 def test_catalog_fetch_type_prefers_section_then_declared():
     a = addons.Addon(
         base="https://k",
@@ -270,6 +305,46 @@ def test_extra_catalogs_from_unlocked_manifests(monkeypatch):
     ]
     assert "tmdb.search" not in {c for c, _ in movie}
     assert "kitsu-anime-list" not in {c for c, _ in movie}
+
+
+def test_catalog_extra_info_from_unlocked_manifest(monkeypatch):
+    """Lookup follows extra_catalogs (first id wins); Cinemeta pins stay None."""
+    tmdb = addons._parse_manifest(
+        "https://tmdb/manifest.json",
+        {
+            "name": "The Movie Database Addon",
+            "resources": ["catalog"],
+            "types": ["movie", "series"],
+            "catalogs": [
+                {
+                    "type": "movie",
+                    "id": "tmdb.top",
+                    "name": "Popular",
+                    "extra": [
+                        {"name": "genre", "options": ["Action", "Drama"]},
+                        {"name": "skip"},
+                    ],
+                },
+                {
+                    "type": "movie",
+                    "id": "tmdb.genres",
+                    "name": "Genres",
+                    "extra": [{"name": "genre", "isRequired": True, "options": ["Horror"]}],
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: tmdb)
+    cfg = Config(torrentio_base="tb", addons=["https://tmdb/manifest.json"])
+    top = addons.catalog_extra_info(cfg, "movie", "tmdb.top")
+    assert top is not None and top.supports_genre and top.supports_skip
+    assert top.genres == ("Action", "Drama") and not top.genre_required
+    req = addons.catalog_extra_info(cfg, "movie", "tmdb.genres")
+    assert req is not None and req.genre_required and req.genres == ("Horror",)
+    assert addons.catalog_extra_info(cfg, "movie", "top") is None
+    assert addons.catalog_extra_info(cfg, None, "tmdb.top") is None
+    movie = addons.extra_catalogs(cfg, "movie")
+    assert ("tmdb.genres", "The Movie Database Addon · Genres") in movie
 
 
 def test_extra_catalogs_skips_builtin_ids(monkeypatch):

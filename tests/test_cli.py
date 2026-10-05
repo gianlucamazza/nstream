@@ -635,6 +635,139 @@ def test_run_browse_genre_and_pagination(monkeypatch):
     assert "Action" in (calls[0][1] or "")
 
 
+def test_run_browse_addon_genre_then_fetch(monkeypatch):
+    """Addon catalog that declares genre: picker first, then catalog with that extra."""
+    seen = {}
+
+    def catalog(c, typ, cat, *, genre=None, skip=0):
+        seen["call"] = (typ, cat, genre, skip)
+        return []
+
+    monkeypatch.setattr(
+        cli.addons,
+        "catalog_extra_info",
+        lambda cfg, typ, cat: cli.addons.CatalogExtraInfo(
+            extras=frozenset({"genre", "skip"}),
+            required=frozenset(),
+            genres=("Action", "Comedy"),
+        ),
+    )
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: "Comedy")
+    monkeypatch.setattr(cli.api, "catalog", catalog)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_browse(CFG, "tmdb.top", opts, typ="movie") == 1
+    assert seen["call"] == ("movie", "tmdb.top", "Comedy", 0)
+
+
+def test_run_browse_addon_tutti_means_no_genre(monkeypatch):
+    monkeypatch.setattr(
+        cli.addons,
+        "catalog_extra_info",
+        lambda cfg, typ, cat: cli.addons.CatalogExtraInfo(
+            extras=frozenset({"genre"}),
+            required=frozenset(),
+            genres=("Action",),
+        ),
+    )
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: cli._ALL_GENRES)
+    seen = {}
+
+    def catalog(c, typ, cat, *, genre=None, skip=0):
+        seen["genre"] = genre
+        return []
+
+    monkeypatch.setattr(cli.api, "catalog", catalog)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_browse(CFG, "tmdb.top", opts, typ="movie") == 1
+    assert seen["genre"] is None
+
+
+def test_run_browse_addon_genre_esc_does_not_fetch(monkeypatch):
+    monkeypatch.setattr(
+        cli.addons,
+        "catalog_extra_info",
+        lambda cfg, typ, cat: cli.addons.CatalogExtraInfo(
+            extras=frozenset({"genre"}),
+            required=frozenset({"genre"}),
+            genres=("Horror",),
+        ),
+    )
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: None)
+    monkeypatch.setattr(
+        cli.api, "catalog", lambda *a, **k: (_ for _ in ()).throw(AssertionError("fetch"))
+    )
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_browse(CFG, "tmdb.genres", opts, typ="movie") == 0
+
+
+def test_run_browse_addon_without_skip_has_no_altri(monkeypatch):
+    from nstream.api import CATALOG_PAGE
+
+    monkeypatch.setattr(
+        cli.addons,
+        "catalog_extra_info",
+        lambda cfg, typ, cat: cli.addons.CatalogExtraInfo(
+            extras=frozenset({"genre"}),
+            required=frozenset(),
+            genres=("Action",),
+        ),
+    )
+    monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: "Action")
+
+    def catalog(c, typ, cat, *, genre=None, skip=0):
+        return [{"id": f"tt{i}", "type": typ, "name": f"T{i}"} for i in range(CATALOG_PAGE)]
+
+    monkeypatch.setattr(cli.api, "catalog", catalog)
+    seen = {}
+
+    def fake_fzf(items, prompt, *, header=None, expect=("tab",), preview=None):
+        seen["labels"] = [lab for lab, _ in items]
+        return None
+
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_browse(CFG, "tmdb.top", opts, typ="movie") == 0
+    assert not any("altri" in lab for lab in seen["labels"])
+
+
+def test_run_browse_addon_with_skip_shows_altri(monkeypatch):
+    from nstream.api import CATALOG_PAGE
+
+    monkeypatch.setattr(
+        cli.addons,
+        "catalog_extra_info",
+        lambda cfg, typ, cat: cli.addons.CatalogExtraInfo(
+            extras=frozenset({"skip"}),
+            required=frozenset(),
+        ),
+    )
+
+    def catalog(c, typ, cat, *, genre=None, skip=0):
+        return [{"id": f"tt{i}", "type": typ, "name": f"T{i}"} for i in range(CATALOG_PAGE)]
+
+    monkeypatch.setattr(cli.api, "catalog", catalog)
+    seen = {}
+
+    def fake_fzf(items, prompt, *, header=None, expect=("tab",), preview=None):
+        seen["labels"] = [lab for lab, _ in items]
+        return None
+
+    monkeypatch.setattr(cli, "fzf_key", fake_fzf)
+    opts = cli.PlayOpts(
+        auto=False, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    assert cli.run_browse(CFG, "tmdb.top", opts, typ="movie") == 0
+    assert any("altri" in lab for lab in seen["labels"])
+
+
 def test_run_genre_picks_then_browses(monkeypatch):
     monkeypatch.setattr(cli, "fzf", lambda items, prompt, **k: "Comedy")
     seen = {}
