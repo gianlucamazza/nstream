@@ -607,6 +607,71 @@ def receiver_info(device: str | None) -> dict:
         return {}
 
 
+CAST_VOLUME_PERCENT_MIN = 0
+CAST_VOLUME_PERCENT_MAX = 100
+
+
+def clamp_volume_percent(level: int | float) -> int:
+    """CLI / catt Cast percent, clamped to 0–100 (ADR 0045)."""
+    try:
+        n = int(level)
+    except (TypeError, ValueError):
+        n = 0
+    return max(CAST_VOLUME_PERCENT_MIN, min(CAST_VOLUME_PERCENT_MAX, n))
+
+
+def volume_percent_to_level(percent: int | float) -> float:
+    """CLI Cast percent 0–100 → protocol `SET_VOLUME` 0–1."""
+    return clamp_volume_percent(percent) / 100.0
+
+
+def volume_level_to_percent(level: float | int | None) -> int | None:
+    """Receiver `volume_level` 0–1 → rounded Cast percent 0–100.
+
+    Round, do not truncate: `0.14 * 100` is `13.999…` in IEEE, and Phase 0
+    quantization is the *receiver* readback (`≈0.133` → 13), not that float error.
+    Values already in percent (`> 1`) are clamped as 0–100. `None` if unreadable.
+    """
+    if level is None:
+        return None
+    try:
+        raw = float(level)
+    except (TypeError, ValueError):
+        return None
+    if raw > 1.0:
+        return clamp_volume_percent(raw)
+    return clamp_volume_percent(round(raw * 100))
+
+
+def format_volume_bits(
+    level: float | int | None,
+    *,
+    control_type: str | None = None,
+    step_interval: float | None = None,
+    osd_mismatch: bool = True,
+) -> str | None:
+    """One status fragment: `vol 13% · master · step=null · ≠ OSD`.
+
+    `step=null` is named when the receiver is MASTER and catt omitted
+    `volume_step_interval` (Philips 43PUS9235/12 DMR, ADR 0045 Phase 0).
+    Cast % is never TV OSD — no conversion factor.
+    """
+    pct = volume_level_to_percent(level)
+    if pct is None:
+        return None
+    bits = [f"vol {pct}%"]
+    kind = (control_type or "").strip().lower()
+    if kind:
+        bits.append(kind)
+    if kind == "master" and step_interval is None:
+        bits.append("step=null")
+    elif step_interval is not None:
+        bits.append(f"step={step_interval:g}")
+    if osd_mismatch:
+        bits.append("≠ OSD")
+    return " · ".join(bits)
+
+
 def device_volume(device: str | None) -> tuple[float | None, bool]:
     """Best-effort (volume_level, volume_muted) from one `catt info -j`. For headless
     fire-and-return casts that skip the poll loop and would otherwise miss a muted or
@@ -645,11 +710,11 @@ def warn_catt_ignores_app_id(cfg: Config) -> None:
 
 def status(device: str | None) -> dict:
     """Best-effort normalized receiver status for the headless `--status` action:
-    player_state, title, position, duration, volume, muted, plus the receiver's confirmed
-    active_tracks + receiver_error (from castbridge, ADR 0016). Cast session fields the
-    next field capture needs (ADR 0045): volume_control_type, volume_step_interval,
-    app_id, content_type, stream_type — never content_id (may carry a debrid URL).
-    Empty player_state when the receiver is idle/unreachable. Never raises."""
+    player_state, title, position, duration, volume (0–1), volume_percent (0–100),
+    muted, plus the receiver's confirmed active_tracks + receiver_error (from
+    castbridge, ADR 0016). Cast session fields (ADR 0045): volume_control_type,
+    volume_step_interval, app_id, content_type, stream_type — never content_id
+    (may carry a debrid URL). Empty player_state when idle/unreachable. Never raises."""
     info = receiver_info(device)
     pos, dur, state = _cast_progress(info)
     if dur <= 0:
@@ -666,6 +731,7 @@ def status(device: str | None) -> dict:
         "position": round(pos, 1) if pos else 0.0,
         "duration": round(dur, 1) if dur else 0.0,
         "volume": vol,
+        "volume_percent": volume_level_to_percent(vol),
         "muted": muted,
         "volume_control_type": _opt_str(info, "volume_control_type"),
         "volume_step_interval": _opt_float(
@@ -720,8 +786,12 @@ def stop(device: str | None) -> bool:
 
 
 def set_volume(device: str | None, level: int) -> bool:
-    """Set the receiver volume to `level` (0–100) via `catt volume`. Best-effort."""
-    level = max(0, min(100, level))
+    """Set the receiver volume to Cast percent `level` (0–100) via `catt volume`.
+
+    catt maps that integer to `SET_VOLUME` 0–1. On MASTER (`volume_step_interval`
+    often null) the TV may quantize the readback (Phase 0: 14 → catt 13). Best-effort.
+    """
+    level = clamp_volume_percent(level)
     base = ["catt", *(["-d", device] if device else [])]
     try:
         res = subprocess.run(

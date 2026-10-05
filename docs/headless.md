@@ -82,11 +82,12 @@ Common fields:
 | `selection`                                          | Title pick: `exact` \| `year` \| `first`                                                                                                                     |
 | `subtitles` / `subtitles_match` / `subtitles_offset` | Sub lang and evidence tier                                                                                                                                   |
 | `volume` / `muted` / `notice`                        | Cast audio state. `audio_lang` is the dub that started. When the preferred language would need a full-file remux and a direct MP4/WebM exists in a later `audio_langs` entry, headless starts that direct cast and `notice` says why (ADR 0035). `--audio-lang` does not take this shortcut. |
-| `notices` | Domain notices of this run (ADR 0037) — what stderr says, as `[{text, code, level}]`, on every result and error object (not on `--follow` event lines). `code` is stable when set: `p2p_blocked`, `p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`, `subs_unverified` (the track is a language guess, sync unchecked), `volume_zero`, `receiver_app_ignored` (catt cannot launch `cast_receiver_app_id`); `""` = informational. Note: `volume` in JSON is the Cast level 0–1 (`volume_control_type: master` = device master), while `--volume` takes Cast percent 0–100. TV OSD is a different scale (ADR 0045). |
+| `notices` | Domain notices of this run (ADR 0037) — what stderr says, as `[{text, code, level}]`, on every result and error object (not on `--follow` event lines). `code` is stable when set: `p2p_blocked`, `p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`, `subs_unverified` (the track is a language guess, sync unchecked), `volume_zero`, `receiver_app_ignored` (catt cannot launch `cast_receiver_app_id`); `""` = informational. Note: `volume` in JSON is the Cast level 0–1; `volume_percent` is the rounded 0–100 CLI/catt percent. `--volume N` takes that percent. `volume_control_type: master` = device master (this Philips DMR also reports `volume_step_interval: null`). catt may quantize (14→13). TV OSD is a **different** scale — no conversion factor until an OSD photo table exists (ADR 0045). |
 
 `--status` adds `player_state`, `position`, `duration`, `active_tracks`, `receiver_error`,
-plus `volume_control_type`, `volume_step_interval`, `app_id`, `content_type`, `stream_type`
-(ADR 0045; each `null` when catt omitted it). Never `content_id`.
+plus `volume_percent`, `volume_control_type`, `volume_step_interval`, `app_id`,
+`content_type`, `stream_type` (ADR 0045; each `null` when catt omitted it). Never
+`content_id`. Standalone `--volume N` emits `volume` (0–1) and `volume_percent`.
 
 ### Subtitle evidence tiers (ADR 0020)
 

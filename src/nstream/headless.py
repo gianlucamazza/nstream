@@ -542,18 +542,20 @@ def _run_sub_shift(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def _run_volume(cfg: Config, args: argparse.Namespace) -> int:
-    """`--json --volume N` without a title: set the receiver volume on the cast in
-    progress (it used to require re-casting a whole title just to change volume)."""
+    """`--json --volume N` without a title: set Cast percent 0–100 on the cast in
+    progress (internally 0–1). Emits `volume` (0–1) and `volume_percent`."""
     device = _headless_device(cfg, args)
     if device is None:
         return 1
-    ok = caster.set_volume(device, args.volume)
+    percent = caster.clamp_volume_percent(args.volume)
+    ok = caster.set_volume(device, percent)
     _emit_json(
         {
             "ok": ok,
             "action": "volume",
             "device": device,
-            "volume": args.volume,
+            "volume": caster.volume_percent_to_level(percent),
+            "volume_percent": percent,
             "error": None if ok else "volume_failed",
         }
     )

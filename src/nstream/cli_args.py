@@ -213,13 +213,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--status",
         action="store_true",
-        help="stato del cast (player_state, titolo…; richiede --json)",
+        help=(
+            "stato del cast (player_state, volume 0-1 + volume_percent, "
+            "volume_control_type, volume_step_interval…; richiede --json)"
+        ),
     )
     parser.add_argument(
         "--volume",
         type=int,
         metavar="N",
-        help="volume Chromecast 0-100 (richiede --json; senza titolo = cast in corso)",
+        help=(
+            "volume Cast 0-100%% (= SET_VOLUME 0-1; richiede --json; "
+            "senza titolo = cast in corso). Non è l'OSD TV. "
+            "DMR Philips: volume_control_type=master, volume_step_interval=null; "
+            "catt può quantizzare (es. 14→13)"
+        ),
     )
     parser.add_argument(
         "--pause",

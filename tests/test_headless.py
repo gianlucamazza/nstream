@@ -1148,7 +1148,8 @@ def test_run_volume_standalone(monkeypatch, capsys):
     )
     rc = headless.run_auto(CFG, _hns(volume=35), _hopts(cast=True))
     out = json.loads(capsys.readouterr().out)
-    assert rc == 0 and out["action"] == "volume" and out["volume"] == 35
+    assert rc == 0 and out["action"] == "volume"
+    assert out["volume"] == 0.35 and out["volume_percent"] == 35
     assert seen == {"device": "192.168.1.5", "n": 35}
 
 

@@ -44,7 +44,7 @@ Always pass `--json`. Quote the title.
 | Continue / next | `nstream --json -c ["X"]` |
 | Explain | `nstream --json --explain "X"` (add `--cast` for TV profile) |
 | Browse | `nstream --json --cast --browse popolari\|nuovi\|top` |
-| Lifecycle | `--stop` / `--status` / `--pause` / `--resume` / `--seek SEC` / `--volume N` |
+| Lifecycle | `--stop` / `--status` / `--pause` / `--resume` / `--seek SEC` / `--volume N` (Cast 0–100% ↔ 0–1; ≠ TV OSD; MASTER/`step=null` on the Philips DMR; catt may quantize 14→13) |
 | Subtitles early/late during a live cast | `nstream --json --sub-shift +1.5` (+ = later; cumulative) |
 | Clear dead denylist | `nstream --json --forget-dead` |
 | Clear addon circuit breakers | `nstream --json --forget-breakers` (ADR 0027; Open addons skipped without network) |
