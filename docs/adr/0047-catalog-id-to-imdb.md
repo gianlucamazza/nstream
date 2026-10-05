@@ -1,6 +1,6 @@
 # 0047. Translate catalog ids to IMDb before stream discovery
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-05
 - **Deciders:** Odroid/CoS planning
 

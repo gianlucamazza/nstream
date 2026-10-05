@@ -9,20 +9,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- **ADR 0049 Proposed:** Trakt as a user-configured *catalog* addon on Film/Serie
+- **ADR 0049 Accepted:** Trakt as a user-configured *catalog* addon on Film/Serie
   (**── Trakt ──**). Watch-history / lists / popular hang on `run_browse` →
   `api.catalog` → play. Not an indexer, not a sync of local continue-watching or
   the local watchlist. Secret URL: `trakt_addon` or `NSTREAM_TRAKT_ADDON` (env
   wins), or a Fonti paste. No marketplace, no hardcoded Trakt host, no remux /
   volume change.
-- **ADR 0048 Proposed:** genre and skip extras for unlocked addon catalogs on
+- **ADR 0048 Accepted:** genre and skip extras for unlocked addon catalogs on
   Film/Serie. Manifest `genre` options (else Cinemeta tokens) and `skip` paging
   via the existing `run_browse` path. Cinemeta Generi… unchanged. No marketplace
   or Trakt.
 - **ADR 0046 Accepted:** catalog board from unlocked addon manifests. Film / Serie TV
   list extra catalogs under **── cataloghi addon ──** (`Addon · name`). No marketplace,
   no new config key. `api.play_id` uses a `tt` already on the row.
-- **ADR 0047 Proposed:** translate `tmdb:` / `kitsu:` (and similar catalog ids) to
+- **ADR 0047 Accepted:** translate `tmdb:` / `kitsu:` (and similar catalog ids) to
   IMDb `tt…` via existing meta endpoints before stream discovery. Soft-fail: never
   invent a `tt`; `--json` `error: id_untranslated` when nothing streamable remains.
 - **ADR 0045 Proposed:** Philips / catt-only Chromecast RCA. Cast volume is 0–1

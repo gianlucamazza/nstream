@@ -73,9 +73,9 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0044](0044-live-started-is-observed-state.md) | Live `started` is an observed player state; dual-layer DV is not live-HLS-native | Accepted | 2026-10-02 |
 | [0045](0045-philips-cast-volume-and-hevc-delivery.md) | Philips Chromecast: MASTER volume is 0–1; HEVC stutter is delivery, not codec | **Proposed** | 2026-10-05 |
 | [0046](0046-board-catalogs-from-unlocked-manifests.md) | Board catalogs from unlocked addon manifests (not a marketplace) | Accepted | 2026-10-05 |
-| [0047](0047-catalog-id-to-imdb.md) | Translate catalog ids (`tmdb:`, `kitsu:`, …) to IMDb before stream discovery | **Proposed** | 2026-10-05 |
-| [0048](0048-addon-catalog-genre-skip.md) | Genre and skip extras for unlocked addon catalogs | **Proposed** | 2026-10-05 |
-| [0049](0049-trakt-catalogs-on-the-board.md) | Trakt catalogs on the board (not an indexer, not history sync) | **Proposed** | 2026-10-05 |
+| [0047](0047-catalog-id-to-imdb.md) | Translate catalog ids (`tmdb:`, `kitsu:`, …) to IMDb before stream discovery | Accepted | 2026-10-05 |
+| [0048](0048-addon-catalog-genre-skip.md) | Genre and skip extras for unlocked addon catalogs | Accepted | 2026-10-05 |
+| [0049](0049-trakt-catalogs-on-the-board.md) | Trakt catalogs on the board (not an indexer, not history sync) | Accepted | 2026-10-05 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.
