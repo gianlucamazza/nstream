@@ -9,9 +9,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
-- **ADR 0046 Proposed** (already on main): board catalogs from unlocked addon
-  manifests — not a marketplace. Film/Serie list extra catalogs; play uses a `tt`
-  already on the row when present. No translator, Trakt, or addon genre/skip extras.
+- **ADR 0046 Accepted:** catalog board from unlocked addon manifests. Film / Serie TV
+  list extra catalogs under **── cataloghi addon ──** (`Addon · name`). No marketplace,
+  no new config key. `api.play_id` uses a `tt` already on the row.
 - **ADR 0047 Proposed:** translate `tmdb:` / `kitsu:` (and similar catalog ids) to
   IMDb `tt…` via existing meta endpoints before stream discovery. Soft-fail: never
   invent a `tt`; `--json` `error: id_untranslated` when nothing streamable remains.
