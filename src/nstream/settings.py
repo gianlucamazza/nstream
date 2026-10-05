@@ -403,7 +403,7 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Fonti stream / plugin",
             "submenu",
             _sources_status(cfg),
-            "Torrentio on/off · preset Comet/MediaFusion/AIOStreams/… · addon custom.",
+            "Torrentio on/off · preset Comet/MediaFusion/AIOStreams/… · addon custom · Trakt cataloghi.",
         ),
         (
             "__health__",
@@ -416,10 +416,15 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
 
 
 def _sources_status(cfg: Config) -> str:
-    """Compact status for the settings row: Torrentio state + extra manifest count."""
+    """Compact status for the settings row: Torrentio state + extra / Trakt."""
     t = "T on" if cfg.torrentio_enabled else "T off"
+    bits = [t]
     n = len(cfg.addons)
-    return f"{t} · {n} extra" if n else t
+    if n:
+        bits.append(f"{n} extra")
+    if cfg.trakt_addon:
+        bits.append("Trakt")
+    return " · ".join(bits)
 
 
 def run_settings(cfg: Config | None = None) -> None:
@@ -602,6 +607,9 @@ def _addons_menu(cfg: Config) -> None:
         actions.append(("preset", None))
         rows.append(f"{ui.g().add} Aggiungi URL custom…")
         actions.append(("custom", None))
+        trakt_state = "impostato" if cfg.trakt_addon else "off"
+        rows.append(f"{ui.g().add} Trakt (cataloghi)  [{trakt_state}]")
+        actions.append(("trakt", None))
 
         idx = _fzf_select(
             rows,
@@ -631,6 +639,10 @@ def _addons_menu(cfg: Config) -> None:
             _add_addon(cfg)
             cfg = config.load()
             continue
+        if kind == "trakt":
+            _set_trakt_addon(cfg)
+            cfg = config.load()
+            continue
         # kind == "addon"
         addon = payload
         assert isinstance(addon, addons.Addon)
@@ -639,7 +651,10 @@ def _addons_menu(cfg: Config) -> None:
             continue
         if _ask(f"Rimuovere '{addon.name}'? [y/N] ").lower() == "y":
             remaining = [u for u in cfg.addons if u != addon.manifest_url]
-            config.save({"addons": remaining})
+            updates: dict[str, object] = {"addons": remaining}
+            if cfg.trakt_addon == addon.manifest_url:
+                updates["trakt_addon"] = ""
+            config.save(updates)
             cfg = config.load()
 
 
@@ -666,6 +681,33 @@ def _add_from_preset(cfg: Config) -> None:
         file=sys.stderr,
     )
     _add_addon(cfg, hint=p.name)
+
+
+def _set_trakt_addon(cfg: Config) -> None:
+    """Paste or clear a Trakt *catalog* manifest (ADR 0049). Not a stream indexer."""
+    if cfg.trakt_addon:
+        print(
+            "nstream: Trakt è un catalogo (cronologia / watchlist / liste), non uno stream.",
+            file=sys.stderr,
+        )
+    url = _ask("URL manifest Trakt (…/manifest.json), vuoto per togliere: ")
+    if not url:
+        if cfg.trakt_addon:
+            config.save({"trakt_addon": ""})
+            print("nstream: Trakt rimosso", file=sys.stderr)
+        return
+    if "/manifest.json" not in url and not url.endswith("manifest.json"):
+        print("nstream: l'URL deve contenere manifest.json", file=sys.stderr)
+        return
+    addon = addons.load_addon(url, use_cache=False)
+    if addon is None:
+        print("nstream: manifest non raggiungibile o non valido", file=sys.stderr)
+        return
+    if not addons.is_trakt_catalog_addon(addon):
+        print("nstream: questo manifest non è un catalogo Trakt", file=sys.stderr)
+        return
+    config.save({"trakt_addon": url})
+    print(f"nstream: Trakt impostato — '{addon.name}' (solo cataloghi)", file=sys.stderr)
 
 
 def _add_addon(cfg: Config, *, hint: str = "") -> None:

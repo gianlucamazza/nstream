@@ -42,6 +42,7 @@ def test_defaults(tmp_path, monkeypatch):
     assert cfg.posters is True
     assert cfg.image_mode == "auto"
     assert cfg.torrentio_enabled is True
+    assert cfg.trakt_addon == ""
 
 
 def test_load_tightens_world_readable_config(tmp_path, monkeypatch):
@@ -110,6 +111,22 @@ def test_missing_torrentio_base_defaults_token_less(tmp_path, monkeypatch):
     cfg = config.load()
     assert cfg.torrentio_base == "sort=qualitysize"
     assert cfg.playback_backend == "local"
+
+
+def test_trakt_addon_from_config_and_env(tmp_path, monkeypatch):
+    """ADR 0049: trakt_addon is config/env only; env wins. Not an indexer key."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("NSTREAM_TRAKT_ADDON", raising=False)
+    write_config(tmp_path, {"torrentio_base": "tb", "trakt_addon": "https://t/manifest.json"})
+    assert config.load().trakt_addon == "https://t/manifest.json"
+    monkeypatch.setenv("NSTREAM_TRAKT_ADDON", "https://env/manifest.json")
+    assert config.load().trakt_addon == "https://env/manifest.json"
+    write_config(tmp_path, {"torrentio_base": "tb", "trakt_addon": None})
+    monkeypatch.delenv("NSTREAM_TRAKT_ADDON", raising=False)
+    assert config.load().trakt_addon == ""
+    write_config(tmp_path, {"torrentio_base": "tb", "trakt_addon": ["nope"]})
+    with pytest.raises(config.ConfigError, match="trakt_addon"):
+        config.load()
 
 
 def test_missing_file_raises(tmp_path, monkeypatch):

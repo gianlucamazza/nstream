@@ -837,9 +837,10 @@ def run_home(cfg: Config, opts: PlayOpts) -> int:
 
 def run_section(cfg: Config, typ: str, opts: PlayOpts) -> int:
     """A type-scoped home section: type-filtered continue-watching, search, the three
-    Cinemeta catalogs, and extra catalogs declared by unlocked user-addon manifests
-    (ADR 0046 / 0048) — Cinemeta-shaped rows pinned to `typ`, other types (anime) in both
-    sections. Addon catalogs that declare genre/skip get a picker and/or paging.
+    Cinemeta catalogs, extra catalogs declared by unlocked user-addon manifests
+    (ADR 0046 / 0048), and Trakt catalog rows under **── Trakt ──** (ADR 0049) —
+    Cinemeta-shaped rows pinned to `typ`, other types (anime) in both sections.
+    Addon catalogs that declare genre/skip get a picker and/or paging.
     ESC returns to the home menu."""
     return _home_menu(cfg, opts, typ=typ)
 
@@ -980,6 +981,10 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
             if extras:
                 items.append((ui.ansi("── cataloghi addon ──", pal.dim), _SEP))
                 items += [(f"{g.folder}  {label}", (_BROWSE, cat_id)) for cat_id, label in extras]
+            trakt = addons.trakt_catalogs(cfg, typ)
+            if trakt:
+                items.append((ui.ansi("── Trakt ──", pal.dim), _SEP))
+                items += [(f"{g.folder}  {label}", (_BROWSE, cat_id)) for cat_id, label in trakt]
 
         # Prefer an explicit notice; else key hints (always useful on home).
         header = notice or _home_help()

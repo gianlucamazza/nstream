@@ -82,6 +82,10 @@ class Config:
     # to Torrentio (Comet, MediaFusion, AIOStreams, …) land here as user-generated
     # manifest URLs — see `sources.STREAM_PRESETS` and the settings "Fonti stream" menu.
     addons: list[str] = field(default_factory=list)
+    # Trakt catalog addon only (ADR 0049): a user-pasted `…/manifest.json` that may
+    # embed a Trakt session in the path. Not a stream indexer. Empty = off. Env
+    # `NSTREAM_TRAKT_ADDON` wins when set. Same URL may also live in `addons`.
+    trakt_addon: str = ""
     # Include the built-in Torrentio stream provider. Off = discovery only from
     # `addons` (and any other non-stream builtins stay). Useful when Torrentio is
     # down or the user prefers Comet/MediaFusion/AIO as the sole stream source.
@@ -355,6 +359,12 @@ def load(*, secure_permissions: bool = True) -> Config:
         value = raw.get(key, [])
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ConfigError(f"config non valido: {key} deve essere una lista di stringhe")
+    trakt_raw = raw.get("trakt_addon", "")
+    if trakt_raw is None:
+        trakt_raw = ""
+    if not isinstance(trakt_raw, str):
+        raise ConfigError("config non valido: trakt_addon deve essere una stringa")
+    trakt_addon = (os.environ.get("NSTREAM_TRAKT_ADDON") or "").strip() or trakt_raw.strip()
     if secure_permissions:
         _ensure_private(path)
 
@@ -372,6 +382,7 @@ def load(*, secure_permissions: bool = True) -> Config:
         audio_langs=list(raw.get("audio_langs", ["ita", "eng"])),
         primary_lang=str(raw.get("primary_lang", "") or ""),
         addons=list(raw.get("addons", [])),
+        trakt_addon=trakt_addon,
         torrentio_enabled=bool(raw.get("torrentio_enabled", Config.torrentio_enabled)),
         history_enabled=bool(raw.get("history_enabled", True)),
         hwdec=hwdec,

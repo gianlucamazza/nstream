@@ -507,7 +507,7 @@ def _catalog_addon_tasks(
     keys: list[str] = []
     for addon in addons.effective_addons(cfg):
         fetch_typ = addons.catalog_fetch_type(addon, typ, cat)
-        if fetch_typ is None or not addons.serves(addon, "catalog", fetch_typ):
+        if fetch_typ is None or not addons.can_fetch_catalog(addon, fetch_typ):
             continue
         url = f"{addon.base}/catalog/{fetch_typ}/{cat}{extras}.json"
         tasks.append(

@@ -404,3 +404,118 @@ def test_recent_refresh_failure_suppresses_retry(monkeypatch):
     monkeypatch.setattr(addons, "_load_cache", lambda: {key: entry})
     monkeypatch.setattr(addons, "_refresh_in_background", lambda u, k: pytest.fail("retry"))
     assert addons.load_addon(url) is not None
+
+
+# --- ADR 0049 Trakt catalog slice (not an indexer) -------------------------
+
+
+_TRAKT_TV_MANIFEST = {
+    "id": "community.trakt-tv",
+    "name": "Trakt Tv",
+    "resources": [{"name": "meta", "types": ["series", "movie"], "idPrefixes": ["trakt:"]}],
+    "types": [],
+    "catalogs": [
+        {
+            "type": "trakt",
+            "id": "trakt_popular_movies",
+            "name": "trakt - Popular movies",
+            "extra": [
+                {"name": "genre", "isRequired": False, "options": ["action", "drama"]},
+                {"name": "skip", "isRequired": False},
+            ],
+        },
+        {
+            "type": "trakt",
+            "id": "trakt_trending_series",
+            "name": "trakt - Trending series",
+            "extra": [{"name": "skip", "isRequired": False}],
+        },
+        {
+            "type": "trakt",
+            "id": "trakt_watchlist",
+            "name": "trakt - Watchlist",
+        },
+        {
+            "type": "trakt",
+            "id": "trakt_search_movies",
+            "name": "trakt - search movies",
+            "extra": [{"name": "search", "isRequired": True}],
+        },
+    ],
+}
+
+
+def _trakt_addon(url: str = "https://trakt.example/abc/manifest.json") -> addons.Addon:
+    return addons._parse_manifest(url, _TRAKT_TV_MANIFEST)
+
+
+def test_is_trakt_catalog_addon_shipping_shape():
+    trakt = _trakt_addon()
+    assert addons.is_trakt_catalog_addon(trakt)
+    assert not addons.serves(trakt, "catalog", "trakt")
+    assert not addons.serves(trakt, "stream", "movie")
+    assert addons.can_fetch_catalog(trakt, "trakt")
+    tmdb = addons._parse_manifest(
+        "https://tmdb/manifest.json",
+        {
+            "name": "The Movie Database Addon",
+            "resources": ["catalog"],
+            "catalogs": [{"type": "movie", "id": "tmdb.top", "name": "Popular"}],
+        },
+    )
+    assert not addons.is_trakt_catalog_addon(tmdb)
+    assert addons.can_fetch_catalog(tmdb, "movie")
+    assert not addons.is_trakt_catalog_addon(
+        addons.Addon(base="https://c", name="Cinemeta", resources={}, builtin=True)
+    )
+
+
+def test_trakt_board_section_from_id_or_type():
+    assert addons.trakt_board_section("trakt", "trakt_popular_movies", "Popular movies") == "movie"
+    assert addons.trakt_board_section("trakt", "trakt_trending_series", "Trending series") == "series"
+    assert addons.trakt_board_section("movie", "watchlist", "Watchlist") == "movie"
+    assert addons.trakt_board_section("trakt", "trakt_watchlist", "Watchlist") is None
+
+
+def test_trakt_catalogs_on_board_not_in_extra_catalogs(monkeypatch):
+    """Type `trakt` + no catalog resource still lists; search stays off (ADR 0048/0049)."""
+    trakt = _trakt_addon()
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: trakt)
+    cfg = Config(torrentio_base="tb", trakt_addon=trakt.manifest_url)
+    movie = addons.trakt_catalogs(cfg, "movie")
+    series = addons.trakt_catalogs(cfg, "series")
+    movie_ids = {c for c, _ in movie}
+    series_ids = {c for c, _ in series}
+    assert movie_ids == {"trakt_popular_movies", "trakt_watchlist"}
+    assert series_ids == {"trakt_trending_series", "trakt_watchlist"}
+    assert "trakt_search_movies" not in movie_ids
+    assert addons.extra_catalogs(cfg, "movie") == []
+    assert addons.extra_catalogs(cfg, "series") == []
+    info = addons.catalog_extra_info(cfg, "movie", "trakt_popular_movies")
+    assert info is not None and info.supports_genre and info.supports_skip
+    assert info.genres == ("action", "drama")
+
+
+def test_effective_addons_includes_trakt_addon_once(monkeypatch):
+    trakt = _trakt_addon()
+    seen: list[str] = []
+
+    def load(url, **k):
+        seen.append(url)
+        return trakt if "trakt" in url else None
+
+    monkeypatch.setattr(addons, "load_addon", load)
+    url = trakt.manifest_url
+    cfg = Config(torrentio_base="tb", addons=[url], trakt_addon=url)
+    names = [a.name for a in addons.effective_addons(cfg) if not a.builtin]
+    assert names.count("Trakt Tv") == 1
+    assert seen.count(url) == 1
+
+
+def test_trakt_addon_from_cfg_addons_still_grouped(monkeypatch):
+    """A Fonti paste into cfg.addons (no trakt_addon key) is still a Trakt catalog."""
+    trakt = _trakt_addon()
+    monkeypatch.setattr(addons, "load_addon", lambda url, **k: trakt)
+    cfg = Config(torrentio_base="tb", addons=[trakt.manifest_url])
+    assert ("trakt_popular_movies", "trakt - Popular movies") in addons.trakt_catalogs(cfg, "movie")
+    assert addons.extra_catalogs(cfg, "movie") == []

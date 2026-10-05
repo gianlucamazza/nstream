@@ -24,7 +24,10 @@ whose type is not a board type (today: `anime`) appears in both. Selecting a row
 usual browse → play path. Catalogs that require an extra other than `skip` / `genre`
 (search-only, …) stay off the board. Addon catalogs that declare `genre` open a genre
 picker; those that declare `skip` (and Cinemeta catalogs) show **↓ altri…** for pagination.
-No marketplace, no new config key.
+No marketplace. A user-configured Trakt catalog addon (Impostazioni → Fonti → **Trakt
+(cataloghi)**, or `trakt_addon` / `NSTREAM_TRAKT_ADDON`) appears under **── Trakt ──** —
+cronologia / watchlist / liste / popular from that addon, not local continue-watching and
+not a stream indexer (ADR 0049).
 
 Multi-season series open a **season menu** before episodes. ESC steps back one level;
 after play (or no sources) you return to the list (app does not quit).
