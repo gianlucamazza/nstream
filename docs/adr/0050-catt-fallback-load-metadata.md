@@ -178,6 +178,24 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   allowlist (https only, max 3 hops). Deadline 3 s across connect+read.
   A failed LAN JPEG fetch falls back to the allowlisted https JPEG
   rather than omitting `images`. Cache dir pruned to 200 newest files.
+- **Poster resolution (board 2026-10-10, main @ 3d24edb1):** Odroid
+  `--json --cast` LOAD was `{metadataType 1, title}` with **no
+  `images`**. `HEAD /cast/<token>/poster.jpg` was 404. Headless
+  `CastMeta.poster` came from the `api.search` hit
+  (`m.media-amazon.com` IMDb Amazon CDN) — not on the Cinemeta/metahub
+  allowlist — so `catt_image_url` returned empty, `lan_media` served
+  nothing, and the https fallback was empty too. The on-disk full
+  Cinemeta meta already had `images.metahub.space/poster/small/…`
+  (rewritten to `/poster/medium/` JPEG). One helper,
+  `caster.resolve_cast_poster`, is used by every cast entry
+  (`cast_flow.run_cast`: headless, TUI/interactive, CLI, LAN and
+  https). Order: (a) full Cinemeta meta poster if cached
+  (`api.cached_meta_poster`, disk only); (b) search-hit if allowlisted;
+  (c) derived `https://images.metahub.space/poster/medium/<imdb_id>/img`
+  when the id matches `^tt\d{1,10}$` (episode `:s:e` stripped first);
+  (d) empty. Amazon CDN is **not** added to the allowlist. INFO log
+  `cast poster source=` (`meta` / `search` / `derived` / `none`) with
+  no URL.
 - **Mute flip on LOAD:** nstream's library path never sends `SET_VOLUME` or
   `set_volume_muted`. catt 0.13.3 `play_media_url` (controllers.py:597-608)
   forwards only url/content_type/current_time/title/thumb/subtitles/
@@ -197,7 +215,8 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
 - Symbols:   `caster.catt_lib_outcome`, `caster.catt_lib_play`,
   `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
   `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_load_media`,
-  `caster.catt_image_url`, `caster.catt_jpeg_poster_url`, `caster.catt_cast_argv`,
+  `caster.catt_image_url`, `caster.catt_jpeg_poster_url`, `caster.resolve_cast_poster`,
+  `caster.poster_imdb_id`, `api.cached_meta_poster`, `caster.catt_cast_argv`,
   `serve.fetch_poster_jpeg`, `serve.served_poster_url`, `serve.poster_host_allowed`,
   `serve._poster_http`, `serve._PosterRedirect`,
   `caster._cast_via_catt`, `caster._catt_inprocess_play`, `caster._catt_lib_finish`,

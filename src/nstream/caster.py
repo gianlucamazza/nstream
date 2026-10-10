@@ -139,6 +139,50 @@ def catt_image_url(poster: str) -> str:
     return catt_jpeg_poster_url(raw)
 
 
+_IMDB_ID_RE = re.compile(r"^tt\d{1,10}$")
+_METAHUB_MEDIUM = "https://images.metahub.space/poster/medium/{imdb_id}/img"
+
+
+def poster_imdb_id(video_id: str) -> str:
+    """Strict IMDb id for a derived metahub poster. Strips a trailing `:season:episode`
+    suffix, then requires `^tt\\d{1,10}$`. Empty otherwise — never invents a `tt`."""
+    raw = (video_id or "").strip()
+    parts = raw.split(":")
+    if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit():
+        raw = ":".join(parts[:-2])
+    return raw if _IMDB_ID_RE.fullmatch(raw) else ""
+
+
+def resolve_cast_poster(
+    full_meta_poster: str = "",
+    search_poster: str = "",
+    imdb_id: str = "",
+) -> str:
+    """HTTPS poster for every cast LOAD (LAN fetch and https fallback).
+
+    Order: (a) full Cinemeta meta poster if allowlisted; (b) search-hit poster
+    if allowlisted; (c) derived metahub `/poster/medium/<imdb_id>/img` when
+    `imdb_id` is a strict IMDb id; (d) empty. Never allowlists the Amazon CDN.
+    Logs `source=` at INFO with no URL.
+    """
+    jpeg = catt_jpeg_poster_url(full_meta_poster)
+    if jpeg:
+        source = "meta"
+        url = jpeg
+    else:
+        jpeg = catt_jpeg_poster_url(search_poster)
+        if jpeg:
+            source = "search"
+            url = jpeg
+        else:
+            ident = poster_imdb_id(imdb_id)
+            derived = _METAHUB_MEDIUM.format(imdb_id=ident) if ident else ""
+            url = catt_jpeg_poster_url(derived)
+            source = "derived" if url else "none"
+    _log.info("cast poster source=%s", source)
+    return url
+
+
 def _parse_catt_version(raw: str) -> tuple[int, int, int] | None:
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw or "")
     if not m:

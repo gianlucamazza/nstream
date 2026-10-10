@@ -949,6 +949,202 @@ def test_headless_json_cast_load_has_lan_jpeg_poster(monkeypatch, capsys, tmp_pa
     assert not media["metadata"]["images"][0]["url"].lower().endswith(".webp")
 
 
+_AMAZON_POSTER = "https://m.media-amazon.com/images/M/MV5Bdeadpool_V1_SX250.jpg"
+_METAHUB_MEDIUM = "https://images.metahub.space/poster/medium/tt6263850/img"
+
+
+def _headless_cast_load_capture(monkeypatch, tmp_path, *, fetch_ok=True):
+    """Wire `--json --cast` through LAN + library LOAD; return (fetched, captured)."""
+    jpeg = tmp_path / "poster.jpg"
+    jpeg.write_bytes(b"\xff\xd8\xff\xd9")
+    stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Deadpool.Wolverine.2024.1080p.WEB-DL.H264\n👤 9 💾 8 GB",
+        "url": "https://real-debrid.com/d/SECRET/file.mp4",
+    }
+    _wire_movie(monkeypatch, name="Deadpool & Wolverine", stream=stream)
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.50")
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.50")
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: _plan("direct", stream)
+    )
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
+    monkeypatch.setattr(cast_flow.caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(
+        tracks,
+        "probe_tracks",
+        lambda url, **k: tracks.Tracks(video_codec="h264", codec_tag="avc1"),
+    )
+    monkeypatch.setattr(
+        urlproxy, "probe", lambda url: urlproxy.Probe(True, "video/mp4", 8_000_000, True)
+    )
+    monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+    fetched: dict = {}
+    monkeypatch.setattr(cast_flow.caster.serve, "lan_ip", lambda device: "192.168.1.103")
+    monkeypatch.setattr(cast_flow.caster.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(cast_flow.caster.serve, "reap_proxy_server", lambda: False)
+    monkeypatch.setattr(
+        cast_flow.caster.serve,
+        "fetch_poster_jpeg",
+        lambda url: fetched.update(url=url) or (str(jpeg) if fetch_ok else None),
+    )
+    monkeypatch.setattr(
+        cast_flow.caster.serve,
+        "spawn_detached",
+        lambda bind_ip, **kw: (
+            fetched.update(poster_path=kw.get("poster_path")) or (4242, 45000, "toktest")
+        ),
+    )
+    monkeypatch.setattr(cast_flow.caster.serve, "register_proxy_server", lambda pid: None)
+    captured: dict = {}
+
+    def fake_outcome(device, url, **kw):
+        captured.update(device=device, url=url, **kw)
+        return cast_flow.caster.CATT_LIB_OK
+
+    monkeypatch.setattr(cast_flow.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(cast_flow.caster, "catt_lib_outcome", fake_outcome)
+    return fetched, captured
+
+
+def test_headless_amazon_search_poster_uses_derived_metahub(monkeypatch, capsys, tmp_path, caplog):
+    """Search-hit Amazon CDN is not allowlisted; a strict IMDb id derives metahub medium.
+
+    LOAD `images[0].url` is LAN `poster.jpg` when the JPEG fetch is mocked, else the
+    metahub medium https fallback.
+    """
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    fetched, captured = _headless_cast_load_capture(monkeypatch, tmp_path, fetch_ok=True)
+    monkeypatch.setattr(
+        headless.api,
+        "search",
+        lambda cfg, q: [
+            {
+                "id": "tt6263850",
+                "type": "movie",
+                "name": "Deadpool & Wolverine",
+                "poster": _AMAZON_POSTER,
+            }
+        ],
+    )
+    monkeypatch.setattr(cast_flow.api, "cached_meta_poster", lambda typ, vid: "")
+    cfg = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], cast_lan_proxy=True)
+    rc = headless.run_auto(cfg, _hns(query=["deadpool"]), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out.get("ok")
+    assert fetched.get("url") == _METAHUB_MEDIUM
+    lan_poster = "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    assert captured["meta"].poster == lan_poster
+    kw = cast_flow.caster.catt_play_kwargs(
+        captured["title"],
+        captured["meta"],
+        content_type=captured.get("content_type") or "video/mp4",
+    )
+    media = cast_flow.caster.catt_load_media(captured["url"], **kw)
+    assert media["metadata"]["images"][0]["url"] == lan_poster
+    assert "source=derived" in caplog.text
+    assert _AMAZON_POSTER not in caplog.text
+
+
+def test_headless_amazon_search_poster_https_fallback(monkeypatch, capsys, tmp_path):
+    """LAN JPEG fetch miss → LOAD images[0] is the derived metahub medium URL."""
+    fetched, captured = _headless_cast_load_capture(monkeypatch, tmp_path, fetch_ok=False)
+    monkeypatch.setattr(
+        headless.api,
+        "search",
+        lambda cfg, q: [
+            {
+                "id": "tt6263850",
+                "type": "movie",
+                "name": "Deadpool & Wolverine",
+                "poster": _AMAZON_POSTER,
+            }
+        ],
+    )
+    monkeypatch.setattr(cast_flow.api, "cached_meta_poster", lambda typ, vid: "")
+    cfg = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], cast_lan_proxy=True)
+    rc = headless.run_auto(cfg, _hns(query=["deadpool"]), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out.get("ok")
+    assert fetched.get("url") == _METAHUB_MEDIUM
+    assert captured["meta"].poster == _METAHUB_MEDIUM
+    kw = cast_flow.caster.catt_play_kwargs(
+        captured["title"],
+        captured["meta"],
+        content_type=captured.get("content_type") or "video/mp4",
+    )
+    media = cast_flow.caster.catt_load_media(captured["url"], **kw)
+    assert media["metadata"]["images"][0]["url"] == _METAHUB_MEDIUM
+
+
+def test_headless_full_meta_poster_wins_over_search(monkeypatch, capsys, tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    fetched, captured = _headless_cast_load_capture(monkeypatch, tmp_path, fetch_ok=True)
+    search = "https://v3-cinemeta.strem.io/search.jpg"
+    meta_small = "https://images.metahub.space/poster/small/tt6263850/img"
+    monkeypatch.setattr(
+        headless.api,
+        "search",
+        lambda cfg, q: [
+            {
+                "id": "tt6263850",
+                "type": "movie",
+                "name": "Deadpool & Wolverine",
+                "poster": search,
+            }
+        ],
+    )
+    monkeypatch.setattr(cast_flow.api, "cached_meta_poster", lambda typ, vid: meta_small)
+    cfg = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], cast_lan_proxy=True)
+    rc = headless.run_auto(cfg, _hns(query=["deadpool"]), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out.get("ok")
+    assert fetched.get("url") == _METAHUB_MEDIUM
+    assert captured["meta"].poster == "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    assert "source=meta" in caplog.text
+    assert search not in caplog.text
+
+
+def test_headless_invalid_imdb_id_omits_poster(monkeypatch, capsys, tmp_path, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    fetched, captured = _headless_cast_load_capture(monkeypatch, tmp_path, fetch_ok=True)
+    monkeypatch.setattr(
+        headless.api,
+        "search",
+        lambda cfg, q: [
+            {
+                "id": "tt",
+                "type": "movie",
+                "name": "Deadpool & Wolverine",
+                "poster": _AMAZON_POSTER,
+            }
+        ],
+    )
+    monkeypatch.setattr(cast_flow.api, "cached_meta_poster", lambda typ, vid: "")
+    monkeypatch.setattr(headless.api, "translate_id", lambda cfg, typ, vid: vid)
+    cfg = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], cast_lan_proxy=True)
+    rc = headless.run_auto(cfg, _hns(query=["deadpool"]), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out.get("ok")
+    assert fetched.get("url") is None
+    assert captured["meta"].poster == ""
+    kw = cast_flow.caster.catt_play_kwargs(
+        captured["title"],
+        captured["meta"],
+        content_type=captured.get("content_type") or "video/mp4",
+    )
+    media = cast_flow.caster.catt_load_media(captured["url"], **kw)
+    assert "images" not in media["metadata"]
+    assert "source=none" in caplog.text
+
+
 def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
     """Headless absent dub: the JSON reports the real language + the safety subtitles."""
     stream = _wire_movie(monkeypatch)

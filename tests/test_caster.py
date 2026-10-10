@@ -997,6 +997,7 @@ def test_catt_poster_url_cinemeta_metahub_only():
     assert caster.catt_poster_url("https://images.metahub.space/poster/medium/tt1/img")
     assert caster.catt_poster_url("https://v3-cinemeta.strem.io/poster.jpg")
     assert caster.catt_poster_url("https://images.example.test/poster/tt7068946.jpg") == ""
+    assert caster.catt_poster_url("https://m.media-amazon.com/images/M/MV5Bx.jpg") == ""
     assert caster.catt_poster_url("https://debrid.example/p.jpg") == ""
     assert caster.catt_poster_url("http://192.168.1.10/p.jpg") == ""
     assert caster.catt_poster_url("http://10.0.0.5/cast/tok/poster.jpg") == ""
@@ -1023,6 +1024,50 @@ def test_catt_image_url_accepts_lan_poster_jpg():
     assert (
         caster.catt_image_url(small) == "https://images.metahub.space/poster/medium/tt6263850/img"
     )
+
+
+def test_resolve_cast_poster_full_meta_wins_over_search(caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    amazon = "https://m.media-amazon.com/images/M/MV5Bdeadpool_V1_SX250.jpg"
+    meta = "https://images.metahub.space/poster/small/tt6263850/img"
+    search = "https://v3-cinemeta.strem.io/other.jpg"
+    got = caster.resolve_cast_poster(meta, search, "tt6263850")
+    assert got == "https://images.metahub.space/poster/medium/tt6263850/img"
+    assert "source=meta" in caplog.text
+    assert "m.media-amazon.com" not in caplog.text
+    assert amazon not in caplog.text
+    assert "http" not in caplog.text
+
+
+def test_resolve_cast_poster_amazon_plus_imdb_derives_metahub(caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    amazon = "https://m.media-amazon.com/images/M/MV5Bdeadpool_V1_SX250.jpg"
+    got = caster.resolve_cast_poster("", amazon, "tt6263850")
+    assert got == "https://images.metahub.space/poster/medium/tt6263850/img"
+    assert "source=derived" in caplog.text
+    assert amazon not in caplog.text
+
+
+def test_resolve_cast_poster_invalid_id_no_poster(caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    amazon = "https://m.media-amazon.com/images/M/MV5Bdeadpool_V1_SX250.jpg"
+    for ident in ("", "tt", "ttabc", "tmdb:1", "tt12345678901", "nm123"):
+        assert caster.resolve_cast_poster("", amazon, ident) == ""
+    assert "source=none" in caplog.text
+    assert caster.poster_imdb_id("tt6263850:1:2") == "tt6263850"
+    assert caster.poster_imdb_id("tt6263850") == "tt6263850"
+    assert caster.poster_imdb_id("tt") == ""
+
+
+def test_resolve_cast_poster_allowlisted_search_when_no_meta():
+    search = "https://v3-cinemeta.strem.io/poster.jpg"
+    assert caster.resolve_cast_poster("", search, "tt1") == search
 
 
 def test_catt_lib_load_debug_redacts_token(caplog):

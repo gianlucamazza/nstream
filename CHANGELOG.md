@@ -41,6 +41,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **Cast poster resolution (ADR 0050):** every cast entry (headless,
+  TUI, CLI; LAN and https) picks a poster via
+  `caster.resolve_cast_poster`: cached full Cinemeta meta, then an
+  allowlisted search hit, then a derived metahub `/poster/medium/<tt>/img`
+  from a strict IMDb id (`^tt\d{1,10}$`), else none. Search-hit Amazon
+  CDN URLs stay off the allowlist (they were why `poster.jpg` 404'd and
+  LOAD had no `images`). INFO `cast poster source=` with no URL.
 - **LAN catt poster JPEG (ADR 0050):** headless `--json --cast` now
   passes Cinemeta `meta.poster` through `lan_media`. On a LAN Range
   proxy the LOAD `images[0].url` is the token-gated

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import urllib.error
@@ -482,6 +483,31 @@ def test_episodes_returns_first_with_videos(monkeypatch):
     monkeypatch.setattr(api, "http_get_json", fake_get)
     vids = api.episodes(CFG, "tt1")
     assert [(v["season"], v["episode"]) for v in vids] == [(1, 1), (1, 2)]  # sorted
+
+
+def test_cached_meta_poster_reads_disk_only(monkeypatch, tmp_path):
+    """Cast poster resolution must not fetch on a cache miss (derive covers that)."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(api, "meta", lambda *a, **k: pytest.fail("no network"))
+    assert api.cached_meta_poster("movie", "tt6263850") == ""
+    path = api._meta_disk_path("movie", "tt6263850")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "ts": 1,
+                "meta": {"poster": "https://images.metahub.space/poster/small/tt6263850/img"},
+            }
+        )
+    )
+    assert (
+        api.cached_meta_poster("movie", "tt6263850")
+        == "https://images.metahub.space/poster/small/tt6263850/img"
+    )
+    assert (
+        api.cached_meta_poster("movie", "tt6263850:1:1")
+        == "https://images.metahub.space/poster/small/tt6263850/img"
+    )
 
 
 def test_meta_cached_disk_persists_and_hits(monkeypatch, tmp_path):
