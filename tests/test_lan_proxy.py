@@ -666,9 +666,9 @@ def test_cast_feeds_lan_mime_into_catt_lib_play(monkeypatch):
 
     def fake_play(device, url, **kw):
         seen.update(device=device, url=url, **kw)
-        return True
+        return caster.CATT_LIB_OK
 
-    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    monkeypatch.setattr(caster, "catt_lib_outcome", fake_play)
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
     r = caster.cast(
         cfg, "The Nice Guys", "https://debrid.example/f.mp4?token=SECRET",
@@ -698,8 +698,8 @@ def test_cast_feeds_webm_lan_mime_into_catt_lib_play(monkeypatch):
     monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
     seen: dict = {}
     monkeypatch.setattr(
-        caster, "catt_lib_play",
-        lambda device, url, **kw: seen.update(url=url, **kw) or True,
+        caster, "catt_lib_outcome",
+        lambda device, url, **kw: seen.update(url=url, **kw) or caster.CATT_LIB_OK,
     )  # fmt: skip
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
     r = caster.cast(
@@ -759,12 +759,24 @@ def test_cast_follow_ended_skips_final_catt_info(monkeypatch):
 POSTER = "https://images.metahub.space/poster/medium/tt7068946/img"
 
 
-def _pychromecast_mc_device(seen: dict, *, raise_after_load: bool = False):
+class CastError(Exception):
+    """Name-matches catt.error.CastError for `_is_catt_session_wait`."""
+
+
+_CATT_SESSION_WAIT = "Waiting for the media session to become active timed out after 30 seconds"
+
+
+def _pychromecast_mc_device(
+    seen: dict,
+    *,
+    raise_after_load: bool = False,
+    raise_before_load: BaseException | None = None,
+):
     """CattDevice stand-in: play_media_url delegates to a pychromecast-like MC.
 
     Mirrors catt 0.13.3 `DefaultCastController.play_media_url` →
     `MediaController.play_media` (media_info.metadata first, then title/thumb →
-    images[0].url). Used to assert the LAN LOAD body, not just catt_lib_play kwargs.
+    images[0].url). `controller._controller.play_media` is the sent-signal hook.
     """
 
     class _MC:
@@ -786,12 +798,17 @@ def _pychromecast_mc_device(seen: dict, *, raise_after_load: bool = False):
             }
 
     class _Ctrl:
+        def __init__(self):
+            self._controller = _MC()
+
         def prep_app(self):
             return None
 
         def play_media_url(self, url, **kw):
+            if raise_before_load is not None:
+                raise raise_before_load
             content_type = kw.get("content_type") or "video/mp4"
-            _MC().play_media(
+            self._controller.play_media(
                 url,
                 content_type,
                 current_time=kw.get("current_time"),
@@ -802,30 +819,51 @@ def _pychromecast_mc_device(seen: dict, *, raise_after_load: bool = False):
                 media_info=kw.get("media_info"),
             )
             if raise_after_load:
-                raise RuntimeError("CastError")  # catt session wait after LOAD
+                raise CastError(_CATT_SESSION_WAIT)
 
     class _Dev:
         def __init__(self, **kw):
             seen["ctor"] = kw
+            self._ctrl = _Ctrl()
 
         @property
         def controller(self):
-            return _Ctrl()
+            return self._ctrl
 
     return _Dev
 
 
-def _lan_lib_cast(monkeypatch, seen, *, raise_after_load=False):
+def _lan_lib_cast(
+    monkeypatch,
+    seen,
+    *,
+    raise_after_load=False,
+    raise_before_load=None,
+    receiver=None,
+    grace=0.0,
+    shutdown=None,
+):
     from nstream import caster
 
-    lan = _fake_lan("video/mp4")
+    lan = _fake_lan("video/mp4", shutdown=shutdown)
     monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
     monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
     monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: True)
-    device_cls = _pychromecast_mc_device(seen, raise_after_load=raise_after_load)
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    device_cls = _pychromecast_mc_device(
+        seen, raise_after_load=raise_after_load, raise_before_load=raise_before_load
+    )
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: device_cls)
-    monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", grace)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_POLL", 0.01)
+    monkeypatch.setattr(caster, "receiver_info", receiver or (lambda dev: {}))
+    seen.setdefault("reap", {})
+    monkeypatch.setattr(
+        caster.serve,
+        "schedule_reap",
+        lambda fn, seconds: seen["reap"].update(fn=fn, s=seconds),
+    )
     calls: list[list[str]] = []
 
     class _P:
@@ -863,11 +901,34 @@ def test_lan_cast_lib_load_sends_movie_poster_via_mc(monkeypatch):
 
 
 def test_lan_cast_lib_session_timeout_no_cli(monkeypatch):
-    """play_media_url raises after LOAD (HEVC session wait): keep metadata, no CLI."""
-    from nstream import caster
+    """Post-LOAD session wait, receiver still empty: keep metadata, honest miss, no CLI."""
+    from nstream import caster, notices
 
     seen: dict = {}
     lan, calls = _lan_lib_cast(monkeypatch, seen, raise_after_load=True)
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    with notices.capture() as bag:
+        r = caster.cast(
+            cfg, "The Nice Guys", "https://debrid.example/f.mp4",
+            device="10.0.0.5", follow=False,
+            meta=caster.CastMeta(poster=POSTER),
+        )  # fmt: skip
+    assert r.delivery == "lan" and r.started is False
+    assert r.error == "cast_never_started"
+    assert any(n.code == "cast_unconfirmed" for n in bag)
+    assert seen["mc"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    assert seen["mc"]["metadata"]["images"][0]["url"] == POSTER
+    assert not any("cast" in c and lan.url in c for c in calls)
+
+
+def test_lan_cast_raise_before_load_falls_to_cli(monkeypatch):
+    """play_media_url raises before MediaController.play_media → CLI fallback."""
+    from nstream import caster
+
+    seen: dict = {}
+    lan, calls = _lan_lib_cast(
+        monkeypatch, seen, raise_before_load=TypeError("unexpected keyword argument")
+    )
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
     r = caster.cast(
         cfg, "The Nice Guys", "https://debrid.example/f.mp4",
@@ -875,9 +936,84 @@ def test_lan_cast_lib_session_timeout_no_cli(monkeypatch):
         meta=caster.CastMeta(poster=POSTER),
     )  # fmt: skip
     assert r.delivery == "lan" and r.started is True
-    assert seen["mc"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    assert "mc" not in seen
+    launch = next(c for c in calls if "cast" in c and lan.url in c)
+    assert "-l" in launch and "--thumb" not in launch
+
+
+def test_lan_cast_session_wait_later_receiver_match(monkeypatch):
+    """Post-LOAD raise; grace poll later sees our media → started, no CLI."""
+    from nstream import caster
+
+    seen: dict = {}
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    infos = iter([{}, {"player_state": "BUFFERING", "content_id": url}])
+    lan, calls = _lan_lib_cast(
+        monkeypatch,
+        seen,
+        raise_after_load=True,
+        receiver=lambda dev: next(infos, {"player_state": "BUFFERING", "content_id": url}),
+        grace=0.3,
+    )
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(
+        cfg, "The Nice Guys", "https://debrid.example/f.mp4",
+        device="10.0.0.5", follow=False,
+        meta=caster.CastMeta(poster=POSTER),
+    )  # fmt: skip
+    assert r.delivery == "lan" and r.started is True and r.error is None
     assert seen["mc"]["metadata"]["images"][0]["url"] == POSTER
     assert not any("cast" in c and lan.url in c for c in calls)
+
+
+def test_lan_cast_session_wait_load_failed_falls_to_cli(monkeypatch):
+    """Post-LOAD raise + receiver LOAD_FAILED → fail, CLI may run."""
+    from nstream import caster
+
+    seen: dict = {}
+    lan, calls = _lan_lib_cast(
+        monkeypatch,
+        seen,
+        raise_after_load=True,
+        receiver=lambda dev: {
+            "player_state": "IDLE",
+            "idle_reason": "ERROR",
+            "error": "LOAD_FAILED",
+        },
+    )
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(
+        cfg, "The Nice Guys", "https://debrid.example/f.mp4",
+        device="10.0.0.5", follow=False,
+        meta=caster.CastMeta(poster=POSTER),
+    )  # fmt: skip
+    assert r.delivery == "lan"
+    launch = next(c for c in calls if "cast" in c and lan.url in c)
+    assert launch and "--thumb" not in launch
+    assert r.started is True  # CLI stub returns rc 0
+
+
+def test_lan_cast_unconfirmed_schedules_reap(monkeypatch):
+    """Unconfirmed LAN keep-alive is bounded by CATT_LIB_UNCONFIRMED_SERVE_S."""
+    from nstream import caster
+
+    seen: dict = {}
+    shut = {"n": 0}
+    lan, calls = _lan_lib_cast(
+        monkeypatch, seen, raise_after_load=True, shutdown=lambda: shut.__setitem__("n", 1)
+    )
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(
+        cfg, "The Nice Guys", "https://debrid.example/f.mp4",
+        device="10.0.0.5", follow=False,
+        meta=caster.CastMeta(poster=POSTER),
+    )  # fmt: skip
+    assert r.started is False and r.error == "cast_never_started"
+    assert not any("cast" in c and lan.url in c for c in calls)
+    assert seen["reap"]["s"] == caster.util.CATT_LIB_UNCONFIRMED_SERVE_S
+    assert shut["n"] == 0
+    seen["reap"]["fn"]()
+    assert shut["n"] == 1
 
 
 def test_lan_cast_cli_when_lib_unavailable(monkeypatch):

@@ -871,6 +871,21 @@ def reap_inproc_proxy() -> bool:
     return True
 
 
+def schedule_reap(fn, seconds: float) -> None:
+    """Best-effort delayed reap (unconfirmed LOAD). Daemon: process exit also ends it."""
+    if seconds <= 0:
+        with contextlib.suppress(Exception):
+            fn()
+        return
+
+    def later() -> None:
+        time.sleep(seconds)
+        with contextlib.suppress(Exception):
+            fn()
+
+    threading.Thread(target=later, name="nstream-unconfirmed-reap", daemon=True).start()
+
+
 def reap_proxy_server() -> bool:
     """Kill and forget a leftover LAN Range-proxy (detached pid and/or in-process)."""
     found = reap_inproc_proxy()

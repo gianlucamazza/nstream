@@ -106,8 +106,12 @@ title, the public Cinemeta/metahub HTTPS poster (`thumb` → `images[0].url`),
 host — the TV fetches Cinemeta/metahub itself. Other https hosts are not sent
 as `thumb`. If `catt.api` cannot be imported, the CLI fallback still sends `-l`
 + `--stream-type BUFFERED` (no artwork). A library timeout or a session-wait
-raise after the LOAD is **loaded, unconfirmed** — no second CLI LOAD (that
-would wipe the poster). In-cast `a` (audio switch) reuses the same
+raise after the LOAD is **unconfirmed**: no second CLI LOAD (that would wipe
+the poster). If the TV still has not confirmed our media after a short
+grace poll, the cast is reported as not started
+(`error: cast_never_started` / notice `cast_unconfirmed`) rather than
+success. A leftover remux/LAN server is reaped after 15 minutes (or the
+detached 3 h idle limit). In-cast `a` (audio switch) reuses the same
 library/helper LOAD so title/artwork survive.
 
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |

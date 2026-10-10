@@ -365,6 +365,12 @@ def test_reap_sub_server_ignores_legacy_cache_pid(tmp_path, monkeypatch):
     assert killed == [] and not legacy.exists()
 
 
+def test_schedule_reap_zero_runs_immediately():
+    seen = {"n": 0}
+    serve.schedule_reap(lambda: seen.__setitem__("n", 1), 0)
+    assert seen["n"] == 1
+
+
 def test_detached_server_exits_when_idle(tmp_path):
     f = tmp_path / "m.mp4"
     f.write_bytes(b"x" * 10)

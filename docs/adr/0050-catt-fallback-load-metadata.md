@@ -93,14 +93,30 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   switch still has title on ≥0.13.2 (`-l`) but no artwork.
 - In-process `CattDevice` / `prep_app` / `play_media_url` is bounded by
   `CATT_LIB_LOAD_TIMEOUT` (55s: connect + prep + catt's own 30s PLAYING wait).
-  A timeout is **loaded, unconfirmed**: check `catt info` on the same device
-  before any CLI fallback, remux server kill, or follow shutdown. Fall back
-  only when no LOAD was sent or the receiver is not playing/buffering our
-  content. Friendly names use `name=`, not `ip_addr=`. Poster `thumb` is
+  **Sent** is `MediaController.play_media` returning (hook on
+  `controller._controller.play_media`) or catt 0.13.3's post-LOAD `CastError`
+  (`"media session to become active timed out"`). A raise before that
+  (NotConnected, RequestTimeout, TypeError on kwargs) is never-sent. The
+  helper (`_catt_load`) uses rc 4 for post-LOAD session wait and rc 1 for
+  never-sent. Friendly names use `name=`, not `ip_addr=`. Poster `thumb` is
   Cinemeta/metahub HTTPS only. In-process version is imported catt
   (`catt.__version__` / `importlib.metadata`), not the PATH binary.
-- Worst-case send: library 55s + one status confirm 10s + one CLI 30s ≈ 95s.
-  Click-flag retry is CLI-only (no library), 30+30=60s.
+- `catt_lib_outcome` is three-way (`ok` / `fail` / `unconfirmed`).
+  `catt_lib_play` is confirmed-only (`ok`). On `unconfirmed`,
+  `catt_receiver_load_state` grace-polls (`CATT_LIB_CONFIRM_GRACE` 20s) for
+  our content_id or an explicit refuse (`LOAD_FAILED` / idle_reason ERROR).
+  Match → `ok`. Explicit fail → `fail` (caller may CLI or kill). Still
+  unknown at the bound → `unconfirmed`: no second CLI LOAD (keeps metadataType
+  1 / images). Honest `CastResult`: `started=False`,
+  `error=cast_never_started`. `--json` reuses ADR 0031: `ok: false`,
+  `error: cast_failed`, `cast_error: cast_never_started` — no new fields.
+  UI notice `code=cast_unconfirmed` (existing `notices` array). Log
+  `catt sender=lib unconfirmed`.
+- Leftover remux/LAN servers after an unconfirmed LOAD are bounded by
+  `serve.schedule_reap` (`CATT_LIB_UNCONFIRMED_SERVE_S` = 15 min) and the
+  detached idle reaper (`serve.IDLE_EXIT_S` = 3 h).
+- Worst-case send: library 55s + grace 20s + one CLI 30s (only when no LOAD
+  was sent) ≈ 105s. Click-flag retry is CLI-only (no library), 30+30=60s.
 - Live HLS is unchanged (castbridge-only, ADR 0039). Event-sourced `--follow`
   JSONL still prefers castbridge.
 - `--json` shape unchanged (no new fields). `--status` already reports receiver
@@ -108,13 +124,14 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
 - **LAN / HEVC (board 2026-10-10, main @ 26970282):** catt `play_media_url`
   sends the LOAD (metadataType 1 + `thumb`/`images`) then waits for the media
   session (`WAIT_TIMEOUT` ≈ 30s). A native HEVC LAN start can miss that window
-  and raise after the LOAD is already on the TV. `_cast_via_catt` used to treat
-  that as `_LIB_FAIL` and CLI-fallback, overwriting chrome to GENERIC 0 / no
-  images. A post-LOAD timeout or CastError is now **loaded, unconfirmed**: no
-  second CLI LOAD. Applies to LAN Range-proxy, hev1 rewrap (`remux.cast_file`),
-  and direct LAN URLs. CLI remains only when `catt_can_lib_load()` is false or
-  the library call raises before a LOAD. Logged as `catt sender=lib` /
-  `catt sender=cli` (never the URL).
+  and raise after the LOAD is already on the TV. Treating that as `_LIB_FAIL`
+  CLI-overwrote chrome to GENERIC 0; treating every unconfirmed as
+  `started=True` hid a real `LOAD_FAILED`. The three-way outcome above is the
+  fix. Applies to LAN Range-proxy, hev1 rewrap (`remux.cast_file`), and
+  direct LAN URLs. CLI remains only when `catt_can_lib_load()` is false, the
+  LOAD was never sent, or the receiver refused it. Logged as
+  `catt sender=lib` / `catt sender=lib unconfirmed` / `catt sender=cli`
+  (never the URL).
 
 ## References
 
@@ -123,8 +140,10 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `guessed_content_type`).
 - pychromecast `MediaController._send_start_play_media` (GENERIC metadataType,
   `thumb` → `images[]`).
-- Symbols:   `caster.catt_lib_play`, `caster.catt_receiver_has_load`, `caster.catt_play_kwargs`,
-  `caster.catt_lib_media_info`, `caster.catt_cast_argv`, `caster._cast_via_catt`,
-  `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
+- Symbols:   `caster.catt_lib_outcome`, `caster.catt_lib_play`,
+  `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
+  `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_cast_argv`,
+  `caster._cast_via_catt`, `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
+  `caster._hook_catt_play_media`, `serve.schedule_reap`,
   `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
   `bridge._media_load_args`.

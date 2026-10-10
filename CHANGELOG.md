@@ -41,12 +41,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- **LAN catt poster (ADR 0050):** a LAN / hev1 / direct-LAN load that already
-  sent `play_media_url` (metadataType 1 + Cinemeta/metahub `images[]`) no
-  longer CLI-falls-back when catt's 30s media-session wait raises. That second
-  LOAD was wiping the poster to GENERIC 0 (`catt info` on the Philips board).
-  CLI remains only when `catt_can_lib_load()` is false or the library call
-  raises before a LOAD. Logged `catt sender=lib` / `catt sender=cli` (no URL).
+- **LAN catt poster (ADR 0050):** a LAN / hev1 / direct-LAN `play_media_url`
+  that already sent LOAD (metadataType 1 + Cinemeta/metahub `images[]`) no
+  longer CLI-falls-back when catt's 30s media-session wait raises — that
+  second LOAD wiped the poster to GENERIC 0. Sent is
+  `MediaController.play_media` returning or catt 0.13.3's post-LOAD
+  `CastError`; helper rc 4 vs rc 1 (never-sent). After a post-LOAD miss,
+  nstream grace-polls the receiver: match → started; `LOAD_FAILED` / idle
+  ERROR → fail (CLI or kill); still unknown → no CLI,
+  `CastResult(started=False, error=cast_never_started)` (`--json` stays
+  `ok: false` / `error: cast_failed` / `cast_error: cast_never_started`),
+  notice `cast_unconfirmed`, log `catt sender=lib unconfirmed`. Leftover
+  remux/LAN servers are bounded by `CATT_LIB_UNCONFIRMED_SERVE_S` (15 min)
+  plus the detached idle reaper. CLI remains when `catt_can_lib_load()` is
+  false, the LOAD was never sent, or the TV refused it.
 - LAN-proxy `open_upstream` / `probe` pin each hop across **all** `getaddrinfo`
   results (skip blocked, interleave IPv6/IPv4, 2 per family, one connect
   deadline — not N×timeout — then `getpeername` per attempt), reject

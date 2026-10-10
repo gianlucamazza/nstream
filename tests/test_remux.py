@@ -533,9 +533,9 @@ def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
 
     def fake_play(ip, url, **kw):
         seen.update(ip=ip, url=url, **kw)
-        return True
+        return caster.CATT_LIB_OK
 
-    monkeypatch.setattr(remux.caster, "catt_lib_play", fake_play)
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", fake_play)
     monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: pytest.fail("CLI fallback"))
     out = remux.cast_file(
         _cfg(),
@@ -579,7 +579,7 @@ def test_cast_file_catt_lib_follow_waits_for_start_before_idle(monkeypatch, tmp_
         "served_url",
         lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
     )
-    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: True)
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_OK)
     monkeypatch.setattr(remux, "_await_start", lambda dev: True)
     monkeypatch.setattr(remux, "_STATUS_POLL", 0.0)
     monkeypatch.setattr(remux.caster, "status", lambda dev: next(states))
@@ -607,7 +607,7 @@ def test_cast_file_catt_lib_start_miss_no_cli(monkeypatch, tmp_path):
         "served_url",
         lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
     )
-    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: True)
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_OK)
     monkeypatch.setattr(remux, "_await_start", lambda dev: False)
     monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda *a, **k: False)
     out = remux.cast_file(_cfg(), "The Nice Guys", str(f), device="10.0.0.5", follow=False)
@@ -618,20 +618,30 @@ def test_cast_file_catt_lib_start_miss_no_cli(monkeypatch, tmp_path):
 
 
 def _hanging_catt_device():
+    """play_media returns (LOAD out) then play_media_url hangs on the session wait."""
+
+    class _MC:
+        def play_media(self, *a, **k):
+            return None
+
     class _Ctrl:
+        def __init__(self):
+            self._controller = _MC()
+
         def prep_app(self):
             return None
 
         def play_media_url(self, *a, **k):
+            self._controller.play_media(*a, **k)
             time.sleep(30)
 
     class _Dev:
         def __init__(self, **kw):
-            return None
+            self._ctrl = _Ctrl()
 
         @property
         def controller(self):
-            return _Ctrl()
+            return self._ctrl
 
     return _Dev
 
@@ -644,6 +654,7 @@ def test_cast_file_lib_timeout_keeps_server(monkeypatch, tmp_path):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.caster, "_catt_device_cls", lambda: _hanging_catt_device())
     monkeypatch.setattr(remux.caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(remux.caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
     monkeypatch.setattr(
         remux.caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
     )
@@ -669,6 +680,7 @@ def test_cast_file_lib_timeout_follow_no_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.caster, "_catt_device_cls", lambda: _hanging_catt_device())
     monkeypatch.setattr(remux.caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(remux.caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
     monkeypatch.setattr(
         remux.caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
     )
@@ -697,7 +709,7 @@ def test_cast_file_lib_false_but_receiver_has_load_no_cli(monkeypatch, tmp_path)
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
     monkeypatch.setattr(remux.serve, "served_url", lambda ip, port, tok: url)
-    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: False)
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_FAIL)
     monkeypatch.setattr(remux, "_await_start", lambda dev: False)
     monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda dev, u: u == url)
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
@@ -719,8 +731,8 @@ def test_cast_file_catt_lib_uses_meta_content_type(monkeypatch, tmp_path):
     )  # fmt: skip
     monkeypatch.setattr(remux, "_await_start", lambda dev: True)
     monkeypatch.setattr(
-        remux.caster, "catt_lib_play",
-        lambda ip, url, **kw: seen.update(url=url, **kw) or True,
+        remux.caster, "catt_lib_outcome",
+        lambda ip, url, **kw: seen.update(url=url, **kw) or caster.CATT_LIB_OK,
     )  # fmt: skip
     remux.cast_file(
         _cfg(), "T", str(f), device="10.0.0.5", follow=False,
@@ -738,7 +750,7 @@ def test_cast_file_lib_false_follow_has_load_no_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
     monkeypatch.setattr(remux.serve, "served_url", lambda ip, port, tok: url)
-    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: False)
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_FAIL)
     monkeypatch.setattr(remux, "_await_start", lambda dev: False)
     monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda dev, u: u == url)
     states = iter(
@@ -752,6 +764,85 @@ def test_cast_file_lib_false_follow_has_load_no_cli(monkeypatch, tmp_path):
     assert out.started is True
     assert rec["popen"] == []
     assert srv.down
+
+
+def test_cast_file_lib_unconfirmed_reaps_detached(monkeypatch, tmp_path):
+    """Unconfirmed remux: no CLI, honest miss, reaper bounds the leftover server."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    scheduled: dict = {}
+    monkeypatch.setattr(
+        remux.serve, "schedule_reap", lambda fn, seconds: scheduled.update(fn=fn, s=seconds)
+    )
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: "http://192.168.1.10:45000/cast/tok/stream.mp4",
+    )
+    monkeypatch.setattr(
+        remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_UNCONFIRMED
+    )
+    monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda *a, **k: False)
+    monkeypatch.setattr(remux.caster, "_catt_unconfirmed_notice", lambda: None)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out.started is False and out.error == "cast_never_started"
+    assert rec["popen"] == [] and rec["killed"] == []
+    assert remux._read_state()["pid"] == 4242
+    assert scheduled["s"] == remux.util.CATT_LIB_UNCONFIRMED_SERVE_S
+    scheduled["fn"]()
+    assert rec["killed"] == [4242]
+    assert not f.exists()
+
+
+def test_cast_file_lib_unconfirmed_follow_reaps_inproc(monkeypatch, tmp_path):
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    srv = _FakeServer()
+    scheduled: dict = {}
+    monkeypatch.setattr(
+        remux.serve, "schedule_reap", lambda fn, seconds: scheduled.update(fn=fn, s=seconds)
+    )
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: "http://192.168.1.10:45000/cast/tok/stream.mp4",
+    )
+    monkeypatch.setattr(
+        remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_UNCONFIRMED
+    )
+    monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda *a, **k: False)
+    monkeypatch.setattr(remux.caster, "_catt_unconfirmed_notice", lambda: None)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out.started is False and out.error == "cast_never_started"
+    assert rec["popen"] == []
+    assert not srv.down
+    assert scheduled["s"] == remux.util.CATT_LIB_UNCONFIRMED_SERVE_S
+    scheduled["fn"]()
+    assert srv.down
+    assert not f.exists()
+
+
+def test_cast_file_lib_load_failed_falls_to_cli(monkeypatch, tmp_path):
+    """LOAD_FAILED after a sent LOAD: kill the unused server and let CLI run."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (777, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: "http://192.168.1.10:45000/cast/tok/stream.mp4",
+    )
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_FAIL)
+    monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda *a, **k: False)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out.started is True
+    assert rec["killed"] == [777]
+    assert rec["popen"]  # CLI fallback
 
 
 def test_cast_file_catt_sends_title_not_poster(monkeypatch, tmp_path):

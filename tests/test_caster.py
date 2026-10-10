@@ -33,7 +33,7 @@ def _catt_on_path(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_catt_lib(monkeypatch):
     """Default: no catt.api in the test env. Tests that pin the library LOAD
-    override `catt_can_lib_load` / `catt_lib_play` / `_catt_device_cls`."""
+    override `catt_can_lib_load` / `catt_lib_outcome` / `_catt_device_cls`."""
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
     monkeypatch.setattr(caster, "_catt_interpreter", lambda: None)
 
@@ -505,9 +505,9 @@ def test_cast_hotkey_lib_keeps_title(monkeypatch):
 
     def fake_play(device, url, **kw):
         seen.update(device=device, url=url, **kw)
-        return True
+        return caster.CATT_LIB_OK
 
-    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    monkeypatch.setattr(caster, "catt_lib_outcome", fake_play)
     calls = _cast_run(
         monkeypatch,
         info_seq=[
@@ -1053,9 +1053,9 @@ def test_catt_lib_play_used_before_cli(monkeypatch):
 
     def fake_play(ip, url, **kw):
         seen.update(ip=ip, url=url, **kw)
-        return True
+        return caster.CATT_LIB_OK
 
-    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    monkeypatch.setattr(caster, "catt_lib_outcome", fake_play)
     calls = _cast_run(monkeypatch)
     poster = "https://images.metahub.space/poster/medium/tt7068946/img"
     caster.cast(
@@ -1216,6 +1216,105 @@ def test_catt_load_helper_name_ctor(monkeypatch):
     assert seen["ctor"] == {"name": "43PUS9235/12"}
 
 
+class CastError(Exception):
+    """Name-matches catt.error.CastError for `_is_catt_session_wait`."""
+
+
+_CATT_SESSION_WAIT = "Waiting for the media session to become active timed out after 30 seconds"
+
+
+def _mc_controller(*, after=None, before=None, hang=False):
+    """play_media_url stand-in with `_controller.play_media` for the sent hook."""
+
+    class _MC:
+        def play_media(self, *a, **k):
+            return None
+
+    class _Ctrl:
+        def __init__(self):
+            self._controller = _MC()
+
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, *a, **k):
+            if before is not None:
+                raise before
+            self._controller.play_media(*a, **k)
+            if hang:
+                time.sleep(30)
+            if after is not None:
+                raise after
+
+    class _Dev:
+        def __init__(self, **kw):
+            self._ctrl = _Ctrl()
+
+        @property
+        def controller(self):
+            return self._ctrl
+
+    return _Dev
+
+
+def test_catt_load_helper_session_wait_is_rc4(monkeypatch):
+    class _MC:
+        def play_media(self, *a, **k):
+            return None
+
+    class _Ctrl:
+        def __init__(self):
+            self._controller = _MC()
+
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, url, **kw):
+            self._controller.play_media(url, kw.get("content_type"), **kw)
+            raise CastError(_CATT_SESSION_WAIT)
+
+    class _Dev:
+        def __init__(self, **kw):
+            self._ctrl = _Ctrl()
+
+        @property
+        def controller(self):
+            return self._ctrl
+
+    monkeypatch.setattr(
+        _catt_load.importlib, "import_module", lambda name: types.SimpleNamespace(CattDevice=_Dev)
+    )
+    monkeypatch.setattr(
+        _catt_load.sys, "stdin", io.StringIO(json.dumps({"ip": "10.0.0.5", "url": "http://u"}))
+    )
+    assert _catt_load.main() == 4
+
+
+def test_catt_load_helper_before_load_is_rc1(monkeypatch):
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, url, **kw):
+            raise TypeError("unexpected keyword argument")
+
+    class _Dev:
+        def __init__(self, **kw):
+            self._ctrl = _Ctrl()
+
+        @property
+        def controller(self):
+            return self._ctrl
+
+    monkeypatch.setattr(
+        _catt_load.importlib, "import_module", lambda name: types.SimpleNamespace(CattDevice=_Dev)
+    )
+    monkeypatch.setattr(
+        _catt_load.sys, "stdin", io.StringIO(json.dumps({"ip": "10.0.0.5", "url": "http://u"}))
+    )
+    assert _catt_load.main() == 1
+
+
 def test_catt_lib_play_inprocess_times_out(monkeypatch):
     class _Dev:
         def __init__(self, **kw):
@@ -1250,26 +1349,11 @@ def test_catt_helper_timeout_receiver_playing_is_loaded(monkeypatch):
 
 
 def test_catt_lib_play_timeout_receiver_playing_is_loaded(monkeypatch):
-    """Late play_media_url: TV already has the LOAD → treat as success, no fallback."""
+    """Late play_media_url after play_media returned: TV has the LOAD → success."""
     url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
-
-    class _Ctrl:
-        def prep_app(self):
-            return None
-
-        def play_media_url(self, *a, **k):
-            time.sleep(30)
-
-    class _Dev:
-        def __init__(self, **kw):
-            return None
-
-        @property
-        def controller(self):
-            return _Ctrl()
-
-    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _mc_controller(hang=True))
     monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
     monkeypatch.setattr(
         caster,
         "receiver_info",
@@ -1292,27 +1376,12 @@ def test_catt_receiver_has_load_matches_path(monkeypatch):
 
 
 def test_cast_lib_timeout_confirmed_skips_cli(monkeypatch):
-    """Direct cast: late LOAD + receiver playing → no second catt cast."""
+    """Direct cast: late LOAD after play_media + receiver playing → no second catt cast."""
     url = "http://u/stream.mp4"
-
-    class _Ctrl:
-        def prep_app(self):
-            return None
-
-        def play_media_url(self, *a, **k):
-            time.sleep(30)
-
-    class _Dev:
-        def __init__(self, **kw):
-            return None
-
-        @property
-        def controller(self):
-            return _Ctrl()
-
     monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
-    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _mc_controller(hang=True))
     monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
     monkeypatch.setattr(
         caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
     )
@@ -1323,17 +1392,43 @@ def test_cast_lib_timeout_confirmed_skips_cli(monkeypatch):
 
 
 def test_catt_lib_play_session_wait_raise_is_unconfirmed(monkeypatch):
-    """play_media_url raises after sending LOAD → loaded, unconfirmed (no CLI)."""
-    seen: dict = {}
+    """Post-LOAD session-wait CastError + empty receiver → unconfirmed, not success."""
+    monkeypatch.setattr(
+        caster, "_catt_device_cls", lambda: _mc_controller(after=CastError(_CATT_SESSION_WAIT))
+    )
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    assert (
+        caster.catt_lib_outcome(
+            "10.0.0.5",
+            url,
+            title="The Nice Guys",
+            meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+        )
+        == caster.CATT_LIB_UNCONFIRMED
+    )
+    assert (
+        caster.catt_lib_play(
+            "10.0.0.5",
+            url,
+            title="The Nice Guys",
+            meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+        )
+        is False
+    )
+
+
+def test_catt_lib_session_wait_without_hook_is_unconfirmed(monkeypatch):
+    """catt 0.13.3 CastError text is enough when `_controller` is missing."""
 
     class _Ctrl:
         def prep_app(self):
             return None
 
-        def play_media_url(self, url, **kw):
-            seen["url"] = url
-            seen["kw"] = kw
-            raise RuntimeError("CastError")
+        def play_media_url(self, *a, **k):
+            raise CastError(_CATT_SESSION_WAIT)
 
     class _Dev:
         def __init__(self, **kw):
@@ -1345,21 +1440,67 @@ def test_catt_lib_play_session_wait_raise_is_unconfirmed(monkeypatch):
 
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
     monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
-    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
-    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
-    assert caster.catt_lib_play(
-        "10.0.0.5",
-        url,
-        title="The Nice Guys",
-        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+    assert caster.catt_lib_outcome("10.0.0.5", "http://u", title="T") == caster.CATT_LIB_UNCONFIRMED
+
+
+def test_catt_lib_raise_before_load_is_fail(monkeypatch):
+    monkeypatch.setattr(
+        caster, "_catt_device_cls", lambda: _mc_controller(before=TypeError("bad kwargs"))
     )
-    assert seen["url"] == url
-    assert seen["kw"]["thumb"] == poster
-    assert seen["kw"]["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+    assert caster.catt_lib_outcome("10.0.0.5", "http://u", title="T") == caster.CATT_LIB_FAIL
+    assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
 
 
-def test_catt_helper_rc1_is_unconfirmed(monkeypatch):
-    """Helper rc 1 is play_media_url after LOAD — not a never-sent miss."""
+def test_catt_lib_session_wait_later_receiver_ok(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    infos = iter([{}, {"player_state": "PLAYING", "content_id": url}])
+    monkeypatch.setattr(
+        caster, "_catt_device_cls", lambda: _mc_controller(after=CastError(_CATT_SESSION_WAIT))
+    )
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: next(infos, {"player_state": "PLAYING", "content_id": url}),
+    )
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.3)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_POLL", 0.01)
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_lib_session_wait_load_failed(monkeypatch):
+    monkeypatch.setattr(
+        caster, "_catt_device_cls", lambda: _mc_controller(after=CastError(_CATT_SESSION_WAIT))
+    )
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {"player_state": "IDLE", "idle_reason": "ERROR", "error": "LOAD_FAILED"},
+    )
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+    assert caster.catt_lib_outcome("10.0.0.5", "http://u", title="T") == caster.CATT_LIB_FAIL
+    assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
+
+
+def test_catt_receiver_load_state_failed_and_ok(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(
+        caster, "receiver_info", lambda dev: {"player_state": "IDLE", "idleReason": "LOAD_FAILED"}
+    )
+    assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_FAIL
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {"player_state": "BUFFERING", "content_id": url},
+    )
+    assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_OK
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_UNCONFIRMED
+
+
+def test_catt_helper_rc1_never_sent(monkeypatch):
     url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
     monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
@@ -1372,7 +1513,70 @@ def test_catt_helper_rc1_is_unconfirmed(monkeypatch):
 
     monkeypatch.setattr(caster.subprocess, "run", lambda *a, **k: _P())
     monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    assert caster.catt_lib_outcome("10.0.0.5", url, title="T") == caster.CATT_LIB_FAIL
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is False
+
+
+def test_catt_helper_rc4_unconfirmed(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+
+    class _P:
+        returncode = 4
+        stdout = ""
+        stderr = "catt-load: media session unconfirmed"
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    assert caster.catt_lib_outcome("10.0.0.5", url, title="T") == caster.CATT_LIB_UNCONFIRMED
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is False
+
+
+def test_catt_helper_rc4_later_receiver_ok(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    infos = iter([{}, {"player_state": "PLAYING", "content_id": url}])
+
+    class _P:
+        returncode = 4
+        stdout = ""
+        stderr = "catt-load: media session unconfirmed"
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: next(infos, {"player_state": "PLAYING", "content_id": url}),
+    )
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.3)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_POLL", 0.01)
     assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_helper_rc4_load_failed(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+
+    class _P:
+        returncode = 4
+        stdout = ""
+        stderr = "catt-load: media session unconfirmed"
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {"player_state": "IDLE", "idle_reason": "ERROR", "error": "LOAD_FAILED"},
+    )
+    assert caster.catt_lib_outcome("10.0.0.5", url, title="T") == caster.CATT_LIB_FAIL
 
 
 def test_catt_helper_rc2_never_sent(monkeypatch):

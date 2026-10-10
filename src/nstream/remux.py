@@ -719,11 +719,12 @@ def _cast_file_via_catt_lib(
 ) -> cast_delivery.CastResult | None:
     """Serve the remux and LOAD via catt.api (title + https thumb + video/mp4 + BUFFERED).
 
-    None when catt.api is unavailable or no LOAD was sent, so `cast_file` falls back
-    to the CLI (temp kept). A library timeout or a `play_media_url` raise after the
-    LOAD is unconfirmed — do not CLI-overwrite metadata and do not kill a server the
-    TV is already reading. nstream owns the Range server (ADR 0007); catt is the
-    sender only.
+    None when catt.api is unavailable or no LOAD was sent / the TV refused it, so
+    `cast_file` falls back to the CLI (temp kept). A post-LOAD session wait that
+    never confirms is a CastResult with `started=False` / `error=cast_never_started`
+    — no CLI overwrite. The Range server is handed to the idle reaper
+    (`CATT_LIB_UNCONFIRMED_SERVE_S`). nstream owns the Range server (ADR 0007);
+    catt is the sender only.
     """
     if not caster.catt_can_lib_load():
         return None
@@ -745,7 +746,7 @@ def _cast_file_via_catt_lib(
         pid, port, token = spawned
         served = serve.served_url(bind_ip, port, token)
         sub_url = serve.served_sub_url(bind_ip, port, token) if vtt_persist else ""
-        ok = caster.catt_lib_play(
+        outcome = caster.catt_lib_outcome(
             device,
             served,
             title=title,
@@ -754,11 +755,26 @@ def _cast_file_via_catt_lib(
             content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
-        # LOAD already sent (ok) or the TV already has our path: never CLI-overwrite.
-        if not ok and not caster.catt_receiver_has_load(device, served):
+        has = (
+            False
+            if outcome == caster.CATT_LIB_OK
+            else caster.catt_receiver_has_load(device, served)
+        )
+        if outcome == caster.CATT_LIB_FAIL and not has:
             _kill(pid)
             _rm(vtt_persist)
             return None
+        if outcome == caster.CATT_LIB_UNCONFIRMED and not has:
+            _write_state(pid, file_path, device, mode="serve")
+            serve.schedule_reap(
+                lambda: _teardown(pid, file_path), util.CATT_LIB_UNCONFIRMED_SERVE_S
+            )
+            caster._catt_unconfirmed_notice()
+            if on_event:
+                on_event({"kind": "failed", "error": "cast_never_started", "title": title})
+            return cast_delivery.CastResult(
+                0.0, 0.0, bool(sub_paths), started=False, error="cast_never_started"
+            )
         _await_start(device)
         _write_state(pid, file_path, device, mode="serve")
         ui.cast_live(device, follow=False)
@@ -770,8 +786,9 @@ def _cast_file_via_catt_lib(
     served = serve.served_url(bind_ip, port, server.token)
     sub_url = serve.served_sub_url(bind_ip, port, server.token) if vtt else ""
     keep_temp = True
+    hand_off = False
     try:
-        ok = caster.catt_lib_play(
+        outcome = caster.catt_lib_outcome(
             device,
             served,
             title=title,
@@ -780,11 +797,30 @@ def _cast_file_via_catt_lib(
             content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
-        # Do not treat a pre-start IDLE as ended — wait for PLAYING first.
-        # A sent LOAD (ok) or the TV already on our path: do not return None
-        # (that would CLI-fallback / second LOAD) and do not kill the server.
-        if not ok and not caster.catt_receiver_has_load(device, served):
+        has = (
+            False
+            if outcome == caster.CATT_LIB_OK
+            else caster.catt_receiver_has_load(device, served)
+        )
+        if outcome == caster.CATT_LIB_FAIL and not has:
             return None
+        if outcome == caster.CATT_LIB_UNCONFIRMED and not has:
+
+            def _drop() -> None:
+                serve.close_server(server)
+                _rm(file_path)
+                _rm(f"{file_path}.vtt")
+
+            serve.register_inproc_proxy(_drop)
+            serve.schedule_reap(serve.reap_inproc_proxy, util.CATT_LIB_UNCONFIRMED_SERVE_S)
+            caster._catt_unconfirmed_notice()
+            keep_temp = True
+            hand_off = True
+            if on_event:
+                on_event({"kind": "failed", "error": "cast_never_started", "title": title})
+            return cast_delivery.CastResult(
+                0.0, 0.0, bool(sub_paths), started=False, error="cast_never_started"
+            )
         _await_start(device)
         keep_temp = False
         ui.cast_live(device, follow=True)
@@ -805,10 +841,11 @@ def _cast_file_via_catt_lib(
                 subprocess.run(["catt", "-d", device, "stop"], capture_output=True, text=True)
         return cast_delivery.CastResult(pos, dur, bool(sub_paths), started=True)
     finally:
-        serve.close_server(server)
-        if not keep_temp:
-            _rm(file_path)
-            _rm(f"{file_path}.vtt")
+        if not hand_off:
+            serve.close_server(server)
+            if not keep_temp:
+                _rm(file_path)
+                _rm(f"{file_path}.vtt")
 
 
 def _cast_file_via_bridge(
