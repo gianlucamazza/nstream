@@ -3,6 +3,7 @@ loop (resume/auto-advance), and the in-cast audio-language switch."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,8 @@ import pytest
 
 from nstream import cast_delivery, caster
 from nstream.config import Config
+
+_DATA = Path(__file__).resolve().parent / "data"
 
 CFG = Config(torrentio_base="tb")
 
@@ -292,6 +295,8 @@ def test_cast_builds_command_with_seek_and_sub(monkeypatch):
     assert "cast" in launch and "http://u" in launch
     assert "-t" in launch and "125" in launch
     assert "-s" in launch and "/tmp/x.srt" in launch
+    assert launch[launch.index("-l") + 1] == "Dune"
+    assert launch[launch.index("--stream-type") + 1] == "BUFFERED"
 
 
 def test_cast_tracks_position_to_the_end(monkeypatch):
@@ -835,3 +840,59 @@ def test_status_reports_the_probed_duration_on_a_live_cast(monkeypatch):
     monkeypatch.setattr(caster.cast_delivery, "live_duration", lambda d: 6472.0)
     st = caster.status("10.0.0.5")
     assert st["position"] == 3100.0 and st["duration"] == 6472.0
+
+
+# --- catt 0.13 LOAD / MediaInformation (ADR 0050) ---------------------------
+
+
+def _fixture_media(name: str) -> dict:
+    raw = json.loads((_DATA / name).read_text())
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def test_catt_media_info_remux_file_matches_fixture():
+    """catt CLI remux/file LOAD: title + BUFFERED + video/mp4; no images (no --thumb)."""
+    got = caster.catt_cli_media_info("The Nice Guys")
+    assert got == _fixture_media("catt_load_mediainfo_remux.json")
+    assert "images" not in got["metadata"] and "thumb" not in got["metadata"]
+    assert "contentId" not in got  # never a debrid / LAN URL in the fixture contract
+
+
+def test_catt_media_info_poster_is_play_media_url_only():
+    """pychromecast play_media_url *would* send images[] when thumb= is set.
+    catt 0.13 CLI cannot; this pins the artwork residual, not a shipped catt argv."""
+    poster = "https://images.example.test/poster/tt7068946.jpg"
+    got = caster.catt_media_info(title="The Nice Guys", poster=poster)
+    assert got == _fixture_media("catt_load_mediainfo_with_poster.json")
+    argv = caster.catt_cast_argv("10.0.0.5", "/tmp/cast-x.mp4", title="The Nice Guys")
+    assert "--thumb" not in argv and poster not in argv
+
+
+def test_catt_cast_argv_title_and_buffered(monkeypatch):
+    calls = _cast_run(monkeypatch)
+    meta = caster.CastMeta(
+        poster="https://images.example.test/poster/tt7068946.jpg",
+        content_type="video/mp4",
+    )
+    caster.cast(
+        CFG, "The Nice Guys", "http://u", device="TV", follow=False, meta=meta
+    )
+    launch = calls[0]
+    assert launch[launch.index("-l") + 1] == "The Nice Guys"
+    assert launch[launch.index("--stream-type") + 1] == "BUFFERED"
+    assert meta.poster not in launch
+
+
+def test_catt_display_title_series():
+    meta = caster.CastMeta(series_title="The Boys", season=2, episode=5)
+    assert caster.catt_display_title("Good for the Soul", meta) == (
+        "The Boys · S02E05 · Good for the Soul"
+    )
+    assert caster.catt_display_title("", meta) == "The Boys · S02E05"
+    assert caster.catt_display_title("Dune", None) == "Dune"
+
+
+def test_catt_cast_argv_omits_empty_title():
+    args = caster.catt_cast_argv("1.2.3.4", "/tmp/cast-x.mp4", title="  ")
+    assert "-l" not in args
+    assert args[-2:] == ["--stream-type", "BUFFERED"]

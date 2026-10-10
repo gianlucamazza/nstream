@@ -1,0 +1,14 @@
+{
+  "_provenance": {
+    "recorded": "2026-10-10",
+    "source": "catt v0.13.3 DefaultCastController.play_media_url + pychromecast MediaController._send_start_play_media",
+    "field": "Odroid N2 → Philips 43PUS9235/12, cast_remux file, castbridge absent, CC1AD845",
+    "note": "CLI-reachable LOAD only. catt 0.13 has -l/--title and --stream-type; no --thumb. contentId omitted (catt's LAN file URL; never a debrid token). metadataType 0 = GENERIC (pychromecast default when unset)."
+  },
+  "streamType": "BUFFERED",
+  "contentType": "video/mp4",
+  "metadata": {
+    "title": "The Nice Guys",
+    "metadataType": 0
+  }
+}

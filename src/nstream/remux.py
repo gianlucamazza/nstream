@@ -570,7 +570,8 @@ def cast_file(
     the file and **castbridge** LOADs its URL with metadata (so the TV card + HUD widget light
     up); when `sub_paths` is set the server also serves a WebVTT track the LOAD side-loads (so subs
     now ride the native path too, `sub_lang` labelling the track). Falls back to **catt**
-    serving+casting (no metadata, subs via `-s`) when castbridge is unavailable or can't start.
+    serving+casting (`-l` title + `--stream-type BUFFERED`, subs via `-s`; no poster — catt
+    0.13 has no `--thumb`, ADR 0050) when castbridge is unavailable or can't start.
     `follow=False` (headless) leaves the server detached and records its PID for `--stop`/GC;
     `follow=True` serves until playback ends, then removes the temp file."""
     serve.reap_sub_server()  # a new cast replaces any standalone Tier-1 subtitle server
@@ -607,11 +608,13 @@ def cast_file(
             shutil.copyfile(sub_paths[0], sub_copy)
             sub_paths = (sub_copy,)
     base = ["catt", *(["-d", device] if device else [])]
-    launch = [*base, "cast", file_path]
-    if start and start > 1:
-        launch += ["-t", str(int(start))]
-    if sub_paths:
-        launch += ["-s", sub_paths[0]]
+    launch = caster.catt_cast_argv(
+        device,
+        file_path,
+        title=caster.catt_display_title(title, meta),
+        start=start,
+        sub_path=sub_paths[0] if sub_paths else None,
+    )
     dest = device or "Chromecast"
     # Capture catt's stderr to a temp file (a detached pipe would have no reader): if the
     # cast never starts, its tail says why (device unreachable, refused media, …) — the

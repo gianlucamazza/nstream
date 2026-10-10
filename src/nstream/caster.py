@@ -29,9 +29,10 @@ _log = log.get_logger("cast")
 
 @dataclass(frozen=True)
 class CastMeta:
-    """Now-playing metadata sent to the receiver (and surfaced on the HUD widget) when casting
-    via castbridge. Sourced from the Cinemeta meta in `cli`. Empty fields are omitted, so the
-    LOAD degrades to a Movie block (poster/subtitle) or a bare title as available."""
+    """Now-playing metadata for the receiver LOAD. castbridge sends the full block
+    (Movie/TvShow + poster). The catt 0.13 CLI fallback sends title + streamType only
+    (`-l`, `--stream-type`); it has no `--thumb` (ADR 0050). Sourced from Cinemeta in
+    `cli` / `headless`. Empty fields are omitted."""
 
     poster: str = ""
     subtitle: str = ""
@@ -39,6 +40,114 @@ class CastMeta:
     season: int = 0
     episode: int = 0
     content_type: str = ""
+
+
+# catt 0.13 DefaultCastController.play_media_url → pychromecast play_media.
+# CLI exposes `-l/--title` and `--stream-type`; not `--thumb` / metadataType.
+CATT_STREAM_BUFFERED = "BUFFERED"
+CATT_METADATA_GENERIC = 0  # pychromecast METADATA_TYPE_GENERIC when metadataType omitted
+
+
+def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
+    """Single-line title for catt `-l`. The CLI has no TvShow block, so series become
+    `Show · SxxEyy · episode` (same shape as `labels.display_title`, no labels import)."""
+    name = " ".join((title or "").split())
+    if not meta:
+        return name
+    show = " ".join((meta.series_title or "").split())
+    if not show:
+        return name
+    if meta.season > 0 and meta.episode > 0:
+        ep = f"S{meta.season:02d}E{meta.episode:02d}"
+        if name and name != show:
+            return f"{show} · {ep} · {name}"
+        return f"{show} · {ep}"
+    return show
+
+
+def catt_cast_argv(
+    device: str | None,
+    source: str,
+    *,
+    title: str = "",
+    start: float | None = None,
+    sub_path: str | None = None,
+    stream_type: str = CATT_STREAM_BUFFERED,
+) -> list[str]:
+    """`catt cast` argv for a URL or local remux file (ADR 0050).
+
+    `-l` overrides catt's local-file stem / yt-dlp title. `--stream-type BUFFERED` is
+    required for a complete remux: catt's StreamInfo only infers BUFFERED on a remote
+    URL that yt-dlp gave a duration, so a `cast-*.mp4` would otherwise LOAD with
+    `streamType: null` (pychromecast default LIVE is not applied when the kwarg is
+    None). No `--thumb`: catt 0.13 has none. Never put a debrid URL in logs — callers
+    redact `source` themselves.
+    """
+    args = ["catt", *(["-d", device] if device else []), "cast", source]
+    if start and start > 1:
+        args += ["-t", str(int(start))]
+    if sub_path:
+        args += ["-s", sub_path]
+    label = " ".join(title.split()) if title else ""
+    if label:
+        args += ["-l", label]
+    if stream_type:
+        args += ["--stream-type", stream_type]
+    return args
+
+
+def catt_media_info(
+    *,
+    title: str = "",
+    poster: str = "",
+    content_type: str = "video/mp4",
+    stream_type: str = CATT_STREAM_BUFFERED,
+    content_id: str = "",
+) -> dict:
+    """MediaInformation body catt 0.13 / pychromecast `play_media` puts on LOAD.
+
+    Reverse-engineered from `DefaultCastController.play_media_url` (catt v0.13.3) and
+    pychromecast `MediaController._send_start_play_media`. `content_id` is the Cast
+    `contentId` (the media URL). Tests pass a label, never a debrid URL. `poster`
+    becomes `metadata.thumb` + `images[0].url` — the CLI cannot set it; castbridge
+    can (`bridge._media_load_args`). metadataType is GENERIC (0) unless a caller
+    upgrades it; Movie/TvShow is a castbridge-only block.
+    """
+    metadata: dict = {}
+    label = " ".join(title.split()) if title else ""
+    if label:
+        metadata["title"] = label
+    image = (poster or "").strip()
+    if image:
+        metadata["thumb"] = image
+        metadata["images"] = [{"url": image}]
+    if metadata:
+        metadata["metadataType"] = CATT_METADATA_GENERIC
+    media: dict = {
+        "streamType": stream_type or CATT_STREAM_BUFFERED,
+        "contentType": content_type or "video/mp4",
+        "metadata": metadata,
+    }
+    if content_id:
+        media["contentId"] = content_id
+    return media
+
+
+def catt_cli_media_info(
+    title: str,
+    meta: CastMeta | None = None,
+    *,
+    content_type: str = "video/mp4",
+    stream_type: str = CATT_STREAM_BUFFERED,
+    content_id: str = "",
+) -> dict:
+    """LOAD MediaInformation the catt **CLI** can actually send (no poster)."""
+    return catt_media_info(
+        title=catt_display_title(title, meta),
+        content_type=(meta.content_type if meta and meta.content_type else content_type),
+        stream_type=stream_type,
+        content_id=content_id,
+    )
 
 
 # Callback the headless `--follow` JSONL path passes in to receive normalized playback events
@@ -285,10 +394,11 @@ def cast(
 ) -> cast_delivery.CastResult:
     """Cast `url` to a Chromecast and track playback so resume and series auto-advance work like
     the mpv path. Returns a `CastResult` — read it by attribute (ADR 0031). The advance decision
-    belongs to `cast_flow`, not to a delivery backend (ADR 0029). Prefers the **castbridge**
-    native sender (metadata-rich LOAD + a real event stream) when its binary is available; falls
-    back to **catt** (no metadata) otherwise, when castbridge can't start, or for the interactive
-    in-cast audio switch ('a'), which remains a catt-path capability (see docs/adr/0007).
+    belongs to `cast_flow`, not to a delivery backend (ADR 0029).     Prefers the **castbridge**
+    native sender (Movie/TvShow LOAD + poster + a real event stream) when its binary is
+    available; falls back to **catt** (`-l` title + `--stream-type BUFFERED`; no poster —
+    the 0.13 CLI has no `--thumb`, ADR 0050) otherwise, when castbridge can't start, or
+    for the interactive in-cast audio switch ('a') (see docs/adr/0007, docs/adr/0050).
     `on_event` receives normalized events for the headless `--follow` JSONL path.
 
     `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast. Both
@@ -325,6 +435,7 @@ def cast(
         choose_lang=choose_lang,
         follow=follow,
         on_event=on_event,
+        meta=meta,
     )
     # Explicit construction, never `(*catt_result, …)`: splatting a NamedTuple flattens it
     # into a wider plain tuple, losing both the type and the arity with no error here (ADR 0031).
@@ -465,21 +576,28 @@ def _cast_via_catt(
     choose_lang: ChooseLang | None = None,
     follow: bool = True,
     on_event: EventCb | None = None,
+    meta: CastMeta | None = None,
 ) -> cast_delivery.CastResult:
     """Cast `url` to a Chromecast via `catt`, then poll its status so resume and
     series auto-advance work just like the mpv path. Returns a `CastResult` whose `started`
     separates a real handoff from a failure — both used to be `(0.0, 0.0)` (ADR 0031).
     `cast_flow` turns pos/dur into the advance decision (ADR 0029).
 
+    The LOAD carries `-l` title and `--stream-type BUFFERED` (ADR 0050). Poster is
+    omitted: catt 0.13 has no `--thumb`. `meta.content_type` is not a CLI flag —
+    catt guesses from the path; a remux `.mp4` is `video/mp4`.
+
     `follow=False` (headless fire-and-return): once `catt cast` has handed the media to
     the receiver, return immediately without the resume poll loop — so an agent isn't
     held for the whole runtime. No position is tracked (no resume) in that mode."""
     base = ["catt", *(["-d", device] if device else [])]
-    launch = [*base, "cast", url]
-    if start and start > 1:
-        launch += ["-t", str(int(start))]
-    if sub_paths:  # catt takes a single subtitle file
-        launch += ["-s", catt_sub(sub_paths[0])]
+    launch = catt_cast_argv(
+        device,
+        url,
+        title=catt_display_title(title, meta),
+        start=start,
+        sub_path=catt_sub(sub_paths[0]) if sub_paths else None,
+    )
     dest = device or "Chromecast"
     # Never log the URL itself: the redaction regexes cover the known token carriers, but a
     # signed native-CDN link (TorBox/Premiumize requestdl) is a capability in its own right

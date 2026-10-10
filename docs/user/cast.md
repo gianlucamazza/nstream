@@ -14,8 +14,11 @@ See [selection.md](../selection.md) for scoring and cast vetting.
 | `ffmpeg` / `ffprobe` | Recommended | Track probe, Tier-2 remux, container rewrap |
 | LAN reachability | Required | Host ↔ TV; Tier-2 needs inbound ports (below) |
 
-Without castbridge, nstream falls back to `catt` (same cast, no now-playing metadata / rich
-events). Without the mirror binary, `--mirror` / auto mirror-over-remux is unavailable.
+Without castbridge, nstream falls back to `catt` 0.13 (same cast; title + `BUFFERED`
+via `-l` / `--stream-type`, ADR 0050). The catt CLI has no `--thumb`, so the TV
+now-playing card stays without artwork until castbridge LOADs `metadata.images`.
+Rich events still need castbridge. Without the mirror binary, `--mirror` / auto
+mirror-over-remux is unavailable.
 
 A registered Custom Receiver is optional (`cast_receiver_app_id` in config). Empty keeps
 Google's Default Media Receiver. The id is forwarded only when **castbridge** is the
@@ -87,6 +90,28 @@ decode skip live. The complete-file remux is the fallback when the live start fa
 stderr shows a prepare message during remux. JSON field `reencoded: true` when remux was used.
 `--stop` tears down the remux server and temp file; stale temps are GC'd on the next run.
 
+### Remux / file metadata on the TV (ADR 0050)
+
+A complete-file remux is a local `cast-*.mp4`. catt would otherwise LOAD that stem as
+the title and leave `streamType` unset (generic chrome, no duration). nstream now
+passes the Cinemeta title (`-l`) and `--stream-type BUFFERED` on both the remux/file
+and the direct-URL catt paths — same DMR (`CC1AD845`) as a non-remux catt cast.
+
+| LOAD field | catt 0.13 remux/file | catt 0.13 direct URL | castbridge (either tier) |
+| --- | --- | --- | --- |
+| `metadata.title` | Cinemeta title (`-l`) | same | same (+ TvShow block) |
+| `metadata.images` / poster | **not sent** (no `--thumb`) | **not sent** | Cinemeta HTTPS poster |
+| `contentType` | `video/mp4` (`.mp4` guess) | path/URL guess | declared (`_with_container_mime` / remux MP4) |
+| `streamType` | `BUFFERED` | `BUFFERED` | BUFFERED (live HLS is a different path) |
+
+Artwork is a **sender** gap, not a receiver-hard limit: this DMR already echoes
+poster on a castbridge LOAD (ADR 0007). A custom receiver id is not required for
+chrome and is not launched on catt (`receiver_app_ignored`, ADR 0013 / 0045).
+Do not treat a 720 H.264 remux as the metadata fix.
+
+`--json` is unchanged. `--status` already reports the receiver's `title`,
+`content_type`, and `stream_type`.
+
 ### Firewall (Tier-2 only)
 
 The TV **pulls** the remuxed file from the host (Range HTTP on ports **45000–47000**).
@@ -130,7 +155,7 @@ Continuation policy (who decides “next episode”): ADR 0029. Delivery must re
 ## Config keys
 
 See the **Cast** table in [config.md](config.md). Related ADRs: 0005–0008, 0010–0013,
-0015–0017, 0022–0023, 0031, 0045.
+0015–0017, 0022–0023, 0031, 0045, 0050.
 
 `--volume N` / `catt volume N` is Cast percent (0–100 → `SET_VOLUME` 0–1). On
 `volume_control_type: master` that is the device master, not a second stream fader.

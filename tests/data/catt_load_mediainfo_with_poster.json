@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "recorded": "2026-10-10",
+    "source": "same play_media_url kwargs when thumb= is set (castbridge _media_load_args poster; catt CLI cannot)",
+    "note": "Pin of the artwork residual: DMR accepts images[] (ADR 0007 field validation). catt 0.13 CLI has no --thumb, so the production catt-only board never sends this block. Fake poster host — not fetched in tests."
+  },
+  "streamType": "BUFFERED",
+  "contentType": "video/mp4",
+  "metadata": {
+    "title": "The Nice Guys",
+    "thumb": "https://images.example.test/poster/tt7068946.jpg",
+    "images": [{"url": "https://images.example.test/poster/tt7068946.jpg"}],
+    "metadataType": 0
+  }
+}

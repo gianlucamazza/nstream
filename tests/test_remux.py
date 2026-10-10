@@ -450,7 +450,10 @@ def test_cast_file_catt_headless_detaches_and_keeps_state(monkeypatch, tmp_path)
     )  # fmt: skip
     assert (out.pos, out.dur, out.subs_delivered) == (0.0, 0.0, True)
     args, kw = rec["popen"][0]
-    assert args == ["catt", "-d", "10.0.0.5", "cast", str(f), "-t", "30", "-s", "/s.srt"]
+    assert args == [
+        "catt", "-d", "10.0.0.5", "cast", str(f),
+        "-t", "30", "-s", "/s.srt", "-l", "T", "--stream-type", "BUFFERED",
+    ]  # fmt: skip
     assert kw["start_new_session"] is True  # detached: outlives the headless return
     assert remux._read_state() == {
         "pid": 4242, "file": str(f), "device": "10.0.0.5", "mode": "catt",
@@ -458,6 +461,32 @@ def test_cast_file_catt_headless_detaches_and_keeps_state(monkeypatch, tmp_path)
     assert proc.wait_calls == 0 and rec["killed"] == []
     assert f.exists()
     assert list(tmp_path.glob("catt-*.log")) == []  # diagnosis capture removed on startup
+
+
+def test_cast_file_catt_sends_title_not_poster(monkeypatch, tmp_path):
+    """catt 0.13 remux/file LOAD: -l + BUFFERED. Poster stays off the argv (no --thumb)."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    poster = "https://images.example.test/poster/tt7068946.jpg"
+    remux.cast_file(
+        _cfg(),
+        "The Nice Guys",
+        str(f),
+        device="10.0.0.5",
+        follow=False,
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    args = rec["popen"][0][0]
+    assert args[args.index("-l") + 1] == "The Nice Guys"
+    assert args[args.index("--stream-type") + 1] == "BUFFERED"
+    assert poster not in args and "--thumb" not in args
+    assert caster.catt_cli_media_info(
+        "The Nice Guys", caster.CastMeta(poster=poster, content_type="video/mp4")
+    ) == {
+        "streamType": "BUFFERED",
+        "contentType": "video/mp4",
+        "metadata": {"title": "The Nice Guys", "metadataType": 0},
+    }
 
 
 def test_cast_file_catt_warns_when_custom_receiver_ignored(monkeypatch, tmp_path):
