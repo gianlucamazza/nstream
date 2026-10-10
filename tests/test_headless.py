@@ -28,7 +28,7 @@ from nstream import (
 )
 from nstream.config import Config
 from nstream.playback import PlaybackOutcome
-from nstream.types import HistoryEntry, Meta
+from nstream.types import HistoryEntry, Meta, Stream
 
 CFG = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"])
 
@@ -179,7 +179,7 @@ def test_run_auto_movie_emits_json(monkeypatch, capsys):
 def test_describe_stream_uses_probed_codec_on_mismatch():
     """Release name says x265 HEVC; a cache-hit probe (Deadpool field report) is h264."""
     url = "http://rd.example/deadpool.mp4"
-    stream = {
+    stream: Stream = {
         "name": "[RD+] Torrentio\n1080p",
         "title": "Deadpool.2016.1080p.BluRay.x265.HEVC-GRP\n👤 9 💾 8 GB",
         "url": url,
@@ -196,7 +196,7 @@ def test_describe_stream_uses_probed_codec_on_mismatch():
 
 
 def test_describe_stream_marks_unprobed_codec_as_claimed():
-    stream = {
+    stream: Stream = {
         "name": "[RD+] Torrentio\n1080p",
         "title": "Deadpool.2016.1080p.BluRay.x265.HEVC-GRP\n👤 9 💾 8 GB",
         "url": "http://rd.example/unprobed.mp4",

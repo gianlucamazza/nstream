@@ -196,7 +196,8 @@ def test_cached_tracks_is_cache_only(monkeypatch):
     monkeypatch.setattr(tracks, "_ffprobe", lambda *a, **k: pytest.fail("must not probe"))
     assert tracks.cached_tracks("http://missing") is None
     tracks._cache["http://hit"] = tracks.Tracks(video_codec="hevc", n_video=1)
-    assert tracks.cached_tracks("http://hit").video_codec == "hevc"
+    hit = tracks.cached_tracks("http://hit")
+    assert hit is not None and hit.video_codec == "hevc"
 
 
 def test_probe_tracks_is_bounded(monkeypatch):
