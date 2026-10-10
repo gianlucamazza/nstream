@@ -73,6 +73,7 @@ CATT_METADATA_GENERIC = 0
 CATT_METADATA_MOVIE = 1  # pychromecast METADATA_TYPE_MOVIE
 CATT_METADATA_TVSHOW = 2  # pychromecast METADATA_TYPE_TVSHOW
 CATT_LOAD_META_MIN = (0, 13, 2)
+_SUB_IDLE_FOR = "_nstream_sub_idle_for"  # stashed on caption kwargs; never a LOAD field
 _CATT_POSTER_HOST_SUFFIX = (".metahub.space", ".strem.io")
 _CATT_POSTER_HOSTS = frozenset(
     {
@@ -443,10 +444,16 @@ def catt_can_lib_load() -> bool:
     return catt_supports_load_meta() and _catt_interpreter() is not None
 
 
-_LIB_OK = "ok"
-_LIB_FAIL = "fail"
-_LIB_UNCONFIRMED = "unconfirmed"  # deadline hit; LOAD may already be on the TV
+CATT_LIB_OK = "ok"
+CATT_LIB_FAIL = "fail"
+CATT_LIB_UNCONFIRMED = "unconfirmed"  # LOAD sent; receiver not yet confirmed
+_LIB_OK = CATT_LIB_OK
+_LIB_FAIL = CATT_LIB_FAIL
+_LIB_UNCONFIRMED = CATT_LIB_UNCONFIRMED
 _CATT_RECEIVER_ACTIVE = frozenset({"PLAYING", "PAUSED", "BUFFERING"})
+# catt 0.13.3 DefaultCastController.play_media_url after play_media() returns.
+_CATT_SESSION_WAIT = "media session to become active timed out"
+_CATT_IDLE_FAIL = frozenset({"ERROR", "LOAD_FAILED"})
 
 
 def _same_cast_content(content_id: str, url: str) -> bool:
@@ -467,27 +474,100 @@ def catt_receiver_has_load(device: str | None, url: str) -> bool:
     after the LOAD, so a deadline can fire while the TV already has the media.
     Never logs `url`.
     """
+    return catt_receiver_load_state(device, url) == _LIB_OK
+
+
+def catt_receiver_load_state(device: str | None, url: str) -> str:
+    """Receiver vs our LOAD: `ok` / `failed` / `unconfirmed` (still pending).
+
+    `failed` is an explicit refuse (LOAD_FAILED / idle_reason ERROR) for
+    *our* content_id (or an empty one). A different content_id is leftover
+    from an earlier session. INTERRUPTED is never a refuse. Never logs `url`.
+    """
     info = receiver_info(device)
     if not info:
-        return False
-    state = str(info.get("player_state") or "")
-    if state not in _CATT_RECEIVER_ACTIVE:
-        return False
+        return _LIB_UNCONFIRMED
+    state = str(info.get("player_state") or "").upper()
+    idle = str(info.get("idle_reason") or info.get("idleReason") or "").upper()
+    err = str(
+        info.get("error") or info.get("receiver_error") or info.get("last_error") or ""
+    ).upper()
     content = str(info.get("content_id") or info.get("contentId") or "")
-    return _same_cast_content(content, url)
+    blob = f"{state} {idle} {err}"
+    refused = (
+        state in _CATT_IDLE_FAIL
+        or idle in _CATT_IDLE_FAIL
+        or "LOAD_FAILED" in blob
+        or (err in _CATT_IDLE_FAIL and state in {"IDLE", "UNKNOWN", ""})
+    )
+    if refused:
+        # INTERRUPTED is a replaced session, not a refuse. ERROR/LOAD_FAILED
+        # about a *different* content_id is leftover from an earlier cast.
+        if not content or _same_cast_content(content, url):
+            return _LIB_FAIL
+        return _LIB_UNCONFIRMED
+    if state in _CATT_RECEIVER_ACTIVE and _same_cast_content(content, url):
+        return _LIB_OK
+    return _LIB_UNCONFIRMED
 
 
-def _catt_lib_finish(device: str, url: str, outcome: str) -> bool:
-    """Map a lib/helper outcome to bool. Timeout is 'loaded, unconfirmed'."""
+def _is_catt_session_wait(exc: BaseException) -> bool:
+    """catt 0.13.3 post-LOAD CastError from block_until_active, not prep_app."""
+    return type(exc).__name__ == "CastError" and _CATT_SESSION_WAIT in str(exc)
+
+
+def _hook_catt_play_media(controller, box: dict):
+    """Wrap MediaController.play_media. Returns a restore() or None.
+
+    `sent` is set only after play_media returns. `abandoned` skips a late
+    send after nstream has already given up (and may have CLI-fallen-back).
+    """
+    inner = getattr(controller, "_controller", None)
+    if inner is None:
+        return None
+    play = getattr(inner, "play_media", None)
+    if not callable(play):
+        return None
+
+    def wrapped(*a, **k):
+        if box.get("abandoned"):
+            return None
+        out = play(*a, **k)
+        box["sent"] = True
+        return out
+
+    inner.play_media = wrapped
+
+    def restore() -> None:
+        inner.play_media = play
+
+    return restore
+
+
+def _catt_lib_finish(device: str, url: str, outcome: str) -> str:
+    """Map a lib/helper outcome. UNCONFIRMED polls the receiver for a grace window.
+
+    Match → ok. LOAD_FAILED / idle ERROR → fail (caller may CLI). Still unknown
+    at the bound → unconfirmed: no second CLI LOAD (keep metadata).
+    """
     if outcome == _LIB_OK:
-        return True
+        return _LIB_OK
     if outcome != _LIB_UNCONFIRMED:
-        return False
-    if catt_receiver_has_load(device, url):
-        _log.debug("catt lib LOAD unconfirmed → receiver already has media")
-        return True
-    _log.warning("catt lib LOAD timed out; receiver has no matching media")
-    return False
+        return _LIB_FAIL
+    deadline = time.monotonic() + util.CATT_LIB_CONFIRM_GRACE
+    while True:
+        state = catt_receiver_load_state(device, url)
+        if state == _LIB_OK:
+            _log.debug("catt lib LOAD unconfirmed → receiver already has media")
+            return _LIB_OK
+        if state == _LIB_FAIL:
+            _log.warning("catt lib LOAD refused (LOAD_FAILED)")
+            return _LIB_FAIL
+        leftover = deadline - time.monotonic()
+        if leftover <= 0:
+            _log.info("catt sender=lib unconfirmed")
+            return _LIB_UNCONFIRMED
+        time.sleep(min(util.CATT_LIB_CONFIRM_POLL, leftover))
 
 
 def _catt_play_media_kwargs(load: dict) -> dict:
@@ -498,32 +578,44 @@ def _catt_play_media_kwargs(load: dict) -> dict:
 
 
 def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) -> str:
-    """play_media_url on a worker thread. Timeout → unconfirmed (LOAD may be sent)."""
-    box: dict[str, object] = {"ok": False, "err": ""}
+    """play_media_url on a worker thread. Sent only after play_media returns."""
+    box: dict[str, object] = {"ok": False, "err": "", "sent": False, "abandoned": False}
     kwargs = _catt_play_media_kwargs(load)
 
     def run() -> None:
+        restore = None
         try:
             dev = Device(**ident)
-            dev.controller.prep_app()
-            dev.controller.play_media_url(url, **kwargs)
+            ctrl = dev.controller
+            restore = _hook_catt_play_media(ctrl, box)
+            ctrl.prep_app()
+            ctrl.play_media_url(url, **kwargs)
             box["ok"] = True
-        except Exception as exc:  # catt/pychromecast: device missing, LOAD refused, …
+        except Exception as exc:  # catt/pychromecast: device missing, session wait, …
             box["err"] = type(exc).__name__
+            if _is_catt_session_wait(exc):
+                box["sent"] = True
+        finally:
+            if restore is not None:
+                restore()
 
     worker = threading.Thread(target=run, name="nstream-catt-lib", daemon=True)
     worker.start()
     worker.join(util.CATT_LIB_LOAD_TIMEOUT)
     if worker.is_alive():
+        box["abandoned"] = True
         _log.warning("catt lib LOAD timed out")
-        return _LIB_UNCONFIRMED
+        return _LIB_UNCONFIRMED if box["sent"] else _LIB_FAIL
     if box["ok"]:
         return _LIB_OK
+    if box["sent"]:
+        _log.warning("catt lib LOAD unconfirmed after play_media: %s", box["err"] or "unknown")
+        return _LIB_UNCONFIRMED
     _log.warning("catt lib LOAD failed: %s", box["err"] or "unknown")
     return _LIB_FAIL
 
 
-def catt_lib_play(
+def catt_lib_outcome(
     device: str,
     url: str,
     *,
@@ -532,15 +624,13 @@ def catt_lib_play(
     start: float | None = None,
     content_type: str = "video/mp4",
     subtitle_url: str = "",
-) -> bool:
-    """One LOAD via catt.api (in-process, else `_catt_load.py` on catt's Python).
+) -> str:
+    """One LOAD via catt.api. Returns `ok` / `fail` / `unconfirmed`. Never logs `url`.
 
-    Does not log `url`. False on import/device/LOAD failure so the caller can fall
-    back to the CLI. A timeout is unconfirmed: the caller must not fallback or
-    tear down a remux server until `catt_receiver_has_load` is False. Uses
-    `play_media_url` (no yt-dlp; no play_url PLAYING wait). Outer bound is
-    CATT_LIB_LOAD_TIMEOUT (above catt's 30s PLAYING wait + connect). `device`
-    is an IP or a friendly name (`catt -d` accepts both).
+    `ok`: receiver is playing/buffering our content.
+    `fail`: LOAD never sent, or the TV refused it (LOAD_FAILED) — caller may CLI.
+    `unconfirmed`: LOAD went out; grace poll did not confirm or refuse. No CLI
+    (a second LOAD would wipe metadataType 1 / images).
     """
     load = catt_play_kwargs(
         title, meta, content_type=content_type, start=start, subtitle_url=subtitle_url
@@ -549,14 +639,14 @@ def catt_lib_play(
     Device = _catt_device_cls()
     if Device is not None:
         if not catt_inprocess_supports_load_meta():
-            return False
+            return _LIB_FAIL
         return _catt_lib_finish(device, url, _catt_inprocess_play(Device, ident, url, load))
     if not catt_supports_load_meta():
-        return False
+        return _LIB_FAIL
     py = _catt_interpreter()
     helper = Path(__file__).with_name("_catt_load.py")
     if not py or not helper.is_file():
-        return False
+        return _LIB_FAIL
     payload = {"url": url, **load}
     if "ip_addr" in ident:
         payload["ip"] = ident["ip_addr"]
@@ -575,11 +665,39 @@ def catt_lib_play(
         return _catt_lib_finish(device, url, _LIB_UNCONFIRMED)
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning("catt helper LOAD failed: %s", type(exc).__name__)
-        return False
-    if proc.returncode != 0:
-        _log.warning("catt helper LOAD rc=%s", proc.returncode)
-        return False
-    return True
+        return _LIB_FAIL
+    if proc.returncode == 0:
+        return _LIB_OK
+    if proc.returncode == 4:
+        _log.warning("catt helper LOAD rc=4 (session wait after LOAD)")
+        return _catt_lib_finish(device, url, _LIB_UNCONFIRMED)
+    _log.warning("catt helper LOAD rc=%s (never sent)", proc.returncode)
+    return _LIB_FAIL
+
+
+def catt_lib_play(
+    device: str,
+    url: str,
+    *,
+    title: str = "",
+    meta: CastMeta | None = None,
+    start: float | None = None,
+    content_type: str = "video/mp4",
+    subtitle_url: str = "",
+) -> bool:
+    """True when the library LOAD is confirmed on the receiver (`catt_lib_outcome` is ok)."""
+    return (
+        catt_lib_outcome(
+            device,
+            url,
+            title=title,
+            meta=meta,
+            start=start,
+            content_type=content_type,
+            subtitle_url=subtitle_url,
+        )
+        == _LIB_OK
+    )
 
 
 # Callback the headless `--follow` JSONL path passes in to receive normalized playback events
@@ -804,8 +922,13 @@ def _switch_cast_audio(
         return
     print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
     target = device or (None if dest == "Chromecast" else dest)
-    if target and catt_lib_play(target, new, title=title, meta=meta, start=pos):
-        return
+    if target:
+        switched = catt_lib_outcome(target, new, title=title, meta=meta, start=pos)
+        if switched == CATT_LIB_OK:
+            return
+        if switched == CATT_LIB_UNCONFIRMED:
+            _catt_unconfirmed_notice()
+            return
     launch = catt_cast_argv(target, new, title=catt_display_title(title, meta), start=pos)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         subprocess.run(
@@ -824,6 +947,7 @@ class LanMedia:
     content_type: str
     shutdown: Callable[[], None] | None
     plan: urlproxy.LanPlan
+    idle_for: Callable[[], float] | None = None
 
 
 def lan_media(
@@ -869,6 +993,7 @@ def lan_media(
             planned.content_type,
             lambda: serve.close_server(server),
             planned,
+            idle_for=server.idle_for,
         )
     spawned = serve.spawn_detached(bind_ip, proxy=urlproxy.proxy_job(url, planned))
     if spawned is None:
@@ -950,6 +1075,19 @@ def cast(
             # Follow already observed playback then IDLE: skip a final `catt info`.
             if follow and result is not None and result.started:
                 lan.shutdown()
+            elif result is not None and result.unconfirmed:
+                # LOAD sent, not confirmed: keep this server only; idle-reap it.
+                shutdown = lan.shutdown
+                served = lan_url
+                dest = device
+                serve.register_inproc_proxy(shutdown)
+                serve.schedule_reap(
+                    shutdown,
+                    util.CATT_LIB_UNCONFIRMED_SERVE_S,
+                    handle=shutdown,
+                    skip_if=lambda: bool(dest and served and catt_receiver_has_load(dest, served)),
+                    idle_for=lan.idle_for,
+                )
             elif device and lan_url and catt_receiver_has_load(device, lan_url):
                 _log.debug("lan-proxy: LOAD unconfirmed, receiver already has media")
                 serve.register_inproc_proxy(lan.shutdown)
@@ -1057,6 +1195,7 @@ def _cast_via_bridge(
         notices.emit(f"ricevitore custom {app_id}")
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
     sub_shutdown = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
+    kwargs.pop(_SUB_IDLE_FOR, None)
 
     def announce() -> None:
         # Title already printed as the play banner in the interactive path; keep it for
@@ -1112,6 +1251,7 @@ def _serve_subtitle(
     if follow:
         server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt)
         kwargs.update(serve.caption_kwargs(bind_ip, port, server.token, sub_lang))
+        kwargs[_SUB_IDLE_FOR] = server.idle_for
         return server.shutdown
     # The VTT lives in the per-play work_dir, which dies with this process, while the
     # detached server opens it PER REQUEST and the receiver re-fetches the track (seek):
@@ -1140,6 +1280,33 @@ def _emit(on_event: EventCb | None, kind: str, **fields) -> None:
         on_event({"kind": kind, **fields})
 
 
+def _catt_unconfirmed_notice() -> None:
+    """Honest unconfirmed LOAD: UI warning, no new --json fields (ADR 0050)."""
+    notices.emit(
+        "cast avviato ma non confermato — il TV potrebbe ancora partire",
+        code="cast_unconfirmed",
+    )
+
+
+def _catt_unconfirmed_result() -> cast_delivery.CastResult:
+    """Reuse `cast_never_started`: LOAD sent, playback not observed. `ok` stays false."""
+    return cast_delivery.CastResult(
+        0.0, 0.0, started=False, error="cast_never_started", unconfirmed=True
+    )
+
+
+def _schedule_unconfirmed_sub_reap(shutdown, device: str | None, url: str, idle_for=None) -> None:
+    """Keep an unconfirmed subtitle server; skip_if once at fire, same as remux/LAN."""
+    dest, served = device, url
+    serve.schedule_reap(
+        shutdown,
+        util.CATT_LIB_UNCONFIRMED_SERVE_S,
+        handle=shutdown,
+        skip_if=lambda: bool(dest and served and catt_receiver_has_load(dest, served)),
+        idle_for=idle_for,
+    )
+
+
 def _cast_via_catt(
     cfg: Config,
     title: str,
@@ -1161,7 +1328,12 @@ def _cast_via_catt(
     `cast_flow` turns pos/dur into the advance decision (ADR 0029).
 
     Prefers catt ≥0.13.2 **library** `play_media_url` (title + Cinemeta/metahub thumb
-    + BUFFERED in one LOAD, ADR 0050). CLI fallback: `-l` + `--stream-type` (no `--thumb`).
+    + BUFFERED in one LOAD, ADR 0050) for remux, LAN Range-proxy, hev1-rewrap, and
+    direct LAN URLs. CLI fallback (`-l` + `--stream-type`; no `--thumb`) only when
+    `catt_can_lib_load()` is false, the library call raises before a LOAD, or the
+    TV refuses the LOAD (LOAD_FAILED). A post-LOAD session wait that never
+    confirms is `CastResult(started=False, error=cast_never_started)` — no second
+    CLI LOAD, notice `cast_unconfirmed`.
     Older catt (0.13.0/0.13.1) keeps the pre-0050 argv so click does not reject `-l`.
 
     `follow=False` (headless fire-and-return): once the LOAD has handed the media to
@@ -1171,32 +1343,53 @@ def _cast_via_catt(
     dest = device or "Chromecast"
     loaded = False
     lib_attempted = False
+    lib_unconfirmed = False
     sub_shutdown = None
+    sub_idle_for = None
     if device and catt_can_lib_load():
         cap: dict = {}
         if sub_paths:
             vtt = srt.to_vtt(sub_paths[0]) or None
             sub_shutdown = _serve_subtitle(vtt, device, None, follow, cap)
+            sub_idle_for = cap.pop(_SUB_IDLE_FOR, None)
         ui.status(f"consegno a {dest}…", kind="tv")
         lib_attempted = True
-        loaded = catt_lib_play(
-            device,
-            url,
-            title=title,
-            meta=meta,
-            start=start,
-            content_type=(meta.content_type if meta and meta.content_type else ""),
-            subtitle_url=str(cap.get("subtitle_url") or ""),
-        )
-        if loaded:
-            _log.debug("catt lib LOAD ok (url redacted)")
+        try:
+            outcome = catt_lib_outcome(
+                device,
+                url,
+                title=title,
+                meta=meta,
+                start=start,
+                content_type=(meta.content_type if meta and meta.content_type else ""),
+                subtitle_url=str(cap.get("subtitle_url") or ""),
+            )
+        except Exception as exc:  # lib path raised before a LOAD — CLI is the fallback
+            _log.warning("catt lib LOAD raised: %s → CLI fallback", type(exc).__name__)
+            outcome = CATT_LIB_FAIL
+            lib_attempted = False
+        if outcome == CATT_LIB_OK:
+            loaded = True
+            _log.info("catt sender=lib")
+        elif outcome == CATT_LIB_UNCONFIRMED:
+            _log.info("catt sender=lib unconfirmed")
+            _catt_unconfirmed_notice()
+            lib_unconfirmed = True
+            if not follow:
+                # Keep the subtitle server for a late TV fetch; idle-reap this handle.
+                if sub_shutdown is not None:
+                    _schedule_unconfirmed_sub_reap(sub_shutdown, device, url, idle_for=sub_idle_for)
+                _emit(on_event, "failed", error="cast_never_started", message="cast non confermato")
+                return _catt_unconfirmed_result()
+            loaded = True  # follow: poll; do not CLI-overwrite metadata
         else:
-            _log.debug("catt lib LOAD missed → CLI fallback")
+            _log.info("catt lib LOAD never sent → CLI fallback")
             if sub_shutdown is not None:
                 sub_shutdown()
                 sub_shutdown = None
             serve.reap_sub_server()
     if not loaded:
+        _log.info("catt sender=cli")
         launch = catt_cast_argv(
             device,
             url,
@@ -1313,10 +1506,14 @@ def _cast_via_catt(
             duration=round(holder["duration"], 1),
         )
     if sub_shutdown is not None:
-        sub_shutdown()
+        if lib_unconfirmed and not started:
+            _schedule_unconfirmed_sub_reap(sub_shutdown, device, url, idle_for=sub_idle_for)
+        else:
+            sub_shutdown()
     return cast_delivery.CastResult(
         holder["position"], holder["duration"],
         started=started, error=None if started else "cast_never_started",
+        unconfirmed=lib_unconfirmed and not started,
     )  # fmt: skip
 
 
