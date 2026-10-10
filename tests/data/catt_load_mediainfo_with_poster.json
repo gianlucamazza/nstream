@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "kind": "expected",
+    "derived_from": "pychromecast MediaController._send_start_play_media + catt ≥0.13.2 play_media_url(title, thumb, content_type, stream_type=BUFFERED, media_info.metadata.metadataType=1)",
+    "note": "Derived from library source, not a field capture. thumb= becomes metadata.thumb + images[0].url. Poster is Cinemeta/metahub HTTPS; TV fetches it. contentId omitted (never a debrid token)."
+  },
+  "streamType": "BUFFERED",
+  "contentType": "video/mp4",
+  "metadata": {
+    "title": "The Nice Guys",
+    "thumb": "https://images.metahub.space/poster/medium/tt7068946/img",
+    "images": [{"url": "https://images.metahub.space/poster/medium/tt7068946/img"}],
+    "metadataType": 1
+  }
+}

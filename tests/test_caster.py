@@ -3,13 +3,19 @@ loop (resume/auto-advance), and the in-cast audio-language switch."""
 
 from __future__ import annotations
 
+import io
+import json
 import subprocess
+import time
+import types
 from pathlib import Path
 
 import pytest
 
-from nstream import cast_delivery, caster
+from nstream import _catt_load, cast_delivery, caster
 from nstream.config import Config
+
+_DATA = Path(__file__).resolve().parent / "data"
 
 CFG = Config(torrentio_base="tb")
 
@@ -22,6 +28,21 @@ def _catt_on_path(monkeypatch):
     """resolve_device guards on catt's presence; keep tests hermetic (the makepkg
     check() chroot, for one, has no catt installed)."""
     monkeypatch.setattr(caster.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+
+@pytest.fixture(autouse=True)
+def _no_catt_lib(monkeypatch):
+    """Default: no catt.api in the test env. Tests that pin the library LOAD
+    override `catt_can_lib_load` / `catt_lib_play` / `_catt_device_cls`."""
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _catt_meta_ok(monkeypatch):
+    """Hermetic: treat the test host as catt ≥0.13.2 so `-l` / `--stream-type` stay on."""
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -292,6 +313,8 @@ def test_cast_builds_command_with_seek_and_sub(monkeypatch):
     assert "cast" in launch and "http://u" in launch
     assert "-t" in launch and "125" in launch
     assert "-s" in launch and "/tmp/x.srt" in launch
+    assert launch[launch.index("-l") + 1] == "Dune"
+    assert launch[launch.index("--stream-type") + 1] == "BUFFERED"
 
 
 def test_cast_tracks_position_to_the_end(monkeypatch):
@@ -456,7 +479,7 @@ def test_cast_hotkey_switches_audio(monkeypatch):
             {"player_state": "IDLE", "duration": 100.0},
         ],
     )
-    keys = iter(["a", None, None, None, None])
+    keys = iter([None, "a", None, None, None])
     monkeypatch.setattr(caster, "_poll_wait", lambda _t: next(keys, None))
     caster.cast(
         CFG, "Film", "http://ita",
@@ -465,6 +488,38 @@ def test_cast_hotkey_switches_audio(monkeypatch):
     )  # fmt: skip
     recasts = [c for c in calls if "cast" in c and "http://eng" in c]
     assert recasts and "-t" in recasts[0]  # re-cast the eng url with a seek
+
+
+def test_cast_hotkey_lib_keeps_title(monkeypatch):
+    """In-cast 'a' reuses the library LOAD so title/thumb are not dropped."""
+    seen: dict = {}
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+
+    def fake_play(device, url, **kw):
+        seen.update(device=device, url=url, **kw)
+        return True
+
+    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    calls = _cast_run(
+        monkeypatch,
+        info_seq=[
+            {"player_state": "PLAYING", "current_time": 30.0, "duration": 100.0},
+            {"player_state": "PLAYING", "current_time": 35.0, "duration": 100.0},
+            {"player_state": "IDLE", "duration": 100.0},
+        ],
+    )
+    keys = iter(["a", None, None, None, None])
+    monkeypatch.setattr(caster, "_poll_wait", lambda _t: next(keys, None))
+    poster = "https://images.metahub.space/poster/medium/tt1/img"
+    caster.cast(
+        CFG, "Film", "http://ita",
+        device="TV", langs=("ita", "eng"), resolve_lang=lambda lang: "http://eng",
+        choose_lang=lambda codes: "eng",
+        meta=caster.CastMeta(poster=poster),
+    )  # fmt: skip
+    assert seen["url"] == "http://eng" and seen["title"] == "Film"
+    assert seen["meta"].poster == poster
+    assert not [c for c in calls if "cast" in c and "http://eng" in c]
 
 
 def test_cast_hotkey_esc_keeps_current(monkeypatch):
@@ -835,3 +890,432 @@ def test_status_reports_the_probed_duration_on_a_live_cast(monkeypatch):
     monkeypatch.setattr(caster.cast_delivery, "live_duration", lambda d: 6472.0)
     st = caster.status("10.0.0.5")
     assert st["position"] == 3100.0 and st["duration"] == 6472.0
+
+
+# --- catt 0.13 LOAD / MediaInformation (ADR 0050) ---------------------------
+
+
+def _fixture_media(name: str) -> dict:
+    raw = json.loads((_DATA / name).read_text())
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def test_catt_media_info_remux_file_matches_fixture():
+    """catt CLI remux/file fallback LOAD: title + BUFFERED + video/mp4; no images."""
+    got = caster.catt_cli_media_info("The Nice Guys")
+    assert got == _fixture_media("catt_load_mediainfo_remux.json")
+    assert "images" not in got["metadata"] and "thumb" not in got["metadata"]
+    assert "contentId" not in got  # never a debrid / LAN URL in the fixture contract
+
+
+def test_catt_lib_media_info_remux_includes_images():
+    """Library LOAD (the shipped catt path): title + images[0].url + BUFFERED + mp4."""
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    meta = caster.CastMeta(poster=poster, content_type="video/mp4")
+    got = caster.catt_lib_media_info("The Nice Guys", meta)
+    assert got == _fixture_media("catt_load_mediainfo_with_poster.json")
+    assert got["metadata"]["images"][0]["url"] == poster
+    assert got["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    assert got["contentType"] == "video/mp4" and got["streamType"] == "BUFFERED"
+
+
+def test_catt_play_kwargs_one_load_with_thumb():
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    meta = caster.CastMeta(poster=poster, content_type="video/mp4")
+    kw = caster.catt_play_kwargs("The Nice Guys", meta, content_type="video/mp4")
+    assert kw["title"] == "The Nice Guys"
+    assert kw["thumb"] == poster
+    assert kw["content_type"] == "video/mp4"
+    assert kw["stream_type"] == "BUFFERED"
+    assert kw["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+
+
+def test_catt_play_kwargs_tvshow_metadata_type():
+    meta = caster.CastMeta(
+        poster="https://images.metahub.space/poster/medium/tt4236770/img",
+        series_title="The Boys",
+        season=2,
+        episode=5,
+    )
+    kw = caster.catt_play_kwargs("Good for the Soul", meta)
+    assert kw["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_TVSHOW
+    assert kw["media_info"]["metadata"]["seriesTitle"] == "The Boys"
+    assert kw["thumb"] == "https://images.metahub.space/poster/medium/tt4236770/img"
+    body = caster.catt_lib_media_info("Good for the Soul", meta)
+    assert body["metadata"]["images"][0]["url"] == kw["thumb"]
+    assert body["metadata"]["metadataType"] == 2
+
+
+def test_catt_poster_url_cinemeta_metahub_only():
+    assert caster.catt_poster_url("https://images.metahub.space/poster/medium/tt1/img")
+    assert caster.catt_poster_url("https://v3-cinemeta.strem.io/poster.jpg")
+    assert caster.catt_poster_url("https://images.example.test/poster/tt7068946.jpg") == ""
+    assert caster.catt_poster_url("https://debrid.example/p.jpg") == ""
+    assert caster.catt_poster_url("http://192.168.1.10/p.jpg") == ""
+    assert caster.catt_poster_url("http://10.0.0.5/cast/tok/poster.jpg") == ""
+    assert caster.catt_poster_url("") == ""
+
+
+def test_catt_load_helper_play_media_url_kwargs(monkeypatch):
+    """_catt_load.py (catt's interpreter) forwards title/thumb/BUFFERED/mp4 to play_media_url."""
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            seen["prep"] = True
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+            seen["kw"] = kw
+
+    class _Dev:
+        def __init__(self, ip_addr=""):
+            seen["ip"] = ip_addr
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(
+        _catt_load.importlib, "import_module", lambda name: types.SimpleNamespace(CattDevice=_Dev)
+    )
+    payload = {
+        "ip": "10.0.0.5",
+        "url": "http://192.168.1.10:45000/cast/tok/stream.mp4",
+        "title": "The Nice Guys",
+        "thumb": "https://images.metahub.space/poster/medium/tt7068946/img",
+        "content_type": "video/mp4",
+        "stream_type": "BUFFERED",
+        "media_info": {"metadata": {"metadataType": 1}},
+    }
+    monkeypatch.setattr(_catt_load.sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert _catt_load.main() == 0
+    assert seen["ip"] == "10.0.0.5" and seen["prep"] is True
+    assert seen["kw"]["title"] == "The Nice Guys"
+    assert seen["kw"]["thumb"] == payload["thumb"]
+    assert seen["kw"]["content_type"] == "video/mp4"
+    assert seen["kw"]["stream_type"] == "BUFFERED"
+    assert seen["kw"]["media_info"]["metadata"]["metadataType"] == 1
+
+
+def test_catt_lib_play_inprocess_play_media_url(monkeypatch):
+    """In-process catt.api: one play_media_url LOAD with thumb + metadataType 1."""
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            seen["prep"] = True
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+            seen["kw"] = kw
+
+    class _Dev:
+        def __init__(self, **kw):
+            seen["ctor"] = kw
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    assert caster.catt_lib_play(
+        "10.0.0.5",
+        "http://192.168.1.10:45000/cast/tok/stream.mp4",
+        title="The Nice Guys",
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert seen["ctor"] == {"ip_addr": "10.0.0.5"} and seen["prep"] is True
+    assert seen["kw"]["title"] == "The Nice Guys"
+    assert seen["kw"]["thumb"] == poster
+    assert seen["kw"]["content_type"] == "video/mp4"
+    assert seen["kw"]["stream_type"] == "BUFFERED"
+    assert seen["kw"]["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+
+
+def test_catt_play_kwargs_drops_non_https_poster():
+    kw = caster.catt_play_kwargs("T", caster.CastMeta(poster="http://10.0.0.5/cast/tok/p.jpg"))
+    assert "thumb" not in kw
+
+
+def test_catt_lib_play_used_before_cli(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+
+    def fake_play(ip, url, **kw):
+        seen.update(ip=ip, url=url, **kw)
+        return True
+
+    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    calls = _cast_run(monkeypatch)
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    caster.cast(
+        CFG,
+        "The Nice Guys",
+        "http://u",
+        device="10.0.0.5",
+        follow=False,
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert seen["ip"] == "10.0.0.5" and seen["url"] == "http://u"
+    assert seen["title"] == "The Nice Guys" and seen["meta"].poster == poster
+    assert all("cast" not in c or "info" in c for c in calls)
+
+
+def test_catt_cast_argv_title_and_buffered(monkeypatch):
+    calls = _cast_run(monkeypatch)
+    meta = caster.CastMeta(
+        poster="https://images.metahub.space/poster/medium/tt7068946/img",
+        content_type="video/mp4",
+    )
+    caster.cast(CFG, "The Nice Guys", "http://u", device="TV", follow=False, meta=meta)
+    launch = calls[0]
+    assert launch[launch.index("-l") + 1] == "The Nice Guys"
+    assert launch[launch.index("--stream-type") + 1] == "BUFFERED"
+    assert meta.poster not in launch
+    assert "--thumb" not in launch
+
+
+def test_catt_display_title_series():
+    meta = caster.CastMeta(series_title="The Boys", season=2, episode=5)
+    assert caster.catt_display_title("Good for the Soul", meta) == (
+        "The Boys · S02E05 · Good for the Soul"
+    )
+    assert caster.catt_display_title("", meta) == "The Boys · S02E05"
+    assert caster.catt_display_title("Dune", None) == "Dune"
+
+
+def test_catt_cast_argv_omits_empty_title():
+    args = caster.catt_cast_argv("1.2.3.4", "/tmp/cast-x.mp4", title="  ")
+    assert "-l" not in args
+    assert args[-2:] == ["--stream-type", "BUFFERED"]
+
+
+def test_catt_cast_argv_omits_meta_flags_before_0_13_2(monkeypatch):
+    """catt 0.13.0/0.13.1: click rejects `-l`; keep the pre-0050 argv."""
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: False)
+    args = caster.catt_cast_argv("TV", "http://u", title="The Nice Guys")
+    assert "-l" not in args and "--stream-type" not in args
+    assert args == ["catt", "-d", "TV", "cast", "http://u"]
+
+
+def test_catt_can_lib_load_requires_0_13_2(monkeypatch):
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: object)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    assert caster.catt_can_lib_load() is False
+
+
+def test_catt_inprocess_version_reads_imported(monkeypatch):
+    """In-process gate uses imported catt.__version__, not `catt --version` on PATH."""
+    monkeypatch.setattr(
+        caster.importlib,
+        "import_module",
+        lambda name: types.SimpleNamespace(__version__="0.13.1") if name == "catt" else None,
+    )
+    assert caster.catt_inprocess_version() == (0, 13, 1)
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: object)
+    assert caster.catt_can_lib_load() is False
+
+
+def test_parse_catt_version():
+    assert caster._parse_catt_version("catt v0.13.1, codename") == (0, 13, 1)
+    assert caster._parse_catt_version("0.13.3") == (0, 13, 3)
+    assert caster._parse_catt_version("nope") is None
+    assert (0, 13, 1) < caster.CATT_LOAD_META_MIN <= (0, 13, 2)
+
+
+def test_cast_retries_cli_without_meta_flags_on_click_usage(monkeypatch):
+    launches: list[list[str]] = []
+
+    class _P:
+        def __init__(self, rc, err=""):
+            self.returncode = rc
+            self.stdout = ""
+            self.stderr = err
+
+    def fake(cmd, **k):
+        launches.append(list(cmd))
+        if "cast" in cmd and "-l" in cmd:
+            return _P(2, "Error: No such option: -l")
+        return _P(0)
+
+    monkeypatch.setattr(caster.subprocess, "run", fake)
+    r = caster.cast(CFG, "The Nice Guys", "http://u", device="TV", follow=False)
+    assert r.started is True
+    assert any("-l" in c for c in launches)
+    retry = [c for c in launches if "cast" in c and "-l" not in c]
+    assert retry and "--stream-type" not in retry[0]
+
+
+def test_catt_device_ctor_kwargs_name_vs_ip():
+    assert caster.catt_device_ctor_kwargs("10.0.0.5") == {"ip_addr": "10.0.0.5"}
+    assert caster.catt_device_ctor_kwargs("2001:db8::1") == {"ip_addr": "2001:db8::1"}
+    assert caster.catt_device_ctor_kwargs("43PUS9235/12") == {"name": "43PUS9235/12"}
+    assert caster.catt_device_ctor_kwargs("Salotto") == {"name": "Salotto"}
+
+
+def test_catt_lib_play_uses_name_for_friendly_device(monkeypatch):
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+
+    class _Dev:
+        def __init__(self, **kw):
+            seen["ctor"] = kw
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    assert caster.catt_lib_play("43PUS9235/12", "http://u", title="T")
+    assert seen["ctor"] == {"name": "43PUS9235/12"}
+
+
+def test_catt_load_helper_name_ctor(monkeypatch):
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+
+    class _Dev:
+        def __init__(self, **kw):
+            seen["ctor"] = kw
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(
+        _catt_load.importlib, "import_module", lambda name: types.SimpleNamespace(CattDevice=_Dev)
+    )
+    payload = {"name": "43PUS9235/12", "url": "http://u", "title": "T"}
+    monkeypatch.setattr(_catt_load.sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert _catt_load.main() == 0
+    assert seen["ctor"] == {"name": "43PUS9235/12"}
+
+
+def test_catt_lib_play_inprocess_times_out(monkeypatch):
+    class _Dev:
+        def __init__(self, **kw):
+            time.sleep(30)
+
+        @property
+        def controller(self):
+            raise AssertionError("must not reach play")
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: None)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    t0 = time.monotonic()
+    assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_catt_helper_timeout_receiver_playing_is_loaded(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=0.05)
+
+    monkeypatch.setattr(caster.subprocess, "run", boom)
+    monkeypatch.setattr(
+        caster, "receiver_info", lambda dev: {"player_state": "BUFFERING", "content_id": url}
+    )
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_lib_play_timeout_receiver_playing_is_loaded(monkeypatch):
+    """Late play_media_url: TV already has the LOAD → treat as success, no fallback."""
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, *a, **k):
+            time.sleep(30)
+
+    class _Dev:
+        def __init__(self, **kw):
+            return None
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {"player_state": "PLAYING", "content_id": url},
+    )
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_receiver_has_load_matches_path(monkeypatch):
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {
+            "player_state": "BUFFERING",
+            "content_id": "http://192.168.1.10:45000/cast/tok/stream.mp4",
+        },
+    )
+    assert caster.catt_receiver_has_load("10.0.0.5", "http://10.0.0.1:45000/cast/tok/stream.mp4")
+    assert not caster.catt_receiver_has_load("10.0.0.5", "http://other/cast/other/x.mp4")
+
+
+def test_cast_lib_timeout_confirmed_skips_cli(monkeypatch):
+    """Direct cast: late LOAD + receiver playing → no second catt cast."""
+    url = "http://u/stream.mp4"
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, *a, **k):
+            time.sleep(30)
+
+    class _Dev:
+        def __init__(self, **kw):
+            return None
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
+    )
+    calls = _cast_run(monkeypatch)
+    r = caster.cast(CFG, "T", url, device="10.0.0.5", follow=False)
+    assert r.started is True
+    assert not [c for c in calls if "cast" in c and url in c]
+
+
+def test_catt_lib_play_false_before_0_13_2(monkeypatch):
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False

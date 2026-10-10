@@ -1,0 +1,13 @@
+{
+  "_provenance": {
+    "kind": "expected",
+    "derived_from": "pychromecast MediaController._send_start_play_media + catt ≥0.13.2 CLI (-l / --stream-type; no --thumb)",
+    "note": "Derived from library source, not a field capture. CLI-reachable LOAD only. contentId omitted (catt's LAN file URL; never a debrid token). metadataType 0 = GENERIC (pychromecast default when unset)."
+  },
+  "streamType": "BUFFERED",
+  "contentType": "video/mp4",
+  "metadata": {
+    "title": "The Nice Guys",
+    "metadataType": 0
+  }
+}

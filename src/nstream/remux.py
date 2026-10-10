@@ -569,8 +569,10 @@ def cast_file(
     Prefers the **native path** (ADR 0007): nstream's own Range HTTP server (`serve.py`) serves
     the file and **castbridge** LOADs its URL with metadata (so the TV card + HUD widget light
     up); when `sub_paths` is set the server also serves a WebVTT track the LOAD side-loads (so subs
-    now ride the native path too, `sub_lang` labelling the track). Falls back to **catt**
-    serving+casting (no metadata, subs via `-s`) when castbridge is unavailable or can't start.
+    now ride the native path too, `sub_lang` labelling the track). Without castbridge, the
+    same server + **catt ≥0.13.2 library** `play_media_url` (title + Cinemeta/metahub
+    thumb + `video/mp4` + BUFFERED in one LOAD, ADR 0050). Last resort: catt CLI
+    serving+casting (`-l` + `--stream-type`; no `--thumb`).
     `follow=False` (headless) leaves the server detached and records its PID for `--stop`/GC;
     `follow=True` serves until playback ends, then removes the temp file."""
     serve.reap_sub_server()  # a new cast replaces any standalone Tier-1 subtitle server
@@ -593,8 +595,16 @@ def cast_file(
         )  # fmt: skip
         if result is not None:
             return result
-        # castbridge couldn't start → fall back to catt serving+casting below.
+        # castbridge couldn't start → catt library (thumb) then CLI serving+casting.
     caster.warn_catt_ignores_app_id(cfg)
+    if device:
+        lib = _cast_file_via_catt_lib(
+            title, file_path, device=device, start=start,
+            meta=meta or caster.CastMeta(), follow=follow, on_event=on_event,
+            sub_paths=sub_paths, sub_lang=sub_lang,
+        )  # fmt: skip
+        if lib is not None:
+            return lib
     if sub_paths:
         sub_paths = (caster.catt_sub(sub_paths[0]),)
     if sub_paths and not follow:
@@ -607,11 +617,13 @@ def cast_file(
             shutil.copyfile(sub_paths[0], sub_copy)
             sub_paths = (sub_copy,)
     base = ["catt", *(["-d", device] if device else [])]
-    launch = [*base, "cast", file_path]
-    if start and start > 1:
-        launch += ["-t", str(int(start))]
-    if sub_paths:
-        launch += ["-s", sub_paths[0]]
+    launch = caster.catt_cast_argv(
+        device,
+        file_path,
+        title=caster.catt_display_title(title, meta),
+        start=start,
+        sub_path=sub_paths[0] if sub_paths else None,
+    )
     dest = device or "Chromecast"
     # Capture catt's stderr to a temp file (a detached pipe would have no reader): if the
     # cast never starts, its tail says why (device unreachable, refused media, …) — the
@@ -688,6 +700,104 @@ def _bridge_meta_kwargs(
     if app_id:
         kwargs["app_id"] = app_id
     return kwargs
+
+
+def _cast_file_via_catt_lib(
+    title: str,
+    file_path: str,
+    *,
+    device: str,
+    start: float | None,
+    meta: caster.CastMeta,
+    follow: bool,
+    on_event: caster.EventCb | None,
+    sub_paths: tuple[str, ...] = (),
+    sub_lang: str | None = None,
+) -> cast_delivery.CastResult | None:
+    """Serve the remux and LOAD via catt.api (title + https thumb + video/mp4 + BUFFERED).
+
+    None when catt.api is unavailable or the LOAD fails, so `cast_file` falls back to
+    the CLI (temp kept). A library timeout is confirmed on the receiver before this
+    returns None — do not kill a server the TV is already reading. nstream owns the
+    Range server (ADR 0007); catt is the sender only.
+    """
+    if not caster.catt_can_lib_load():
+        return None
+    bind_ip = serve.lan_ip(device)
+    vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
+
+    if not follow:
+        vtt_persist: str | None = None
+        if vtt:
+            vtt_persist = f"{file_path}.vtt"
+            try:
+                shutil.copyfile(vtt, vtt_persist)
+            except OSError:
+                vtt_persist = None
+        spawned = serve.spawn_detached(bind_ip, file_path=file_path, sub_path=vtt_persist)
+        if spawned is None:
+            _rm(vtt_persist)
+            return None
+        pid, port, token = spawned
+        sub_url = serve.served_sub_url(bind_ip, port, token) if vtt_persist else ""
+        ok = caster.catt_lib_play(
+            device,
+            serve.served_url(bind_ip, port, token),
+            title=title,
+            meta=meta,
+            start=start,
+            content_type="video/mp4",
+            subtitle_url=sub_url,
+        )
+        if not ok or not _await_start(device):
+            _kill(pid)
+            _rm(vtt_persist)
+            return None
+        _write_state(pid, file_path, device, mode="serve")
+        ui.cast_live(device, follow=False)
+        if on_event:
+            on_event({"kind": "started", "title": title})
+        return cast_delivery.CastResult(0.0, 0.0, bool(sub_paths), started=True)
+
+    server, port, _thread = serve.serve_file(file_path, bind_ip, sub_path=vtt)
+    sub_url = serve.served_sub_url(bind_ip, port, server.token) if vtt else ""
+    keep_temp = True
+    try:
+        ok = caster.catt_lib_play(
+            device,
+            serve.served_url(bind_ip, port, server.token),
+            title=title,
+            meta=meta,
+            start=start,
+            content_type="video/mp4",
+            subtitle_url=sub_url,
+        )
+        # Do not treat a pre-start IDLE as ended — wait for PLAYING first.
+        if not ok or not _await_start(device):
+            return None
+        keep_temp = False
+        ui.cast_live(device, follow=True)
+        if on_event:
+            on_event({"kind": "started", "title": title})
+        pos = dur = 0.0
+        try:
+            while True:
+                time.sleep(_STATUS_POLL)
+                st = caster.status(device)
+                pos = st.get("position") or pos
+                dur = st.get("duration") or dur
+                state = str(st.get("player_state") or "")
+                if state in ("IDLE", "UNKNOWN", ""):
+                    break
+        except KeyboardInterrupt:
+            with contextlib.suppress(OSError, subprocess.SubprocessError):
+                subprocess.run(["catt", "-d", device, "stop"], capture_output=True, text=True)
+        return cast_delivery.CastResult(pos, dur, bool(sub_paths), started=True)
+    finally:
+        server.shutdown()
+        if not keep_temp:
+            _rm(file_path)
+            _rm(f"{file_path}.vtt")
 
 
 def _cast_file_via_bridge(
