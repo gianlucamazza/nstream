@@ -1129,6 +1129,7 @@ class _P:
     def __init__(self, rc=0, stderr=""):
         self.returncode = rc
         self.stderr = stderr
+        self.stdout = ""
 
 
 def test_stop_no_state_returns_false():
