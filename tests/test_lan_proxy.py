@@ -654,7 +654,8 @@ def test_cast_feeds_webm_lan_mime_into_catt_lib_play(monkeypatch):
 
 
 def test_cast_skips_lan_shutdown_while_receiver_has_load(monkeypatch):
-    """Late library LOAD: content_id is the LAN capability path — do not tear the server down."""
+    """Late library LOAD: content_id is the LAN capability path — do not tear the server down.
+    The leftover in-process server is registered so the next reap / cast closes it."""
     from nstream import cast_delivery, caster
 
     shut = {"n": 0}
@@ -663,13 +664,35 @@ def test_cast_skips_lan_shutdown_while_receiver_has_load(monkeypatch):
     monkeypatch.setattr(
         caster,
         "_cast_senders",
-        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, started=True, delivery="lan"),
+        lambda *a, **k: cast_delivery.CastResult(
+            0.0, 0.0, started=False, error="cast_timeout", delivery="lan"
+        ),
     )
     monkeypatch.setattr(caster, "catt_receiver_has_load", lambda dev, url: url == lan.url)
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
     r = caster.cast(cfg, "T", "https://debrid.example/f.mp4", device="10.0.0.5", follow=True)
-    assert r.started is True and shut["n"] == 0
-
-    monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
-    r = caster.cast(cfg, "T", "https://debrid.example/f.mp4", device="10.0.0.5", follow=True)
+    assert r.started is False and shut["n"] == 0
+    assert serve.reap_proxy_server() is True
     assert shut["n"] == 1
+    assert serve.reap_proxy_server() is False
+
+
+def test_cast_follow_ended_skips_final_catt_info(monkeypatch):
+    """Follow already saw IDLE: tear down without another catt info."""
+    from nstream import cast_delivery, caster
+
+    shut = {"n": 0}
+    lan = _fake_lan("video/mp4", shutdown=lambda: shut.__setitem__("n", shut["n"] + 1))
+    monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
+    monkeypatch.setattr(
+        caster,
+        "_cast_senders",
+        lambda *a, **k: cast_delivery.CastResult(1.0, 10.0, started=True, delivery="lan"),
+    )
+    monkeypatch.setattr(
+        caster, "catt_receiver_has_load",
+        lambda *a, **k: pytest.fail("follow already saw IDLE"),
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(cfg, "T", "https://debrid.example/f.mp4", device="10.0.0.5", follow=True)
+    assert r.started is True and shut["n"] == 1

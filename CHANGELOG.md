@@ -41,6 +41,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- LAN-proxy `open_upstream` / `probe` pin each hop to one resolved address and
+  reject private / loopback / link-local / unspecified / CGNAT / ULA (and
+  v4-mapped) so a public-then-private DNS rebind cannot reach the host.
 - **ADR 0050:** catt **≥0.13.2** remux/file and direct fallback LOADs send
   Cinemeta title + Cinemeta/metahub HTTPS poster (`thumb` → `images[]`) +
   `video/mp4` + `BUFFERED` via `catt.api` / catt's interpreter. Older catt

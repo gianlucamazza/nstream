@@ -13,6 +13,12 @@ returned unchanged — they carry no token and gain nothing from a second hop.
 ADR 0045 Phase 1 also uses this module's probe / plan / open helpers so `serve` can
 Range-serve the same remote url on the LAN (the TV never sees the debrid host). The
 loopback server below stays 127.0.0.1-only; the LAN bind lives in `serve`.
+
+`open_upstream` / `probe` pin each hop (first included) to one `getaddrinfo` result:
+private / loopback / link-local / unspecified / CGNAT `100.64.0.0/10` / ULA `fc00::/7`
+(and IPv4-mapped forms) are rejected, then the socket connects to that address.
+The URL hostname stays on `Host`, SNI, and certificate verification. After connect,
+`getpeername()` is checked again so a public-then-private rebind cannot land.
 """
 
 from __future__ import annotations
@@ -163,16 +169,113 @@ def local_url(url: str) -> str:
     return f"http://{host}:{port}/{route}"
 
 
+# CGNAT (RFC 6598). Not covered by ipaddress.is_private.
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Literal IPv4/IPv6, or None. Unwraps v4-mapped so `::ffff:127.0.0.1` is loopback."""
+    raw = (host or "").split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(raw)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def _blocked_ip(host: str) -> bool:
+    """True for private, loopback, link-local, unspecified, CGNAT, ULA (via is_private)."""
+    addr = _parse_ip(host)
+    if addr is None:
+        return False
+    if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified:
+        return True
+    return addr.version == 4 and addr in _CGNAT
+
+
+def _assert_peer_public(sock: socket.socket) -> None:
+    peer = sock.getpeername()[0]
+    if _blocked_ip(str(peer)):
+        raise urllib.error.URLError("blocked address")
+
+
+def _connect_pinned(host: str, port: int, timeout, source_address=None):
+    """Resolve `host` once, reject a blocked address, connect to that sockaddr.
+
+    A literal IP in the URL is used as-is (loopback fixtures / TorrServer). A name
+    must resolve to a public address; `getpeername()` must still be public.
+    """
+    port = int(port or 0)
+    if _parse_ip(host) is not None:
+        sock = socket.create_connection((host, port), timeout, source_address)
+        return sock
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise urllib.error.URLError(exc) from exc
+    if not infos:
+        raise urllib.error.URLError("blocked address")
+    fam, socktype, proto, _canon, sockaddr = infos[0]
+    ip = sockaddr[0]
+    if not isinstance(ip, str) or _blocked_ip(ip):
+        raise urllib.error.URLError("blocked address")
+    sock = socket.socket(fam, socktype, proto)
+    if timeout is not None:
+        sock.settimeout(timeout)
+    try:
+        if source_address:
+            sock.bind(source_address)
+        sock.connect(sockaddr)
+        _assert_peer_public(sock)
+    except Exception:
+        sock.close()
+        raise
+    return sock
+
+
+def _pinned_create(address, timeout, source_address):
+    return _connect_pinned(address[0], address[1], timeout, source_address)
+
+
+class _HTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that pins the peer to one resolved address (no DNS rebind)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # HTTPConnection.__init__ stores socket.create_connection on the instance.
+        self._create_connection = _pinned_create
+
+
+class _HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection: pin the TCP peer; SNI / cert verify still use `self.host`."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_create
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_HTTPConnection, req)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_HTTPSConnection, req, context=getattr(self, "_context", None))
+
+
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Follow 3xx only to public http(s) hosts. Reject private/loopback/link-local
-    targets and https→http downgrades (SSRF / token-leak on the probe and serve paths)."""
+    """Follow 3xx only to http(s). Reject literal private/loopback/link-local targets
+    and https→http downgrades. Named hosts are pinned at connect (`_connect_pinned`)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _guard_redirect(req.full_url, newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_SafeRedirect)
+_opener = urllib.request.build_opener(_SafeRedirect, _HTTPHandler, _HTTPSHandler)
 
 
 def _guard_redirect(src_url: str, dst_url: str) -> None:
@@ -185,33 +288,17 @@ def _guard_redirect(src_url: str, dst_url: str) -> None:
     host = (dst.hostname or "").lower()
     if not host or _is_local(host) or host.endswith(".localhost"):
         raise urllib.error.URLError("redirect to private")
-    if _is_private_host(host) or _resolves_private(host):
+    if _blocked_ip(host):
         raise urllib.error.URLError("redirect to private")
-
-
-def _resolves_private(host: str) -> bool:
-    """True when `host` (a name, not an IP we already classified) has a private A/AAAA."""
-    try:
-        ipaddress.ip_address(host)
-        return False  # already handled by _is_private_host
-    except ValueError:
-        pass
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
-    for info in infos:
-        ip = info[4][0]
-        if isinstance(ip, str) and (_is_private_host(ip) or _is_local(ip)):
-            return True
-    return False
 
 
 def open_upstream(url: str, method: str, rng: str | None, timeout: float = _UPSTREAM_TIMEOUT):
     """GET/HEAD `url`, optionally with a Range. Never logs the url (it may carry a token).
 
-    Redirects are filtered (`_SafeRedirect`): private/loopback/link-local targets and
-    https→http downgrades are rejected on both the probe and the serve path."""
+    Every hop (first included) uses a pinned HTTP(S) connection: one `getaddrinfo`,
+    reject blocked nets, connect to that address, then `getpeername()` abort. The
+    URL hostname stays on Host / SNI / certificate verification. Redirects: no
+    https→http and no literal private/loopback/link-local targets."""
     headers = {"User-Agent": UA}
     if rng:
         headers["Range"] = rng
@@ -322,25 +409,17 @@ def copy_n(resp, write, n: int) -> int:
     return sent
 
 
-def _is_private_host(host: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified)
-
-
 def is_remote(url: str) -> bool:
     """True when `url` is an http(s) resource the TV would pull over the WAN.
 
-    Loopback, RFC1918, link-local, our own `/cast/` capability paths, and single-label
-    hosts (test stubs like `http://u`) stay as-is — they are already on the LAN or
-    are not a real remote stream."""
+    Loopback, RFC1918, CGNAT, ULA, link-local, unspecified, our own `/cast/`
+    capability paths, and single-label hosts (test stubs like `http://u`) stay
+    as-is — they are already on the LAN or are not a real remote stream."""
     parts = urllib.parse.urlsplit(url)
     if parts.scheme not in ("http", "https"):
         return False
     host = (parts.hostname or "").lower()
-    if not host or _is_local(host) or _is_private_host(host):
+    if not host or _is_local(host) or _blocked_ip(host):
         return False
     if host.endswith((".example", ".test", ".invalid", ".localhost")):
         return False  # RFC 2606 / test stubs (http://rd.example/…)
@@ -436,8 +515,9 @@ def _probe_range(url: str, timeout: float) -> tuple[bool, int | None]:
 def probe(url: str, timeout: float = _PROBE_BUDGET) -> Probe:
     """HEAD (then a 1-byte Range GET if needed) of `url`. Never logs the url.
 
-    Total wait is `timeout` (default 8 s) split across HEAD + Range GET — well under
-    a 16 s stall. Memoized per url so `cast_flow` + `lan_media` share one probe."""
+    Uses `open_upstream` (pinned resolve on every hop, first included). Total wait
+    is `timeout` (default 8 s) split across HEAD + Range GET — well under a 16 s
+    stall. Memoized per url so `cast_flow` + `lan_media` share one probe."""
     hit = _probe_cache.get(url)
     if hit is not None:
         return hit

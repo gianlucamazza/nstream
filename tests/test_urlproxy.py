@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
 
 from nstream import urlproxy
 
@@ -80,6 +83,8 @@ def test_is_remote_skips_lan_and_stubs():
     assert not urlproxy.is_remote("http://u")  # caster test stub
     assert not urlproxy.is_remote("/tmp/file.mp4")
     assert not urlproxy.is_remote("http://192.0.2.10:45001/cast/tok/stream.mp4")
+    assert not urlproxy.is_remote("http://100.64.0.1/f.mp4")  # CGNAT
+    assert not urlproxy.is_remote("http://[fc00::1]/f.mp4")  # ULA
 
 
 class _Dropping(_Upstream):
@@ -125,3 +130,74 @@ def test_unreachable_upstream_prints_no_traceback(monkeypatch, capfd):
     except urllib.error.HTTPError as e:
         assert e.code == 502
     assert "Traceback" not in capfd.readouterr().err
+
+
+def test_blocked_ip_covers_cgnat_ula_and_v4_mapped():
+    assert urlproxy._blocked_ip("127.0.0.1")
+    assert urlproxy._blocked_ip("::1")
+    assert urlproxy._blocked_ip("192.168.1.1")
+    assert urlproxy._blocked_ip("169.254.1.1")
+    assert urlproxy._blocked_ip("0.0.0.0")
+    assert urlproxy._blocked_ip("100.64.0.1")
+    assert urlproxy._blocked_ip("fc00::1")
+    assert urlproxy._blocked_ip("::ffff:127.0.0.1")
+    assert urlproxy._blocked_ip("::ffff:100.64.0.1")
+    assert not urlproxy._blocked_ip("8.8.8.8")
+    assert not urlproxy._blocked_ip("2001:4860:4860::8888")
+    assert not urlproxy._blocked_ip("debrid.example.com")
+
+
+def test_hostname_resolving_to_loopback_is_refused(monkeypatch):
+    monkeypatch.setattr(
+        urlproxy.socket,
+        "getaddrinfo",
+        lambda host, port, *a, **k: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port or 80))
+        ],
+    )
+    urlproxy._probe_cache.clear()
+    with pytest.raises(urllib.error.URLError):
+        urlproxy.open_upstream("http://evil.example.com/x", "GET", None)
+    assert urlproxy.probe("http://evil.example.com/x").ok is False
+
+
+def test_dns_rebinding_public_then_loopback_is_refused(monkeypatch):
+    """getaddrinfo returns a public IP first and 127.0.0.1 on the second call.
+
+    The local fixture must not see a request: we pin the first resolve (or abort
+    on getpeername) instead of letting urllib connect to the rebound loopback.
+    """
+    hits = {"n": 0}
+
+    class _Count(_Upstream):
+        def do_GET(self):
+            hits["n"] += 1
+            super().do_GET()
+
+        def do_HEAD(self):
+            hits["n"] += 1
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Count)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    n = {"gai": 0}
+
+    def fake_gai(host, port, *a, **k):
+        n["gai"] += 1
+        ip = "203.0.113.10" if n["gai"] == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or srv.server_address[1]))]
+
+    monkeypatch.setattr(urlproxy.socket, "getaddrinfo", fake_gai)
+    url = f"http://rebinder.example.com:{srv.server_address[1]}/secret"
+    urlproxy._probe_cache.clear()
+    try:
+        with pytest.raises(urllib.error.URLError):
+            urlproxy.open_upstream(url, "GET", None, timeout=0.4)
+        assert urlproxy.probe(url, timeout=0.4).ok is False
+        assert hits["n"] == 0
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        urlproxy._probe_cache.clear()

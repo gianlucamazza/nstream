@@ -933,19 +933,25 @@ def cast(
         _log.warning("lan-proxy: rifiuto WAN-direct (%s)", reason)
         return cast_delivery.CastResult(0.0, 0.0, error=reason)
     lan_url = lan.url if lan is not None else ""
+    result: cast_delivery.CastResult | None = None
     try:
-        return _cast_senders(
+        result = _cast_senders(
             cfg, title, url, device=device, start=start, sub_paths=sub_paths,
             sub_lang=sub_lang, langs=langs, resolve_lang=resolve_lang,
             choose_lang=choose_lang, follow=follow, meta=meta, on_event=on_event,
             delivery="lan" if lan is not None else "",
         )  # fmt: skip
+        return result
     finally:
         # ADR 0050: a late library LOAD can time out while the TV already has
         # our content_id (the LAN capability path). Do not tear the server down.
         if lan is not None and lan.shutdown is not None:
-            if device and lan_url and catt_receiver_has_load(device, lan_url):
+            # Follow already observed playback then IDLE: skip a final `catt info`.
+            if follow and result is not None and result.started:
+                lan.shutdown()
+            elif device and lan_url and catt_receiver_has_load(device, lan_url):
                 _log.debug("lan-proxy: LOAD unconfirmed, receiver already has media")
+                serve.register_inproc_proxy(lan.shutdown)
             else:
                 lan.shutdown()
 

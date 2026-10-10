@@ -142,7 +142,7 @@ probes HEAD + a 1-byte Range GET (never logs the url) and decides:
 | Upstream / container | Delivery | `contentType` |
 | -------------------- | -------- | ------------- |
 | MP4 / WebM, Range + known length | LAN proxy, Range passed through | `video/mp4` / `video/webm` |
-| MP4 / WebM, no Range (`lan_no_range`) or unknown length (`lan_unknown_length`) | **not proxyable** — existing ADR 0022 / 0039 remux or live tier (disk-capped). No synthesized 206. | `video/mp4` after remux |
+| MP4 / WebM, no Range (`lan_no_range`) or unknown length (`lan_unknown_length`) | **not proxyable** — remux/live (disk-capped). No synthesized 206. A no-Range MP4 with moov-at-end cannot be discarded-from-0 (TV timeout); if remux/live cannot run → `CastRemuxInfeasible` (honest fail, no WAN fallback). | `video/mp4` after remux |
 | Matroska / other non-`CAST_CONTAINER_DECODABLE` | existing ADR 0022 `cast_flow` rewrap (`-c copy` to MP4), not a parallel proxy table and not a 720 transcode | `video/mp4` |
 | MP4 tagged `hev1` | rewrap with `-tag:v hvc1` (Chromecast rejects / mishandles `hev1`) | `video/mp4` |
 | Video codec outside `CAST_VIDEO_DECODABLE` | still proxy native bytes when Range-capable (ADR 0017 already failed/mirrored) | container mime |

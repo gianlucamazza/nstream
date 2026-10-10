@@ -848,12 +848,36 @@ def register_proxy_server(pid: int) -> None:
     _proxy_server_state().write({"pid": pid})
 
 
+_inproc_proxy_shutdown = None
+
+
+def register_inproc_proxy(shutdown) -> None:
+    """Track a follow-mode in-process LAN server left up because the receiver
+    already has our content_id. Next cast / `--stop` in this process reaps it."""
+    reap_inproc_proxy()
+    global _inproc_proxy_shutdown
+    _inproc_proxy_shutdown = shutdown
+
+
+def reap_inproc_proxy() -> bool:
+    """Shut a leftover in-process LAN proxy. True if there was one."""
+    global _inproc_proxy_shutdown
+    fn = _inproc_proxy_shutdown
+    _inproc_proxy_shutdown = None
+    if fn is None:
+        return False
+    with contextlib.suppress(Exception):
+        fn()
+    return True
+
+
 def reap_proxy_server() -> bool:
-    """Kill and forget a leftover LAN Range-proxy. True if there was one."""
+    """Kill and forget a leftover LAN Range-proxy (detached pid and/or in-process)."""
+    found = reap_inproc_proxy()
     st = _proxy_server_state()
     data = st.read()
     if data is None:
-        return False
+        return found
     kill_detached(data.get("pid"))
     st.clear()
     return True
