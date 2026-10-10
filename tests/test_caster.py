@@ -46,6 +46,14 @@ def _catt_meta_ok(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_lan_proxy(monkeypatch):
+    """Existing cast() tests hand catt a stub url (`http://u`). A real LAN wrap would
+    probe it. Phase-1 tests live in test_lan_proxy; this keeps the catt argv
+    assertions hermetic."""
+    monkeypatch.setattr(caster, "lan_media", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_discovery_io(monkeypatch):
     """Keep tests hermetic: no disk cache, no background thread, no TCP probe.
     Individual tests override get_devices (via _scan) / load_cache / verify."""

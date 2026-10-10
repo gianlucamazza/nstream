@@ -203,6 +203,14 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
             "Se on, il TV parte in pochi secondi (audio stereo); off = file completo prima.",
         ),
         (
+            "cast_lan_proxy",
+            "Proxy LAN Range (HEVC)",
+            "bool",
+            "on" if cfg.cast_lan_proxy else "off",
+            "Se on, un URL remoto è servito in Range dalla LAN (video nativo). Off = "
+            "il TV scarica il debrid (debug).",
+        ),
+        (
             "cast_remux_max_resolution",
             "Remux: max risoluzione",
             "maxres",

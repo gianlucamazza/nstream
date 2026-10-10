@@ -54,6 +54,7 @@ from . import (
     serve,
     srt,
     subalign,
+    tracks,
     ui,
     urlproxy,
     util,
@@ -116,8 +117,6 @@ def _probe_meta(url: str):
     third network read. Returns `(Tracks, n_video, duration_s)`, all empty/zero if ffprobe is
     unavailable or the probe fails (the caller then falls back to a track-blind remux). The
     url (which may embed a debrid token) is passed only to ffprobe, never logged."""
-    from . import tracks
-
     t = tracks.probe_tracks(url)
     return t, t.n_video, t.duration
 
@@ -515,13 +514,16 @@ def remux_to_file(
     else:
         codec = cfg.cast_audio_codec or "aac"
         acodec = ["-c:a", codec, "-b:a", _audio_bitrate(sel.channels if sel else None)]
+    # Chromecast rejects / mishandles `hev1`; ffmpeg writes that tag unless we force hvc1.
+    vcodec = tracks.probe_tracks(url).video_codec
+    vtag = ["-tag:v", "hvc1"] if vcodec in ("hevc", "h265") else []
     path = _new_remux_temp()
     cmd = [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         # A stalled source must fail the remux, not hang it forever (30s, microseconds).
         "-rw_timeout", "30000000", "-i", urlproxy.local_url(url),  # token kept out of argv
         "-map", "0:v:0", "-map", amap,
-        "-c:v", "copy", *acodec,
+        "-c:v", "copy", *vtag, *acodec,
         "-movflags", "+faststart", path,
         # The embedded subtitle, extracted in the same read of the source (ADR 0042).
         *(["-map", f"0:s:{sub_index}", "-c:s", "webvtt", embedded_vtt(path)]
@@ -576,6 +578,7 @@ def cast_file(
     `follow=False` (headless) leaves the server detached and records its PID for `--stop`/GC;
     `follow=True` serves until playback ends, then removes the temp file."""
     serve.reap_sub_server()  # a new cast replaces any standalone Tier-1 subtitle server
+    serve.reap_proxy_server()  # and any leftover LAN Range-proxy (ADR 0045)
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
         # The state slot is single: a new Tier-2 cast replaces the previous one. Reap the
@@ -739,17 +742,18 @@ def _cast_file_via_catt_lib(
             _rm(vtt_persist)
             return None
         pid, port, token = spawned
+        served = serve.served_url(bind_ip, port, token)
         sub_url = serve.served_sub_url(bind_ip, port, token) if vtt_persist else ""
         ok = caster.catt_lib_play(
             device,
-            serve.served_url(bind_ip, port, token),
+            served,
             title=title,
             meta=meta,
             start=start,
-            content_type="video/mp4",
+            content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
-        if not ok or not _await_start(device):
+        if not (ok and _await_start(device)) and not caster.catt_receiver_has_load(device, served):
             _kill(pid)
             _rm(vtt_persist)
             return None
@@ -760,20 +764,23 @@ def _cast_file_via_catt_lib(
         return cast_delivery.CastResult(0.0, 0.0, bool(sub_paths), started=True)
 
     server, port, _thread = serve.serve_file(file_path, bind_ip, sub_path=vtt)
+    served = serve.served_url(bind_ip, port, server.token)
     sub_url = serve.served_sub_url(bind_ip, port, server.token) if vtt else ""
     keep_temp = True
     try:
         ok = caster.catt_lib_play(
             device,
-            serve.served_url(bind_ip, port, server.token),
+            served,
             title=title,
             meta=meta,
             start=start,
-            content_type="video/mp4",
+            content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
         # Do not treat a pre-start IDLE as ended — wait for PLAYING first.
-        if not ok or not _await_start(device):
+        # Late LOAD: if the TV already has our capability path, do not return
+        # None (that would CLI-fallback / second LOAD) and do not kill the server.
+        if not (ok and _await_start(device)) and not caster.catt_receiver_has_load(device, served):
             return None
         keep_temp = False
         ui.cast_live(device, follow=True)
@@ -794,7 +801,7 @@ def _cast_file_via_catt_lib(
                 subprocess.run(["catt", "-d", device, "stop"], capture_output=True, text=True)
         return cast_delivery.CastResult(pos, dur, bool(sub_paths), started=True)
     finally:
-        server.shutdown()
+        serve.close_server(server)
         if not keep_temp:
             _rm(file_path)
             _rm(f"{file_path}.vtt")
@@ -925,7 +932,7 @@ def _cast_file_via_bridge(
     finally:
         disconnected = bool(out and out.disconnected)
         if not disconnected:
-            server.shutdown()
+            serve.close_server(server)
         if out and out.started and not disconnected:
             # A started cast ran to its end → clean the temp file (fallback keeps it,
             # and a disconnect leaves it for the still-streaming receiver / GC).
@@ -1251,6 +1258,7 @@ def cast_live(
         sel = t.audio[audio_index] if 0 <= audio_index < len(t.audio) else None
         job = dataclasses.replace(job, rms=True, rms_channels=(sel.channels or 0) if sel else 0)
     serve.reap_sub_server()
+    serve.reap_proxy_server()
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
         _replace_previous(prev)
@@ -1296,7 +1304,7 @@ def cast_live(
 
     def teardown() -> None:
         if server is not None:
-            server.shutdown()
+            serve.close_server(server)
         if producer is not None:
             producer.stop()
             _INPROC.pop(out_dir, None)
@@ -1618,10 +1626,11 @@ def stop(device: str | None = None) -> bool:
     # A Tier-1 direct cast leaves only a standalone subtitle server (no remux state) — reap it
     # here so `--stop` tears it down too, even when there's no remux temp file to clear.
     reaped_sub = serve.reap_sub_server()
+    reaped_proxy = serve.reap_proxy_server()
     reap_prefetch()  # a binge's prepared next episode goes with the cast
     st = _read_state()
     if not st:
-        return reaped_sub
+        return reaped_sub or reaped_proxy
     dev = st.get("device") if device is None else device
     if st.get("inproc"):
         # A followed live cast: stopping the receiver ends it, and its owner tears down.

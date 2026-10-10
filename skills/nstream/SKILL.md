@@ -56,7 +56,8 @@ Always pass `--json`. Quote the title.
 - **`ok: true` means delivery started** for cast/play (ADR 0031). On live HLS that is
   PLAYING/PAUSED/BUFFERING, not a playlist GET (ADR 0044). On `cast_failed`, do not
   report success. If `delivery: live` then `--status` shows `receiver_error`, the start
-  lied — stop and recast; do not tell the user it is playing.
+  lied — stop and recast; do not tell the user it is playing. `delivery: lan` is the
+  ADR 0045 default for a remote debrid url (host Range-proxy, native video).
 - **Do not silently change language or quality** on `audio_lang_unavailable` /
   `quality_unavailable` — show `available_*` and ask.
 - A soft `audio_langs` preference may start a later language when the preferred dub

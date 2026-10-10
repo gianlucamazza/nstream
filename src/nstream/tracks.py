@@ -53,6 +53,9 @@ class Tracks:
     # Real codec of the first video stream ("" = no video/probe failed) — the cast video
     # vetting (`cast_vet.vet_cast_video`, ADR 0017) reads it from the same probe.
     video_codec: str = ""
+    # First video stream's `codec_tag_string` (e.g. `hvc1` / `hev1`). Chromecast
+    # rejects or mishandles `hev1`; the LAN plan rewraps those MP4s (ADR 0045).
+    codec_tag: str = ""
     # Raw ffprobe `format_name` (e.g. "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2") — the cast
     # container vetting (`cast_vet.vet_cast_container`, ADR 0022) reads it from the same
     # probe to confirm the filename extension (a lying .mp4 that is really Matroska).
@@ -68,12 +71,14 @@ def _parse_ffprobe(data: dict) -> Tracks:
     subs: list[Track] = []
     n_video = 0
     video_codec = ""
+    codec_tag = ""
     for s in data.get("streams", []):
         kind = s.get("codec_type")
         if kind == "video":
             n_video += 1
             if not video_codec:
                 video_codec = str(s.get("codec_name") or "")
+                codec_tag = str(s.get("codec_tag_string") or "")
         if kind not in ("audio", "subtitle"):
             continue
         bucket = audio if kind == "audio" else subs
@@ -96,7 +101,8 @@ def _parse_ffprobe(data: dict) -> Tracks:
         duration = 0.0
     return Tracks(
         audio=audio, subs=subs, n_video=n_video, duration=duration,
-        video_codec=video_codec, container=str(fmt.get("format_name") or ""),
+        video_codec=video_codec, codec_tag=codec_tag,
+        container=str(fmt.get("format_name") or ""),
     )  # fmt: skip
 
 
@@ -146,7 +152,8 @@ def _ffprobe(url: str, timeout: float) -> Tracks:
         "-rw_timeout", "6000000", "-probesize", "2M", "-analyzeduration", "2M",
         "-of", "json", "-show_entries",
         "format=duration,format_name"
-        ":stream=index,codec_type,codec_name,channels:stream_tags=language,title"
+        ":stream=index,codec_type,codec_name,codec_tag_string,channels"
+        ":stream_tags=language,title"
         ":stream_disposition=default,forced",
         urlproxy.local_url(url),  # never the debrid url in argv
     ]  # fmt: skip

@@ -28,15 +28,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **ADR 0045 Proposed:** Philips / catt-only Chromecast RCA. Cast volume CLI is
   0–100% ↔ `SET_VOLUME` 0–1 MASTER (Phase 0: this DMR reports
   `volume_control_type=master`, `volume_step_interval=null`; catt may quantize
-  14→13). Cast % is not TV OSD — no `osd_max`. 1080 HEVC stutter on a direct
-  remote URL is delivery, not a codec miss. No remux-720 default. Open: OSD
-  photo table, HEVC HEAD/Range, JointSpace pairing.
+  14→13). Cast % is not TV OSD — no `osd_max`. Phase 1: a remote debrid url is
+  Range-served from the host LAN when the upstream honours Range
+  (`cast_lan_proxy`, default on; JSON `delivery: lan`) so 1080 HEVC stays
+  native — not remux-720. No synthesized 206. No-Range / unknown length go to
+  the existing remux or live tier. Matroska still follows ADR 0022 in
+  `cast_flow` (`-c copy` to MP4, `-tag:v hvc1` for HEVC). Open: OSD photo
+  table, board HEVC playback HEAD, JointSpace pairing.
 - `--json --status` reports `volume_control_type`, `volume_step_interval`,
   `volume_percent`, `app_id`, `content_type`, `stream_type` (ADR 0045). Never
   `content_id`. `--volume` / TUI copy names Cast % ≠ OSD.
 
 ### Fixed
 
+- LAN-proxy `open_upstream` / `probe` pin each hop to one resolved address and
+  reject private / loopback / link-local / unspecified / CGNAT / ULA (and
+  v4-mapped) so a public-then-private DNS rebind cannot reach the host.
 - **ADR 0050:** catt **≥0.13.2** remux/file and direct fallback LOADs send
   Cinemeta title + Cinemeta/metahub HTTPS poster (`thumb` → `images[]`) +
   `video/mp4` + `BUFFERED` via `catt.api` / catt's interpreter. Older catt

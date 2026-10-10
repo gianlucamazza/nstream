@@ -219,6 +219,26 @@ def test_remux_to_file_copies_decodable_track(monkeypatch, tmp_path):
     assert "-b:a" not in cmd
 
 
+def test_remux_to_file_tags_hevc_hvc1(monkeypatch, tmp_path):
+    """Chromecast rejects hev1; the rewrap must force `-tag:v hvc1`."""
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_gc_stale", lambda: None)
+    seen = {}
+    monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
+    from nstream import tracks as tracks_mod
+
+    monkeypatch.setattr(
+        tracks_mod,
+        "probe_tracks",
+        lambda *a, **k: Tracks(video_codec="hevc", codec_tag="hev1"),
+    )
+    remux.remux_to_file(
+        "http://x", _cfg(), audio_index=0, audio=[Track(id=1, lang="ita", codec="aac")]
+    )
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
+
+
 def test_remux_to_file_failure_cleans_up(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)
@@ -655,6 +675,71 @@ def test_cast_file_lib_timeout_follow_no_restart(monkeypatch, tmp_path):
     assert srv.down  # normal end-of-follow shutdown, not a fallback restart
 
 
+def test_cast_file_lib_false_but_receiver_has_load_no_cli(monkeypatch, tmp_path):
+    """catt_lib_play False + content_id already on the receiver: no kill, no second LOAD."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
+    monkeypatch.setattr(remux.serve, "served_url", lambda ip, port, tok: url)
+    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: False)
+    monkeypatch.setattr(remux, "_await_start", lambda dev: False)
+    monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda dev, u: u == url)
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out.started is True and out.error is None
+    assert rec["killed"] == []
+    assert rec["popen"] == []
+
+
+def test_cast_file_catt_lib_uses_meta_content_type(monkeypatch, tmp_path):
+    f = _tmp_remux(tmp_path)
+    seen: dict = {}
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve, "served_url",
+        lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
+    )  # fmt: skip
+    monkeypatch.setattr(remux, "_await_start", lambda dev: True)
+    monkeypatch.setattr(
+        remux.caster, "catt_lib_play",
+        lambda ip, url, **kw: seen.update(url=url, **kw) or True,
+    )  # fmt: skip
+    remux.cast_file(
+        _cfg(), "T", str(f), device="10.0.0.5", follow=False,
+        meta=caster.CastMeta(content_type="video/webm"),
+    )  # fmt: skip
+    assert seen["content_type"] == "video/webm"
+
+
+def test_cast_file_lib_false_follow_has_load_no_cli(monkeypatch, tmp_path):
+    """Follow: late LOAD already on the capability path — no CLI restart; teardown after IDLE."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    srv = _FakeServer()
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(remux.serve, "served_url", lambda ip, port, tok: url)
+    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: False)
+    monkeypatch.setattr(remux, "_await_start", lambda dev: False)
+    monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda dev, u: u == url)
+    states = iter(
+        [
+            {"player_state": "PLAYING", "position": 1.0, "duration": 10.0},
+            {"player_state": "IDLE", "position": 10.0, "duration": 10.0},
+        ]
+    )
+    monkeypatch.setattr(remux.caster, "status", lambda dev: next(states))
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out.started is True
+    assert rec["popen"] == []
+    assert srv.down
+
+
 def test_cast_file_catt_sends_title_not_poster(monkeypatch, tmp_path):
     """catt ≥0.13.2 remux/file CLI fallback: -l + BUFFERED. Poster stays off the argv."""
     f = _tmp_remux(tmp_path)
@@ -1044,6 +1129,7 @@ class _P:
     def __init__(self, rc=0, stderr=""):
         self.returncode = rc
         self.stderr = stderr
+        self.stdout = ""
 
 
 def test_stop_no_state_returns_false():

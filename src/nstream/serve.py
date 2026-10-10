@@ -1,9 +1,11 @@
 """Tier-2 cast delivery: a minimal **Range-capable HTTP server** that serves one complete
 local file to the Chromecast Default Media Receiver — plus, optionally, a side-loaded WebVTT
 caption track at a second capability path (`served_sub_url`), with CORS headers the receiver
-requires to fetch it. Replaces the detached `catt` file server
-of ADR 0005 on the castbridge path — catt is itself a Python Range server, so owning this is
-the correct implementation of exactly what the DMR needs (a complete, `Content-Length`'d,
+requires to fetch it. ADR 0045 Phase 1 also Range-proxies a remote debrid url on the same
+capability path (`upstream=` / detached `--proxy` via stdin) so a catt-only host can hand
+the TV a LAN `Content-Length`'d 206 instead of a WAN url. Replaces the detached `catt` file
+server of ADR 0005 on the castbridge path — catt is itself a Python Range server, so owning
+this is the correct implementation of exactly what the DMR needs (a complete, `Content-Length`'d,
 `Range`/206 delivery), not a workaround. castbridge then LOADs this server's URL with metadata.
 
 The DMR issues a GET with a `Range` header and expects a `206 Partial Content` with
@@ -43,11 +45,12 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import languages, live, log, srt, util
+from . import languages, live, log, srt, urlproxy, util
 
 _log = log.get_logger("serve")
 
@@ -82,9 +85,9 @@ def new_token() -> str:
     return secrets.token_urlsafe(16)
 
 
-def url_path(token: str) -> str:
+def url_path(token: str, name: str = "stream.mp4") -> str:
     """The secret URL path the receiver must hit for the media; everything else is 404."""
-    return f"/cast/{token}/stream.mp4"
+    return f"/cast/{token}/{name}"
 
 
 def sub_url_path(token: str) -> str:
@@ -102,8 +105,8 @@ def served_hls_url(ip: str, port: int, token: str, name: str = live.PLAYLIST) ->
     return f"http://{ip}:{port}{hls_url_path(token)}{name}"
 
 
-def served_url(ip: str, port: int, token: str) -> str:
-    return f"http://{ip}:{port}{url_path(token)}"
+def served_url(ip: str, port: int, token: str, name: str = "stream.mp4") -> str:
+    return f"http://{ip}:{port}{url_path(token, name)}"
 
 
 def served_sub_url(ip: str, port: int, token: str) -> str:
@@ -204,13 +207,17 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         compares so the token can't be probed byte-by-byte."""
         srv = self.server
         req = self.path.encode()
-        if srv.file_path and secrets.compare_digest(req, srv.url_path.encode()):
+        want = srv.url_path.encode()
+        media_hit = (srv.file_path or srv.upstream) and len(req) == len(want)
+        if media_hit and secrets.compare_digest(req, want):
+            if srv.upstream and not srv.file_path:
+                return "", srv.upstream_type or "video/mp4"
             ct = (
                 "video/mp4"
-                if srv.file_path.lower().endswith(".mp4")
+                if (srv.file_path or "").lower().endswith(".mp4")
                 else "application/octet-stream"
             )
-            return srv.file_path, ct
+            return srv.file_path or "", ct
         if srv.sub_path and secrets.compare_digest(req, srv.sub_url_path.encode()):
             return srv.sub_path, "text/vtt; charset=utf-8"
         prefix = srv.hls_prefix.encode()
@@ -237,10 +244,12 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
 
     def do_HEAD(self) -> None:
-        self._respond(write_body=False)
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._respond(write_body=False)
 
     def do_GET(self) -> None:
-        self._respond(write_body=True)
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._respond(write_body=True)
 
     def do_OPTIONS(self) -> None:
         # CORS preflight the Cast receiver may send before fetching the VTT track.
@@ -273,14 +282,16 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         path, content_type = target
+        # Record before the reply: waiting until after the body races the client
+        # (test_hls_route_serves_playlist_and_segments on 3.14, run 38008509413).
+        producer = self.server.producer
+        if producer is not None and write_body:
+            producer.on_request(os.path.basename(path))
         self.server.touch(+1)
         try:
             self._serve_target(path, content_type, write_body=write_body)
         finally:
             self.server.touch(-1)
-        producer = self.server.producer
-        if producer is not None and write_body:
-            producer.on_request(os.path.basename(path))
 
     def _serve_playlist(self, path: str, *, write_body: bool) -> None:
         """A live playlist, in film time (`live.film_time_playlist`): small and growing, so
@@ -323,6 +334,9 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _serve_target(self, path: str, content_type: str, *, write_body: bool) -> None:
+        if self.server.upstream and not path:
+            self._serve_upstream(content_type, write_body=write_body)
+            return
         if content_type == _HLS_PLAYLIST_TYPE:
             self._serve_playlist(path, write_body=write_body)
             return
@@ -367,6 +381,124 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             return
         self._send_body(path, start, length)
 
+    def _serve_upstream(self, content_type: str, *, write_body: bool) -> None:
+        """Range-serve a remote url toward the DMR (ADR 0045 Phase 1).
+
+        Pass through an upstream 206. Never synthesize 206 by discarding from a
+        full GET (that scales with the seek offset at WAN speed). When the upstream
+        does not honour Range we do not advertise Accept-Ranges. Never logs the url."""
+        srv = self.server
+        upstream = srv.upstream
+        if not upstream:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        size = srv.upstream_length
+        raw_range = self.headers.get("Range", "") if srv.upstream_ranged else ""
+        rng = _parse_range(raw_range, size) if raw_range and size is not None else None
+        if raw_range and size is not None and rng is None and self._unsatisfiable(size):
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self._send_cors()
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if not write_body and size is not None:
+            if rng is None:
+                start, end, status = 0, size - 1, HTTPStatus.OK
+            else:
+                start, end, status = rng[0], rng[1], HTTPStatus.PARTIAL_CONTENT
+            self._upstream_headers(
+                status, content_type, end - start + 1, start, end, size,
+                accept_ranges=srv.upstream_ranged,
+            )  # fmt: skip
+            return
+
+        up_range = None
+        if rng is not None:
+            up_range = f"bytes={rng[0]}-{rng[1]}"
+        elif raw_range and size is None and srv.upstream_ranged:
+            up_range = raw_range
+        method = "GET" if write_body else "HEAD"
+        try:
+            resp = urlproxy.open_upstream(upstream, method, up_range)
+        except urllib.error.HTTPError as e:
+            self.send_response(e.code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            e.close()
+            return
+        except (urllib.error.URLError, OSError) as e:
+            _log.warning("serve: upstream irraggiungibile (%s)", type(e).__name__)
+            self.send_error(HTTPStatus.BAD_GATEWAY)
+            return
+        with resp:
+            if resp.status == 206:
+                self._relay_partial(resp, content_type, write_body=write_body)
+                return
+            # 200: the upstream ignored Range (or none was sent). Relay as 200.
+            # Never synthesize 206; never claim Accept-Ranges we cannot honour.
+            length_h = resp.headers.get("Content-Length")
+            expected = int(length_h) if length_h and str(length_h).isdigit() else None
+            self.send_response(HTTPStatus.OK)
+            self._send_cors()
+            self.send_header("Content-Type", content_type)
+            if srv.upstream_ranged:
+                self.send_header("Accept-Ranges", "bytes")
+            if expected is not None:
+                self.send_header("Content-Length", str(expected))
+            else:
+                self.send_header("Connection", "close")
+                self.close_connection = True
+            self.end_headers()
+            if write_body:
+                urlproxy.copy_body(resp, self.wfile.write, upstream, None, False, expected)
+
+    def _upstream_headers(
+        self,
+        status: int,
+        content_type: str,
+        length: int,
+        start: int,
+        end: int,
+        size: int,
+        *,
+        accept_ranges: bool = True,
+    ) -> None:
+        self.send_response(status)
+        self._send_cors()
+        self.send_header("Content-Type", content_type)
+        if accept_ranges:
+            self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+    def _relay_partial(self, resp, content_type: str, *, write_body: bool) -> None:
+        cr = resp.headers.get("Content-Range")
+        cl = resp.headers.get("Content-Length")
+        self.send_response(HTTPStatus.PARTIAL_CONTENT)
+        self._send_cors()
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        if cl:
+            self.send_header("Content-Length", cl)
+        if cr:
+            self.send_header("Content-Range", cr)
+        self.end_headers()
+        upstream = self.server.upstream
+        if write_body and upstream:
+            expected = int(cl) if cl and str(cl).isdigit() else None
+            # Resume from the upstream's Content-Range start, never a raw suffix.
+            up_range = urlproxy.range_from_content_range(cr)
+            raw = self.headers.get("Range")
+            if up_range is None and urlproxy.is_start_end_range(raw):
+                up_range = raw
+            urlproxy.copy_body(
+                resp, self.wfile.write, upstream,
+                up_range, up_range is not None, expected,
+            )  # fmt: skip
+
     def _unsatisfiable(self, size: int) -> bool:
         """A Range header was present but unparsed: treat as 416 only when it's a well-formed but
         out-of-bounds byte range (`bytes=<start>-`), not a malformed/multi-range header (→ 200)."""
@@ -405,14 +537,23 @@ class _FileServer(ThreadingHTTPServer):
         token: str | None = None,
         sub_path: str | None = None,
         hls_dir: str | None = None,
+        upstream: str | None = None,
+        upstream_type: str = "",
+        upstream_length: int | None = None,
+        upstream_ranged: bool = False,
+        media_name: str = "stream.mp4",
     ):
         super().__init__(addr, RangeFileHandler)
         self.hls_dir = hls_dir  # live HLS directory (ADR 0039)
         self.producer: live.Producer | None = None  # its producer, when this process owns it
-        self.file_path = file_path  # media file (None → sub-only server, e.g. Tier-1 direct)
+        self.file_path = file_path  # media file (None → sub-only / upstream proxy)
         self.sub_path = sub_path  # optional side-loaded WebVTT caption track
+        self.upstream = upstream  # remote url to Range-proxy (ADR 0045); never logged
+        self.upstream_type = upstream_type
+        self.upstream_length = upstream_length
+        self.upstream_ranged = upstream_ranged
         self.token = token or new_token()  # per-cast capability (see module docstring)
-        self.url_path = url_path(self.token)
+        self.url_path = url_path(self.token, media_name)
         self.sub_url_path = sub_url_path(self.token)
         self.hls_prefix = hls_url_path(self.token)
         self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
@@ -423,6 +564,13 @@ class _FileServer(ThreadingHTTPServer):
         self._last_activity = time.monotonic()
         self._bases: dict[str, float] = {}  # first segment → film time it starts at
         self._codecs: dict[str, str] = {}  # first segment → CODECS of its generation
+
+    def handle_error(self, request, client_address) -> None:
+        # Never print a traceback (the stdlib default) on the user's terminal: a TV
+        # that hung up on seek is normal (urlproxy._Server does the same).
+        exc = sys.exception()
+        if not isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            _log.debug("serve: errore di richiesta (%s)", type(exc).__name__)
 
     def playlist_base(self, path: str) -> float:
         """Film time at which a live playlist's generation starts (its first segment's PTS;
@@ -482,15 +630,29 @@ def _make_server(
     token: str | None = None,
     sub_path: str | None = None,
     hls_dir: str | None = None,
+    upstream: str | None = None,
+    upstream_type: str = "",
+    upstream_length: int | None = None,
+    upstream_ranged: bool = False,
+    media_name: str = "stream.mp4",
 ) -> _FileServer:
     """Bind a `_FileServer`, preferring the firewall-allowed cast port range so the receiver can
     actually reach us. `preferred_port > 0` forces that exact port; otherwise scan the range and
     fall back to an ephemeral port if it's fully busy."""
+
+    def _bind(addr: tuple[str, int]) -> _FileServer:
+        return _FileServer(
+            addr, file_path, token=token, sub_path=sub_path, hls_dir=hls_dir,
+            upstream=upstream, upstream_type=upstream_type,
+            upstream_length=upstream_length, upstream_ranged=upstream_ranged,
+            media_name=media_name,
+        )  # fmt: skip
+
     if preferred_port:
-        return _FileServer((bind_ip, preferred_port), file_path, token, sub_path, hls_dir)
+        return _bind((bind_ip, preferred_port))
     for port in range(_CAST_PORT_LO, _CAST_PORT_HI + 1):
         try:
-            return _FileServer((bind_ip, port), file_path, token, sub_path, hls_dir)
+            return _bind((bind_ip, port))
         except OSError:
             continue
     _log.warning(
@@ -498,7 +660,7 @@ def _make_server(
         _CAST_PORT_LO,
         _CAST_PORT_HI,
     )
-    return _FileServer((bind_ip, 0), file_path, token, sub_path, hls_dir)
+    return _bind((bind_ip, 0))
 
 
 def serve_file(
@@ -507,17 +669,38 @@ def serve_file(
     sub_path: str | None = None,
     *,
     hls_dir: str | None = None,
+    upstream: str | None = None,
+    upstream_type: str = "",
+    upstream_length: int | None = None,
+    upstream_ranged: bool = False,
+    media_name: str = "stream.mp4",
 ) -> tuple[_FileServer, int, threading.Thread]:
     """Start a threaded Range server for `file_path` (and/or a side-loaded WebVTT `sub_path`)
     bound to `bind_ip:0` (ephemeral port). Returns `(server, port, thread)`; the caller builds
     URLs via `served_url`/`served_sub_url(bind_ip, port, server.token)` and shuts down with
     `server.shutdown()`. The thread is a daemon (dies with the process), so this is the
-    in-process (follow) mode — headless uses the `__main__` detached entrypoint."""
-    server = _make_server(bind_ip, file_path, sub_path=sub_path, hls_dir=hls_dir)
+    in-process (follow) mode — headless uses the `__main__` detached entrypoint.
+
+    `upstream` (ADR 0045): Range-proxy a remote url on the media path instead of a file.
+    The url is held in process memory — never on argv."""
+    server = _make_server(
+        bind_ip, file_path, sub_path=sub_path, hls_dir=hls_dir,
+        upstream=upstream, upstream_type=upstream_type,
+        upstream_length=upstream_length, upstream_ranged=upstream_ranged,
+        media_name=media_name,
+    )  # fmt: skip
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, name="nstream-serve", daemon=True)
     thread.start()
     return server, port, thread
+
+
+def close_server(server: _FileServer) -> None:
+    """follow-mode teardown: stop the thread and release the socket."""
+    with contextlib.suppress(Exception):
+        server.shutdown()
+    with contextlib.suppress(Exception):
+        server.server_close()
 
 
 def _cache_dir() -> Path:
@@ -548,6 +731,7 @@ def spawn_detached(
     sub_path: str | None = None,
     hls_dir: str | None = None,
     job: live.Job | None = None,
+    proxy: dict | None = None,
 ) -> tuple[int, int, str] | None:
     """Spawn a detached `python -m nstream.serve` serving `file_path` and/or a WebVTT `sub_path`
     on `bind_ip`, returning (pid, port, token) once it announces them, or None on failure. Detached
@@ -564,18 +748,21 @@ def spawn_detached(
         cmd += ["--subs", sub_path]
     if hls_dir:
         cmd += ["--hls", hls_dir]
+    if proxy and not job:
+        cmd.append("--proxy")
+    payload = json.dumps(job.to_dict() if job else (proxy or {})) + "\n" if (job or proxy) else None
     try:
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE if job else subprocess.DEVNULL,
+            stdin=subprocess.PIPE if payload is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError) as e:
         _log.warning("serve detach fallito: %s", e)
         return None
-    if job and proc.stdin is not None:
+    if payload is not None and proc.stdin is not None:
         try:
-            proc.stdin.write(json.dumps(job.to_dict()) + "\n")
+            proc.stdin.write(payload)
             proc.stdin.close()
         except OSError:
             kill_detached(proc.pid)
@@ -652,6 +839,50 @@ def register_sub_server(pid: int, persist_path: str | None = None) -> None:
     _sub_server_state().write({"pid": pid, "persist": persist_path or ""})
 
 
+def _proxy_server_state() -> util.RunState:
+    return util.RunState("lan-proxy")
+
+
+def register_proxy_server(pid: int) -> None:
+    """Record the detached LAN Range-proxy (ADR 0045) so `--stop` / the next cast reaps it."""
+    _proxy_server_state().write({"pid": pid})
+
+
+_inproc_proxy_shutdown = None
+
+
+def register_inproc_proxy(shutdown) -> None:
+    """Track a follow-mode in-process LAN server left up because the receiver
+    already has our content_id. Next cast / `--stop` in this process reaps it."""
+    reap_inproc_proxy()
+    global _inproc_proxy_shutdown
+    _inproc_proxy_shutdown = shutdown
+
+
+def reap_inproc_proxy() -> bool:
+    """Shut a leftover in-process LAN proxy. True if there was one."""
+    global _inproc_proxy_shutdown
+    fn = _inproc_proxy_shutdown
+    _inproc_proxy_shutdown = None
+    if fn is None:
+        return False
+    with contextlib.suppress(Exception):
+        fn()
+    return True
+
+
+def reap_proxy_server() -> bool:
+    """Kill and forget a leftover LAN Range-proxy (detached pid and/or in-process)."""
+    found = reap_inproc_proxy()
+    st = _proxy_server_state()
+    data = st.read()
+    if data is None:
+        return found
+    kill_detached(data.get("pid"))
+    st.clear()
+    return True
+
+
 def reap_sub_server() -> bool:
     """Kill and forget a leftover standalone subtitle server, removing its persisted VTT
     copy. True if there was one (best-effort, idempotent)."""
@@ -725,6 +956,7 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--subs")  # optional side-loaded WebVTT caption track
     ap.add_argument("--hls")  # live HLS directory; the producer job arrives on stdin
+    ap.add_argument("--proxy", action="store_true")  # remote url arrives on stdin (never argv)
     ap.add_argument("--idle-exit", type=float, default=IDLE_EXIT_S)
     args = ap.parse_args(argv)
     # Detached process: nothing has configured logging (cli._entry does it for the TUI), so
@@ -737,10 +969,20 @@ def _main(argv: list[str] | None = None) -> int:
     if args.subs and not os.path.isfile(args.subs):
         print(f"serve: sottotitoli non trovati: {args.subs}", file=sys.stderr)
         return 2
-    if not args.file and not args.subs and not args.hls:
-        print("serve: né file né --subs né --hls specificati", file=sys.stderr)
+    if not args.file and not args.subs and not args.hls and not args.proxy:
+        print("serve: né file né --subs né --hls né --proxy specificati", file=sys.stderr)
         return 2
     producer: live.Producer | None = None
+    proxy_spec: dict | None = None
+    if args.proxy:
+        try:
+            proxy_spec = json.loads(sys.stdin.readline())
+            upstream = proxy_spec.get("upstream")
+            if not isinstance(upstream, str) or not upstream.startswith(("http://", "https://")):
+                raise ValueError
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            print("serve: job proxy non valido", file=sys.stderr)
+            return 2
     if args.hls:
         try:
             job = live.Job.from_dict(json.loads(sys.stdin.readline()))
@@ -764,9 +1006,25 @@ def _main(argv: list[str] | None = None) -> int:
             ).start()
 
         signal.signal(signal.SIGUSR1, restart)
-    server = _make_server(
-        args.bind, args.file, preferred_port=args.port, sub_path=args.subs, hls_dir=args.hls
-    )
+    if proxy_spec is not None:
+        length = proxy_spec.get("content_length")
+        length_i = (
+            int(length)
+            if isinstance(length, int) or (isinstance(length, str) and length.isdigit())
+            else None
+        )
+        server = _make_server(
+            args.bind, args.file, preferred_port=args.port, sub_path=args.subs, hls_dir=args.hls,
+            upstream=proxy_spec["upstream"],
+            upstream_type=str(proxy_spec.get("content_type") or "video/mp4"),
+            upstream_length=length_i,
+            upstream_ranged=bool(proxy_spec.get("ranged")),
+            media_name=str(proxy_spec.get("media_name") or "stream.mp4"),
+        )  # fmt: skip
+    else:
+        server = _make_server(
+            args.bind, args.file, preferred_port=args.port, sub_path=args.subs, hls_dir=args.hls
+        )
     server.producer = producer
     if producer is not None:
         producer.run_pacing()

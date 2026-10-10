@@ -58,7 +58,7 @@ flowchart TD
   C -->|yes| D[mirror: mpv headless + openscreen sender]
   C -->|no| E{needs Tier-2 remux?}
   E -->|Dolby/DTS, no AAC alt| F[remux: download + audio AAC + Range HTTP]
-  E -->|native AAC / direct| G[caster: castbridge or catt]
+  E -->|native AAC / remote url| G[LAN Range-proxy then caster: castbridge or catt]
   F --> G
   D --> H[receiver playing]
   G --> H
@@ -67,6 +67,7 @@ flowchart TD
 | Backend | Start | Fidelity | Cost |
 | ------- | ----- | -------- | ---- |
 | **Direct DMR** (castbridge/catt) | Instant stream | Full video (HEVC/4K/HDR) if codec ok | Needs DMR-decodable **audio** (AAC/…) |
+| **LAN Range-proxy** (ADR 0045) | Instant (same LOAD) | Native video; TV pulls the host | Default for a remote debrid url (`cast_lan_proxy`) |
 | **Tier-2 live** (ADR 0039) | Seconds (live HLS-TS) | Video copy; audio → AAC stereo | ~40 min window on disk |
 | **Tier-2 remux** (ADR 0005) | Prepare wait (download whole file) | Video copy; audio → AAC (multichannel) | Disk + time; fallback, or `cast_live: false` |
 | **Mirror** (ADR 0006/0015/0023) | Instant | 1080p SDR (HDR→SDR) | Needs openscreen sender + Hyprland/PipeWire |
@@ -126,7 +127,9 @@ the metadata fix.
 The TV **pulls** the remuxed file from the host (Range HTTP on ports **45000–47000**).
 nstream never changes the firewall or invokes sudo during playback. On a connection
 failure it prints guidance for an administrator to apply an appropriately scoped rule.
-Direct casts and castbridge control are outbound-only.
+Direct casts that still hand the TV a remote URL are outbound-only. A LAN
+Range-proxy (ADR 0045, default) needs the same inbound 45000–47000 rule as
+Tier-2: the TV pulls the host, not the debrid WAN.
 
 ## Cast-time vetting
 
@@ -173,7 +176,12 @@ The Philips 43PUS9235/12 DMR (app `CC1AD845`) reports `master` and
 quantize (14→13). TV OSD ticks are a **different** scale — there is no
 `osd_max` and no linear map (a remembered 14 ≈ OSD 8 / 0–60 guess was rejected).
 Comfortable OSD ~12–15 means try Cast percents and read the TV, not a remapped
-CLI. HEVC 1080 stutter on a **direct** catt cast (TV pulls a remote URL) is a
-delivery path; this DMR already plays HEVC/4K/HDR from a LAN Range file or live
-HLS (video copy). A 720 H.264 remux is triage, not the default. Missing
-`cast_sender` only blocks the mirror fallback.
+CLI. HEVC 1080 stutter on a **WAN-direct** catt cast (TV pulls a remote URL) is
+a delivery path, not a codec miss. Default `cast_lan_proxy` Range-serves that
+url from the host when the upstream honours Range (video pass-through,
+`video/mp4`, real 206). No synthesized 206: an upstream without Range goes to
+the existing remux / live tier. MKV still follows ADR 0022 (`cast_flow` `-c
+copy` to MP4). This DMR already plays HEVC/4K/HDR from a LAN Range file or
+live HLS. A 720 H.264 remux is triage, not the default. Missing `cast_sender`
+only blocks the mirror fallback. JSON `delivery` is `lan` when the proxy ran.
+Off (`cast_lan_proxy: false`) is debug only.

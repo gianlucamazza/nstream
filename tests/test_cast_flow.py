@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from nstream import cast_delivery, cast_flow, stream_select, subs, util
+from nstream import cast_delivery, cast_flow, stream_select, subs, tracks, urlproxy, util
 from nstream.config import Config, PlayOpts
 from nstream.types import Stream
 
@@ -157,6 +157,17 @@ def test_remux_failure_degrades_to_direct(monkeypatch, capsys):
     assert seen["cast_url"] == stream["url"]
     assert out.notice and "remux non riuscito" in out.notice
     assert out.reencoded is False and out.action == "cast"
+
+
+def test_remux_failure_with_lan_proxy_does_not_wan_direct(monkeypatch):
+    """A remote url + cast_lan_proxy must not silently hand the debrid URL to the TV."""
+    stream: Stream = {**_STREAM, "url": "https://cdn.example.com/f.mp4"}
+    _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.remux, "live_available", lambda cfg: False)
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", lambda *a, **k: None)
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("must not WAN-direct"))
+    with pytest.raises(cast_flow.CastRemuxInfeasible, match="proxy LAN"):
+        _run(_opts(), stream)
 
 
 def test_headless_prefers_direct_over_remux(monkeypatch, capsys):
@@ -1207,6 +1218,59 @@ def test_direct_cast_reports_direct_delivery(monkeypatch):
     _wire(monkeypatch, _plan("direct", stream))
     monkeypatch.setattr(cast_flow.caster, "cast", lambda *a, **k: _ok())
     assert _run(_opts(), stream).delivery == "direct"
+
+
+def test_lan_proxy_cast_reports_lan_delivery(monkeypatch):
+    """cast_flow passes video_codec into caster.cast so lan_undecodable_video can run."""
+    stream: Stream = {**_STREAM, "url": "https://cdn.example.com/f.mp4"}
+    _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.urlproxy,
+        "probe",
+        lambda *a, **k: urlproxy.Probe(True, "video/mp4", 99, True),
+    )
+    monkeypatch.setattr(
+        cast_flow.tracks,
+        "probe_tracks",
+        lambda *a, **k: tracks.Tracks(video_codec="hevc", codec_tag="hvc1"),
+    )
+    seen: dict = {}
+
+    def fake_cast(*a, **k):
+        seen.update(k)
+        return cast_delivery.CastResult(0.0, 0.0, started=True, delivery="lan")
+
+    monkeypatch.setattr(cast_flow.caster, "cast", fake_cast)
+    out = _run(_opts(), stream)
+    assert out.delivery == "lan"
+    assert seen.get("video_codec") == "hevc"
+    assert seen.get("container") == "mp4"
+
+
+def test_lan_no_range_routes_to_remux_not_wan(monkeypatch):
+    """No synthesized 206: a no-Range remote MP4 takes the disk-capped remux tier."""
+    stream: Stream = {**_STREAM, "url": "https://cdn.example.com/f.mp4"}
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.urlproxy,
+        "probe",
+        lambda *a, **k: urlproxy.Probe(True, "video/mp4", 99, False),
+    )
+    monkeypatch.setattr(
+        cast_flow.tracks,
+        "probe_tracks",
+        lambda *a, **k: tracks.Tracks(video_codec="hevc", codec_tag="hvc1"),
+    )
+    monkeypatch.setattr(cast_flow.remux, "live_available", lambda cfg: False)
+    monkeypatch.setattr(
+        cast_flow.remux,
+        "remux_for_cast",
+        lambda *a, **k: seen.update(remux=True) or "/tmp/out.mp4",
+    )
+    monkeypatch.setattr(cast_flow.remux, "cast_file", lambda *a, **k: _ok())
+    monkeypatch.setattr(cast_flow.caster, "cast", _boom("must not WAN-direct a no-Range url"))
+    out = _run(_opts(), stream)
+    assert seen.get("remux") and out.delivery == "file"
 
 
 def test_no_auto_mirror_when_the_live_tier_can_run(monkeypatch):
