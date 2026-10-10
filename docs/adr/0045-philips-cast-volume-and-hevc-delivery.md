@@ -2,14 +2,14 @@
 
 - **Status:** Proposed
 - **Date:** 2026-10-05
-- **Deciders:** Phase 0 CLI grid (Odroid, 2026-10-05) confirms the volume contract
+- **Deciders:** Phase 0 CLI grid (the board, 2026-10-05) confirms the volume contract
   below. Status stays **Proposed** until the OSD photo table and HEVC HEAD/Range
   traces land — Docs can stamp Accepted then. No remux / OSD-scale product default
   change.
 
 ## Context
 
-Field, Odroid N2 + Philips 43PUS9235/12 (TPM191E, `192.168.1.228`), nstream 1.43.0,
+Field, the board + Philips 43PUS9235/12 (TPM191E), nstream 1.43.0,
 `cast_mode=dmr`, `cast_remux=true`, catt 0.13.3. **castbridge / mirror / `cast_sender`
 absent.** Config sets `cast_receiver_app_id=07841171`. Board traces 2026-10-05.
 
@@ -67,7 +67,7 @@ remote url** (Phase 1): video stays native; the TV pulls a complete, `Content-Le
 
 ## Phase 0 CLI grid (2026-10-05)
 
-Cast idle (player_state UNKNOWN, `content_id` None) on `192.168.1.228`. Volume restored
+Cast idle (player_state UNKNOWN, `content_id` None) on <tv-ip>. Volume restored
 to ~14 after the grid. OSD photograph: **NEED_USER** (cannot photograph the TV from the
 board). Do **not** invent `cast_volume_osd_max` or a linear 0–60 map from the earlier
 remembered OSD ~8 pair — CoS already rejected that guess.
@@ -160,10 +160,10 @@ on argv) are `serve`. Fire-and-return registers `RunState("lan-proxy")`; `--stop
 
 Live board HEAD/ffprobe traces remain NEED_PLAYBACK; the fixture tests cover a Range
 MP4 proxy, no-Range routing to remux/live (no synthesized 206), and MKV as ADR 0022
-rewrap. Status stays **Proposed** until an Odroid 1080 HEVC cast confirms smooth
+rewrap. Status stays **Proposed** until the board 1080 HEVC cast confirms smooth
 playback.
 
-### Board verification (Odroid; no install)
+### Board verification (the board; no install)
 
 CODE + docs only. Do **not** install castbridge / mirror / `cast_sender`. Volume contract
 unchanged — do not invent `osd_max`.
@@ -188,7 +188,7 @@ unchanged — do not invent `osd_max`.
 8. `--stop` reaps the LAN proxy (`RunState("lan-proxy")`). A second cast replaces it.
 9. Optional: `cast_lan_proxy: false` reproduces the old WAN-direct stutter (debug).
 
-## Residuals still open (Odroid; no install)
+## Residuals still open (the board; no install)
 
 Volume:
 
@@ -227,7 +227,7 @@ HEVC (do **not** remux to 720; leave the triage file alone):
 
 ## References
 
-- Board traces 2026-10-05 (odroidn2) + Phase 0 CLI grid 2026-10-05. Symbols:
+- Board traces 2026-10-05 (<host>) + Phase 0 CLI grid 2026-10-05. Symbols:
   `caster.clamp_volume_percent`, `caster.volume_percent_to_level`,
   `caster.volume_level_to_percent`, `caster.format_volume_bits`, `caster.set_volume`,
   `caster.status`, `caster.lan_media`, `caster._cast_via_catt`, `caster.catt_lib_play`,

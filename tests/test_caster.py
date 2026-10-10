@@ -1016,10 +1016,10 @@ def test_catt_jpeg_poster_url_rewrites_small_webp_to_medium():
 
 
 def test_catt_image_url_accepts_lan_poster_jpg():
-    lan = "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    lan = "http://192.0.2.103:45000/cast/toktest/poster.jpg"
     assert caster.catt_image_url(lan) == lan
-    assert caster.catt_image_url("http://192.168.1.103:45000/cast/tok/other.jpg") == ""
-    assert caster.catt_image_url("http://192.168.1.103/p.jpg") == ""
+    assert caster.catt_image_url("http://192.0.2.103:45000/cast/tok/other.jpg") == ""
+    assert caster.catt_image_url("http://192.0.2.103/p.jpg") == ""
     small = "https://images.metahub.space/poster/small/tt6263850/img"
     assert (
         caster.catt_image_url(small) == "https://images.metahub.space/poster/medium/tt6263850/img"
@@ -1106,8 +1106,8 @@ def test_catt_lib_load_debug_redacts_token(caplog):
     import logging
 
     caplog.set_level(logging.DEBUG, logger="nstream.cast")
-    url = "http://192.168.1.103:45000/cast/s3cretTok/stream.mp4"
-    poster = "http://192.168.1.103:45000/cast/s3cretTok/poster.jpg"
+    url = "http://192.0.2.103:45000/cast/s3cretTok/stream.mp4"
+    poster = "http://192.0.2.103:45000/cast/s3cretTok/poster.jpg"
     load = caster.catt_play_kwargs("Deadpool & Wolverine", caster.CastMeta(poster=poster))
     caster._log_catt_load(url, load)
     text = "\n".join(r.getMessage() for r in caplog.records)

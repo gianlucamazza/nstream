@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-05
-- **Deciders:** Odroid/CoS planning
+- **Deciders:** board/CoS planning
 
 ## Context
 

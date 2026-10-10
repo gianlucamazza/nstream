@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-10
-- **Deciders:** field report (Odroid, Deadpool @ 12810a18) + ADR 0017 / 0045 follow-up
+- **Deciders:** field report (the board, Deadpool @ 12810a18) + ADR 0017 / 0045 follow-up
 
 ## Context
 
@@ -58,5 +58,5 @@ another.
 - `tracks.honest_codec`, `tracks.cached_tracks`, `headless_play.describe_stream`,
   `caster.lan_media`, `urlproxy.plan`, `remux.remux_to_file`, `labels.stream_label`
 - ADR 0017 (real codec before cast), ADR 0026 (name parse), ADR 0045 (LAN plan /
-  hev1 rewrap). Field: Odroid @ 12810a18, Deadpool 1080 labelled x265, ffprobe
+  hev1 rewrap). Field: the board @ 12810a18, Deadpool 1080 labelled x265, ffprobe
   H.264.

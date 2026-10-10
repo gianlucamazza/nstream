@@ -460,7 +460,7 @@ def test_serve_file_binds_in_cast_range(tmp_path):
 
 
 def test_lan_subnet():
-    assert serve._lan_subnet("192.168.1.75") == "192.168.1.0/24"
+    assert serve._lan_subnet("192.0.2.75") == "192.0.2.0/24"
     assert serve._lan_subnet("10.0.5.42") == "10.0.5.0/24"
 
 
@@ -469,7 +469,7 @@ def test_ensure_firewall_noop_without_ufw(monkeypatch):
     monkeypatch.setattr(serve.shutil, "which", lambda _: None)
     called = []
     monkeypatch.setattr(serve.subprocess, "run", lambda *a, **k: called.append(a))
-    serve.ensure_firewall("192.168.1.75")
+    serve.ensure_firewall("192.0.2.75")
     assert called == []
 
 
@@ -488,7 +488,7 @@ def test_ensure_firewall_never_changes_host_policy(monkeypatch):
         return _R(0)
 
     monkeypatch.setattr(serve.subprocess, "run", fake_run)
-    serve.ensure_firewall("192.168.1.75")
+    serve.ensure_firewall("192.0.2.75")
     assert cmds == []
 
 
@@ -499,14 +499,14 @@ def test_ensure_firewall_skips_when_present(monkeypatch):
     class _R:
         returncode = 0
         stderr = ""
-        stdout = "45000:47000/tcp   ALLOW IN   192.168.1.0/24\n"
+        stdout = "45000:47000/tcp   ALLOW IN   192.0.2.0/24\n"
 
     def fake_run(cmd, **k):
         cmds.append(cmd)
         return _R()
 
     monkeypatch.setattr(serve.subprocess, "run", fake_run)
-    serve.ensure_firewall("192.168.1.75")
+    serve.ensure_firewall("192.0.2.75")
     assert not any("allow" in c for c in cmds)  # already open → no privileged add
 
 
@@ -518,12 +518,12 @@ def test_ensure_firewall_noop_without_sudo(monkeypatch):
         stdout = stderr = ""
 
     monkeypatch.setattr(serve.subprocess, "run", lambda *a, **k: _R())
-    serve.ensure_firewall("192.168.1.75")  # must not raise
+    serve.ensure_firewall("192.0.2.75")  # must not raise
 
 
 def test_firewall_hint_mentions_rule():
-    hint = serve.firewall_hint("192.168.1.75", 45123)
-    assert "192.168.1.0/24" in hint and "45000:47000" in hint and "45123" in hint
+    hint = serve.firewall_hint("192.0.2.75", 45123)
+    assert "192.0.2.0/24" in hint and "45000:47000" in hint and "45123" in hint
 
 
 # --- persisted VTT lifecycle (detached sub server, ADR 0018 refinement) -------

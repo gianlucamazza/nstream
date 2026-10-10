@@ -862,7 +862,7 @@ def test_headless_json_cast_load_has_lan_jpeg_poster(monkeypatch, capsys, tmp_pa
     """
     poster_small = "https://images.metahub.space/poster/small/tt6263850/img"
     poster_medium = "https://images.metahub.space/poster/medium/tt6263850/img"
-    lan_poster = "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    lan_poster = "http://192.0.2.103:45000/cast/toktest/poster.jpg"
     jpeg = tmp_path / "poster.jpg"
     jpeg.write_bytes(b"\xff\xd8\xff\xd9")
     stream = {
@@ -903,7 +903,7 @@ def test_headless_json_cast_load_has_lan_jpeg_poster(monkeypatch, capsys, tmp_pa
     monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
 
     fetched: dict = {}
-    monkeypatch.setattr(cast_flow.caster.serve, "lan_ip", lambda device: "192.168.1.103")
+    monkeypatch.setattr(cast_flow.caster.serve, "lan_ip", lambda device: "192.0.2.103")
     monkeypatch.setattr(cast_flow.caster.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(cast_flow.caster.serve, "reap_proxy_server", lambda: False)
     monkeypatch.setattr(
@@ -981,7 +981,7 @@ def _headless_cast_load_capture(monkeypatch, tmp_path, *, fetch_ok=True):
     )
     monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
     fetched: dict = {}
-    monkeypatch.setattr(cast_flow.caster.serve, "lan_ip", lambda device: "192.168.1.103")
+    monkeypatch.setattr(cast_flow.caster.serve, "lan_ip", lambda device: "192.0.2.103")
     monkeypatch.setattr(cast_flow.caster.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(cast_flow.caster.serve, "reap_proxy_server", lambda: False)
     monkeypatch.setattr(
@@ -1036,7 +1036,7 @@ def test_headless_amazon_search_poster_uses_derived_metahub(monkeypatch, capsys,
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out.get("ok")
     assert fetched.get("url") == _METAHUB_MEDIUM
-    lan_poster = "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    lan_poster = "http://192.0.2.103:45000/cast/toktest/poster.jpg"
     assert captured["meta"].poster == lan_poster
     kw = cast_flow.caster.catt_play_kwargs(
         captured["title"],
@@ -1105,7 +1105,7 @@ def test_headless_full_meta_poster_wins_over_search(monkeypatch, capsys, tmp_pat
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out.get("ok")
     assert fetched.get("url") == _METAHUB_MEDIUM
-    assert captured["meta"].poster == "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    assert captured["meta"].poster == "http://192.0.2.103:45000/cast/toktest/poster.jpg"
     assert "source=meta" in caplog.text
     assert search not in caplog.text
 
