@@ -74,18 +74,6 @@ CATT_METADATA_MOVIE = 1  # pychromecast METADATA_TYPE_MOVIE
 CATT_METADATA_TVSHOW = 2  # pychromecast METADATA_TYPE_TVSHOW
 CATT_LOAD_META_MIN = (0, 13, 2)
 _SUB_IDLE_FOR = "_nstream_sub_idle_for"  # stashed on caption kwargs; never a LOAD field
-_CATT_POSTER_HOST_SUFFIX = (".metahub.space", ".strem.io")
-_CATT_POSTER_HOSTS = frozenset(
-    {
-        "metahub.space",
-        "images.metahub.space",
-        "live.metahub.space",
-        "strem.io",
-        "cinemeta.strem.io",
-        "v3-cinemeta.strem.io",
-        "images.strem.io",
-    }
-)
 
 
 def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
@@ -117,7 +105,7 @@ def catt_poster_url(poster: str) -> str:
     host = (urllib.parse.urlsplit(raw).hostname or "").lower().rstrip(".")
     if not host:
         return ""
-    if host in _CATT_POSTER_HOSTS or host.endswith(_CATT_POSTER_HOST_SUFFIX):
+    if serve.poster_host_allowed(host):
         return raw
     return ""
 
@@ -436,7 +424,7 @@ def _scrub_catt_load_url(raw: str) -> str:
         return _CAST_CAP_PATH.sub(r"\1<token>", path)
     if parts.scheme in ("http", "https"):
         host = (parts.hostname or "").lower().rstrip(".")
-        if host in _CATT_POSTER_HOSTS or host.endswith(_CATT_POSTER_HOST_SUFFIX):
+        if serve.poster_host_allowed(host):
             return f"{host}{path}"
         return "<url>"
     return text
@@ -1090,20 +1078,12 @@ def lan_media(
     jpeg_src = catt_jpeg_poster_url(poster)
     poster_path = serve.fetch_poster_jpeg(jpeg_src) if jpeg_src else None
     if follow:
-        if poster_path:
-            server, port, _thread = serve.serve_file(
-                None, bind_ip,
-                upstream=url, upstream_type=planned.content_type,
-                upstream_length=planned.content_length, upstream_ranged=planned.ranged,
-                media_name=planned.media_name, poster_path=poster_path,
-            )  # fmt: skip
-        else:
-            server, port, _thread = serve.serve_file(
-                None, bind_ip,
-                upstream=url, upstream_type=planned.content_type,
-                upstream_length=planned.content_length, upstream_ranged=planned.ranged,
-                media_name=planned.media_name,
-            )  # fmt: skip
+        server, port, _thread = serve.serve_file(
+            None, bind_ip,
+            upstream=url, upstream_type=planned.content_type,
+            upstream_length=planned.content_length, upstream_ranged=planned.ranged,
+            media_name=planned.media_name, poster_path=poster_path,
+        )  # fmt: skip
         return LanMedia(
             serve.served_url(bind_ip, port, server.token, planned.media_name),
             planned.content_type,
@@ -1111,15 +1091,12 @@ def lan_media(
             planned,
             idle_for=server.idle_for,
             poster_url=(
-                serve.served_poster_url(bind_ip, port, server.token) if poster_path else ""
+                serve.served_poster_url(bind_ip, port, server.token) if poster_path else jpeg_src
             ),
         )
-    if poster_path:
-        spawned = serve.spawn_detached(
-            bind_ip, proxy=urlproxy.proxy_job(url, planned), poster_path=poster_path
-        )
-    else:
-        spawned = serve.spawn_detached(bind_ip, proxy=urlproxy.proxy_job(url, planned))
+    spawned = serve.spawn_detached(
+        bind_ip, proxy=urlproxy.proxy_job(url, planned), poster_path=poster_path
+    )
     if spawned is None:
         _log.warning("lan-proxy: detach fallito")
         return None
@@ -1130,7 +1107,7 @@ def lan_media(
         planned.content_type,
         None,
         planned,
-        poster_url=serve.served_poster_url(bind_ip, port, token) if poster_path else "",
+        poster_url=serve.served_poster_url(bind_ip, port, token) if poster_path else jpeg_src,
     )
 
 
@@ -1185,7 +1162,8 @@ def cast(
     )
     if lan is not None:
         url = lan.url
-        meta = replace(meta or CastMeta(), content_type=lan.content_type, poster=lan.poster_url)
+        poster = lan.poster_url or catt_jpeg_poster_url(meta.poster if meta else "")
+        meta = replace(meta or CastMeta(), content_type=lan.content_type, poster=poster)
     elif meta is not None and (meta.poster or "").startswith("https://"):
         jpeg = catt_jpeg_poster_url(meta.poster)
         if jpeg != meta.poster:

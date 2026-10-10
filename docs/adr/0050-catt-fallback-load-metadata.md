@@ -173,6 +173,11 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   small→medium, verify `image/jpeg` (`serve.fetch_poster_jpeg`). Debug
   log `catt lib LOAD media=` (`--debug` / `NSTREAM_DEBUG`) with the
   token redacted so the next live run can grep the exact LOAD.
+  Poster GET uses `ProxyHandler({})` (env `HTTPS_PROXY` ignored) and a
+  redirect handler that re-checks every hop against the Cinemeta/metahub
+  allowlist (https only, max 3 hops). Deadline 3 s across connect+read.
+  A failed LAN JPEG fetch falls back to the allowlisted https JPEG
+  rather than omitting `images`. Cache dir pruned to 200 newest files.
 - **Mute flip on LOAD:** nstream's library path never sends `SET_VOLUME` or
   `set_volume_muted`. catt 0.13.3 `play_media_url` (controllers.py:597-608)
   forwards only url/content_type/current_time/title/thumb/subtitles/
@@ -193,7 +198,8 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
   `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_load_media`,
   `caster.catt_image_url`, `caster.catt_jpeg_poster_url`, `caster.catt_cast_argv`,
-  `serve.fetch_poster_jpeg`, `serve.served_poster_url`,
+  `serve.fetch_poster_jpeg`, `serve.served_poster_url`, `serve.poster_host_allowed`,
+  `serve._poster_http`, `serve._PosterRedirect`,
   `caster._cast_via_catt`, `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
   `caster._hook_catt_play_media`, `caster._log_catt_load`, `caster._schedule_unconfirmed_sub_reap`,
   `serve.schedule_reap`, `serve.cancel_reap`, `serve.register_inproc_proxy`,

@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -113,13 +114,156 @@ def test_fetch_poster_jpeg_accepts_jpeg_rejects_webp(tmp_path, monkeypatch):
         return _Resp(jpeg, "image/jpeg")
 
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(serve.urllib.request, "urlopen", fake_open)
+    monkeypatch.setattr(serve._poster_http, "open", fake_open)
     path = serve.fetch_poster_jpeg("https://images.metahub.space/poster/small/tt6263850/img")
     assert path and Path(path).read_bytes() == jpeg
     assert "poster" in path and path.endswith(".jpg")
     assert serve.fetch_poster_jpeg("https://images.metahub.space/poster/small/tt1/img.webp") is None
     assert serve.fetch_poster_jpeg("https://images.metahub.space/webp/tt1/img") is None
     assert serve.fetch_poster_jpeg("https://images.metahub.space/lied/tt1/img") is None
+
+
+def test_poster_redirect_refuses_off_allowlist_and_http():
+    """Every hop is https + Cinemeta/metahub. Off-allowlist / http → refuse."""
+    h = serve._PosterRedirect()
+    req = urllib.request.Request("https://images.metahub.space/poster/medium/tt1/img")
+    with pytest.raises(urllib.error.URLError):
+        h.redirect_request(req, None, 302, "Found", {}, "https://evil.example/steal.jpg")
+    with pytest.raises(urllib.error.URLError):
+        h.redirect_request(req, None, 302, "Found", {}, "http://images.metahub.space/p.jpg")
+    assert serve._PosterRedirect.max_redirections == 3
+
+
+def test_download_poster_refuses_redirect_off_allowlist(monkeypatch):
+    """Opener follows 302 only while the next hop stays on the allowlist."""
+
+    class _Hop(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", "https://evil.example/p.jpg")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Hop)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(serve, "_poster_url_ok", lambda url: "evil.example" not in url)
+    try:
+        assert serve._download_poster_jpeg(f"http://127.0.0.1:{srv.server_address[1]}/p") is None
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_poster_opener_ignores_https_proxy(monkeypatch):
+    """HTTPS_PROXY must not steal the poster hop (ProxyHandler({}))."""
+    origin_hits = {"n": 0}
+    proxy_hits = {"n": 0}
+
+    class _Origin(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            pass
+
+        def do_GET(self) -> None:
+            origin_hits["n"] += 1
+            body = b"\xff\xd8\xff\xd9xxxx"
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class _Proxy(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            pass
+
+        def do_GET(self) -> None:
+            proxy_hits["n"] += 1
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_CONNECT(self) -> None:
+            proxy_hits["n"] += 1
+            self.send_response(200)
+            self.end_headers()
+
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), _Origin)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), _Proxy)
+    threading.Thread(target=origin.serve_forever, daemon=True).start()
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    monkeypatch.setenv("http_proxy", proxy_url)
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    monkeypatch.setenv("https_proxy", proxy_url)
+    monkeypatch.setenv("HTTPS_PROXY", proxy_url)
+    try:
+        url = f"http://127.0.0.1:{origin.server_address[1]}/p.jpg"
+        req = urllib.request.Request(url)
+        with serve._poster_http.open(req, timeout=2) as resp:
+            assert resp.status == 200
+        assert origin_hits["n"] == 1
+        assert proxy_hits["n"] == 0
+    finally:
+        origin.shutdown()
+        origin.server_close()
+        proxy.shutdown()
+        proxy.server_close()
+
+
+def test_download_poster_jpeg_deadline_then_cast_without_lan_poster(monkeypatch):
+    """A hanging metahub is cut at `_POSTER_TIMEOUT`; the cast proceeds."""
+
+    class _Slow(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:  # noqa: A002
+            pass
+
+        def do_GET(self) -> None:
+            time.sleep(10)
+            self.send_response(200)
+            self.end_headers()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Slow)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(serve, "_poster_url_ok", lambda url: True)
+    monkeypatch.setattr(serve, "_POSTER_TIMEOUT", 0.4)
+    try:
+        t0 = time.monotonic()
+        assert serve._download_poster_jpeg(f"http://127.0.0.1:{srv.server_address[1]}/p") is None
+        assert time.monotonic() - t0 < 1.5
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_fetch_poster_jpeg_prunes_cache(tmp_path, monkeypatch):
+    jpeg = b"\xff\xd8\xff\xd9" + b"x" * 16
+
+    class _Resp:
+        headers = {"Content-Type": "image/jpeg"}
+
+        def read(self, n=-1):
+            return jpeg
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    d = tmp_path / "nstream" / "posters"
+    d.mkdir(parents=True)
+    for i in range(serve._POSTER_CACHE_MAX_FILES + 1):
+        p = d / f"{i:03d}.bin"
+        p.write_bytes(b"x")
+        p.touch()
+    monkeypatch.setattr(serve._poster_http, "open", lambda *a, **k: _Resp())
+    path = serve.fetch_poster_jpeg("https://images.metahub.space/poster/medium/tt1/img")
+    assert path
+    assert len([p for p in d.iterdir() if p.is_file()]) <= serve._POSTER_CACHE_MAX_FILES
 
 
 def test_full_get_returns_200(tmp_path):

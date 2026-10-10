@@ -108,15 +108,63 @@ def served_poster_url(ip: str, port: int, token: str) -> str:
 
 
 _POSTER_MAX = 5 * 1024 * 1024
-_POSTER_TIMEOUT = 8.0
+_POSTER_TIMEOUT = 3.0  # connect + read; a slow metahub must not stall the LOAD
+_POSTER_MAX_HOPS = 3
+_POSTER_CACHE_MAX_FILES = 200
+_POSTER_CACHE_MAX_BYTES = 50 * 1024 * 1024
 _JPEG_TYPES = frozenset({"image/jpeg", "image/jpg"})
+# Cinemeta / metahub only — same allowlist `caster.catt_poster_url` uses.
+CATT_POSTER_HOST_SUFFIX = (".metahub.space", ".strem.io")
+CATT_POSTER_HOSTS = frozenset(
+    {
+        "metahub.space",
+        "images.metahub.space",
+        "live.metahub.space",
+        "strem.io",
+        "cinemeta.strem.io",
+        "v3-cinemeta.strem.io",
+        "images.strem.io",
+    }
+)
+
+
+def poster_host_allowed(host: str | None) -> bool:
+    """True for an allowlisted Cinemeta / metahub hostname."""
+    name = (host or "").lower().rstrip(".")
+    return bool(name) and (name in CATT_POSTER_HOSTS or name.endswith(CATT_POSTER_HOST_SUFFIX))
+
+
+def _poster_url_ok(url: str) -> bool:
+    """Every hop: https + allowlisted host. Never logs `url`."""
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" and poster_host_allowed(parts.hostname)
+
+
+class _PosterRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow at most 3 https hops, each re-checked against the poster allowlist."""
+
+    max_redirections = _POSTER_MAX_HOPS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _poster_url_ok(newurl):
+            raise urllib.error.URLError("poster redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+# Empty ProxyHandler: env HTTPS_PROXY must not steal the hop (ADR 0045 / #16/#17).
+_poster_http = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    _PosterRedirect,
+    urllib.request.HTTPHandler,
+    urllib.request.HTTPSHandler,
+)
 
 
 def fetch_poster_jpeg(url: str) -> str | None:
     """GET a poster URL, verify JPEG, cache under XDG posters. None on webp /
     non-jpeg / network / I/O. Rewrites metahub `/poster/small/` (webp) to
-    `/poster/medium/` (jpeg). Never logs `url`. Best-effort — must not block
-    playback.
+    `/poster/medium/` (jpeg). Never logs `url`. Best-effort — ≤3 s, must not
+    block playback.
     """
     raw = (url or "").strip()
     if not raw.startswith("https://"):
@@ -129,6 +177,8 @@ def fetch_poster_jpeg(url: str) -> str | None:
         raw = urllib.parse.urlunsplit(
             parts._replace(path=path.replace("/poster/small/", "/poster/medium/", 1))
         )
+    if not _poster_url_ok(raw):
+        return None
     dest = _poster_jpeg_cache_path(raw)
     try:
         if dest.is_file() and dest.stat().st_size > 0:
@@ -141,6 +191,12 @@ def fetch_poster_jpeg(url: str) -> str | None:
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         util.atomic_write_bytes(dest, data, prefix=".poster-")
+        with contextlib.suppress(Exception):
+            util.prune_lru(
+                dest.parent,
+                max_files=_POSTER_CACHE_MAX_FILES,
+                max_bytes=_POSTER_CACHE_MAX_BYTES,
+            )
         return str(dest)
     except OSError:
         return None
@@ -152,14 +208,28 @@ def _poster_jpeg_cache_path(url: str) -> Path:
 
 
 def _download_poster_jpeg(url: str) -> bytes | None:
+    if not _poster_url_ok(url):
+        return None
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 nstream"})
+    deadline = time.monotonic() + _POSTER_TIMEOUT
+    leftover = deadline - time.monotonic()
+    if leftover <= 0:
+        return None
     try:
-        with urllib.request.urlopen(req, timeout=_POSTER_TIMEOUT) as resp:
+        with _poster_http.open(req, timeout=leftover) as resp:
+            leftover = deadline - time.monotonic()
+            if leftover <= 0:
+                return None
+            sock = getattr(getattr(resp, "fp", None), "raw", None)
+            sock = getattr(sock, "_sock", None)
+            if sock is not None:
+                with contextlib.suppress(OSError):
+                    sock.settimeout(leftover)
             ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if ctype not in _JPEG_TYPES:
                 return None
             data = resp.read(_POSTER_MAX + 1)
-    except (OSError, urllib.error.URLError, ValueError):
+    except (OSError, urllib.error.URLError, ValueError, TimeoutError):
         return None
     if len(data) > _POSTER_MAX or len(data) < 2:
         return None

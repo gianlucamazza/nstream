@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -355,6 +356,69 @@ def test_lan_media_rewrites_remote_url(monkeypatch):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 assert resp.status == 206
                 assert resp.read() == MP4[4:8]
+        finally:
+            if lan.shutdown:
+                lan.shutdown()
+    finally:
+        fixture.shutdown()
+
+
+def test_lan_media_poster_fetch_fail_falls_back_to_https_jpeg(monkeypatch):
+    """LAN route stays; a failed JPEG fetch keeps the allowlisted https poster."""
+    from nstream import caster
+
+    fixture = _start_fixture("range-mp4")
+    try:
+        monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+        monkeypatch.setattr(caster.serve, "fetch_poster_jpeg", lambda url: None)
+        cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+        small = "https://images.metahub.space/poster/small/tt6263850/img"
+        lan = caster.lan_media(
+            cfg,
+            _upstream(fixture),
+            "127.0.0.1",
+            container="mp4",
+            video_codec="hevc",
+            poster=small,
+        )
+        assert lan is not None
+        try:
+            assert lan.poster_url == "https://images.metahub.space/poster/medium/tt6263850/img"
+        finally:
+            if lan.shutdown:
+                lan.shutdown()
+    finally:
+        fixture.shutdown()
+
+
+def test_lan_media_slow_poster_fetch_falls_back_within_deadline(monkeypatch):
+    """A hanging metahub is cut at `_POSTER_TIMEOUT`; LAN cast keeps the https JPEG."""
+    from nstream import caster
+
+    def hanging_open(req, timeout=None):
+        time.sleep(float(timeout if timeout is not None else 60))
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(caster.serve, "_POSTER_TIMEOUT", 0.3)
+    monkeypatch.setattr(caster.serve._poster_http, "open", hanging_open)
+    fixture = _start_fixture("range-mp4")
+    try:
+        monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+        cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+        small = "https://images.metahub.space/poster/small/tt6263850/img"
+        t0 = time.monotonic()
+        lan = caster.lan_media(
+            cfg,
+            _upstream(fixture),
+            "127.0.0.1",
+            container="mp4",
+            video_codec="hevc",
+            poster=small,
+        )
+        assert lan is not None
+        try:
+            assert time.monotonic() - t0 < 1.5
+            assert lan.poster_url == "https://images.metahub.space/poster/medium/tt6263850/img"
         finally:
             if lan.shutdown:
                 lan.shutdown()

@@ -697,7 +697,11 @@ def _meta_with_lan_poster(
     meta: caster.CastMeta, bind_ip: str, port: int, token: str, poster_path: str | None
 ) -> caster.CastMeta:
     """Point LOAD images at the token-gated LAN JPEG when we have bytes."""
-    poster = serve.served_poster_url(bind_ip, port, token) if poster_path else ""
+    poster = (
+        serve.served_poster_url(bind_ip, port, token)
+        if poster_path
+        else caster.catt_jpeg_poster_url(meta.poster)
+    )
     return dataclasses.replace(meta, poster=poster)
 
 
@@ -756,12 +760,9 @@ def _cast_file_via_catt_lib(
             except OSError:
                 vtt_persist = None
         poster_path = _jpeg_poster_path(meta)
-        if poster_path:
-            spawned = serve.spawn_detached(
-                bind_ip, file_path=file_path, sub_path=vtt_persist, poster_path=poster_path
-            )
-        else:
-            spawned = serve.spawn_detached(bind_ip, file_path=file_path, sub_path=vtt_persist)
+        spawned = serve.spawn_detached(
+            bind_ip, file_path=file_path, sub_path=vtt_persist, poster_path=poster_path
+        )
         if spawned is None:
             _rm(vtt_persist)
             return None
@@ -810,12 +811,9 @@ def _cast_file_via_catt_lib(
         return cast_delivery.CastResult(0.0, 0.0, bool(sub_paths), started=True)
 
     poster_path = _jpeg_poster_path(meta)
-    if poster_path:
-        server, port, _thread = serve.serve_file(
-            file_path, bind_ip, sub_path=vtt, poster_path=poster_path
-        )
-    else:
-        server, port, _thread = serve.serve_file(file_path, bind_ip, sub_path=vtt)
+    server, port, _thread = serve.serve_file(
+        file_path, bind_ip, sub_path=vtt, poster_path=poster_path
+    )
     served = serve.served_url(bind_ip, port, server.token)
     sub_url = serve.served_sub_url(bind_ip, port, server.token) if vtt else ""
     meta = _meta_with_lan_poster(meta, bind_ip, port, server.token, poster_path)
@@ -932,19 +930,20 @@ def _cast_file_via_bridge(
             except OSError:
                 vtt_persist = None
         poster_path = _jpeg_poster_path(meta)
-        if poster_path:
-            spawned = serve.spawn_detached(
-                bind_ip, file_path=file_path, sub_path=vtt_persist, poster_path=poster_path
-            )
-        else:
-            spawned = serve.spawn_detached(bind_ip, file_path=file_path, sub_path=vtt_persist)
+        spawned = serve.spawn_detached(
+            bind_ip, file_path=file_path, sub_path=vtt_persist, poster_path=poster_path
+        )
         if spawned is None:
             _rm(vtt_persist)
             return None
         pid, port, token = spawned
         if vtt_persist:
             kwargs.update(serve.caption_kwargs(bind_ip, port, token, sub_lang))
-        kwargs["poster"] = serve.served_poster_url(bind_ip, port, token) if poster_path else ""
+        kwargs["poster"] = (
+            serve.served_poster_url(bind_ip, port, token)
+            if poster_path
+            else caster.catt_jpeg_poster_url(meta.poster)
+        )
 
         def abort(started: bool) -> bool:
             # User abort during the headless startup wait — the driver already stopped
@@ -980,15 +979,16 @@ def _cast_file_via_bridge(
     # The vtt lives in the caller's per-play temp dir, held open for the whole follow, so the
     # in-process server can read it live (no persist copy needed, unlike the detached path).
     poster_path = _jpeg_poster_path(meta)
-    if poster_path:
-        server, port, _thread = serve.serve_file(
-            file_path, bind_ip, sub_path=vtt, poster_path=poster_path
-        )
-    else:
-        server, port, _thread = serve.serve_file(file_path, bind_ip, sub_path=vtt)
+    server, port, _thread = serve.serve_file(
+        file_path, bind_ip, sub_path=vtt, poster_path=poster_path
+    )
     if vtt:
         kwargs.update(serve.caption_kwargs(bind_ip, port, server.token, sub_lang))
-    kwargs["poster"] = serve.served_poster_url(bind_ip, port, server.token) if poster_path else ""
+    kwargs["poster"] = (
+        serve.served_poster_url(bind_ip, port, server.token)
+        if poster_path
+        else caster.catt_jpeg_poster_url(meta.poster)
+    )
 
     def announce() -> None:
         ui.cast_live(device, follow=True)
