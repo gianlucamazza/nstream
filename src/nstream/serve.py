@@ -217,7 +217,7 @@ class RangeFileHandler(BaseHTTPRequestHandler):
                 if (srv.file_path or "").lower().endswith(".mp4")
                 else "application/octet-stream"
             )
-            return srv.file_path, ct
+            return srv.file_path or "", ct
         if srv.sub_path and secrets.compare_digest(req, srv.sub_url_path.encode()):
             return srv.sub_path, "text/vtt; charset=utf-8"
         prefix = srv.hls_prefix.encode()
@@ -385,6 +385,10 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         know the size we synthesize 206 by skipping from the start of a full GET.
         Never logs the upstream url."""
         srv = self.server
+        upstream = srv.upstream
+        if not upstream:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
         size = srv.upstream_length
         raw_range = self.headers.get("Range", "")
         rng = _parse_range(raw_range, size) if size is not None else None
@@ -410,7 +414,7 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             up_range = raw_range
         method = "GET" if write_body else "HEAD"
         try:
-            resp = urlproxy.open_upstream(srv.upstream, method, up_range)
+            resp = urlproxy.open_upstream(upstream, method, up_range)
         except urllib.error.HTTPError as e:
             self.send_response(e.code)
             self.send_header("Content-Length", "0")
@@ -450,7 +454,7 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if write_body:
                 urlproxy.copy_body(
-                    resp, self.wfile.write, srv.upstream, None, srv.upstream_ranged, expected
+                    resp, self.wfile.write, upstream, None, srv.upstream_ranged, expected
                 )
 
     def _upstream_headers(
@@ -483,10 +487,11 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         if cr:
             self.send_header("Content-Range", cr)
         self.end_headers()
-        if write_body:
+        upstream = self.server.upstream
+        if write_body and upstream:
             expected = int(cl) if cl and str(cl).isdigit() else None
             urlproxy.copy_body(
-                resp, self.wfile.write, self.server.upstream,
+                resp, self.wfile.write, upstream,
                 self.headers.get("Range"), True, expected,
             )  # fmt: skip
 
@@ -623,16 +628,20 @@ def _make_server(
     """Bind a `_FileServer`, preferring the firewall-allowed cast port range so the receiver can
     actually reach us. `preferred_port > 0` forces that exact port; otherwise scan the range and
     fall back to an ephemeral port if it's fully busy."""
-    kw = dict(
-        token=token, sub_path=sub_path, hls_dir=hls_dir, upstream=upstream,
-        upstream_type=upstream_type, upstream_length=upstream_length,
-        upstream_ranged=upstream_ranged, media_name=media_name,
-    )  # fmt: skip
+
+    def _bind(addr: tuple[str, int]) -> _FileServer:
+        return _FileServer(
+            addr, file_path, token=token, sub_path=sub_path, hls_dir=hls_dir,
+            upstream=upstream, upstream_type=upstream_type,
+            upstream_length=upstream_length, upstream_ranged=upstream_ranged,
+            media_name=media_name,
+        )  # fmt: skip
+
     if preferred_port:
-        return _FileServer((bind_ip, preferred_port), file_path, **kw)
+        return _bind((bind_ip, preferred_port))
     for port in range(_CAST_PORT_LO, _CAST_PORT_HI + 1):
         try:
-            return _FileServer((bind_ip, port), file_path, **kw)
+            return _bind((bind_ip, port))
         except OSError:
             continue
     _log.warning(
@@ -640,7 +649,7 @@ def _make_server(
         _CAST_PORT_LO,
         _CAST_PORT_HI,
     )
-    return _FileServer((bind_ip, 0), file_path, **kw)
+    return _bind((bind_ip, 0))
 
 
 def serve_file(

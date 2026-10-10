@@ -26,10 +26,15 @@ MKV = b"\x1a\x45\xdf\xa3" + bytes(range(256)) * 32  # EBML-ish + payload
 SECRET = "realdebrid=SECRETTOKEN"
 
 
+class _FixServer(ThreadingHTTPServer):
+    mode: str = ""
+
+
 class _Fixture(BaseHTTPRequestHandler):
     """Configurable upstream: `server.mode` is range-mp4 | norange-mp4 | range-mkv | norange-mkv."""
 
     protocol_version = "HTTP/1.1"
+    server: _FixServer
 
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         pass
@@ -74,19 +79,19 @@ class _Fixture(BaseHTTPRequestHandler):
             self.wfile.write(chunk)
 
 
-def _start_fixture(mode: str) -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Fixture)
+def _start_fixture(mode: str) -> _FixServer:
+    srv = _FixServer(("127.0.0.1", 0), _Fixture)
     srv.mode = mode
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
 
-def _upstream(srv: ThreadingHTTPServer, name: str = "file.mp4") -> str:
+def _upstream(srv: _FixServer, name: str = "file.mp4") -> str:
     return f"http://127.0.0.1:{srv.server_address[1]}/{SECRET}/{name}"
 
 
 def _proxy(
-    upstream: str, *, content_type: str, length: int, ranged: bool, name: str = "stream.mp4"
+    upstream: str, *, content_type: str, length: int | None, ranged: bool, name: str = "stream.mp4"
 ):
     server, port, _thread = serve.serve_file(
         None, "127.0.0.1",
@@ -282,7 +287,9 @@ def test_detached_proxy_announces_and_serves_without_url_on_argv(tmp_path):
             token_line = proc.stdout.readline().strip()
             assert port_line.startswith("PORT=") and token_line.startswith("TOKEN=")
             # The debrid url must not appear on argv (the reason urlproxy exists).
-            assert SECRET not in " ".join(proc.args) if isinstance(proc.args, list) else ""
+            argv = proc.args
+            shown = " ".join(str(a) for a in argv) if isinstance(argv, list) else str(argv)
+            assert SECRET not in shown
             port, token = int(port_line[len("PORT=") :]), token_line[len("TOKEN=") :]
             url = serve.served_url("127.0.0.1", port, token, planned.media_name)
             assert SECRET not in url
