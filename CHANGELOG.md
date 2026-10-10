@@ -42,8 +42,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 ### Fixed
 
 - LAN-proxy `open_upstream` / `probe` pin each hop across **all** `getaddrinfo`
-  results (skip blocked, try each public address, `getpeername` per attempt),
-  reject IPv4-compatible `::/96` (`::7f00:1`), and ignore env
+  results (skip blocked, interleave IPv6/IPv4, 2 per family, one connect
+  deadline — not N×timeout — then `getpeername` per attempt), reject
+  IPv4-compatible `::/96` (`::7f00:1`), and ignore env
   `http_proxy`/`https_proxy` (`ProxyHandler({})`) so a proxy cannot bypass the
   pin. Private / loopback / link-local / unspecified / CGNAT / ULA / v4-mapped
   stay rejected.

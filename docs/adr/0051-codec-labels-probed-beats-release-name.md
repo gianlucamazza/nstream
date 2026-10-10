@@ -48,6 +48,9 @@ another.
   fix; the field stays a string. Scripts that assumed the name parse should
   read `codec_source`.
 - `quality.StreamInfo.codec` stays the name parse (ranking / ADR 0026).
+- Residual: if ffprobe fails (`Tracks.video_codec` empty) but remux still
+  runs, ffmpeg may write HEVC as `hev1` rather than `-tag:v hvc1`. Safe
+  direction — we do not invent a tag from the release name.
 - Debrid URLs stay out of argv, logs, and `--json`.
 
 ## References
