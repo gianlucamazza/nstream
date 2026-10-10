@@ -593,10 +593,29 @@ def test_meta_threaded_and_backend_never_sees_next_label(monkeypatch):
     )  # fmt: skip
     out = _run(_opts(), stream, next_label="S01E02", meta=meta)
     assert seen["next_label"] is None  # backends never learn that an episode follows
-    assert seen["meta"].poster == "http://img/p.jpg"  # original field preserved
+    # Non-allowlisted search poster + tt1 → derived metahub medium (ADR 0050).
+    assert seen["meta"].poster == "https://images.metahub.space/poster/medium/tt1/img"
     assert seen["meta"].content_type == "video/mp4"  # container MIME declared on the LOAD
     # 1.0 of 2.0 is half the episode: reported position, no advance.
     assert (out.pos, out.dur, out.advance) == (1.0, 2.0, False)
+
+
+def test_malformed_search_poster_does_not_abort_cast(monkeypatch):
+    """urlsplit ValueError on a search poster must not kill run_cast (ADR 0050)."""
+    stream: Stream = _STREAM.copy()
+    seen = _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.caster,
+        "cast",
+        lambda *a, **k: seen.update(meta=k.get("meta")) or _ok(1.0, 2.0),
+    )
+    out = _run(
+        _opts(),
+        stream,
+        meta=cast_flow.caster.CastMeta(poster="https://[::1"),
+    )
+    assert out.started is True
+    assert seen["meta"].poster == "https://images.metahub.space/poster/medium/tt1/img"
 
 
 # --- fire-and-return handoff ---------------------------------------------------

@@ -602,6 +602,21 @@ def _meta_disk_path(typ: str, video_id: str) -> Path:
     return Path(base) / "nstream" / "meta" / f"{h}.json"
 
 
+def cached_meta_poster(typ: str, video_id: str) -> str:
+    """Poster from the on-disk full Cinemeta meta cache. Empty on miss. No network.
+
+    Cast poster resolution prefers this over a search-hit URL (Amazon CDN is not
+    allowlisted). Episode ids (`tt…:s:e`) look up the series/title cache key.
+    Best-effort: never raises.
+    """
+    lookup = _meta_lookup_id(video_id)
+    cached = util.load_json(_meta_disk_path(typ, lookup), {})
+    obj = cached.get("meta")
+    if not isinstance(obj, dict):
+        return ""
+    return str(obj.get("poster") or "")
+
+
 def meta_cached_disk(cfg: Config, typ: str, video_id: str) -> dict:
     """`meta()` with an on-disk TTL cache. The preview subcommand spawns a fresh process
     per focused row, so the in-process cache never helps there; persisting meta (which is

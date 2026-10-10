@@ -524,6 +524,16 @@ def run_cast(
 
     `expected_runtime_s` (0 = unknown) keeps every reselect below off placeholder/sample
     files (ADR 0028) — the same guard `prepare_stream` already applied to `chosen`."""
+    # One poster for every cast entry (headless / TUI / CLI, LAN and https). Prefer the
+    # cached full Cinemeta meta, then an allowlisted search hit, then a derived metahub
+    # medium JPEG from a strict IMDb id. Amazon CDN search posters are not allowlisted.
+    ident = caster.poster_imdb_id(video_id)
+    poster = caster.resolve_cast_poster(
+        api.cached_meta_poster(typ, ident or video_id),
+        (meta.poster if meta else "") or "",
+        ident,
+    )
+    meta = replace(meta or caster.CastMeta(), poster=poster)
     # Video first (ADR 0017): a video codec the DMR can't render casts as PLAYING + black
     # screen with no receiver error, so the REAL codec is verified before any side effect.
     # No castable candidate and no mirror to decode locally → explicit failure, not a black cast.
