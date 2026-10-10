@@ -48,13 +48,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `MediaController.play_media` returning or catt 0.13.3's post-LOAD
   `CastError`; helper rc 4 vs rc 1 (never-sent). After a post-LOAD miss,
   nstream grace-polls the receiver: match → started; `LOAD_FAILED` / idle
-  ERROR → fail (CLI or kill); still unknown → no CLI,
-  `CastResult(started=False, error=cast_never_started)` (`--json` stays
-  `ok: false` / `error: cast_failed` / `cast_error: cast_never_started`),
-  notice `cast_unconfirmed`, log `catt sender=lib unconfirmed`. Leftover
-  remux/LAN servers are bounded by `CATT_LIB_UNCONFIRMED_SERVE_S` (15 min)
-  plus the detached idle reaper. CLI remains when `catt_can_lib_load()` is
-  false, the LOAD was never sent, or the TV refused it.
+  ERROR for *our* (or empty) content_id → fail (CLI or kill);
+  `INTERRUPTED` or an error about a foreign content_id is not a fail;
+  still unknown → no CLI, `CastResult(started=False,
+  error=cast_never_started, unconfirmed=True)` (`--json` stays `ok: false`
+  / `error: cast_failed` / `cast_error: cast_never_started`), notice
+  `cast_unconfirmed`, log `catt sender=lib unconfirmed`. Leftover servers
+  are reaped per-handle on HTTP idle (`CATT_LIB_UNCONFIRMED_SERVE_S`) or
+  skipped while the TV plays our content; headless bound is
+  `IDLE_EXIT_S` + `--stop`. CLI remains when `catt_can_lib_load()` is
+  false, the LOAD was never sent, or the TV refused our media.
 - LAN-proxy `open_upstream` / `probe` pin each hop across **all** `getaddrinfo`
   results (skip blocked, interleave IPv6/IPv4, 2 per family, one connect
   deadline — not N×timeout — then `getpeername` per attempt), reject

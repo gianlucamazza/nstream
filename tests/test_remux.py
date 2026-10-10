@@ -772,7 +772,9 @@ def test_cast_file_lib_unconfirmed_reaps_detached(monkeypatch, tmp_path):
     rec, _proc = _catt_wiring(monkeypatch)
     scheduled: dict = {}
     monkeypatch.setattr(
-        remux.serve, "schedule_reap", lambda fn, seconds: scheduled.update(fn=fn, s=seconds)
+        remux.serve,
+        "schedule_reap",
+        lambda fn, seconds, **k: scheduled.update(fn=fn, s=seconds, k=k),
     )
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
@@ -789,7 +791,8 @@ def test_cast_file_lib_unconfirmed_reaps_detached(monkeypatch, tmp_path):
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert out.started is False and out.error == "cast_never_started"
     assert rec["popen"] == [] and rec["killed"] == []
-    assert remux._read_state()["pid"] == 4242
+    st = remux._read_state()
+    assert st is not None and st["pid"] == 4242
     assert scheduled["s"] == remux.util.CATT_LIB_UNCONFIRMED_SERVE_S
     scheduled["fn"]()
     assert rec["killed"] == [4242]
@@ -798,11 +801,13 @@ def test_cast_file_lib_unconfirmed_reaps_detached(monkeypatch, tmp_path):
 
 def test_cast_file_lib_unconfirmed_follow_reaps_inproc(monkeypatch, tmp_path):
     f = _tmp_remux(tmp_path)
-    rec, _proc = _catt_wiring(monkeypatch)
+    rec, _proc = _catt_wiring(monkeypatch, await_start=False)
     srv = _FakeServer()
     scheduled: dict = {}
     monkeypatch.setattr(
-        remux.serve, "schedule_reap", lambda fn, seconds: scheduled.update(fn=fn, s=seconds)
+        remux.serve,
+        "schedule_reap",
+        lambda fn, seconds, **k: scheduled.update(fn=fn, s=seconds, k=k),
     )
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
@@ -946,6 +951,9 @@ class _FakeServer:
 
     def shutdown(self):
         self.down = True
+
+    def idle_for(self) -> float:
+        return 0.0
 
 
 def _bridge_scaffold(monkeypatch, cast_load):

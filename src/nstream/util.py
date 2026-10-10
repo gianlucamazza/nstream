@@ -79,10 +79,12 @@ CATT_CAST_TIMEOUT = 30.0  # `catt cast` blocks while the receiver buffers the re
 CATT_LIB_LOAD_TIMEOUT = 55.0  # connect + prep_app + catt's own 30s PLAYING wait (ADR 0050)
 CATT_LIB_CONFIRM_GRACE = 20.0  # HEVC slow start after a post-LOAD session-wait miss
 CATT_LIB_CONFIRM_POLL = 1.0
-CATT_LIB_UNCONFIRMED_SERVE_S = 15 * 60.0  # bound a leftover remux/LAN server (ADR 0050)
+CATT_LIB_UNCONFIRMED_SERVE_S = 15 * 60.0  # in-process idle (no HTTP) before reap
 CATT_INFO_TIMEOUT = 10.0  # one castv2 round-trip: `catt info -j` / `stop` / `volume`
-# Worst-case catt send (ADR 0050): library 55s + grace 20s + one CLI 30s (only when
-# no LOAD was sent) ≈ 105s. Click-flag retry is CLI-only, 30+30=60s.
+# Worst-case catt send (ADR 0050): library 55s + grace 20s + one status 10s ≈ 85s.
+# CLI +30s only when no LOAD was sent. Remux follow-unconfirmed adds `_await_start`
+# (40s). Click-flag retry is CLI-only, 30+30=60s. Headless leftover servers live
+# until `serve.IDLE_EXIT_S` (3 h) or `--stop` — a parent timer dies with the CLI.
 
 # HTTP retry tuning, shared by every retrying client (api addon fetch, native debrid).
 _BACKOFF_BASE = 0.5

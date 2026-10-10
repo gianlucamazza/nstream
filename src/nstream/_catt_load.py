@@ -30,21 +30,28 @@ def _is_catt_session_wait(exc: BaseException) -> bool:
     return type(exc).__name__ == "CastError" and _CATT_SESSION_WAIT in str(exc)
 
 
-def _hook_play_media(controller, sent: dict) -> None:
-    """Mark sent only after pychromecast MediaController.play_media returns."""
+def _hook_play_media(controller, sent: dict):
+    """Wrap play_media. Returns restore() or None. Honour sent['abandoned']."""
     inner = getattr(controller, "_controller", None)
     if inner is None:
-        return
+        return None
     play = getattr(inner, "play_media", None)
     if not callable(play):
-        return
+        return None
 
     def wrapped(*a, **k):
+        if sent.get("abandoned"):
+            return None
         out = play(*a, **k)
         sent["v"] = True
         return out
 
     inner.play_media = wrapped
+
+    def restore() -> None:
+        inner.play_media = play
+
+    return restore
 
 
 def main() -> int:
@@ -77,14 +84,15 @@ def main() -> int:
         kwargs["media_info"] = args["media_info"]
     if args.get("subtitle_url"):
         kwargs["subtitles"] = args["subtitle_url"]
-    sent = {"v": False}
+    sent = {"v": False, "abandoned": False}
+    restore = None
     try:
         # play_media_url (not play_url): one LOAD, no yt-dlp, no 10s PLAYING wait.
         # nstream polls the receiver. Never print args["url"].
         ctor = {"ip_addr": str(ip)} if ip else {"name": str(name)}
         device = api.CattDevice(**ctor)
+        restore = _hook_play_media(device.controller, sent)
         device.controller.prep_app()
-        _hook_play_media(device.controller, sent)
         device.controller.play_media_url(str(args["url"]), **kwargs)
     except Exception as exc:  # noqa: BLE001 — helper: classify sent vs never-sent
         if _is_catt_session_wait(exc) or sent["v"]:
@@ -92,6 +100,9 @@ def main() -> int:
             return 4
         print("catt-load: play_media_url failed", file=sys.stderr)
         return 1
+    finally:
+        if restore is not None:
+            restore()
     return 0
 
 

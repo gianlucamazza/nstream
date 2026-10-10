@@ -76,6 +76,7 @@ class CastResult(NamedTuple):
     started: bool = False
     error: str | None = None  # "catt_missing" | "cast_timeout" | "cast_failed" | …
     delivery: str = ""  # caster may set "lan" (ADR 0045 Range-proxy); else the caller names it
+    unconfirmed: bool = False  # lib LOAD sent; not a --json field (ADR 0050)
 
 
 class BridgeOutcome(NamedTuple):

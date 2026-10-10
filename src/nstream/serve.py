@@ -866,24 +866,88 @@ def reap_inproc_proxy() -> bool:
     _inproc_proxy_shutdown = None
     if fn is None:
         return False
+    cancel_reap(fn)
     with contextlib.suppress(Exception):
         fn()
     return True
 
 
-def schedule_reap(fn, seconds: float) -> None:
-    """Best-effort delayed reap (unconfirmed LOAD). Daemon: process exit also ends it."""
-    if seconds <= 0:
-        with contextlib.suppress(Exception):
-            fn()
-        return
+_reap_live: set[object] = set()
+
+
+def schedule_reap(
+    fn,
+    seconds: float,
+    *,
+    handle: object | None = None,
+    skip_if=None,
+    idle_for=None,
+    poll: float | None = None,
+) -> None:
+    """Reap only `fn` (this server/pid). Daemon: process exit also ends it.
+
+    `handle` is this leftover's identity; `cancel_reap(handle)` or a later
+    `schedule_reap` with the same handle supersedes it. A different handle
+    is a different server — this timer will not close it.
+
+    When `idle_for` is set, wait until it reports ≥ `seconds` of HTTP idle
+    (a playing HEVC cast keeps requesting). `skip_if()` True (receiver has
+    our content) re-arms. Headless: the thread dies with the CLI; the
+    detached child is bounded by `IDLE_EXIT_S` / `--stop`.
+    """
+    token: object = object() if handle is None else handle
+    _reap_live.discard(token)
+    _reap_live.add(token)
+    if poll is not None:
+        poll_s = poll
+    elif seconds < 1:
+        poll_s = 0.05
+    else:
+        poll_s = min(1.0, max(0.05, seconds / 4))
 
     def later() -> None:
-        time.sleep(seconds)
+        deadline = time.monotonic() + max(seconds, 0.0)
+        while True:
+            if token not in _reap_live:
+                return
+            if skip_if is not None and skip_if():
+                deadline = time.monotonic() + max(seconds, 0.05)
+                time.sleep(poll_s)
+                continue
+            if idle_for is not None:
+                try:
+                    idle = float(idle_for())
+                except Exception:
+                    idle = 0.0
+                if idle >= seconds:
+                    break
+                time.sleep(poll_s)
+                continue
+            leftover = deadline - time.monotonic()
+            if leftover <= 0:
+                break
+            time.sleep(min(poll_s, leftover))
+        if token not in _reap_live:
+            return
+        if skip_if is not None and skip_if():
+            schedule_reap(fn, seconds, handle=token, skip_if=skip_if, idle_for=idle_for, poll=poll)
+            return
+        _reap_live.discard(token)
         with contextlib.suppress(Exception):
             fn()
 
+    if seconds <= 0 and idle_for is None and skip_if is None:
+        if token in _reap_live:
+            _reap_live.discard(token)
+            with contextlib.suppress(Exception):
+                fn()
+        return
     threading.Thread(target=later, name="nstream-unconfirmed-reap", daemon=True).start()
+
+
+def cancel_reap(handle: object) -> None:
+    """Drop a pending owned reaper (a later cast replaced this server)."""
+    _reap_live.discard(handle)
 
 
 def reap_proxy_server() -> bool:

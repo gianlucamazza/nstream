@@ -104,19 +104,26 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
 - `catt_lib_outcome` is three-way (`ok` / `fail` / `unconfirmed`).
   `catt_lib_play` is confirmed-only (`ok`). On `unconfirmed`,
   `catt_receiver_load_state` grace-polls (`CATT_LIB_CONFIRM_GRACE` 20s) for
-  our content_id or an explicit refuse (`LOAD_FAILED` / idle_reason ERROR).
-  Match → `ok`. Explicit fail → `fail` (caller may CLI or kill). Still
-  unknown at the bound → `unconfirmed`: no second CLI LOAD (keeps metadataType
-  1 / images). Honest `CastResult`: `started=False`,
-  `error=cast_never_started`. `--json` reuses ADR 0031: `ok: false`,
-  `error: cast_failed`, `cast_error: cast_never_started` — no new fields.
-  UI notice `code=cast_unconfirmed` (existing `notices` array). Log
-  `catt sender=lib unconfirmed`.
-- Leftover remux/LAN servers after an unconfirmed LOAD are bounded by
-  `serve.schedule_reap` (`CATT_LIB_UNCONFIRMED_SERVE_S` = 15 min) and the
-  detached idle reaper (`serve.IDLE_EXIT_S` = 3 h).
-- Worst-case send: library 55s + grace 20s + one CLI 30s (only when no LOAD
-  was sent) ≈ 105s. Click-flag retry is CLI-only (no library), 30+30=60s.
+  our content_id or an explicit refuse (`LOAD_FAILED` / idle_reason ERROR
+  whose content_id is empty or ours). `INTERRUPTED` is a replaced session,
+  not a refuse. ERROR/LOAD_FAILED for a *different* content_id is leftover
+  from an earlier cast → keep polling / `unconfirmed`. Match → `ok`.
+  Explicit fail → `fail` (caller may CLI or kill). Still unknown at the
+  bound → `unconfirmed`: no second CLI LOAD (keeps metadataType 1 / images).
+  Honest `CastResult`: `started=False`, `error=cast_never_started`,
+  `unconfirmed=True` (internal; not a `--json` field). `--json` reuses
+  ADR 0031: `ok: false`, `error: cast_failed`, `cast_error: cast_never_started`.
+  UI notice `code=cast_unconfirmed`. Log `catt sender=lib unconfirmed`.
+- Leftover remux/LAN servers after an unconfirmed LOAD: each reaper owns
+  one handle/pid (`serve.schedule_reap(..., handle=, skip_if=has_load,
+  idle_for=)`). Reap on HTTP idleness (`CATT_LIB_UNCONFIRMED_SERVE_S` =
+  15 min) or skip/re-arm while the TV is on our content. A later cast
+  cancels the earlier handle. Headless: the parent timer dies with the
+  CLI; the real bound is the detached idle reaper (`serve.IDLE_EXIT_S` =
+  3 h) and `--stop`.
+- Worst-case send: library 55s + grace 20s + one status 10s ≈ 85s. CLI
+  +30s only when no LOAD was sent. Remux follow-unconfirmed adds
+  `_await_start` (40s). Click-flag retry is CLI-only, 30+30=60s.
 - Live HLS is unchanged (castbridge-only, ADR 0039). Event-sourced `--follow`
   JSONL still prefers castbridge.
 - `--json` shape unchanged (no new fields). `--status` already reports receiver
@@ -144,6 +151,6 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
   `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_cast_argv`,
   `caster._cast_via_catt`, `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
-  `caster._hook_catt_play_media`, `serve.schedule_reap`,
+  `caster._hook_catt_play_media`, `serve.schedule_reap`, `serve.cancel_reap`,
   `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
   `bridge._media_load_args`.

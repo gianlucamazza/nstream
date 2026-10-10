@@ -722,9 +722,10 @@ def _cast_file_via_catt_lib(
     None when catt.api is unavailable or no LOAD was sent / the TV refused it, so
     `cast_file` falls back to the CLI (temp kept). A post-LOAD session wait that
     never confirms is a CastResult with `started=False` / `error=cast_never_started`
-    — no CLI overwrite. The Range server is handed to the idle reaper
-    (`CATT_LIB_UNCONFIRMED_SERVE_S`). nstream owns the Range server (ADR 0007);
-    catt is the sender only.
+    — no CLI overwrite. The Range server is handed to an *owned* idle
+    reaper (`CATT_LIB_UNCONFIRMED_SERVE_S` of no HTTP, skip while the TV
+    has our content). Headless leftovers live until `IDLE_EXIT_S` / `--stop`.
+    nstream owns the Range server (ADR 0007); catt is the sender only.
     """
     if not caster.catt_can_lib_load():
         return None
@@ -766,16 +767,20 @@ def _cast_file_via_catt_lib(
             return None
         if outcome == caster.CATT_LIB_UNCONFIRMED and not has:
             _write_state(pid, file_path, device, mode="serve")
+            dest, served_url = device, served
             serve.schedule_reap(
-                lambda: _teardown(pid, file_path), util.CATT_LIB_UNCONFIRMED_SERVE_S
+                lambda: _teardown(pid, file_path),
+                util.CATT_LIB_UNCONFIRMED_SERVE_S,
+                handle=pid,
+                skip_if=lambda: caster.catt_receiver_has_load(dest, served_url),
             )
             caster._catt_unconfirmed_notice()
             if on_event:
                 on_event({"kind": "failed", "error": "cast_never_started", "title": title})
             return cast_delivery.CastResult(
-                0.0, 0.0, bool(sub_paths), started=False, error="cast_never_started"
-            )
-        _await_start(device)
+                0.0, 0.0, bool(sub_paths),
+                started=False, error="cast_never_started", unconfirmed=True,
+            )  # fmt: skip
         _write_state(pid, file_path, device, mode="serve")
         ui.cast_live(device, follow=False)
         if on_event:
@@ -804,24 +809,32 @@ def _cast_file_via_catt_lib(
         )
         if outcome == caster.CATT_LIB_FAIL and not has:
             return None
-        if outcome == caster.CATT_LIB_UNCONFIRMED and not has:
+        # Align with caster follow: one more receiver poll before giving up.
+        if outcome == caster.CATT_LIB_UNCONFIRMED and not has and not _await_start(device):
 
             def _drop() -> None:
                 serve.close_server(server)
                 _rm(file_path)
                 _rm(f"{file_path}.vtt")
 
+            dest, served_url = device, served
             serve.register_inproc_proxy(_drop)
-            serve.schedule_reap(serve.reap_inproc_proxy, util.CATT_LIB_UNCONFIRMED_SERVE_S)
+            serve.schedule_reap(
+                _drop,
+                util.CATT_LIB_UNCONFIRMED_SERVE_S,
+                handle=_drop,
+                skip_if=lambda: caster.catt_receiver_has_load(dest, served_url),
+                idle_for=server.idle_for,
+            )
             caster._catt_unconfirmed_notice()
             keep_temp = True
             hand_off = True
             if on_event:
                 on_event({"kind": "failed", "error": "cast_never_started", "title": title})
             return cast_delivery.CastResult(
-                0.0, 0.0, bool(sub_paths), started=False, error="cast_never_started"
-            )
-        _await_start(device)
+                0.0, 0.0, bool(sub_paths),
+                started=False, error="cast_never_started", unconfirmed=True,
+            )  # fmt: skip
         keep_temp = False
         ui.cast_live(device, follow=True)
         if on_event:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -369,6 +370,41 @@ def test_schedule_reap_zero_runs_immediately():
     seen = {"n": 0}
     serve.schedule_reap(lambda: seen.__setitem__("n", 1), 0)
     assert seen["n"] == 1
+
+
+def _wait_until(pred, timeout=2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+def test_schedule_reap_short_timer_fires():
+    seen = {"n": 0}
+    serve.schedule_reap(lambda: seen.__setitem__("n", 1), 0.05)
+    assert _wait_until(lambda: seen["n"] == 1)
+
+
+def test_schedule_reap_skips_while_receiver_plays():
+    hits: list[int] = []
+    playing = {"v": True}
+    serve.schedule_reap(lambda: hits.append(1), 0.05, skip_if=lambda: playing["v"])
+    time.sleep(0.15)
+    assert hits == []
+    playing["v"] = False
+    assert _wait_until(lambda: hits == [1])
+
+
+def test_schedule_reap_does_not_close_later_server():
+    """Earlier timer must not run a later server's shutdown."""
+    closed: list[str] = []
+    serve.schedule_reap(lambda: closed.append("old"), 0.08, handle="old")
+    serve.cancel_reap("old")
+    serve.schedule_reap(lambda: closed.append("new"), 0.05, handle="new")
+    assert _wait_until(lambda: "new" in closed)
+    assert "old" not in closed
 
 
 def test_detached_server_exits_when_idle(tmp_path):

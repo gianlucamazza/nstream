@@ -1315,6 +1315,42 @@ def test_catt_load_helper_before_load_is_rc1(monkeypatch):
     assert _catt_load.main() == 1
 
 
+def test_catt_lib_abandoned_skips_late_play_media(monkeypatch):
+    """Timeout before sent: a late play_media must not LOAD on top of CLI."""
+    sent = {"n": 0}
+
+    class _MC:
+        def play_media(self, *a, **k):
+            sent["n"] += 1
+
+    class _Ctrl:
+        def __init__(self):
+            self._controller = _MC()
+
+        def prep_app(self):
+            time.sleep(30)
+
+        def play_media_url(self, *a, **k):
+            self._controller.play_media(*a, **k)
+
+    class _Dev:
+        def __init__(self, **kw):
+            self._ctrl = _Ctrl()
+
+        @property
+        def controller(self):
+            return self._ctrl
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: None)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(caster.util, "CATT_LIB_CONFIRM_GRACE", 0.0)
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
+    time.sleep(0.2)
+    assert sent["n"] == 0
+
+
 def test_catt_lib_play_inprocess_times_out(monkeypatch):
     class _Dev:
         def __init__(self, **kw):
@@ -1498,6 +1534,48 @@ def test_catt_receiver_load_state_failed_and_ok(monkeypatch):
     assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_OK
     monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
     assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_UNCONFIRMED
+
+
+def test_catt_receiver_interrupted_foreign_content_is_unconfirmed(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {
+            "player_state": "IDLE",
+            "idle_reason": "INTERRUPTED",
+            "content_id": "http://other/cast/old/x.mp4",
+        },
+    )
+    assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_UNCONFIRMED
+
+
+def test_catt_receiver_error_foreign_content_is_unconfirmed(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {
+            "player_state": "IDLE",
+            "idle_reason": "ERROR",
+            "content_id": "http://other/cast/old/x.mp4",
+        },
+    )
+    assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_UNCONFIRMED
+
+
+def test_catt_receiver_load_failed_our_content_is_fail(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {
+            "player_state": "IDLE",
+            "idleReason": "LOAD_FAILED",
+            "content_id": url,
+        },
+    )
+    assert caster.catt_receiver_load_state("10.0.0.5", url) == caster.CATT_LIB_FAIL
 
 
 def test_catt_helper_rc1_never_sent(monkeypatch):

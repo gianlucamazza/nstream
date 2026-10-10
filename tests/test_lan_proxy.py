@@ -781,7 +781,7 @@ def _pychromecast_mc_device(
 
     class _MC:
         def play_media(self, url, content_type, **kw):
-            metadata = {"metadataType": 0}
+            metadata: dict[str, object] = {"metadataType": 0}
             info = kw.get("media_info") or {}
             if isinstance(info.get("metadata"), dict):
                 metadata.update(info["metadata"])
@@ -862,7 +862,7 @@ def _lan_lib_cast(
     monkeypatch.setattr(
         caster.serve,
         "schedule_reap",
-        lambda fn, seconds: seen["reap"].update(fn=fn, s=seconds),
+        lambda fn, seconds, **k: seen["reap"].update(fn=fn, s=seconds, k=k),
     )
     calls: list[list[str]] = []
 

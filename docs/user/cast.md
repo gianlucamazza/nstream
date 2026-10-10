@@ -105,14 +105,18 @@ title, the public Cinemeta/metahub HTTPS poster (`thumb` → `images[0].url`),
 `streamType: BUFFERED`. The poster is **not** rewritten onto the remux/LAN
 host — the TV fetches Cinemeta/metahub itself. Other https hosts are not sent
 as `thumb`. If `catt.api` cannot be imported, the CLI fallback still sends `-l`
-+ `--stream-type BUFFERED` (no artwork). A library timeout or a session-wait
-raise after the LOAD is **unconfirmed**: no second CLI LOAD (that would wipe
-the poster). If the TV still has not confirmed our media after a short
-grace poll, the cast is reported as not started
-(`error: cast_never_started` / notice `cast_unconfirmed`) rather than
-success. A leftover remux/LAN server is reaped after 15 minutes (or the
-detached 3 h idle limit). In-cast `a` (audio switch) reuses the same
-library/helper LOAD so title/artwork survive.
++ `--stream-type BUFFERED` (no artwork). A library timeout **before** the
+LOAD is sent is a fail → CLI fallback. A session-wait raise **after** the
+LOAD is **unconfirmed**: no second CLI LOAD (that would wipe the poster).
+If the TV still has not confirmed our media after a short grace poll, the
+cast is reported as not started (`error: cast_never_started` / notice
+`cast_unconfirmed`) rather than success. Interactive follow (caster and
+remux) keeps polling; fire-and-return returns immediately. A leftover
+in-process remux/LAN server is reaped after 15 minutes of HTTP idle (or
+skipped while the TV is on our content). Headless leftover servers live
+until the detached idle limit (`IDLE_EXIT_S`, 3 h) or `--stop`. In-cast
+`a` (audio switch) reuses the same library/helper LOAD so title/artwork
+survive.
 
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |
 | --- | --- | --- | --- |
