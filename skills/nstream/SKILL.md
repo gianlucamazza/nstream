@@ -102,6 +102,8 @@ Always pass `--json`. Quote the title.
 Read `ok`. On success surface `title`, `action`, `device`, short `stream` summary, and when
 relevant: `quality`, `available_resolutions`, `audio_lang` / `available_audio` /
 `audio_verified`, `duration_verified`, `reencoded`, `selection` (`exact`|`year`|`first`).
+`stream.codec_source` is `probed` (ffprobe already ran) or `release_name` (claim;
+the name can lie). Prefer `probed` when both appear across a session.
 
 Full error table and recovery: **`docs/headless.md`** (codes include `no_result`,
 `no_stream_sources`, `no_streams`, `id_untranslated`, `no_playable_stream`, `cast_failed`,

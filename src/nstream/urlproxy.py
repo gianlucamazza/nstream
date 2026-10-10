@@ -14,11 +14,14 @@ ADR 0045 Phase 1 also uses this module's probe / plan / open helpers so `serve` 
 Range-serve the same remote url on the LAN (the TV never sees the debrid host). The
 loopback server below stays 127.0.0.1-only; the LAN bind lives in `serve`.
 
-`open_upstream` / `probe` pin each hop (first included) to one `getaddrinfo` result:
+`open_upstream` / `probe` pin each hop (first included) across `getaddrinfo` results:
 private / loopback / link-local / unspecified / CGNAT `100.64.0.0/10` / ULA `fc00::/7`
-(and IPv4-mapped forms) are rejected, then the socket connects to that address.
-The URL hostname stays on `Host`, SNI, and certificate verification. After connect,
-`getpeername()` is checked again so a public-then-private rebind cannot land.
+/ IPv4-compatible `::/96` (and IPv4-mapped forms) are skipped. Public addresses
+are interleaved by family (RFC 8305-style, 2 per family) and tried inside one
+connect deadline (`timeout`, not N×timeout); a hanging IPv6 list cannot starve
+IPv4. After each connect, `getpeername()` is checked and the socket's read
+timeout is restored to `timeout`. Env `http_proxy` / `https_proxy` are ignored
+(`ProxyHandler({})`) so a proxy cannot bypass the pin.
 """
 
 from __future__ import annotations
@@ -59,6 +62,11 @@ _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", re.I)
 # HEAD + optional 1-byte Range GET share this budget (well under a 16 s stall).
 _PROBE_BUDGET = 8.0
 _PROBE_TIMEOUT = 4.0
+# Pinned connect: at most this many public addresses per family; when another
+# family is still queued, cap the current attempt so IPv6-first blackholes
+# cannot spend the whole deadline (RFC 8305 Connection Attempt Delay).
+_CONNECT_PER_FAMILY = 2
+_CONNECT_FAMILY_DELAY = 0.25
 
 _lock = threading.Lock()
 _routes: dict[str, str] = {}
@@ -171,6 +179,9 @@ def local_url(url: str) -> str:
 
 # CGNAT (RFC 6598). Not covered by ipaddress.is_private.
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# Deprecated IPv4-compatible (RFC 4291). `::7f00:1` is 127.0.0.1 but is_loopback
+# is False on the IPv6 form — ipaddress only treats `::1` as loopback.
+_V4COMPAT = ipaddress.ip_network("::/96")
 
 
 def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -186,13 +197,15 @@ def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
 
 
 def _blocked_ip(host: str) -> bool:
-    """True for private, loopback, link-local, unspecified, CGNAT, ULA (via is_private)."""
+    """True for private, loopback, link-local, unspecified, CGNAT, ULA, IPv4-compatible."""
     addr = _parse_ip(host)
     if addr is None:
         return False
     if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified:
         return True
-    return addr.version == 4 and addr in _CGNAT
+    if addr.version == 4 and addr in _CGNAT:
+        return True
+    return addr.version == 6 and addr in _V4COMPAT
 
 
 def _assert_peer_public(sock: socket.socket) -> None:
@@ -201,11 +214,63 @@ def _assert_peer_public(sock: socket.socket) -> None:
         raise urllib.error.URLError("blocked address")
 
 
+def _public_addrinfos(infos: list) -> list:
+    """`getaddrinfo` rows whose sockaddr is a public IP (blocked nets skipped)."""
+    out = []
+    for info in infos:
+        ip = info[4][0]
+        if isinstance(ip, str) and not _blocked_ip(ip):
+            out.append(info)
+    return out
+
+
+def _interleave_families(infos: list, per_family: int = _CONNECT_PER_FAMILY) -> list:
+    """Alternate address families (RFC 8305), first family as `getaddrinfo` ordered it.
+
+    Caps each family so a long AAAA list cannot occupy the whole deadline.
+    """
+    buckets: dict[int, list] = {}
+    order: list[int] = []
+    for info in infos:
+        fam = info[0]
+        if fam not in buckets:
+            order.append(fam)
+            buckets[fam] = []
+        if len(buckets[fam]) < per_family:
+            buckets[fam].append(info)
+    interleaved: list = []
+    while any(buckets.values()):
+        for fam in order:
+            if buckets[fam]:
+                interleaved.append(buckets[fam].pop(0))
+    return interleaved
+
+
+def _attempt_timeout(timeout, deadline, has_other_family: bool) -> float | None:
+    """Connect timeout for one sockaddr: min(timeout, remaining), CAD if needed."""
+    if deadline is None:
+        if timeout is None:
+            return _CONNECT_FAMILY_DELAY if has_other_family else None
+        slot = float(timeout)
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        slot = remaining if timeout is None else min(float(timeout), remaining)
+    if has_other_family:
+        slot = min(slot, _CONNECT_FAMILY_DELAY)
+    return slot
+
+
 def _connect_pinned(host: str, port: int, timeout, source_address=None):
-    """Resolve `host` once, reject a blocked address, connect to that sockaddr.
+    """Resolve `host` once, skip blocked results, connect inside one deadline.
 
     A literal IP in the URL is used as-is (loopback fixtures / TorrServer). A name
-    must resolve to a public address; `getpeername()` must still be public.
+    is interleaved by family (≤2 public addresses each). Each attempt gets
+    `min(timeout, remaining)`; when another family is still queued the attempt
+    is also capped by `_CONNECT_FAMILY_DELAY` so a hanging IPv6 cannot starve
+    IPv4. `getpeername()` is checked per success; the socket then restores the
+    caller's read `timeout`. Fail when the deadline is exhausted or none work.
     """
     port = int(port or 0)
     if _parse_ip(host) is not None:
@@ -215,24 +280,33 @@ def _connect_pinned(host: str, port: int, timeout, source_address=None):
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise urllib.error.URLError(exc) from exc
-    if not infos:
-        raise urllib.error.URLError("blocked address")
-    fam, socktype, proto, _canon, sockaddr = infos[0]
-    ip = sockaddr[0]
-    if not isinstance(ip, str) or _blocked_ip(ip):
-        raise urllib.error.URLError("blocked address")
-    sock = socket.socket(fam, socktype, proto)
-    if timeout is not None:
+    candidates = _interleave_families(_public_addrinfos(infos))
+    deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))
+    last_exc: BaseException | None = None
+    for i, (fam, socktype, proto, _canon, sockaddr) in enumerate(candidates):
+        others = {c[0] for c in candidates[i + 1 :]}
+        slot = _attempt_timeout(timeout, deadline, bool(others - {fam}))
+        if slot == 0.0:
+            break
+        sock = socket.socket(fam, socktype, proto)
+        if slot is not None:
+            sock.settimeout(slot)
+        try:
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            _assert_peer_public(sock)
+        except (OSError, urllib.error.URLError) as exc:
+            sock.close()
+            last_exc = exc
+            continue
         sock.settimeout(timeout)
-    try:
-        if source_address:
-            sock.bind(source_address)
-        sock.connect(sockaddr)
-        _assert_peer_public(sock)
-    except Exception:
-        sock.close()
-        raise
-    return sock
+        return sock
+    if last_exc is None:
+        raise urllib.error.URLError("blocked address")
+    if isinstance(last_exc, urllib.error.URLError):
+        raise last_exc
+    raise urllib.error.URLError(last_exc) from last_exc
 
 
 def _pinned_create(address, timeout, source_address):
@@ -275,7 +349,10 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_SafeRedirect, _HTTPHandler, _HTTPSHandler)
+# Empty ProxyHandler disables env http_proxy/https_proxy (those would bypass the pin).
+_opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _SafeRedirect, _HTTPHandler, _HTTPSHandler
+)
 
 
 def _guard_redirect(src_url: str, dst_url: str) -> None:
@@ -295,10 +372,11 @@ def _guard_redirect(src_url: str, dst_url: str) -> None:
 def open_upstream(url: str, method: str, rng: str | None, timeout: float = _UPSTREAM_TIMEOUT):
     """GET/HEAD `url`, optionally with a Range. Never logs the url (it may carry a token).
 
-    Every hop (first included) uses a pinned HTTP(S) connection: one `getaddrinfo`,
-    reject blocked nets, connect to that address, then `getpeername()` abort. The
-    URL hostname stays on Host / SNI / certificate verification. Redirects: no
-    https→http and no literal private/loopback/link-local targets."""
+    Every hop (first included) uses a pinned HTTP(S) connection: `getaddrinfo`,
+    skip blocked nets, interleave families inside one connect deadline, then
+    `getpeername()` abort. Env proxies are off. The URL hostname stays on Host /
+    SNI / certificate verification. Redirects: no https→http and no literal
+    private/loopback/link-local targets."""
     headers = {"User-Agent": UA}
     if rng:
         headers["Range"] = rng

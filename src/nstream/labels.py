@@ -56,8 +56,9 @@ def stream_label(s: Stream, info: quality.StreamInfo | None = None) -> str:
     tags = []
     if info.resolution:
         tags.append(f"{info.resolution}p")
-    if info.codec:
-        tags.append(info.codec)
+    codec, src = tracks.honest_codec(s.get("url") or "", info.codec)
+    if codec:
+        tags.append(f"{codec} (claimed)" if src == "release_name" else codec)
     if info.dv:
         tags.append("DV")
     elif info.hdr:

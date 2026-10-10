@@ -75,11 +75,14 @@ def _fmt_components(comp: dict[str, float | int | bool]) -> str:
     return " ".join(parts)
 
 
-def _fmt_info(info: quality.StreamInfo) -> str:
+def _fmt_info(info: quality.StreamInfo, url: str = "") -> str:
     langs = ",".join(sorted(info.languages)) if info.languages else "untagged"
+    codec, src = tracks.honest_codec(url, info.codec)
+    if codec and src == "release_name":
+        codec = f"{codec} (claimed)"
     tags = [
         f"{info.resolution}p" if info.resolution else "?p",
-        info.codec or "?",
+        codec or "?",
         info.source or "?src",
         info.audio or "?aud",
         langs,
@@ -93,7 +96,10 @@ def _row(idx: int, r: quality.RankedStream, spec: quality.FilterSpec, mark: str)
     name = ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:60]
     addon = ui.sanitize(r.stream.get("addon") or "").strip()
     src = f"{addon} · " if addon else ""
-    return f"{idx:>2} {mark:<7} {_fmt_info(r.info):<46}  [{_fmt_components(comp)}]  {src}{name}"
+    return (
+        f"{idx:>2} {mark:<7} {_fmt_info(r.info, r.stream.get('url') or ''):<46}  "
+        f"[{_fmt_components(comp)}]  {src}{name}"
+    )
 
 
 def _breaker_section() -> list[str]:
@@ -181,10 +187,12 @@ def _row_data(
     """One ranked stream as parsed metadata + score components (never the url/token)."""
     info = r.info
     comp = quality.spec_components(info, spec)
+    codec, codec_source = tracks.honest_codec(r.stream.get("url") or "", info.codec)
     row = {
         "name": ui.sanitize(r.stream.get("title") or "").split("\n", 1)[0][:120],
         "resolution": info.resolution,
-        "codec": info.codec,
+        "codec": codec,
+        "codec_source": codec_source,
         "source": info.source,
         "audio": info.audio,
         "languages": sorted(info.languages),

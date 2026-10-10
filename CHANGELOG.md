@@ -41,9 +41,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- LAN-proxy `open_upstream` / `probe` pin each hop to one resolved address and
-  reject private / loopback / link-local / unspecified / CGNAT / ULA (and
-  v4-mapped) so a public-then-private DNS rebind cannot reach the host.
+- LAN-proxy `open_upstream` / `probe` pin each hop across **all** `getaddrinfo`
+  results (skip blocked, interleave IPv6/IPv4, 2 per family, one connect
+  deadline — not N×timeout — then `getpeername` per attempt), reject
+  IPv4-compatible `::/96` (`::7f00:1`), and ignore env
+  `http_proxy`/`https_proxy` (`ProxyHandler({})`) so a proxy cannot bypass the
+  pin. Private / loopback / link-local / unspecified / CGNAT / ULA / v4-mapped
+  stay rejected.
+- **ADR 0051:** a release name that says x265/HEVC can be H.264 (Deadpool field
+  report). LAN/remux routing (`hev1` rewrap, `CAST_VIDEO_DECODABLE`) and
+  `--json` `stream.codec` use the probed codec when ffprobe already ran;
+  otherwise `codec_source: release_name` and the TUI suffix `(claimed)`. No
+  extra probe, no remux-720.
 - **ADR 0050:** catt **≥0.13.2** remux/file and direct fallback LOADs send
   Cinemeta title + Cinemeta/metahub HTTPS poster (`thumb` → `images[]`) +
   `video/mp4` + `BUFFERED` via `catt.api` / catt's interpreter. Older catt

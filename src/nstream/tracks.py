@@ -129,6 +129,24 @@ def cached_duration(url: str) -> float:
     return tr.duration if tr else 0.0
 
 
+def cached_tracks(url: str) -> Tracks | None:
+    """Tracks already measured for `url`, or None — **cache-only, never probes**."""
+    return _cache.get(url) if url else None
+
+
+def honest_codec(url: str, claimed: str = "") -> tuple[str, str]:
+    """`(codec, source)` without a new ffprobe (ADR 0051).
+
+    A cache hit with a real `video_codec` wins — the LAN proxy / remux settle /
+    cast-vet paths already paid for that probe. Otherwise the release-name parse
+    is returned as a claim (`release_name`). Empty `url` is always a claim.
+    """
+    tr = cached_tracks(url)
+    if tr is not None and tr.video_codec:
+        return tr.video_codec, "probed"
+    return claimed, "release_name"
+
+
 def probe_tracks(url: str, *, timeout: float = util.FFPROBE_TIMEOUT) -> Tracks:
     """Probe `url` for embedded audio/subtitle tracks (+ video count / duration). Returns
     empty lists if ffprobe is unavailable or the probe fails (caller falls back to mpv

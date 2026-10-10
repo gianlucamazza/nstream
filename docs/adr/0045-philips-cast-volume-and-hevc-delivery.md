@@ -205,9 +205,11 @@ HEVC (do **not** remux to 720; leave the triage file alone):
    length routes to remux/live. MKV is ADR 0022 `cast_flow`, not a proxy path.
    Residual: `hev1` MP4s are rewrapped with `-tag:v hvc1`; confirm on the board that
    a proxied `hvc1` HEVC MP4 plays and that an `hev1` source takes the rewrap.
+   Codec / tag for that decision are the **probed** values when ffprobe already
+   ran (ADR 0051) — a release name that says x265 is not enough.
 2. During a **new** 1080 HEVC **lan** cast on the board: `catt info -j` (`content_type`,
    `stream_type`, `app_id`, player_state) + the headless JSON (`delivery=lan`, `codec`,
-   `container` if present). No stream URL. Confirm smoothness. **NEED_PLAYBACK.**
+   `codec_source`, `container` if present). No stream URL. Confirm smoothness. **NEED_PLAYBACK.**
 3. `ffprobe` of the **same** resolved file (via nstream's local/urlproxy path):
    `format_name`, video `codec_name`/`profile`/`pix_fmt`/`bit_rate`, first audio codec.
    Confirm MP4 vs Matroska. **NEED_PLAYBACK.**
@@ -218,6 +220,10 @@ HEVC (do **not** remux to 720; leave the triage file alone):
    useful as a decoder-vs-WAN split, but it is no longer the product path.
 7. Whether `castbridge` can be placed on PATH later (CoS names tip first). Live HLS is
    castbridge-only (`remux.cast_live`).
+8. **CODE shipped (ADR 0051).** Field @ 12810a18: a 1080 release labelled x265
+   HEVC (Deadpool) was H.264 per ffprobe. LAN/remux routing and `--json`/`stream`
+   labels use the probed codec when a cache hit exists; otherwise
+   `codec_source: release_name` / UI `(claimed)`. No extra probe, no remux-720.
 
 ## References
 
@@ -227,7 +233,8 @@ HEVC (do **not** remux to 720; leave the triage file alone):
   `caster.status`, `caster.lan_media`, `caster._cast_via_catt`, `caster.catt_lib_play`,
   `bridge._media_load_args`, `urlproxy.probe`, `urlproxy.plan`, `urlproxy.is_remote`,
   `serve.serve_file` (`upstream=`), `remux.cast_live`, `cast_flow._with_container_mime`,
-  `quality.CAST_VIDEO_DECODABLE`, `quality.CAST_CONTAINER_DECODABLE`.
+  `quality.CAST_VIDEO_DECODABLE`, `quality.CAST_CONTAINER_DECODABLE`,
+  `tracks.honest_codec` (ADR 0051).
 - ADR 0005, 0007, 0013, 0015, 0022, 0039, 0050 (catt remux/file LOAD title + HTTPS
   `thumb`/`images[]` + BUFFERED via library; CLI has no `--thumb`). catt 0.13
   `DefaultCastController.play_media_url` (contentType defaults to `video/mp4`).

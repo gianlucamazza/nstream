@@ -405,6 +405,63 @@ def test_plan_hev1_is_rewrap():
     assert planned.reason == "hev1"
 
 
+def test_plan_probed_h264_is_not_hev1_rewrap():
+    """Claimed x265 + probed avc1 must not take the HEVC rewrap (Deadpool field report)."""
+    planned = urlproxy.plan(
+        "mp4", urlproxy.Probe(True, "video/mp4", 100, True), "h264", codec_tag="avc1"
+    )
+    assert planned.mode == "proxy"
+    assert planned.reason == "lan"
+
+
+def test_lan_media_prefers_probed_h264_over_claimed_hevc(monkeypatch):
+    from nstream import caster
+    from nstream import tracks as tracks_mod
+
+    fixture = _start_fixture("range-mp4")
+    try:
+        monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+        monkeypatch.setattr(
+            tracks_mod,
+            "probe_tracks",
+            lambda url, **k: tracks_mod.Tracks(video_codec="h264", codec_tag="avc1"),
+        )
+        cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+        lan = caster.lan_media(
+            cfg, _upstream(fixture), "127.0.0.1", container="mp4", video_codec="hevc"
+        )
+        assert lan is not None
+        try:
+            assert lan.plan.mode == "proxy"
+            assert lan.plan.reason != "hev1"
+        finally:
+            if lan.shutdown:
+                lan.shutdown()
+    finally:
+        fixture.shutdown()
+
+
+def test_lan_media_probed_hev1_rewraps_despite_claimed_h264(monkeypatch):
+    from nstream import caster
+    from nstream import tracks as tracks_mod
+
+    fixture = _start_fixture("range-mp4")
+    try:
+        monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+        monkeypatch.setattr(
+            tracks_mod,
+            "probe_tracks",
+            lambda url, **k: tracks_mod.Tracks(video_codec="hevc", codec_tag="hev1"),
+        )
+        cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+        lan = caster.lan_media(
+            cfg, _upstream(fixture), "127.0.0.1", container="mp4", video_codec="h264"
+        )
+        assert lan is None  # rewrap is not a LAN proxy
+    finally:
+        fixture.shutdown()
+
+
 def test_probe_failure_closed_port():
     probed = urlproxy.probe("http://127.0.0.1:1/missing")
     assert probed.ok is False

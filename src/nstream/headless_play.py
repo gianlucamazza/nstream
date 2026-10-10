@@ -92,8 +92,14 @@ def _emit_unplayable(
 
 
 def describe_stream(cfg: Config, chosen: Stream) -> dict:
-    """Descriptive JSON for the chosen stream — parsed quality only, never the url/token."""
+    """Descriptive JSON for the chosen stream — never the url/token.
+
+    `codec` is the ffprobe value when this url was already probed (LAN proxy /
+    remux / cast vet); otherwise the release-name parse. `codec_source` says
+    which (`probed` | `release_name`). Cache-only — never pays a new probe.
+    """
     info = quality.parse_stream(chosen)
+    codec, codec_source = tracks.honest_codec(chosen.get("url") or "", info.codec)
     backend = (
         "debrid"
         if info.cached
@@ -103,7 +109,8 @@ def describe_stream(cfg: Config, chosen: Stream) -> dict:
     )
     return {
         "resolution": info.resolution,
-        "codec": info.codec,
+        "codec": codec,
+        "codec_source": codec_source,
         "audio": info.audio,
         "size_gb": round(info.size_gb, 2),
         "cached": info.cached,
@@ -409,6 +416,10 @@ def auto_play(
     # without a real duration the watched/near-end logic can't ever retire the entry.
     if opts.history and hist_pos > 0 and hist_dur > 0:
         state.save_entry(cfg, _hist_entry(hist_pos, hist_dur))
+
+    # Cache-only refresh: a probe paid during play/cast (LAN / remux / audio) wins
+    # over the release-name claim that `describe_stream` saw before the run.
+    stream_block = describe_stream(cfg, chosen)
 
     # A downloaded track has a file; an embedded rendition (ADR 0042) has none.
     has_subs = bool(sub_paths) or sub_match == "embedded"
