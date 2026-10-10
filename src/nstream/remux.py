@@ -717,8 +717,9 @@ def _cast_file_via_catt_lib(
     """Serve the remux and LOAD via catt.api (title + https thumb + video/mp4 + BUFFERED).
 
     None when catt.api is unavailable or the LOAD fails, so `cast_file` falls back to
-    the CLI (temp kept). nstream owns the Range server (ADR 0007); catt is the sender
-    only — `play_url(resolve=False)` so yt-dlp never sees the LAN URL.
+    the CLI (temp kept). A library timeout is confirmed on the receiver before this
+    returns None — do not kill a server the TV is already reading. nstream owns the
+    Range server (ADR 0007); catt is the sender only.
     """
     if not caster.catt_can_lib_load():
         return None

@@ -11,6 +11,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from nstream.tracks import Track, Tracks
 def _no_catt_lib(monkeypatch):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: False)
     monkeypatch.setattr(remux.caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(remux.caster, "catt_inprocess_supports_load_meta", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -579,6 +581,78 @@ def test_cast_file_catt_lib_start_miss_falls_back_to_cli(monkeypatch, tmp_path):
     assert 777 in rec["killed"]
     assert rec["popen"][0][0][:4] == ["catt", "-d", "10.0.0.5", "cast"]
     assert f.exists()
+
+
+def _hanging_catt_device():
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, *a, **k):
+            time.sleep(30)
+
+    class _Dev:
+        def __init__(self, **kw):
+            return None
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    return _Dev
+
+
+def test_cast_file_lib_timeout_keeps_server(monkeypatch, tmp_path):
+    """Late library LOAD + receiver already playing: no second LOAD, no server kill."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.caster, "_catt_device_cls", lambda: _hanging_catt_device())
+    monkeypatch.setattr(remux.caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        remux.caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
+    )
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve, "served_url", lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4"
+    )
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
+    assert out.started is True and out.error is None
+    assert rec["killed"] == []
+    assert rec["popen"] == []
+    assert remux._read_state() == {
+        "pid": 4242, "file": str(f), "device": "10.0.0.5", "mode": "serve",
+    }  # fmt: skip
+
+
+def test_cast_file_lib_timeout_follow_no_restart(monkeypatch, tmp_path):
+    """Followed remux: late LOAD + playing receiver must not shut down and CLI-restart."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    srv = _FakeServer()
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.caster, "_catt_device_cls", lambda: _hanging_catt_device())
+    monkeypatch.setattr(remux.caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        remux.caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
+    )
+    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve, "served_url", lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4"
+    )
+    states = iter(
+        [
+            {"player_state": "PLAYING", "position": 1.0, "duration": 10.0},
+            {"player_state": "IDLE", "position": 10.0, "duration": 10.0},
+        ]
+    )
+    monkeypatch.setattr(remux.caster, "status", lambda dev: next(states))
+    out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=True)
+    assert out.started is True
+    assert rec["popen"] == []
+    assert srv.down  # normal end-of-follow shutdown, not a fallback restart
 
 
 def test_cast_file_catt_sends_title_not_poster(monkeypatch, tmp_path):

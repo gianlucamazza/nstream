@@ -115,7 +115,7 @@ def _parse_catt_version(raw: str) -> tuple[int, int, int] | None:
 
 @functools.cache
 def catt_version() -> tuple[int, int, int] | None:
-    """Installed catt version, or None when it cannot be read. ≥0.13.2 for LOAD meta."""
+    """catt on PATH (CLI / helper shebang). None when it cannot be read."""
     try:
         proc = subprocess.run(
             ["catt", "--version"],
@@ -127,10 +127,6 @@ def catt_version() -> tuple[int, int, int] | None:
         proc = None
     if proc is not None:
         parsed = _parse_catt_version(f"{proc.stdout or ''} {proc.stderr or ''}")
-        if parsed:
-            return parsed
-    with contextlib.suppress(importlib.metadata.PackageNotFoundError, ValueError):
-        parsed = _parse_catt_version(importlib.metadata.version("catt"))
         if parsed:
             return parsed
     py = _catt_interpreter()
@@ -148,9 +144,29 @@ def catt_version() -> tuple[int, int, int] | None:
     return _parse_catt_version(probe.stdout or "")
 
 
+def catt_inprocess_version() -> tuple[int, int, int] | None:
+    """catt imported in this env (`CattDevice`), not the binary on PATH."""
+    try:
+        mod = importlib.import_module("catt")
+    except ImportError:
+        return None
+    parsed = _parse_catt_version(str(getattr(mod, "__version__", "") or ""))
+    if parsed:
+        return parsed
+    with contextlib.suppress(importlib.metadata.PackageNotFoundError, ValueError):
+        return _parse_catt_version(importlib.metadata.version("catt"))
+    return None
+
+
 def catt_supports_load_meta() -> bool:
-    """True when catt is ≥0.13.2 (`-l`, `--stream-type`, media_info; timed play_media_url)."""
+    """PATH catt ≥0.13.2 (`-l`, `--stream-type`; helper play_media_url)."""
     ver = catt_version()
+    return ver is not None and ver >= CATT_LOAD_META_MIN
+
+
+def catt_inprocess_supports_load_meta() -> bool:
+    """Imported catt ≥0.13.2 (`media_info`; timed play_media_url)."""
+    ver = catt_inprocess_version()
     return ver is not None and ver >= CATT_LOAD_META_MIN
 
 
@@ -214,11 +230,18 @@ def _catt_cli_rejects_meta_flags(stderr: str) -> bool:
     return "no such option" in text and ("-l" in text or "title" in text or "stream-type" in text)
 
 
-def _catt_cli_run(launch: list[str]) -> subprocess.CompletedProcess:
-    """`catt cast`; retry once without ≥0.13.2 flags if click rejects them."""
+def _catt_cli_run(
+    launch: list[str], *, retry_meta_flags: bool = True
+) -> subprocess.CompletedProcess:
+    """`catt cast`; retry once without ≥0.13.2 flags if click rejects them.
+
+    Skip the retry after a library attempt so worst-case send stays
+    lib + confirm + one CLI (ADR 0050), not lib + CLI + retry.
+    """
     proc = subprocess.run(launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT)
     if (
-        proc.returncode != 0
+        retry_meta_flags
+        and proc.returncode != 0
         and _catt_cli_rejects_meta_flags(proc.stderr)
         and any(a in launch for a in ("-l", "--title", "--stream-type"))
     ):
@@ -403,9 +426,56 @@ def _catt_interpreter() -> str | None:
 
 def catt_can_lib_load() -> bool:
     """True when a catt ≥0.13.2 library LOAD is possible (in-process or helper)."""
-    if not catt_supports_load_meta():
+    if _catt_device_cls() is not None:
+        return catt_inprocess_supports_load_meta()
+    return catt_supports_load_meta() and _catt_interpreter() is not None
+
+
+_LIB_OK = "ok"
+_LIB_FAIL = "fail"
+_LIB_UNCONFIRMED = "unconfirmed"  # deadline hit; LOAD may already be on the TV
+_CATT_RECEIVER_ACTIVE = frozenset({"PLAYING", "PAUSED", "BUFFERING"})
+
+
+def _same_cast_content(content_id: str, url: str) -> bool:
+    """True if the receiver content_id is the URL we LOADed. Never logs either."""
+    got, want = (content_id or "").strip(), (url or "").strip()
+    if not got or not want:
         return False
-    return _catt_device_cls() is not None or _catt_interpreter() is not None
+    if got == want:
+        return True
+    a, b = urllib.parse.urlsplit(got), urllib.parse.urlsplit(want)
+    return bool(a.path) and (a.path, a.query) == (b.path, b.query)
+
+
+def catt_receiver_has_load(device: str | None, url: str) -> bool:
+    """Short bounded check: receiver is playing/buffering the URL we LOADed.
+
+    Used when the library/helper call timed out — catt's own PLAYING wait starts
+    after the LOAD, so a deadline can fire while the TV already has the media.
+    Never logs `url`.
+    """
+    info = receiver_info(device)
+    if not info:
+        return False
+    state = str(info.get("player_state") or "")
+    if state not in _CATT_RECEIVER_ACTIVE:
+        return False
+    content = str(info.get("content_id") or info.get("contentId") or "")
+    return _same_cast_content(content, url)
+
+
+def _catt_lib_finish(device: str, url: str, outcome: str) -> bool:
+    """Map a lib/helper outcome to bool. Timeout is 'loaded, unconfirmed'."""
+    if outcome == _LIB_OK:
+        return True
+    if outcome != _LIB_UNCONFIRMED:
+        return False
+    if catt_receiver_has_load(device, url):
+        _log.debug("catt lib LOAD unconfirmed → receiver already has media")
+        return True
+    _log.warning("catt lib LOAD timed out; receiver has no matching media")
+    return False
 
 
 def _catt_play_media_kwargs(load: dict) -> dict:
@@ -415,8 +485,8 @@ def _catt_play_media_kwargs(load: dict) -> dict:
     return kwargs
 
 
-def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) -> bool:
-    """play_media_url on a worker thread; False if it exceeds CATT_CAST_TIMEOUT."""
+def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) -> str:
+    """play_media_url on a worker thread. Timeout → unconfirmed (LOAD may be sent)."""
     box: dict[str, object] = {"ok": False, "err": ""}
     kwargs = _catt_play_media_kwargs(load)
 
@@ -431,14 +501,14 @@ def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) ->
 
     worker = threading.Thread(target=run, name="nstream-catt-lib", daemon=True)
     worker.start()
-    worker.join(util.CATT_CAST_TIMEOUT)
+    worker.join(util.CATT_LIB_LOAD_TIMEOUT)
     if worker.is_alive():
         _log.warning("catt lib LOAD timed out")
-        return False
+        return _LIB_UNCONFIRMED
     if box["ok"]:
-        return True
+        return _LIB_OK
     _log.warning("catt lib LOAD failed: %s", box["err"] or "unknown")
-    return False
+    return _LIB_FAIL
 
 
 def catt_lib_play(
@@ -454,19 +524,23 @@ def catt_lib_play(
     """One LOAD via catt.api (in-process, else `_catt_load.py` on catt's Python).
 
     Does not log `url`. False on import/device/LOAD failure so the caller can fall
-    back to the CLI. Uses `play_media_url` (no yt-dlp; no play_url PLAYING wait).
-    In-process is bounded by CATT_CAST_TIMEOUT (catt 0.13.1 can hang otherwise).
-    `device` is an IP or a friendly name (`catt -d` accepts both).
+    back to the CLI. A timeout is unconfirmed: the caller must not fallback or
+    tear down a remux server until `catt_receiver_has_load` is False. Uses
+    `play_media_url` (no yt-dlp; no play_url PLAYING wait). Outer bound is
+    CATT_LIB_LOAD_TIMEOUT (above catt's 30s PLAYING wait + connect). `device`
+    is an IP or a friendly name (`catt -d` accepts both).
     """
-    if not catt_supports_load_meta():
-        return False
     load = catt_play_kwargs(
         title, meta, content_type=content_type, start=start, subtitle_url=subtitle_url
     )
     ident = catt_device_ctor_kwargs(device)
     Device = _catt_device_cls()
     if Device is not None:
-        return _catt_inprocess_play(Device, ident, url, load)
+        if not catt_inprocess_supports_load_meta():
+            return False
+        return _catt_lib_finish(device, url, _catt_inprocess_play(Device, ident, url, load))
+    if not catt_supports_load_meta():
+        return False
     py = _catt_interpreter()
     helper = Path(__file__).with_name("_catt_load.py")
     if not py or not helper.is_file():
@@ -482,8 +556,11 @@ def catt_lib_play(
             input=json.dumps(payload),
             capture_output=True,
             text=True,
-            timeout=util.CATT_CAST_TIMEOUT,
+            timeout=util.CATT_LIB_LOAD_TIMEOUT,
         )
+    except subprocess.TimeoutExpired:
+        _log.warning("catt helper LOAD timed out")
+        return _catt_lib_finish(device, url, _LIB_UNCONFIRMED)
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning("catt helper LOAD failed: %s", type(exc).__name__)
         return False
@@ -946,6 +1023,7 @@ def _cast_via_catt(
     base = ["catt", *(["-d", device] if device else [])]
     dest = device or "Chromecast"
     loaded = False
+    lib_attempted = False
     sub_shutdown = None
     if device and catt_can_lib_load():
         cap: dict = {}
@@ -953,6 +1031,7 @@ def _cast_via_catt(
             vtt = srt.to_vtt(sub_paths[0]) or None
             sub_shutdown = _serve_subtitle(vtt, device, None, follow, cap)
         ui.status(f"consegno a {dest}…", kind="tv")
+        lib_attempted = True
         loaded = catt_lib_play(
             device,
             url,
@@ -984,7 +1063,7 @@ def _cast_via_catt(
         _log.debug("catt launch: %s", " ".join(a if a != url else "<url>" for a in launch))
         ui.status(f"consegno a {dest}…", kind="tv")
         try:
-            proc = _catt_cli_run(launch)
+            proc = _catt_cli_run(launch, retry_meta_flags=not lib_attempted)
         except FileNotFoundError:
             notices.emit("catt non trovato")
             _emit(on_event, "failed", error="catt_missing", message="catt non trovato")

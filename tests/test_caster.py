@@ -42,6 +42,7 @@ def _no_catt_lib(monkeypatch):
 def _catt_meta_ok(monkeypatch):
     """Hermetic: treat the test host as catt ≥0.13.2 so `-l` / `--stream-type` stay on."""
     monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -1100,9 +1101,23 @@ def test_catt_cast_argv_omits_meta_flags_before_0_13_2(monkeypatch):
 
 
 def test_catt_can_lib_load_requires_0_13_2(monkeypatch):
-    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: object)
     monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    assert caster.catt_can_lib_load() is False
+
+
+def test_catt_inprocess_version_reads_imported(monkeypatch):
+    """In-process gate uses imported catt.__version__, not `catt --version` on PATH."""
+    monkeypatch.setattr(
+        caster.importlib,
+        "import_module",
+        lambda name: types.SimpleNamespace(__version__="0.13.1") if name == "catt" else None,
+    )
+    assert caster.catt_inprocess_version() == (0, 13, 1)
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: object)
     assert caster.catt_can_lib_load() is False
 
 
@@ -1204,15 +1219,103 @@ def test_catt_lib_play_inprocess_times_out(monkeypatch):
 
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
     monkeypatch.setattr(caster, "_catt_interpreter", lambda: None)
-    monkeypatch.setattr(caster.util, "CATT_CAST_TIMEOUT", 0.05)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
     t0 = time.monotonic()
     assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
     assert time.monotonic() - t0 < 2.0
 
 
+def test_catt_helper_timeout_receiver_playing_is_loaded(monkeypatch):
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=0.05)
+
+    monkeypatch.setattr(caster.subprocess, "run", boom)
+    monkeypatch.setattr(
+        caster, "receiver_info", lambda dev: {"player_state": "BUFFERING", "content_id": url}
+    )
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_lib_play_timeout_receiver_playing_is_loaded(monkeypatch):
+    """Late play_media_url: TV already has the LOAD → treat as success, no fallback."""
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, *a, **k):
+            time.sleep(30)
+
+    class _Dev:
+        def __init__(self, **kw):
+            return None
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {"player_state": "PLAYING", "content_id": url},
+    )
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_receiver_has_load_matches_path(monkeypatch):
+    monkeypatch.setattr(
+        caster,
+        "receiver_info",
+        lambda dev: {
+            "player_state": "BUFFERING",
+            "content_id": "http://192.168.1.10:45000/cast/tok/stream.mp4",
+        },
+    )
+    assert caster.catt_receiver_has_load("10.0.0.5", "http://10.0.0.1:45000/cast/tok/stream.mp4")
+    assert not caster.catt_receiver_has_load("10.0.0.5", "http://other/cast/other/x.mp4")
+
+
+def test_cast_lib_timeout_confirmed_skips_cli(monkeypatch):
+    """Direct cast: late LOAD + receiver playing → no second catt cast."""
+    url = "http://u/stream.mp4"
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, *a, **k):
+            time.sleep(30)
+
+    class _Dev:
+        def __init__(self, **kw):
+            return None
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster.util, "CATT_LIB_LOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(
+        caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
+    )
+    calls = _cast_run(monkeypatch)
+    r = caster.cast(CFG, "T", url, device="10.0.0.5", follow=False)
+    assert r.started is True
+    assert not [c for c in calls if "cast" in c and url in c]
+
+
 def test_catt_lib_play_false_before_0_13_2(monkeypatch):
     monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: False)
-    monkeypatch.setattr(
-        caster, "_catt_device_cls", lambda: pytest.fail("must not construct CattDevice")
-    )
+    monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
     assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False

@@ -92,8 +92,15 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
 - In-cast `a` (audio switch) reuses the same library/helper LOAD. A CLI-only
   switch still has title on ≥0.13.2 (`-l`) but no artwork.
 - In-process `CattDevice` / `prep_app` / `play_media_url` is bounded by
-  `CATT_CAST_TIMEOUT` (thread + deadline). Friendly names use `name=`, not
-  `ip_addr=`. Poster `thumb` is Cinemeta/metahub HTTPS only.
+  `CATT_LIB_LOAD_TIMEOUT` (55s: connect + prep + catt's own 30s PLAYING wait).
+  A timeout is **loaded, unconfirmed**: check `catt info` on the same device
+  before any CLI fallback, remux server kill, or follow shutdown. Fall back
+  only when no LOAD was sent or the receiver is not playing/buffering our
+  content. Friendly names use `name=`, not `ip_addr=`. Poster `thumb` is
+  Cinemeta/metahub HTTPS only. In-process version is imported catt
+  (`catt.__version__` / `importlib.metadata`), not the PATH binary.
+- Worst-case send: library 55s + one status confirm 10s + one CLI 30s ≈ 95s.
+  Click-flag retry is CLI-only (no library), 30+30=60s.
 - Live HLS is unchanged (castbridge-only, ADR 0039). Event-sourced `--follow`
   JSONL still prefers castbridge.
 - `--json` shape unchanged (no new fields). `--status` already reports receiver
@@ -106,7 +113,7 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `guessed_content_type`).
 - pychromecast `MediaController._send_start_play_media` (GENERIC metadataType,
   `thumb` → `images[]`).
-- Symbols:   `caster.catt_lib_play`, `caster.catt_play_kwargs`,
+- Symbols:   `caster.catt_lib_play`, `caster.catt_receiver_has_load`, `caster.catt_play_kwargs`,
   `caster.catt_lib_media_info`, `caster.catt_cast_argv`, `caster._cast_via_catt`,
   `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
   `bridge._media_load_args`.

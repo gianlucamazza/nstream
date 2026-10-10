@@ -41,7 +41,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   Cinemeta title + Cinemeta/metahub HTTPS poster (`thumb` → `images[]`) +
   `video/mp4` + `BUFFERED` via `catt.api` / catt's interpreter. Older catt
   (0.13.0/0.13.1) keeps the pre-0050 argv (`-l` would be `cast_failed`). CLI
-  fallback still has `-l` + `--stream-type` (no `--thumb`). `--json` unchanged.
+  fallback still has `-l` + `--stream-type` (no `--thumb`). A library timeout is
+  confirmed on the receiver before a second LOAD or remux-server teardown.
+  `--json` unchanged.
 - catt-only casts with `cast_receiver_app_id` set emit `receiver_app_ignored` instead
   of silently staying on the Default Media Receiver `CC1AD845`.
 

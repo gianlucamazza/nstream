@@ -101,8 +101,10 @@ title, the public Cinemeta/metahub HTTPS poster (`thumb` → `images[0].url`),
 `contentType: video/mp4`, and `streamType: BUFFERED`. The poster is **not**
 rewritten onto the remux host — the TV fetches Cinemeta/metahub itself. Other
 https hosts are not sent as `thumb`. If `catt.api` cannot be imported, the CLI
-fallback still sends `-l` + `--stream-type BUFFERED` (no artwork). In-cast `a`
-(audio switch) reuses the same library/helper LOAD so title/artwork survive.
+fallback still sends `-l` + `--stream-type BUFFERED` (no artwork). A library
+timeout is confirmed against the receiver before a second LOAD or tearing down
+the remux server (the TV may already have the media). In-cast `a` (audio
+switch) reuses the same library/helper LOAD so title/artwork survive.
 
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |
 | --- | --- | --- | --- |
