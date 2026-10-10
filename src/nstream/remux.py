@@ -742,17 +742,18 @@ def _cast_file_via_catt_lib(
             _rm(vtt_persist)
             return None
         pid, port, token = spawned
+        served = serve.served_url(bind_ip, port, token)
         sub_url = serve.served_sub_url(bind_ip, port, token) if vtt_persist else ""
         ok = caster.catt_lib_play(
             device,
-            serve.served_url(bind_ip, port, token),
+            served,
             title=title,
             meta=meta,
             start=start,
-            content_type="video/mp4",
+            content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
-        if not ok or not _await_start(device):
+        if not (ok and _await_start(device)) and not caster.catt_receiver_has_load(device, served):
             _kill(pid)
             _rm(vtt_persist)
             return None
@@ -763,20 +764,23 @@ def _cast_file_via_catt_lib(
         return cast_delivery.CastResult(0.0, 0.0, bool(sub_paths), started=True)
 
     server, port, _thread = serve.serve_file(file_path, bind_ip, sub_path=vtt)
+    served = serve.served_url(bind_ip, port, server.token)
     sub_url = serve.served_sub_url(bind_ip, port, server.token) if vtt else ""
     keep_temp = True
     try:
         ok = caster.catt_lib_play(
             device,
-            serve.served_url(bind_ip, port, server.token),
+            served,
             title=title,
             meta=meta,
             start=start,
-            content_type="video/mp4",
+            content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
         # Do not treat a pre-start IDLE as ended — wait for PLAYING first.
-        if not ok or not _await_start(device):
+        # Late LOAD: if the TV already has our capability path, do not return
+        # None (that would CLI-fallback / second LOAD) and do not kill the server.
+        if not (ok and _await_start(device)) and not caster.catt_receiver_has_load(device, served):
             return None
         keep_temp = False
         ui.cast_live(device, follow=True)
@@ -797,7 +801,7 @@ def _cast_file_via_catt_lib(
                 subprocess.run(["catt", "-d", device, "stop"], capture_output=True, text=True)
         return cast_delivery.CastResult(pos, dur, bool(sub_paths), started=True)
     finally:
-        server.shutdown()
+        serve.close_server(server)
         if not keep_temp:
             _rm(file_path)
             _rm(f"{file_path}.vtt")

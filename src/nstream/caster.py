@@ -932,6 +932,7 @@ def cast(
         reason = "lan_no_bind" if not device else _lan_fail_reason(url, container, video_codec)
         _log.warning("lan-proxy: rifiuto WAN-direct (%s)", reason)
         return cast_delivery.CastResult(0.0, 0.0, error=reason)
+    lan_url = lan.url if lan is not None else ""
     try:
         return _cast_senders(
             cfg, title, url, device=device, start=start, sub_paths=sub_paths,
@@ -940,8 +941,13 @@ def cast(
             delivery="lan" if lan is not None else "",
         )  # fmt: skip
     finally:
+        # ADR 0050: a late library LOAD can time out while the TV already has
+        # our content_id (the LAN capability path). Do not tear the server down.
         if lan is not None and lan.shutdown is not None:
-            lan.shutdown()
+            if device and lan_url and catt_receiver_has_load(device, lan_url):
+                _log.debug("lan-proxy: LOAD unconfirmed, receiver already has media")
+            else:
+                lan.shutdown()
 
 
 def _lan_fail_reason(url: str, container: str, video_codec: str) -> str:

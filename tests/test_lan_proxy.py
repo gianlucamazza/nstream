@@ -579,3 +579,97 @@ def test_cast_integration_uses_lan_url_not_secret(monkeypatch):
         assert "stream.mp4" in joined
     finally:
         fixture.shutdown()
+
+
+def _fake_lan(content_type: str, shutdown=None):
+    from nstream import caster
+
+    name = "stream.webm" if content_type == "video/webm" else "stream.mp4"
+    plan = urlproxy.LanPlan("proxy", content_type, 100, True, name, "lan")
+    return caster.LanMedia(
+        f"http://192.168.1.10:45000/cast/tok/{name}",
+        content_type,
+        shutdown,
+        plan,
+    )
+
+
+def test_cast_feeds_lan_mime_into_catt_lib_play(monkeypatch):
+    """LAN proxy mime (video/mp4) reaches ADR 0050 library LOAD: BUFFERED + title + thumb."""
+    from nstream import caster
+
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    lan = _fake_lan("video/mp4")
+    monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
+    seen: dict = {}
+
+    def fake_play(device, url, **kw):
+        seen.update(device=device, url=url, **kw)
+        return True
+
+    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(
+        cfg, "The Nice Guys", "https://debrid.example/f.mp4?token=SECRET",
+        device="10.0.0.5", follow=False,
+        meta=caster.CastMeta(poster=poster),
+        container="mp4", video_codec="hevc",
+    )  # fmt: skip
+    assert r.delivery == "lan" and r.started is True
+    assert seen["url"] == lan.url and "SECRET" not in seen["url"]
+    assert seen["url"].endswith("/cast/tok/stream.mp4")
+    assert seen["content_type"] == "video/mp4"
+    assert seen["meta"].content_type == "video/mp4"
+    load = caster.catt_play_kwargs(seen["title"], seen["meta"], content_type=seen["content_type"])
+    assert load["content_type"] == "video/mp4"
+    assert load["stream_type"] == caster.CATT_STREAM_BUFFERED
+    assert load["thumb"] == poster
+    assert load["title"] == "The Nice Guys"
+
+
+def test_cast_feeds_webm_lan_mime_into_catt_lib_play(monkeypatch):
+    from nstream import caster
+
+    lan = _fake_lan("video/webm")
+    monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
+    seen: dict = {}
+    monkeypatch.setattr(
+        caster, "catt_lib_play",
+        lambda device, url, **kw: seen.update(url=url, **kw) or True,
+    )  # fmt: skip
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(
+        cfg, "T", "https://debrid.example/f.webm",
+        device="10.0.0.5", follow=False, container="webm",
+    )  # fmt: skip
+    assert r.delivery == "lan" and seen["content_type"] == "video/webm"
+    assert seen["url"].endswith("/cast/tok/stream.webm")
+    assert seen["meta"].content_type == "video/webm"
+
+
+def test_cast_skips_lan_shutdown_while_receiver_has_load(monkeypatch):
+    """Late library LOAD: content_id is the LAN capability path — do not tear the server down."""
+    from nstream import cast_delivery, caster
+
+    shut = {"n": 0}
+    lan = _fake_lan("video/mp4", shutdown=lambda: shut.__setitem__("n", shut["n"] + 1))
+    monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
+    monkeypatch.setattr(
+        caster,
+        "_cast_senders",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, started=True, delivery="lan"),
+    )
+    monkeypatch.setattr(caster, "catt_receiver_has_load", lambda dev, url: url == lan.url)
+    cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    r = caster.cast(cfg, "T", "https://debrid.example/f.mp4", device="10.0.0.5", follow=True)
+    assert r.started is True and shut["n"] == 0
+
+    monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
+    r = caster.cast(cfg, "T", "https://debrid.example/f.mp4", device="10.0.0.5", follow=True)
+    assert shut["n"] == 1

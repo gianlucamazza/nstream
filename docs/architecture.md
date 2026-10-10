@@ -111,7 +111,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `cast_vet` | Audio plan, video codec, container |
 | `cast_delivery` | Shared castbridge event loop (ADR 0011) |
 | `cast_control` | TUI lifecycle: stop/status/pause/seek/volume + runtime health |
-| `caster` | Device resolve; castbridge or catt LOAD (`catt_lib_play` / `_catt_load` / CLI `-l` + BUFFERED, ADR 0050) |
+| `caster` | Device resolve; LAN Range-proxy wrap (`lan_media`, ADR 0045); castbridge or catt LOAD (`catt_lib_play` / `_catt_load` / CLI `-l` + BUFFERED, ADR 0050) |
 | `remux` / `serve` | Tier-2 file + Range server; `serve` also LAN Range-proxies a remote url (ADR 0045) |
 | `mirror` | Realtime 1080p path |
 | `bridge` | castbridge IPC client + daemon ensure |
