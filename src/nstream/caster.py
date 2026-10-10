@@ -74,18 +74,6 @@ CATT_METADATA_MOVIE = 1  # pychromecast METADATA_TYPE_MOVIE
 CATT_METADATA_TVSHOW = 2  # pychromecast METADATA_TYPE_TVSHOW
 CATT_LOAD_META_MIN = (0, 13, 2)
 _SUB_IDLE_FOR = "_nstream_sub_idle_for"  # stashed on caption kwargs; never a LOAD field
-_CATT_POSTER_HOST_SUFFIX = (".metahub.space", ".strem.io")
-_CATT_POSTER_HOSTS = frozenset(
-    {
-        "metahub.space",
-        "images.metahub.space",
-        "live.metahub.space",
-        "strem.io",
-        "cinemeta.strem.io",
-        "v3-cinemeta.strem.io",
-        "images.strem.io",
-    }
-)
 
 
 def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
@@ -105,6 +93,9 @@ def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
     return show
 
 
+_LAN_POSTER_PATH = re.compile(r"^/cast/[^/]+/poster\.jpg$")
+
+
 def catt_poster_url(poster: str) -> str:
     """Cinemeta / metahub HTTPS poster the TV fetches itself. Empty otherwise —
     never rewritten onto the remux/debrid host, never an arbitrary https URL."""
@@ -114,9 +105,38 @@ def catt_poster_url(poster: str) -> str:
     host = (urllib.parse.urlsplit(raw).hostname or "").lower().rstrip(".")
     if not host:
         return ""
-    if host in _CATT_POSTER_HOSTS or host.endswith(_CATT_POSTER_HOST_SUFFIX):
+    if serve.poster_host_allowed(host):
         return raw
     return ""
+
+
+def catt_jpeg_poster_url(poster: str) -> str:
+    """Allowlisted https poster, never webp. Metahub `/poster/small/` is webp on
+    the DMR (Philips 43PUS9235) — rewrite to `/poster/medium/` (JPEG)."""
+    raw = catt_poster_url(poster)
+    if not raw:
+        return ""
+    if raw.lower().endswith(".webp"):
+        return ""
+    parts = urllib.parse.urlsplit(raw)
+    path = parts.path or ""
+    if "/poster/small/" in path:
+        path = path.replace("/poster/small/", "/poster/medium/", 1)
+        raw = urllib.parse.urlunsplit(parts._replace(path=path))
+    return raw
+
+
+def catt_image_url(poster: str) -> str:
+    """URL allowed on LOAD `images[{url}]` / `thumb`. LAN `poster.jpg` (same
+    origin as the stream) or an allowlisted https JPEG — never webp, never a
+    debrid host."""
+    raw = (poster or "").strip()
+    if raw.startswith("http://"):
+        parts = urllib.parse.urlsplit(raw)
+        if _LAN_POSTER_PATH.match(parts.path or "") and (parts.hostname or ""):
+            return raw
+        return ""
+    return catt_jpeg_poster_url(raw)
 
 
 def _parse_catt_version(raw: str) -> tuple[int, int, int] | None:
@@ -281,13 +301,13 @@ def catt_play_kwargs(
 ) -> dict:
     """kwargs for catt ≥0.13.2 `CattDevice.controller.play_media_url` (one LOAD).
 
-    title, thumb (https poster), content_type, stream_type=BUFFERED, plus
-    `media_info.metadata` with metadataType 1/2 **and** `images: [{url}]` when
-    the poster is an allowlisted Cinemeta/metahub https URL. pychromecast 14.x
-    `**media_info` replaces `media.metadata` before it copies `thumb=` into
-    `images[]`; a metadata dict that only had `metadataType` left the LOAD
-    without `images` whenever `thumb` was missing. Put images on the Movie
-    block ourselves (ADR 0050).
+    title, thumb, content_type, stream_type=BUFFERED, plus `media_info.metadata`
+    with metadataType 1/2 **and** `images: [{url}]`. On LAN delivery the image
+    is the token-gated `poster.jpg` (same origin as the stream, JPEG). Else an
+    allowlisted Cinemeta/metahub **https JPEG** (`/poster/small/` → `/medium/`).
+    Never webp — the Philips DMR strips it. pychromecast 14.x `**media_info`
+    replaces `media.metadata` before it copies `thumb=` into `images[]`; put
+    images on the Movie block ourselves (ADR 0050).
     """
     meta = meta or CastMeta()
     mime = (meta.content_type or content_type or "video/mp4").strip() or "video/mp4"
@@ -298,7 +318,7 @@ def catt_play_kwargs(
         "stream_type": CATT_STREAM_BUFFERED,
         "media_info": {"metadata": md},
     }
-    poster = catt_poster_url(meta.poster)
+    poster = catt_image_url(meta.poster)
     if poster:
         out["thumb"] = poster
     if start and start > 1:
@@ -340,7 +360,7 @@ def catt_media_info(
             metadata["episode"] = int(episode)
     if subtitle:
         metadata["subtitle"] = subtitle
-    image = catt_poster_url(poster)
+    image = catt_image_url(poster)
     if image:
         metadata["thumb"] = image
         metadata["images"] = [{"url": image}]
@@ -354,6 +374,78 @@ def catt_media_info(
     return media
 
 
+def catt_load_media(url: str, **kw) -> dict:
+    """Exact LOAD media pychromecast 14.0.1 `_send_start_play_media` builds
+    (media.py:475-493) from catt 0.13.3 `play_media_url` kwargs. Tests pin
+    `images[0].url` here. `url` is the Cast contentId — callers pass a LAN
+    label in tests, never a debrid URL.
+    """
+    media_info = dict(kw.get("media_info") or {})
+    md = media_info.get("metadata")
+    if isinstance(md, dict):
+        media_info["metadata"] = dict(md)
+        if isinstance(md.get("images"), list):
+            media_info["metadata"]["images"] = list(md["images"])
+    media = {
+        "contentId": url,
+        "streamType": kw.get("stream_type") or CATT_STREAM_BUFFERED,
+        "contentType": kw.get("content_type") or "video/mp4",
+        "metadata": dict(kw.get("metadata") or {}),
+        **media_info,
+    }
+    if kw.get("title"):
+        media["metadata"]["title"] = kw["title"]
+    thumb = kw.get("thumb")
+    if thumb:
+        media["metadata"]["thumb"] = thumb
+        if "images" not in media["metadata"]:
+            media["metadata"]["images"] = []
+        media["metadata"]["images"].append({"url": thumb})
+    if media["metadata"] and "metadataType" not in media["metadata"]:
+        media["metadata"]["metadataType"] = CATT_METADATA_GENERIC
+    return media
+
+
+_CAST_CAP_PATH = re.compile(r"^(/cast/)[^/]+")
+
+
+def _scrub_catt_load_url(raw: str) -> str:
+    """Token-redact a LOAD URL and drop the scheme so `log.redact` keeps the path.
+
+    LAN `/cast/<token>/…` → `/cast/<token>/…`. Allowlisted poster host+path
+    (no scheme). Anything else (debrid) → `<url>`.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return text
+    parts = urllib.parse.urlsplit(text)
+    path = parts.path or ""
+    if path.startswith("/cast/"):
+        return _CAST_CAP_PATH.sub(r"\1<token>", path)
+    if parts.scheme in ("http", "https"):
+        host = (parts.hostname or "").lower().rstrip(".")
+        if serve.poster_host_allowed(host):
+            return f"{host}{path}"
+        return "<url>"
+    return text
+
+
+def _scrub_catt_load(obj):
+    if isinstance(obj, dict):
+        return {k: _scrub_catt_load(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_catt_load(v) for v in obj]
+    if isinstance(obj, str) and ("://" in obj or obj.startswith("/cast/")):
+        return _scrub_catt_load_url(obj)
+    return obj
+
+
+def _log_catt_load(url: str, load: dict) -> None:
+    """Debug dump of the exact LOAD media dict (`--debug` / `NSTREAM_DEBUG`)."""
+    media = catt_load_media(url, **{k: v for k, v in load.items() if k != "subtitle_url"})
+    _log.debug("catt lib LOAD media=%s", json.dumps(_scrub_catt_load(media), ensure_ascii=False))
+
+
 def catt_lib_media_info(
     title: str,
     meta: CastMeta | None = None,
@@ -361,7 +453,7 @@ def catt_lib_media_info(
     content_type: str = "video/mp4",
     content_id: str = "",
 ) -> dict:
-    """LOAD MediaInformation the catt **library** path sends (title + images when https)."""
+    """LOAD MediaInformation the catt **library** path sends (title + JPEG images)."""
     meta = meta or CastMeta()
     return catt_media_info(
         title=catt_display_title(title, meta),
@@ -634,6 +726,7 @@ def catt_lib_outcome(
     load = catt_play_kwargs(
         title, meta, content_type=content_type, start=start, subtitle_url=subtitle_url
     )
+    _log_catt_load(url, load)
     ident = catt_device_ctor_kwargs(device)
     Device = _catt_device_cls()
     if Device is not None:
@@ -947,6 +1040,7 @@ class LanMedia:
     shutdown: Callable[[], None] | None
     plan: urlproxy.LanPlan
     idle_for: Callable[[], float] | None = None
+    poster_url: str = ""
 
 
 def lan_media(
@@ -957,6 +1051,7 @@ def lan_media(
     container: str = "",
     video_codec: str = "",
     follow: bool = True,
+    poster: str = "",
 ) -> LanMedia | None:
     """Range-serve `url` on the host LAN so the TV does not pull a remote debrid host.
 
@@ -980,12 +1075,14 @@ def lan_media(
     bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
     serve.reap_proxy_server()
+    jpeg_src = catt_jpeg_poster_url(poster)
+    poster_path = serve.fetch_poster_jpeg(jpeg_src) if jpeg_src else None
     if follow:
         server, port, _thread = serve.serve_file(
             None, bind_ip,
             upstream=url, upstream_type=planned.content_type,
             upstream_length=planned.content_length, upstream_ranged=planned.ranged,
-            media_name=planned.media_name,
+            media_name=planned.media_name, poster_path=poster_path,
         )  # fmt: skip
         return LanMedia(
             serve.served_url(bind_ip, port, server.token, planned.media_name),
@@ -993,8 +1090,13 @@ def lan_media(
             lambda: serve.close_server(server),
             planned,
             idle_for=server.idle_for,
+            poster_url=(
+                serve.served_poster_url(bind_ip, port, server.token) if poster_path else jpeg_src
+            ),
         )
-    spawned = serve.spawn_detached(bind_ip, proxy=urlproxy.proxy_job(url, planned))
+    spawned = serve.spawn_detached(
+        bind_ip, proxy=urlproxy.proxy_job(url, planned), poster_path=poster_path
+    )
     if spawned is None:
         _log.warning("lan-proxy: detach fallito")
         return None
@@ -1005,6 +1107,7 @@ def lan_media(
         planned.content_type,
         None,
         planned,
+        poster_url=serve.served_poster_url(bind_ip, port, token) if poster_path else jpeg_src,
     )
 
 
@@ -1048,11 +1151,24 @@ def cast(
     (`sub_lang` labels it), the catt path uses `-s`."""
     # The in-cast switch needs a frontend menu (`choose_lang`, ADR 0037); stdin being a TTY
     # is only the capability to read the 'a' keypress (`_poll_wait`), not the policy.
-    lan = lan_media(cfg, url, device, container=container, video_codec=video_codec, follow=follow)
+    lan = lan_media(
+        cfg,
+        url,
+        device,
+        container=container,
+        video_codec=video_codec,
+        follow=follow,
+        poster=(meta.poster if meta else ""),
+    )
     if lan is not None:
         url = lan.url
-        meta = replace(meta or CastMeta(), content_type=lan.content_type)
-    elif cfg.cast_lan_proxy and urlproxy.is_remote(url):
+        poster = lan.poster_url or catt_jpeg_poster_url(meta.poster if meta else "")
+        meta = replace(meta or CastMeta(), content_type=lan.content_type, poster=poster)
+    elif meta is not None and (meta.poster or "").startswith("https://"):
+        jpeg = catt_jpeg_poster_url(meta.poster)
+        if jpeg != meta.poster:
+            meta = replace(meta, poster=jpeg)
+    if lan is None and cfg.cast_lan_proxy and urlproxy.is_remote(url):
         # Fail closed: never hand the debrid URL to the TV over the WAN.
         reason = "lan_no_bind" if not device else _lan_fail_reason(url, container, video_codec)
         _log.warning("lan-proxy: rifiuto WAN-direct (%s)", reason)

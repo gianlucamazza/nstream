@@ -53,10 +53,12 @@ forwards `thumb=` and `media_info=` to pychromecast 14.0.1
 to `images[]` only when `thumb` is truthy. A metadata dict that only set
 `metadataType` therefore left the LOAD without `images` whenever `thumb` was
 empty or dropped. nstream now puts `images[]` on the Movie/TvShow block
-itself (`catt_play_kwargs` ← `catt_lib_media_info`). The LAN Range-proxy can
-also serve the same poster bytes at `/cast/<token>/poster.jpg` (`image/jpeg`);
-the LOAD `images[0].url` stays the Cinemeta/metahub **https** URL the TV
-fetches itself (never a debrid host).
+itself (`catt_play_kwargs` ← `catt_lib_media_info`). The LAN Range-proxy
+serves the poster at `/cast/<token>/poster.jpg` (`image/jpeg`) and the LOAD
+`images[0].url` is that LAN URL (same origin as the stream). Metahub
+`/poster/small/` is webp — the Philips DMR strips it — so the upstream is
+`/poster/medium/` (JPEG), verified `image/jpeg` before serving. HTTPS JPEG
+fallback only when there is no LAN route. Never webp, never a debrid host.
 
 - In-process `import catt.api` when the env already has catt (not a declared
   nstream dependency).
@@ -66,7 +68,8 @@ fetches itself (never a debrid host).
 
 A remux file is served by nstream's Range server (ADR 0007 split: we own the
 bytes, catt is only the sender). `play_url(resolve=False)` — never yt-dlp on a
-LAN or debrid URL. Poster is never proxied through the remux/debrid host.
+LAN or debrid URL. Poster bytes are served from the nstream Range server
+(JPEG), never through a debrid host.
 
 No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
 
@@ -158,6 +161,23 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   the LOAD we sent. Putting `images[]` on `media_info.metadata` makes the
   Movie payload match the fixture even if `thumb=` is missing; a later
   empty echo then means the DMR dropped a failed fetch, not a sender omit.
+- **Poster JPEG / headless (board 2026-10-10, tip 8282d240):** Odroid
+  `--json --cast` on the Philips. `catt info` still had
+  `{metadataType 1, title}` and **no `images`**. Two causes: (1) Cinemeta
+  `poster/small/` is `image/webp` — DMR rejects and strips it; (2) LOAD
+  `images[0].url` was still the WAN https URL, not the LAN origin the TV
+  already fetches for the stream. Headless **does** pass `meta.poster`
+  (`headless.py` `CastMeta(poster=…)` → `cast_flow.run_cast` →
+  `caster.cast` / `lan_media(poster=)`). Fix: serve JPEG on
+  `/cast/<token>/poster.jpg`, point `images[0].url` there, rewrite
+  small→medium, verify `image/jpeg` (`serve.fetch_poster_jpeg`). Debug
+  log `catt lib LOAD media=` (`--debug` / `NSTREAM_DEBUG`) with the
+  token redacted so the next live run can grep the exact LOAD.
+  Poster GET uses `ProxyHandler({})` (env `HTTPS_PROXY` ignored) and a
+  redirect handler that re-checks every hop against the Cinemeta/metahub
+  allowlist (https only, max 3 hops). Deadline 3 s across connect+read.
+  A failed LAN JPEG fetch falls back to the allowlisted https JPEG
+  rather than omitting `images`. Cache dir pruned to 200 newest files.
 - **Mute flip on LOAD:** nstream's library path never sends `SET_VOLUME` or
   `set_volume_muted`. catt 0.13.3 `play_media_url` (controllers.py:597-608)
   forwards only url/content_type/current_time/title/thumb/subtitles/
@@ -176,9 +196,12 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   then `thumb` → `images[]`; 260-264 / 332: STATUS echo `media_metadata`).
 - Symbols:   `caster.catt_lib_outcome`, `caster.catt_lib_play`,
   `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
-  `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_cast_argv`,
+  `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_load_media`,
+  `caster.catt_image_url`, `caster.catt_jpeg_poster_url`, `caster.catt_cast_argv`,
+  `serve.fetch_poster_jpeg`, `serve.served_poster_url`, `serve.poster_host_allowed`,
+  `serve._poster_http`, `serve._PosterRedirect`,
   `caster._cast_via_catt`, `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
-  `caster._hook_catt_play_media`, `caster._schedule_unconfirmed_sub_reap`,
+  `caster._hook_catt_play_media`, `caster._log_catt_load`, `caster._schedule_unconfirmed_sub_reap`,
   `serve.schedule_reap`, `serve.cancel_reap`, `serve.register_inproc_proxy`,
   `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
   `bridge._media_load_args`.

@@ -12,6 +12,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -362,6 +363,69 @@ def test_lan_media_rewrites_remote_url(monkeypatch):
         fixture.shutdown()
 
 
+def test_lan_media_poster_fetch_fail_falls_back_to_https_jpeg(monkeypatch):
+    """LAN route stays; a failed JPEG fetch keeps the allowlisted https poster."""
+    from nstream import caster
+
+    fixture = _start_fixture("range-mp4")
+    try:
+        monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+        monkeypatch.setattr(caster.serve, "fetch_poster_jpeg", lambda url: None)
+        cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+        small = "https://images.metahub.space/poster/small/tt6263850/img"
+        lan = caster.lan_media(
+            cfg,
+            _upstream(fixture),
+            "127.0.0.1",
+            container="mp4",
+            video_codec="hevc",
+            poster=small,
+        )
+        assert lan is not None
+        try:
+            assert lan.poster_url == "https://images.metahub.space/poster/medium/tt6263850/img"
+        finally:
+            if lan.shutdown:
+                lan.shutdown()
+    finally:
+        fixture.shutdown()
+
+
+def test_lan_media_slow_poster_fetch_falls_back_within_deadline(monkeypatch):
+    """A hanging metahub is cut at `_POSTER_TIMEOUT`; LAN cast keeps the https JPEG."""
+    from nstream import caster
+
+    def hanging_open(req, timeout=None):
+        time.sleep(float(timeout if timeout is not None else 60))
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(caster.serve, "_POSTER_TIMEOUT", 0.3)
+    monkeypatch.setattr(caster.serve._poster_http, "open", hanging_open)
+    fixture = _start_fixture("range-mp4")
+    try:
+        monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+        cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+        small = "https://images.metahub.space/poster/small/tt6263850/img"
+        t0 = time.monotonic()
+        lan = caster.lan_media(
+            cfg,
+            _upstream(fixture),
+            "127.0.0.1",
+            container="mp4",
+            video_codec="hevc",
+            poster=small,
+        )
+        assert lan is not None
+        try:
+            assert time.monotonic() - t0 < 1.5
+            assert lan.poster_url == "https://images.metahub.space/poster/medium/tt6263850/img"
+        finally:
+            if lan.shutdown:
+                lan.shutdown()
+    finally:
+        fixture.shutdown()
+
+
 def test_lan_media_off_returns_none():
     from nstream import caster
 
@@ -639,7 +703,10 @@ def test_cast_integration_uses_lan_url_not_secret(monkeypatch):
         fixture.shutdown()
 
 
-def _fake_lan(content_type: str, shutdown=None):
+LAN_POSTER = "http://192.168.1.10:45000/cast/tok/poster.jpg"
+
+
+def _fake_lan(content_type: str, shutdown=None, poster_url=""):
     from nstream import caster
 
     name = "stream.webm" if content_type == "video/webm" else "stream.mp4"
@@ -649,6 +716,7 @@ def _fake_lan(content_type: str, shutdown=None):
         content_type,
         shutdown,
         plan,
+        poster_url=poster_url,
     )
 
 
@@ -657,7 +725,7 @@ def test_cast_feeds_lan_mime_into_catt_lib_play(monkeypatch):
     from nstream import caster
 
     poster = "https://images.metahub.space/poster/medium/tt7068946/img"
-    lan = _fake_lan("video/mp4")
+    lan = _fake_lan("video/mp4", poster_url=LAN_POSTER)
     monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
     monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
     monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
@@ -684,7 +752,7 @@ def test_cast_feeds_lan_mime_into_catt_lib_play(monkeypatch):
     load = caster.catt_play_kwargs(seen["title"], seen["meta"], content_type=seen["content_type"])
     assert load["content_type"] == "video/mp4"
     assert load["stream_type"] == caster.CATT_STREAM_BUFFERED
-    assert load["thumb"] == poster
+    assert load["thumb"] == LAN_POSTER
     assert load["title"] == "The Nice Guys"
 
 
@@ -845,8 +913,12 @@ def _lan_lib_cast(
 ):
     from nstream import caster
 
-    lan = _fake_lan("video/mp4", shutdown=shutdown)
-    monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
+    def fake_lan(*a, **k):
+        src = k.get("poster") or ""
+        poster_url = LAN_POSTER if caster.catt_jpeg_poster_url(src) else ""
+        return _fake_lan("video/mp4", shutdown=shutdown, poster_url=poster_url)
+
+    monkeypatch.setattr(caster, "lan_media", fake_lan)
     monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
     monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: True)
@@ -872,7 +944,7 @@ def _lan_lib_cast(
         stderr = ""
 
     monkeypatch.setattr(caster.subprocess, "run", lambda cmd, **k: calls.append(list(cmd)) or _P())
-    return lan, calls
+    return _fake_lan("video/mp4", shutdown=shutdown, poster_url=LAN_POSTER), calls
 
 
 def test_lan_cast_lib_load_sends_movie_poster_via_mc(monkeypatch):
@@ -895,7 +967,7 @@ def test_lan_cast_lib_load_sends_movie_poster_via_mc(monkeypatch):
     assert mc["streamType"] == caster.CATT_STREAM_BUFFERED
     assert mc["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
     assert mc["metadata"]["title"] == "The Nice Guys"
-    assert mc["metadata"]["images"][0]["url"] == POSTER
+    assert mc["metadata"]["images"][0]["url"] == LAN_POSTER
     assert POSTER not in json.dumps(calls)
     assert not any("cast" in c and lan.url in c for c in calls)
 
@@ -917,7 +989,7 @@ def test_lan_cast_lib_session_timeout_no_cli(monkeypatch):
     assert r.error == "cast_never_started"
     assert any(n.code == "cast_unconfirmed" for n in bag)
     assert seen["mc"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
-    assert seen["mc"]["metadata"]["images"][0]["url"] == POSTER
+    assert seen["mc"]["metadata"]["images"][0]["url"] == LAN_POSTER
     assert not any("cast" in c and lan.url in c for c in calls)
 
 
@@ -962,7 +1034,7 @@ def test_lan_cast_session_wait_later_receiver_match(monkeypatch):
         meta=caster.CastMeta(poster=POSTER),
     )  # fmt: skip
     assert r.delivery == "lan" and r.started is True and r.error is None
-    assert seen["mc"]["metadata"]["images"][0]["url"] == POSTER
+    assert seen["mc"]["metadata"]["images"][0]["url"] == LAN_POSTER
     assert not any("cast" in c and lan.url in c for c in calls)
 
 

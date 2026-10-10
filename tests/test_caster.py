@@ -945,30 +945,7 @@ def _pychromecast_14_0_1_load_media(url: str, **kw) -> dict:
     (pychromecast/controllers/media.py:475-493). catt 0.13.3 pins
     `pychromecast>=14.0.1,<15` and forwards `thumb=` + `media_info=`
     (`catt/controllers.py:597-608`)."""
-    media_info = dict(kw.get("media_info") or {})
-    md = media_info.get("metadata")
-    if isinstance(md, dict):
-        media_info["metadata"] = dict(md)
-        if isinstance(md.get("images"), list):
-            media_info["metadata"]["images"] = list(md["images"])
-    media = {
-        "contentId": url,
-        "streamType": kw.get("stream_type") or "BUFFERED",
-        "contentType": kw.get("content_type") or "video/mp4",
-        "metadata": dict(kw.get("metadata") or {}),
-        **media_info,
-    }
-    if kw.get("title"):
-        media["metadata"]["title"] = kw["title"]
-    thumb = kw.get("thumb")
-    if thumb:
-        media["metadata"]["thumb"] = thumb
-        if "images" not in media["metadata"]:
-            media["metadata"]["images"] = []
-        media["metadata"]["images"].append({"url": thumb})
-    if media["metadata"] and "metadataType" not in media["metadata"]:
-        media["metadata"]["metadataType"] = 0
-    return media
+    return caster.catt_load_media(url, **kw)
 
 
 def test_catt_lib_load_payload_at_pychromecast_boundary():
@@ -1024,6 +1001,45 @@ def test_catt_poster_url_cinemeta_metahub_only():
     assert caster.catt_poster_url("http://192.168.1.10/p.jpg") == ""
     assert caster.catt_poster_url("http://10.0.0.5/cast/tok/poster.jpg") == ""
     assert caster.catt_poster_url("") == ""
+
+
+def test_catt_jpeg_poster_url_rewrites_small_webp_to_medium():
+    small = "https://images.metahub.space/poster/small/tt6263850/img"
+    medium = "https://images.metahub.space/poster/medium/tt6263850/img"
+    assert caster.catt_jpeg_poster_url(small) == medium
+    assert caster.catt_jpeg_poster_url(medium) == medium
+    assert (
+        caster.catt_jpeg_poster_url("https://images.metahub.space/poster/small/tt1/img.webp") == ""
+    )
+    assert caster.catt_jpeg_poster_url("https://debrid.example/p.jpg") == ""
+
+
+def test_catt_image_url_accepts_lan_poster_jpg():
+    lan = "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    assert caster.catt_image_url(lan) == lan
+    assert caster.catt_image_url("http://192.168.1.103:45000/cast/tok/other.jpg") == ""
+    assert caster.catt_image_url("http://192.168.1.103/p.jpg") == ""
+    small = "https://images.metahub.space/poster/small/tt6263850/img"
+    assert (
+        caster.catt_image_url(small) == "https://images.metahub.space/poster/medium/tt6263850/img"
+    )
+
+
+def test_catt_lib_load_debug_redacts_token(caplog):
+    """`--debug` LOAD dump keeps the path, never the capability token."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="nstream.cast")
+    url = "http://192.168.1.103:45000/cast/s3cretTok/stream.mp4"
+    poster = "http://192.168.1.103:45000/cast/s3cretTok/poster.jpg"
+    load = caster.catt_play_kwargs("Deadpool & Wolverine", caster.CastMeta(poster=poster))
+    caster._log_catt_load(url, load)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "catt lib LOAD media=" in text
+    assert "s3cretTok" not in text
+    assert "/cast/<token>/poster.jpg" in text
+    assert "/cast/<token>/stream.mp4" in text
+    assert "metadataType" in text
 
 
 def test_catt_load_helper_play_media_url_kwargs(monkeypatch):

@@ -26,6 +26,7 @@ def _no_catt_lib(monkeypatch):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: False)
     monkeypatch.setattr(remux.caster, "catt_supports_load_meta", lambda: True)
     monkeypatch.setattr(remux.caster, "catt_inprocess_supports_load_meta", lambda: True)
+    monkeypatch.setattr(remux.serve, "fetch_poster_jpeg", lambda url: None)
 
 
 @pytest.fixture(autouse=True)
@@ -514,10 +515,14 @@ def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
     """Library remux LOAD: nstream serves, catt.api play_url gets thumb + video/mp4 + BUFFERED."""
     f = _tmp_remux(tmp_path)
     poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    lan_poster = "http://192.168.1.10:45000/cast/tok/poster.jpg"
+    jpeg = tmp_path / "poster.jpg"
+    jpeg.write_bytes(b"\xff\xd8\xff\xd9")
     seen: dict = {}
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "fetch_poster_jpeg", lambda url: str(jpeg))
     monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
     monkeypatch.setattr(
         remux.serve,
@@ -550,13 +555,48 @@ def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
     assert seen["url"].endswith("/stream.mp4")
     assert seen["title"] == "The Nice Guys"
     assert seen["content_type"] == "video/mp4"
-    assert seen["meta"].poster == poster
+    assert seen["meta"].poster == lan_poster
     body = caster.catt_lib_media_info("The Nice Guys", seen["meta"], content_type="video/mp4")
-    assert body["metadata"]["images"][0]["url"] == poster
+    assert body["metadata"]["images"][0]["url"] == lan_poster
     assert body["contentType"] == "video/mp4" and body["streamType"] == "BUFFERED"
     assert remux._read_state() == {
         "pid": 4242, "file": str(f), "device": "10.0.0.5", "mode": "serve",
     }  # fmt: skip
+
+
+def test_cast_file_catt_lib_poster_fetch_fail_uses_https(monkeypatch, tmp_path):
+    """Remux LAN route + failed JPEG fetch → allowlisted https poster, not empty."""
+    f = _tmp_remux(tmp_path)
+    small = "https://images.metahub.space/poster/small/tt6263850/img"
+    medium = "https://images.metahub.space/poster/medium/tt6263850/img"
+    seen: dict = {}
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
+    )
+    monkeypatch.setattr(remux, "_await_start", lambda dev: True)
+
+    def fake_play(ip, url, **kw):
+        seen.update(ip=ip, url=url, **kw)
+        return caster.CATT_LIB_OK
+
+    monkeypatch.setattr(remux.caster, "catt_lib_outcome", fake_play)
+    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: pytest.fail("CLI fallback"))
+    out = remux.cast_file(
+        _cfg(),
+        "The Nice Guys",
+        str(f),
+        device="10.0.0.5",
+        follow=False,
+        meta=caster.CastMeta(poster=small, content_type="video/mp4"),
+    )
+    assert out.started is True
+    assert seen["meta"].poster == medium
 
 
 def test_cast_file_catt_lib_follow_waits_for_start_before_idle(monkeypatch, tmp_path):
@@ -573,7 +613,9 @@ def test_cast_file_catt_lib_follow_waits_for_start_before_idle(monkeypatch, tmp_
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
-    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve, "serve_file", lambda p, b, sub_path=None, poster_path=None: (srv, 45000, None)
+    )
     monkeypatch.setattr(
         remux.serve,
         "served_url",
@@ -684,7 +726,9 @@ def test_cast_file_lib_timeout_follow_no_restart(monkeypatch, tmp_path):
     monkeypatch.setattr(
         remux.caster, "receiver_info", lambda dev: {"player_state": "PLAYING", "content_id": url}
     )
-    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve, "serve_file", lambda p, b, sub_path=None, poster_path=None: (srv, 45000, None)
+    )
     monkeypatch.setattr(
         remux.serve, "served_url", lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4"
     )
@@ -748,7 +792,9 @@ def test_cast_file_lib_false_follow_has_load_no_cli(monkeypatch, tmp_path):
     srv = _FakeServer()
     url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
-    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve, "serve_file", lambda p, b, sub_path=None, poster_path=None: (srv, 45000, None)
+    )
     monkeypatch.setattr(remux.serve, "served_url", lambda ip, port, tok: url)
     monkeypatch.setattr(remux.caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_FAIL)
     monkeypatch.setattr(remux, "_await_start", lambda dev: False)
@@ -810,7 +856,9 @@ def test_cast_file_lib_unconfirmed_follow_reaps_inproc(monkeypatch, tmp_path):
         lambda fn, seconds, **k: scheduled.update(fn=fn, s=seconds, k=k),
     )
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
-    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve, "serve_file", lambda p, b, sub_path=None, poster_path=None: (srv, 45000, None)
+    )
     monkeypatch.setattr(
         remux.serve,
         "served_url",
@@ -967,7 +1015,9 @@ def _bridge_scaffold(monkeypatch, cast_load):
     monkeypatch.setattr(remux.bridge, "stop", lambda dev=None: stopped.append(dev) or True)
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
-    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 46000, None))
+    monkeypatch.setattr(
+        remux.serve, "serve_file", lambda p, b, sub_path=None, poster_path=None: (srv, 46000, None)
+    )
     monkeypatch.setattr(
         remux.subprocess, "Popen",
         lambda *a, **k: pytest.fail("catt fallback launched"),
@@ -1049,7 +1099,7 @@ def test_cast_file_headless_bridge_writes_serve_state(monkeypatch, tmp_path):
     monkeypatch.setattr(
         remux.serve,
         "spawn_detached",
-        lambda bind_ip, file_path=None, sub_path=None: (777, 46001, "tok"),
+        lambda bind_ip, file_path=None, sub_path=None, poster_path=None: (777, 46001, "tok"),
     )
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert (out.pos, out.dur, out.subs_delivered) == (0.0, 0.0, False)
@@ -1073,7 +1123,7 @@ def test_cast_file_headless_bridge_failed_falls_back_to_catt(monkeypatch, tmp_pa
     monkeypatch.setattr(
         remux.serve,
         "spawn_detached",
-        lambda bind_ip, file_path=None, sub_path=None: (777, 46001, "tok"),
+        lambda bind_ip, file_path=None, sub_path=None, poster_path=None: (777, 46001, "tok"),
     )
     out = remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)
     assert (out.pos, out.dur, out.subs_delivered) == (0.0, 0.0, False)
@@ -1101,7 +1151,7 @@ def test_cast_file_headless_ctrl_c_propagates_no_catt_fallback(monkeypatch, tmp_
     monkeypatch.setattr(
         remux.serve,
         "spawn_detached",
-        lambda bind_ip, file_path=None, sub_path=None: (777, 46001, "tok"),
+        lambda bind_ip, file_path=None, sub_path=None, poster_path=None: (777, 46001, "tok"),
     )
     with pytest.raises(KeyboardInterrupt):
         remux.cast_file(_cfg(), "T", str(f), device="10.0.0.5", follow=False)

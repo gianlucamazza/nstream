@@ -15,8 +15,8 @@ See [selection.md](../selection.md) for scoring and cast vetting.
 | LAN reachability | Required | Host ↔ TV; Tier-2 needs inbound ports (below) |
 
 Without castbridge, nstream falls back to **catt ≥0.13.2**. The **library** path
-(`play_media_url`) sends title + Cinemeta/metahub HTTPS poster (`thumb` →
-`metadata.images`) + `BUFFERED` in one LOAD (ADR 0050). The CLI fallback (`-l` /
+(`play_media_url`) sends title + a JPEG poster (`thumb` → `metadata.images`;
+LAN `poster.jpg` when proxied) + `BUFFERED` in one LOAD (ADR 0050). The CLI fallback (`-l` /
 `--stream-type`) has no `--thumb`. catt 0.13.0/0.13.1 keep the pre-0050 argv
 (those builds reject `-l` and 0.13.1 can hang in `play_media_url`). Rich events
 still need castbridge. Without the mirror binary, `--mirror` / auto
@@ -100,11 +100,14 @@ a LAN Range-proxy, an hev1 rewrap, and a direct LAN URL. catt's CLI would
 otherwise LOAD a remux stem as the title, leave `streamType` unset, and send
 `metadataType` 0 with no artwork. nstream serves the bytes (Range HTTP) and
 calls catt **≥0.13.2 library** `play_media_url` so one LOAD has the Cinemeta
-title, the public Cinemeta/metahub HTTPS poster (`thumb` → `images[0].url`),
+title, a JPEG poster (`thumb` → `images[0].url`),
 `contentType` (`video/mp4` on remux/file; the LAN mime on a proxy), and
-`streamType: BUFFERED`. The poster is **not** rewritten onto the remux/LAN
-host — the TV fetches Cinemeta/metahub itself. Other https hosts are not sent
-as `thumb`. If `catt.api` cannot be imported, the CLI fallback still sends `-l`
+`streamType: BUFFERED`. On LAN delivery the poster is the token-gated
+`/cast/<token>/poster.jpg` (same origin as the stream, `image/jpeg`).
+Metahub `/poster/small/` is webp and is rewritten to `/poster/medium/`
+before fetch; webp is never sent (the Philips DMR strips it). Without a
+LAN route the LOAD keeps the allowlisted Cinemeta/metahub **https JPEG**.
+Other https hosts are not sent as `thumb`. If `catt.api` cannot be imported, the CLI fallback still sends `-l`
 + `--stream-type BUFFERED` (no artwork). A library timeout **before** the
 LOAD is sent is a fail → CLI fallback. A session-wait raise **after** the
 LOAD is **unconfirmed**: no second CLI LOAD (that would wipe the poster).
@@ -124,7 +127,7 @@ survive.
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |
 | --- | --- | --- | --- |
 | `metadata.title` | Cinemeta title | `-l` | same (+ TvShow block) |
-| `metadata.images` / poster | Cinemeta/metahub **https** on Movie `images[{url}]` + `thumb=` | **not sent** (no `--thumb`) | Cinemeta HTTPS poster |
+| `metadata.images` / poster | LAN `/cast/<token>/poster.jpg` (JPEG) when proxied; else Cinemeta/metahub **https JPEG** | **not sent** (no `--thumb`) | same JPEG URL |
 | `metadataType` | 1 Movie / 2 TvShow (`media_info`) | GENERIC (0) | Movie / TvShow |
 | `contentType` | `video/mp4` (remux); LAN mime on proxy | path guess | declared |
 | `streamType` | `BUFFERED` | `BUFFERED` | BUFFERED (live HLS is another path) |

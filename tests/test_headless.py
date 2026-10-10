@@ -24,6 +24,7 @@ from nstream import (
     stream_select,
     subs,
     tracks,
+    urlproxy,
     util,
 )
 from nstream.config import Config
@@ -850,6 +851,102 @@ def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
     assert rc == 0 and out["reencoded"] is True
     assert seen["follow"] is True and callable(seen["on_event"])  # JSONL events wired
     assert seen["detached"] == 1  # --follow keeps ownership: no detach
+
+
+def test_headless_json_cast_load_has_lan_jpeg_poster(monkeypatch, capsys, tmp_path):
+    """`--json --cast` (headless) puts LAN `poster.jpg` on the pychromecast LOAD.
+
+    Cinemeta `poster/small/` is webp; the Philips DMR strips it. The headless
+    entry must pass `meta.poster` through `lan_media` and LOAD `images[0].url`
+    as the token-gated JPEG on the same origin as the stream.
+    """
+    poster_small = "https://images.metahub.space/poster/small/tt6263850/img"
+    poster_medium = "https://images.metahub.space/poster/medium/tt6263850/img"
+    lan_poster = "http://192.168.1.103:45000/cast/toktest/poster.jpg"
+    jpeg = tmp_path / "poster.jpg"
+    jpeg.write_bytes(b"\xff\xd8\xff\xd9")
+    stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Deadpool.Wolverine.2024.1080p.WEB-DL.H264\n👤 9 💾 8 GB",
+        "url": "https://real-debrid.com/d/SECRET/file.mp4",
+    }
+    _wire_movie(monkeypatch, name="Deadpool & Wolverine", stream=stream)
+    monkeypatch.setattr(
+        headless.api,
+        "search",
+        lambda cfg, q: [
+            {
+                "id": "tt6263850",
+                "type": "movie",
+                "name": "Deadpool & Wolverine",
+                "poster": poster_small,
+            }
+        ],
+    )
+    monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.50")
+    monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.50")
+    monkeypatch.setattr(
+        cast_flow.cast_vet, "vet_cast_audio", lambda *a, **k: _plan("direct", stream)
+    )
+    monkeypatch.setattr(cast_flow.mirror, "available", lambda: False)
+    monkeypatch.setattr(cast_flow.engine, "detach_spawned", lambda: None)
+    monkeypatch.setattr(cast_flow.caster.bridge, "bridge_available", lambda: False)
+
+    monkeypatch.setattr(
+        tracks,
+        "probe_tracks",
+        lambda url, **k: tracks.Tracks(video_codec="h264", codec_tag="avc1"),
+    )
+    monkeypatch.setattr(
+        urlproxy, "probe", lambda url: urlproxy.Probe(True, "video/mp4", 8_000_000, True)
+    )
+    monkeypatch.setattr(urlproxy, "is_remote", lambda url: True)
+
+    fetched: dict = {}
+    monkeypatch.setattr(cast_flow.caster.serve, "lan_ip", lambda device: "192.168.1.103")
+    monkeypatch.setattr(cast_flow.caster.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(cast_flow.caster.serve, "reap_proxy_server", lambda: False)
+    monkeypatch.setattr(
+        cast_flow.caster.serve,
+        "fetch_poster_jpeg",
+        lambda url: fetched.update(url=url) or str(jpeg),
+    )
+    monkeypatch.setattr(
+        cast_flow.caster.serve,
+        "spawn_detached",
+        lambda bind_ip, **kw: (
+            fetched.update(poster_path=kw.get("poster_path")) or (4242, 45000, "toktest")
+        ),
+    )
+    monkeypatch.setattr(cast_flow.caster.serve, "register_proxy_server", lambda pid: None)
+
+    captured: dict = {}
+
+    def fake_outcome(device, url, **kw):
+        captured.update(device=device, url=url, **kw)
+        return cast_flow.caster.CATT_LIB_OK
+
+    monkeypatch.setattr(cast_flow.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(cast_flow.caster, "catt_lib_outcome", fake_outcome)
+
+    cfg = Config(torrentio_base="tb", subtitle_langs=["ita", "eng"], cast_lan_proxy=True)
+    rc = headless.run_auto(cfg, _hns(query=["deadpool"]), _cast_opts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out.get("ok")
+    assert fetched.get("url") == poster_medium
+    assert fetched.get("poster_path") == str(jpeg)
+    assert captured["meta"].poster == lan_poster
+    kw = cast_flow.caster.catt_play_kwargs(
+        captured["title"],
+        captured["meta"],
+        content_type=captured.get("content_type") or "video/mp4",
+    )
+    media = cast_flow.caster.catt_load_media(captured["url"], **kw)
+    assert media["metadata"]["metadataType"] == cast_flow.caster.CATT_METADATA_MOVIE
+    assert media["metadata"]["title"] == "Deadpool & Wolverine"
+    assert media["metadata"]["images"][0]["url"] == lan_poster
+    assert "/poster/small/" not in media["metadata"]["images"][0]["url"]
+    assert not media["metadata"]["images"][0]["url"].lower().endswith(".webp")
 
 
 def test_run_auto_cast_absent_safety_subs_json(monkeypatch, capsys):
