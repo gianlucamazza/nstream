@@ -14,11 +14,13 @@ ADR 0045 Phase 1 also uses this module's probe / plan / open helpers so `serve` 
 Range-serve the same remote url on the LAN (the TV never sees the debrid host). The
 loopback server below stays 127.0.0.1-only; the LAN bind lives in `serve`.
 
-`open_upstream` / `probe` pin each hop (first included) to one `getaddrinfo` result:
+`open_upstream` / `probe` pin each hop (first included) across `getaddrinfo` results:
 private / loopback / link-local / unspecified / CGNAT `100.64.0.0/10` / ULA `fc00::/7`
-(and IPv4-mapped forms) are rejected, then the socket connects to that address.
-The URL hostname stays on `Host`, SNI, and certificate verification. After connect,
-`getpeername()` is checked again so a public-then-private rebind cannot land.
+/ IPv4-compatible `::/96` (and IPv4-mapped forms) are skipped, then the socket
+connects to each remaining public address in turn. The URL hostname stays on
+`Host`, SNI, and certificate verification. After each connect, `getpeername()`
+is checked so a public-then-private rebind cannot land. Env `http_proxy` /
+`https_proxy` are ignored (`ProxyHandler({})`) so a proxy cannot bypass the pin.
 """
 
 from __future__ import annotations
@@ -171,6 +173,9 @@ def local_url(url: str) -> str:
 
 # CGNAT (RFC 6598). Not covered by ipaddress.is_private.
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# Deprecated IPv4-compatible (RFC 4291). `::7f00:1` is 127.0.0.1 but is_loopback
+# is False on the IPv6 form — ipaddress only treats `::1` as loopback.
+_V4COMPAT = ipaddress.ip_network("::/96")
 
 
 def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -186,13 +191,15 @@ def _parse_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None
 
 
 def _blocked_ip(host: str) -> bool:
-    """True for private, loopback, link-local, unspecified, CGNAT, ULA (via is_private)."""
+    """True for private, loopback, link-local, unspecified, CGNAT, ULA, IPv4-compatible."""
     addr = _parse_ip(host)
     if addr is None:
         return False
     if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_unspecified:
         return True
-    return addr.version == 4 and addr in _CGNAT
+    if addr.version == 4 and addr in _CGNAT:
+        return True
+    return addr.version == 6 and addr in _V4COMPAT
 
 
 def _assert_peer_public(sock: socket.socket) -> None:
@@ -202,10 +209,11 @@ def _assert_peer_public(sock: socket.socket) -> None:
 
 
 def _connect_pinned(host: str, port: int, timeout, source_address=None):
-    """Resolve `host` once, reject a blocked address, connect to that sockaddr.
+    """Resolve `host` once, skip blocked results, connect to each public sockaddr.
 
     A literal IP in the URL is used as-is (loopback fixtures / TorrServer). A name
-    must resolve to a public address; `getpeername()` must still be public.
+    must resolve to at least one public address; each attempt checks `getpeername()`.
+    Fail only when every result is blocked or every public connect fails.
     """
     port = int(port or 0)
     if _parse_ip(host) is not None:
@@ -215,24 +223,29 @@ def _connect_pinned(host: str, port: int, timeout, source_address=None):
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
         raise urllib.error.URLError(exc) from exc
-    if not infos:
+    last_exc: BaseException | None = None
+    for fam, socktype, proto, _canon, sockaddr in infos:
+        ip = sockaddr[0]
+        if not isinstance(ip, str) or _blocked_ip(ip):
+            continue
+        sock = socket.socket(fam, socktype, proto)
+        if timeout is not None:
+            sock.settimeout(timeout)
+        try:
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            _assert_peer_public(sock)
+        except (OSError, urllib.error.URLError) as exc:
+            sock.close()
+            last_exc = exc
+            continue
+        return sock
+    if last_exc is None:
         raise urllib.error.URLError("blocked address")
-    fam, socktype, proto, _canon, sockaddr = infos[0]
-    ip = sockaddr[0]
-    if not isinstance(ip, str) or _blocked_ip(ip):
-        raise urllib.error.URLError("blocked address")
-    sock = socket.socket(fam, socktype, proto)
-    if timeout is not None:
-        sock.settimeout(timeout)
-    try:
-        if source_address:
-            sock.bind(source_address)
-        sock.connect(sockaddr)
-        _assert_peer_public(sock)
-    except Exception:
-        sock.close()
-        raise
-    return sock
+    if isinstance(last_exc, urllib.error.URLError):
+        raise last_exc
+    raise urllib.error.URLError(last_exc) from last_exc
 
 
 def _pinned_create(address, timeout, source_address):
@@ -275,7 +288,10 @@ class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-_opener = urllib.request.build_opener(_SafeRedirect, _HTTPHandler, _HTTPSHandler)
+# Empty ProxyHandler disables env http_proxy/https_proxy (those would bypass the pin).
+_opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}), _SafeRedirect, _HTTPHandler, _HTTPSHandler
+)
 
 
 def _guard_redirect(src_url: str, dst_url: str) -> None:
@@ -295,10 +311,11 @@ def _guard_redirect(src_url: str, dst_url: str) -> None:
 def open_upstream(url: str, method: str, rng: str | None, timeout: float = _UPSTREAM_TIMEOUT):
     """GET/HEAD `url`, optionally with a Range. Never logs the url (it may carry a token).
 
-    Every hop (first included) uses a pinned HTTP(S) connection: one `getaddrinfo`,
-    reject blocked nets, connect to that address, then `getpeername()` abort. The
-    URL hostname stays on Host / SNI / certificate verification. Redirects: no
-    https→http and no literal private/loopback/link-local targets."""
+    Every hop (first included) uses a pinned HTTP(S) connection: `getaddrinfo`,
+    skip blocked nets, connect to each public address, then `getpeername()` abort.
+    Env proxies are off. The URL hostname stays on Host / SNI / certificate
+    verification. Redirects: no https→http and no literal private/loopback/
+    link-local targets."""
     headers = {"User-Agent": UA}
     if rng:
         headers["Range"] = rng

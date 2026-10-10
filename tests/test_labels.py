@@ -1,4 +1,4 @@
-from nstream import labels, ui
+from nstream import labels, quality, tracks, ui
 from nstream.tracks import Track, Tracks
 from nstream.types import HistoryEntry, Meta, Stream, Video
 
@@ -93,3 +93,29 @@ def test_stream_label_strips_ansi_from_release_names():
 def test_stream_label_shows_addon_provenance():
     s: Stream = {"name": "[RD+] 1080p", "title": "Film.mkv", "addon": "Comet"}
     assert "[Comet]" in labels.stream_label(s)
+
+
+def test_stream_label_marks_claimed_codec():
+    s: Stream = {
+        "name": "[RD+] 1080p",
+        "title": "Deadpool.2016.1080p.BluRay.x265.HEVC-GRP",
+        "url": "http://rd.example/unprobed.mp4",
+    }
+    label = labels.stream_label(s, quality.parse_stream(s))
+    assert "hevc (claimed)" in label
+
+
+def test_stream_label_uses_probed_codec_on_mismatch():
+    s: Stream = {
+        "name": "[RD+] 1080p",
+        "title": "Deadpool.2016.1080p.BluRay.x265.HEVC-GRP",
+        "url": "http://rd.example/deadpool.mp4",
+    }
+    tracks.clear_cache()
+    tracks._cache[s["url"]] = Tracks(video_codec="h264", codec_tag="avc1", n_video=1)
+    try:
+        label = labels.stream_label(s, quality.parse_stream(s))
+        assert "h264" in label
+        assert "claimed" not in label
+    finally:
+        tracks.clear_cache()

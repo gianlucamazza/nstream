@@ -85,6 +85,7 @@ def test_is_remote_skips_lan_and_stubs():
     assert not urlproxy.is_remote("http://192.0.2.10:45001/cast/tok/stream.mp4")
     assert not urlproxy.is_remote("http://100.64.0.1/f.mp4")  # CGNAT
     assert not urlproxy.is_remote("http://[fc00::1]/f.mp4")  # ULA
+    assert not urlproxy.is_remote("http://[::7f00:1]/f.mp4")  # IPv4-compatible loopback
 
 
 class _Dropping(_Upstream):
@@ -142,9 +143,147 @@ def test_blocked_ip_covers_cgnat_ula_and_v4_mapped():
     assert urlproxy._blocked_ip("fc00::1")
     assert urlproxy._blocked_ip("::ffff:127.0.0.1")
     assert urlproxy._blocked_ip("::ffff:100.64.0.1")
+    assert urlproxy._blocked_ip("::7f00:1")  # IPv4-compatible 127.0.0.1
+    assert urlproxy._blocked_ip("::c0a8:1")  # IPv4-compatible 192.168.0.1
     assert not urlproxy._blocked_ip("8.8.8.8")
     assert not urlproxy._blocked_ip("2001:4860:4860::8888")
     assert not urlproxy._blocked_ip("debrid.example.com")
+
+
+def _allow_loopback_peer(monkeypatch):
+    """Fixture servers bind 127.0.0.1; allow that peer after a named-host pin."""
+    real = urlproxy._blocked_ip
+    monkeypatch.setattr(
+        urlproxy, "_blocked_ip", lambda host: False if host in ("127.0.0.1", "::1") else real(host)
+    )
+
+
+def test_connect_pinned_skips_blocked_then_public(monkeypatch):
+    """First getaddrinfo result is blocked; the second is the fixture and succeeds."""
+    hits = {"n": 0}
+
+    class _Count(_Upstream):
+        def do_GET(self):
+            hits["n"] += 1
+            super().do_GET()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Count)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+
+    def fake_gai(host, port, *a, **k):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.1", port or 80)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", srv.server_address[1])),
+        ]
+
+    monkeypatch.setattr(urlproxy.socket, "getaddrinfo", fake_gai)
+    _allow_loopback_peer(monkeypatch)
+    try:
+        with urlproxy.open_upstream(
+            f"http://dual.example.com:{port}/x", "GET", None, timeout=2
+        ) as r:
+            assert r.status == 200
+            assert r.read() == BODY
+        assert hits["n"] == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_connect_pinned_skips_unreachable_then_public(monkeypatch):
+    """First public result refuses the connect; the second public address works."""
+    hits = {"n": 0}
+
+    class _Count(_Upstream):
+        def do_GET(self):
+            hits["n"] += 1
+            super().do_GET()
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Count)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+
+    def fake_gai(host, port, *a, **k):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.10", 1)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", srv.server_address[1])),
+        ]
+
+    orig_connect = socket.socket.connect
+
+    def fake_connect(self, address):
+        if address[0] == "203.0.113.10":
+            raise OSError("unreachable")
+        return orig_connect(self, address)
+
+    monkeypatch.setattr(urlproxy.socket, "getaddrinfo", fake_gai)
+    monkeypatch.setattr(socket.socket, "connect", fake_connect)
+    _allow_loopback_peer(monkeypatch)
+    try:
+        with urlproxy.open_upstream(
+            f"http://dual.example.com:{port}/x", "GET", None, timeout=2
+        ) as r:
+            assert r.status == 200
+            assert r.read() == BODY
+        assert hits["n"] == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_pinned_opener_ignores_http_proxy_env(monkeypatch):
+    """http_proxy must not steal the pinned hop (that would skip getaddrinfo pinning)."""
+    origin_hits = {"n": 0}
+    proxy_hits = {"n": 0}
+
+    class _Origin(_Upstream):
+        def do_GET(self):
+            origin_hits["n"] += 1
+            super().do_GET()
+
+    class _Proxy(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args) -> None:
+            pass
+
+        def do_GET(self):
+            proxy_hits["n"] += 1
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_HEAD(self):
+            self.do_GET()
+
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), _Origin)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), _Proxy)
+    threading.Thread(target=origin.serve_forever, daemon=True).start()
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    monkeypatch.setenv("http_proxy", proxy_url)
+    monkeypatch.setenv("HTTP_PROXY", proxy_url)
+    monkeypatch.setenv("https_proxy", proxy_url)
+    monkeypatch.setenv("HTTPS_PROXY", proxy_url)
+
+    def fake_gai(host, port, *a, **k):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", origin.server_address[1]))
+        ]
+
+    monkeypatch.setattr(urlproxy.socket, "getaddrinfo", fake_gai)
+    _allow_loopback_peer(monkeypatch)
+    try:
+        url = f"http://cdn.example.com:{origin.server_address[1]}/file"
+        with urlproxy.open_upstream(url, "GET", None, timeout=2) as resp:
+            assert resp.status == 200
+            assert resp.read() == BODY
+        assert origin_hits["n"] == 1
+        assert proxy_hits["n"] == 0
+    finally:
+        origin.shutdown()
+        origin.server_close()
+        proxy.shutdown()
+        proxy.server_close()
 
 
 def test_hostname_resolving_to_loopback_is_refused(monkeypatch):

@@ -239,6 +239,25 @@ def test_remux_to_file_tags_hevc_hvc1(monkeypatch, tmp_path):
     assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
 
 
+def test_remux_to_file_does_not_hvc1_tag_when_probed_h264(monkeypatch, tmp_path):
+    """Release name may claim x265; the remux tag follows ffprobe (Deadpool field report)."""
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_gc_stale", lambda: None)
+    seen = {}
+    monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
+    from nstream import tracks as tracks_mod
+
+    monkeypatch.setattr(
+        tracks_mod,
+        "probe_tracks",
+        lambda *a, **k: Tracks(video_codec="h264", codec_tag="avc1"),
+    )
+    remux.remux_to_file(
+        "http://x", _cfg(), audio_index=0, audio=[Track(id=1, lang="ita", codec="aac")]
+    )
+    assert "-tag:v" not in seen["cmd"]
+
+
 def test_remux_to_file_failure_cleans_up(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)

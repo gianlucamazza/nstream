@@ -170,6 +170,35 @@ def test_probe_tracks_requests_format_name(monkeypatch):
     assert "format_name" in entries
 
 
+def test_honest_codec_uses_cached_probe_over_release_name():
+    """Deadpool-style mismatch: name says x265, ffprobe already saw h264."""
+    url = "http://rd.example/deadpool.mp4"
+    tracks._cache[url] = tracks.Tracks(video_codec="h264", codec_tag="avc1", n_video=1)
+    assert tracks.honest_codec(url, "hevc") == ("h264", "probed")
+
+
+def test_honest_codec_marks_unprobed_release_name_as_claimed():
+    assert tracks.honest_codec("http://rd.example/unprobed.mp4", "hevc") == ("hevc", "release_name")
+    assert tracks.honest_codec("", "hevc") == ("hevc", "release_name")
+
+
+def test_honest_codec_never_probes(monkeypatch):
+    monkeypatch.setattr(tracks, "probe_tracks", lambda *a, **k: pytest.fail("must not probe"))
+    assert tracks.honest_codec("http://x", "hevc") == ("hevc", "release_name")
+
+
+def test_honest_codec_failed_probe_stays_claimed():
+    tracks._cache["http://empty"] = tracks.Tracks()
+    assert tracks.honest_codec("http://empty", "hevc") == ("hevc", "release_name")
+
+
+def test_cached_tracks_is_cache_only(monkeypatch):
+    monkeypatch.setattr(tracks, "_ffprobe", lambda *a, **k: pytest.fail("must not probe"))
+    assert tracks.cached_tracks("http://missing") is None
+    tracks._cache["http://hit"] = tracks.Tracks(video_codec="hevc", n_video=1)
+    assert tracks.cached_tracks("http://hit").video_codec == "hevc"
+
+
 def test_probe_tracks_is_bounded(monkeypatch):
     # P3: a stalled remote read must fail fast, and probing stays on the headers.
     seen = []

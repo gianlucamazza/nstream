@@ -23,6 +23,7 @@ from nstream import (
     state,
     stream_select,
     subs,
+    tracks,
     util,
 )
 from nstream.config import Config
@@ -171,7 +172,39 @@ def test_run_auto_movie_emits_json(monkeypatch, capsys):
     assert out["ok"] and out["action"] == "play" and out["type"] == "movie"
     assert out["title"] == "Dune" and out["selection"] == "exact"
     assert out["stream"]["resolution"] == 1080 and out["stream"]["codec"] == "hevc"
+    assert out["stream"]["codec_source"] == "release_name"
     assert out["stream"]["cached"] is True and out["stream"]["backend"] == "debrid"
+
+
+def test_describe_stream_uses_probed_codec_on_mismatch():
+    """Release name says x265 HEVC; a cache-hit probe (Deadpool field report) is h264."""
+    url = "http://rd.example/deadpool.mp4"
+    stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Deadpool.2016.1080p.BluRay.x265.HEVC-GRP\n👤 9 💾 8 GB",
+        "url": url,
+    }
+    tracks.clear_cache()
+    tracks._cache[url] = tracks.Tracks(video_codec="h264", codec_tag="avc1", n_video=1)
+    try:
+        block = headless_play.describe_stream(CFG, stream)
+        assert block["codec"] == "h264"
+        assert block["codec_source"] == "probed"
+        assert "url" not in block and "secret" not in json.dumps(block)
+    finally:
+        tracks.clear_cache()
+
+
+def test_describe_stream_marks_unprobed_codec_as_claimed():
+    stream = {
+        "name": "[RD+] Torrentio\n1080p",
+        "title": "Deadpool.2016.1080p.BluRay.x265.HEVC-GRP\n👤 9 💾 8 GB",
+        "url": "http://rd.example/unprobed.mp4",
+    }
+    tracks.clear_cache()
+    block = headless_play.describe_stream(CFG, stream)
+    assert block["codec"] == "hevc"
+    assert block["codec_source"] == "release_name"
 
 
 def test_run_auto_skips_fzf(monkeypatch):

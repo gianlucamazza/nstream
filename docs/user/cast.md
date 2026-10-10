@@ -138,7 +138,7 @@ After ranking, `cast_vet` enforces what the DMR can actually play:
 | Gate | Module | Effect |
 | ---- | ------ | ------ |
 | Audio language + codec | `vet_cast_audio` | Prefer primary dub as first track; remux track select; safety subs |
-| Real video codec | `vet_cast_video` (ADR 0017) | Drop DivX/etc.; may fail `video_codec_unsupported` |
+| Real video codec | `vet_cast_video` (ADR 0017, 0051) | Drop DivX/etc.; may fail `video_codec_unsupported`. Labels/`--json` use the probed codec when ffprobe already ran; otherwise `(claimed)` / `codec_source: release_name` |
 | Container | `vet_cast_container` (ADR 0022) | mkv → MP4 rewrap when needed |
 
 Audio on the DMR is **file default track only** — no embedded track switch. In-cast **`a`**

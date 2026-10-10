@@ -850,7 +850,8 @@ def lan_media(
 
     probed = urlproxy.probe(url)
     tr = tracks.probe_tracks(url)
-    planned = urlproxy.plan(container, probed, video_codec or tr.video_codec, tr.codec_tag)
+    # Probed codec wins when ffprobe ran (ADR 0051); claimed is only the fallback.
+    planned = urlproxy.plan(container, probed, tr.video_codec or video_codec, tr.codec_tag)
     if planned.mode != "proxy":
         return None
     bind_ip = serve.lan_ip(device)
@@ -961,7 +962,7 @@ def _lan_fail_reason(url: str, container: str, video_codec: str) -> str:
 
     probed = urlproxy.probe(url)
     tr = tracks.probe_tracks(url)
-    planned = urlproxy.plan(container, probed, video_codec or tr.video_codec, tr.codec_tag)
+    planned = urlproxy.plan(container, probed, tr.video_codec or video_codec, tr.codec_tag)
     return planned.reason if planned.mode != "proxy" else "lan_unavailable"
 
 
