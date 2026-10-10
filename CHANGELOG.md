@@ -28,9 +28,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **ADR 0045 Proposed:** Philips / catt-only Chromecast RCA. Cast volume CLI is
   0–100% ↔ `SET_VOLUME` 0–1 MASTER (Phase 0: this DMR reports
   `volume_control_type=master`, `volume_step_interval=null`; catt may quantize
-  14→13). Cast % is not TV OSD — no `osd_max`. 1080 HEVC stutter on a direct
-  remote URL is delivery, not a codec miss. No remux-720 default. Open: OSD
-  photo table, HEVC HEAD/Range, JointSpace pairing.
+  14→13). Cast % is not TV OSD — no `osd_max`. Phase 1: a remote debrid url is
+  Range-served from the host LAN (`cast_lan_proxy`, default on; JSON
+  `delivery: lan`) so 1080 HEVC stays native — not remux-720. Matroska still
+  remux `-c copy` to MP4 (ADR 0022). Open: OSD photo table, board HEVC
+  playback HEAD, JointSpace pairing.
 - `--json --status` reports `volume_control_type`, `volume_step_interval`,
   `volume_percent`, `app_id`, `content_type`, `stream_type` (ADR 0045). Never
   `content_id`. `--volume` / TUI copy names Cast % ≠ OSD.

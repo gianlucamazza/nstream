@@ -71,6 +71,16 @@ def test_loopback_and_non_http_urls_pass_through():
     assert urlproxy.local_url("/tmp/file.mp4") == "/tmp/file.mp4"
 
 
+def test_is_remote_skips_lan_and_stubs():
+    assert urlproxy.is_remote("https://debrid.example/realdebrid=SECRET/f.mp4")
+    assert not urlproxy.is_remote("http://127.0.0.1:8090/stream/x")
+    assert not urlproxy.is_remote("http://192.168.1.10:8090/f.mp4")
+    assert not urlproxy.is_remote("http://10.0.0.5/f.mp4")
+    assert not urlproxy.is_remote("http://u")  # caster test stub
+    assert not urlproxy.is_remote("/tmp/file.mp4")
+    assert not urlproxy.is_remote("http://192.0.2.10:45001/cast/tok/stream.mp4")
+
+
 class _Dropping(_Upstream):
     """Sends half the body of a full GET, then drops the connection; ranged GETs work."""
 

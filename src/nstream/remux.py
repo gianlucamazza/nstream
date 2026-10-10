@@ -576,6 +576,7 @@ def cast_file(
     `follow=False` (headless) leaves the server detached and records its PID for `--stop`/GC;
     `follow=True` serves until playback ends, then removes the temp file."""
     serve.reap_sub_server()  # a new cast replaces any standalone Tier-1 subtitle server
+    serve.reap_proxy_server()  # and any leftover LAN Range-proxy (ADR 0045)
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
         # The state slot is single: a new Tier-2 cast replaces the previous one. Reap the
@@ -1251,6 +1252,7 @@ def cast_live(
         sel = t.audio[audio_index] if 0 <= audio_index < len(t.audio) else None
         job = dataclasses.replace(job, rms=True, rms_channels=(sel.channels or 0) if sel else 0)
     serve.reap_sub_server()
+    serve.reap_proxy_server()
     prev = _read_state()
     if prev and _pid_alive(prev.get("pid")):
         _replace_previous(prev)
@@ -1618,10 +1620,11 @@ def stop(device: str | None = None) -> bool:
     # A Tier-1 direct cast leaves only a standalone subtitle server (no remux state) — reap it
     # here so `--stop` tears it down too, even when there's no remux temp file to clear.
     reaped_sub = serve.reap_sub_server()
+    reaped_proxy = serve.reap_proxy_server()
     reap_prefetch()  # a binge's prepared next episode goes with the cast
     st = _read_state()
     if not st:
-        return reaped_sub
+        return reaped_sub or reaped_proxy
     dev = st.get("device") if device is None else device
     if st.get("inproc"):
         # A followed live cast: stopping the receiver ends it, and its owner tears down.

@@ -52,6 +52,7 @@ def test_items_cover_all_settings():
         "default_quality",
         "cast_mode",
         "cast_remux",
+        "cast_lan_proxy",
         "cast_remux_max_resolution",
         "cast_remux_max_size_gb",
         "cast_mirror_over_remux_gb",

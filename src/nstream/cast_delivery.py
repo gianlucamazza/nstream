@@ -75,6 +75,7 @@ class CastResult(NamedTuple):
     subs_delivered: bool = False
     started: bool = False
     error: str | None = None  # "catt_missing" | "cast_timeout" | "cast_failed" | …
+    delivery: str = ""  # caster may set "lan" (ADR 0045 Range-proxy); else the caller names it
 
 
 class BridgeOutcome(NamedTuple):

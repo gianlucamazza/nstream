@@ -170,7 +170,7 @@ class CastOutcome:
     # mute). Callers must not fall back to a pre-cast language guess.
     audio_degraded: bool = False
     start: float | None = None  # the position the delivery was LOADed at (see `_handoff_start`)
-    delivery: str = ""  # "live" (HLS-TS) | "file" (complete remux) | "direct" | "mirror"
+    delivery: str = ""  # "live" | "file" | "direct" | "lan" | "mirror"
     sub_lang: str | None = None  # language of the delivered subtitle track
 
 
@@ -770,10 +770,11 @@ def run_cast(
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,
                 langs=langs, resolve_lang=resolver, choose_lang=choose_lang, follow=follow,
                 meta=meta, on_event=on_event,
+                container=final_container,
             )  # fmt: skip
             pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             action = "cast"
-            delivered_as = "direct"
+            delivered_as = delivery.delivery or "direct"
     if (sub_paths or embedded_used) and not subs_delivered:
         # Honesty over silence: the subtitles were fetched but not attached to the cast
         # (e.g. WebVTT conversion/serving failed, or the mirror path with no burn-in).

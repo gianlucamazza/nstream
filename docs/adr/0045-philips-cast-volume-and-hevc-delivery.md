@@ -33,8 +33,9 @@ Range-served MP4 or as live HLS-TS from the host. A 2026-10-01 live start of *Bl
 
 nstream does **not** lower remux defaults to 720p H.264, and does **not** invent an OSD
 scale. The volume CLI contract below is the shipped contract (helpers + `--help` /
-`--status` / TUI copy). HEVC delivery stays the RCA in Context — no LAN-proxy CODE
-until a playback HEAD exists.
+`--status` / TUI copy). HEVC delivery on a catt-only host is a **LAN Range-proxy of the
+remote url** (Phase 1): video stays native; the TV pulls a complete, `Content-Length`'d,
+`Accept-Ranges` / 206 resource from the host. A 720 H.264 remux remains triage only.
 
 1. **Volume CLI contract (shipped).** The Cast protocol has no TV-OSD units.
    `SET_VOLUME` is a float 0–1. `--volume N` / TUI / `catt volume N` are the same
@@ -55,12 +56,14 @@ until a playback HEAD exists.
    never launched — live session `app_id: CC1AD845`. The catt path emits
    `receiver_app_ignored`. Live HLS already forces the DMR: the custom app `LOAD_FAILED`
    an HLS playlist (ADR 0039 field note).
-3. **HEVC delivery.** Keep native HEVC. The stuttering path is **catt handing the TV a
-   remote debrid URL** (the TV pulls WAN, contentType is whatever catt guesses —
-   `video/mp4` if unset). The working path on this TV is **LAN Range / live HLS with
-   video `-c copy`**. Missing `cast_sender` only blocks the **mirror** fallback (ADR 0006 /
-   0015), which is 1080p SDR remoting — a last resort, not the HEVC fix. A 720 H.264 remux
-   is diagnostic: smaller file + LAN serve, not evidence the SoC cannot decode 1080 HEVC.
+3. **HEVC delivery (Phase 1 shipped).** Keep native HEVC. The stuttering path is **catt
+   handing the TV a remote debrid URL** (the TV pulls WAN, contentType is whatever catt
+   guesses — `video/mp4` if unset). The working path on this TV is **LAN Range / live HLS
+   with video `-c copy`**. On a catt-only host that is a LAN Range-proxy of the remote url
+   (`urlproxy.plan` + `serve` upstream + `caster.lan_media`). Missing `cast_sender` only
+   blocks the **mirror** fallback (ADR 0006 / 0015), which is 1080p SDR remoting — a last
+   resort, not the HEVC fix. A 720 H.264 remux is diagnostic: smaller file + LAN serve,
+   not evidence the SoC cannot decode 1080 HEVC.
 
 ## Phase 0 CLI grid (2026-10-05)
 
@@ -102,7 +105,7 @@ this capture; prior LAN remux endpoint dead). Optional video-copy remux skipped
 | Permanent remux-720 H.264 default | — | Quality downgrade | Rejected (CoS) |
 | Mirror / `cast_sender` as the HEVC answer | — | 1080p SDR remoting; binary absent here | Last resort only (ADR 0006) |
 | LAN Range / live HLS, video copy | — | Already proven 4K HEVC HDR on this TV | **Chosen** product path |
-| LAN Range-proxy of a remote URL (no remux) | — | Would keep HEVC on catt-only hosts | Deferred until playback HEAD |
+| LAN Range-proxy of a remote URL (no remux) | — | Keeps HEVC on catt-only hosts | **Chosen** (Phase 1; this revision) |
 
 Cast has no better volume unit than 0–1. Philips JointSpace
 (`https://TV:1926/6/audio/volume`) would be the OSD control plane **after pairing**.
@@ -122,8 +125,66 @@ until Lab asks.
 - catt-only casts with a configured custom id emit `receiver_app_ignored`. Config docs
   stop implying catt launches that id.
 - No ranking / remux-resolution / `cast_mode` default change.
-- **Still not shipped:** `cast_volume_osd_max`, JointSpace client, LAN URL-proxy for
-  Tier-1. Those wait on the residuals below.
+- **Still not shipped:** `cast_volume_osd_max`, JointSpace client. Those wait on the
+  residuals below.
+
+## Phase 1 — LAN Range-proxy (catt-only HEVC)
+
+Field fact (Context): a 1080 HEVC "direct" cast stutters because catt hands the TV the
+**remote debrid URL** (WAN pull, `contentType` guessed `video/mp4`). The same SoC plays
+HEVC Main10 4K HDR10 when bytes arrive as a complete Range-served MP4 from the LAN host.
+castbridge / live HLS / mirror are absent on this board; mirror stays last resort.
+
+**Shipped (this revision).** A remote http(s) url on the Tier-1 path is re-homed on the
+existing `serve` Range server (ports 45000–47000, per-cast capability token). `urlproxy`
+probes HEAD + a 1-byte Range GET (never logs the url) and decides:
+
+| Upstream / container | Delivery | `contentType` |
+| -------------------- | -------- | ------------- |
+| MP4 / WebM, `Accept-Ranges` or a 206 on `bytes=0-0` | LAN proxy, Range passed through | `video/mp4` / `video/webm` |
+| MP4 / WebM, no Range, `Content-Length` known | LAN proxy, 206 **synthesized** (skip-from-start) | same |
+| MP4 / WebM, no Range and no length | LAN proxy best-effort (`lan_unknown_length`); DMR may still refuse | same |
+| Matroska / other non-`CAST_CONTAINER_DECODABLE` | remux `-c copy` to MP4 (ADR 0022), not a 720 transcode | `video/mp4` |
+| Video codec outside `CAST_VIDEO_DECODABLE` | still proxy native bytes (ADR 0017 already failed/mirrored) | container mime |
+
+The LOAD url is `http://<lan>:<port>/cast/<token>/stream.mp4` (`.webm` when that is the
+container) so catt 0.13 guesses `video/mp4` / `video/webm`. `caster.CastMeta.content_type`
+is set for castbridge. `streamType` is BUFFERED by construction (complete `Content-Length`
+resource). JSON `delivery` is `lan` (never the url, never `content_id`).
+
+Reuse, not a parallel server: loopback `urlproxy.local_url` is unchanged (ffprobe/ffmpeg
+argv); the LAN bind, token path, idle-exit, and detached stdin job (`--proxy`, url never
+on argv) are `serve`. Fire-and-return registers `RunState("lan-proxy")`; `--stop` /
+`remux.stop` reaps it. Config gate `cast_lan_proxy` defaults **on** — off is debug only.
+
+Live board HEAD/ffprobe traces remain NEED_PLAYBACK; the fixture tests cover Range and
+no-Range MP4 + MKV. Status stays **Proposed** until an Odroid 1080 HEVC cast confirms
+smooth playback.
+
+### Board verification (Odroid; no install)
+
+CODE + docs only. Do **not** install castbridge / mirror / `cast_sender`. Volume contract
+unchanged — do not invent `osd_max`.
+
+1. Run this branch's nstream (editable `src/`). `cast_lan_proxy` on (default).
+2. Cast a **1080 HEVC MP4** debrid title (catt-only, `cast_mode=dmr`).
+3. Headless JSON: `delivery: "lan"`, `codec: hevc`, `ok: true`. No stream url, no
+   `content_id`.
+4. `catt info -j` on the device: `content_type` `video/mp4`, `stream_type` BUFFERED (or
+   whatever catt reports), `app_id` `CC1AD845`. Confirm playback is **smooth** (no
+   stutter of the old WAN-direct path).
+5. From the **board**, HEAD the LAN capability url (the `/cast/<token>/stream.mp4` the
+   TV was given — not the debrid url): `206`/`200`, `Accept-Ranges: bytes`,
+   `Content-Type: video/mp4`, `Content-Length`. Redact nothing secret on that url
+   (token path only).
+6. Optional NEED_PLAYBACK fill-in: HEAD the debrid url from the board (redact the url)
+   — `Accept-Ranges`, `Content-Type`, `Content-Length`. `ffprobe` of the same file via
+   `urlproxy.local_url`: `format_name`, video `codec_name` / profile / pix_fmt, first
+   audio. Confirm MP4 vs Matroska.
+7. If the title is **MKV**: confirm the existing ADR 0022 rewrap (`-c copy` to MP4) or
+   live HLS, **not** a 720 H.264 remux.
+8. `--stop` reaps the LAN proxy (`RunState("lan-proxy")`). A second cast replaces it.
+9. Optional: `cast_lan_proxy: false` reproduces the old WAN-direct stutter (debug).
 
 ## Residuals still open (Odroid; no install)
 
@@ -137,17 +198,20 @@ Volume:
 
 HEVC (do **not** remux to 720; leave the triage file alone):
 
-1. During a **new** 1080 HEVC direct: `catt info -j` (`content_type`, `stream_type`,
-   `app_id`, player_state) + the headless JSON (`delivery`, `codec`, `container` if
-   present). No stream URL. **NEED_PLAYBACK.**
-2. `ffprobe` of the **same** resolved file (via nstream's local/urlproxy path):
+1. **CODE shipped.** LAN Range-proxy of a remote url (`urlproxy.probe` / `urlproxy.plan` /
+   `serve` upstream / `caster.lan_media`). Fixture tests cover Range + no-Range MP4/MKV.
+2. During a **new** 1080 HEVC **lan** cast on the board: `catt info -j` (`content_type`,
+   `stream_type`, `app_id`, player_state) + the headless JSON (`delivery=lan`, `codec`,
+   `container` if present). No stream URL. Confirm smoothness. **NEED_PLAYBACK.**
+3. `ffprobe` of the **same** resolved file (via nstream's local/urlproxy path):
    `format_name`, video `codec_name`/`profile`/`pix_fmt`/`bit_rate`, first audio codec.
    Confirm MP4 vs Matroska. **NEED_PLAYBACK.**
-3. One HEAD/GET of the debrid URL from the **board** (not the TV): status, `Accept-Ranges`,
+4. One HEAD/GET of the debrid URL from the **board** (not the TV): status, `Accept-Ranges`,
    `Content-Type`, `Content-Length`. Redact the URL. **NEED_PLAYBACK.**
-4. If disk allows a **video-copy** 1080 HEVC remux to a complete MP4 (no scale): does
-   LAN-served HEVC play smooth? That splits “WAN pull” from “decoder”.
-5. Whether `castbridge` can be placed on PATH later (CoS names tip first). Live HLS is
+5. HEAD of the **LAN** capability url from the board (step 5 above). **NEED_PLAYBACK.**
+6. If disk allows a **video-copy** 1080 HEVC remux to a complete MP4 (no scale): still
+   useful as a decoder-vs-WAN split, but it is no longer the product path.
+7. Whether `castbridge` can be placed on PATH later (CoS names tip first). Live HLS is
    castbridge-only (`remux.cast_live`).
 
 ## References
@@ -155,8 +219,10 @@ HEVC (do **not** remux to 720; leave the triage file alone):
 - Board traces 2026-10-05 (odroidn2) + Phase 0 CLI grid 2026-10-05. Symbols:
   `caster.clamp_volume_percent`, `caster.volume_percent_to_level`,
   `caster.volume_level_to_percent`, `caster.format_volume_bits`, `caster.set_volume`,
-  `caster.status`, `caster._cast_via_catt`, `bridge._media_load_args`,
-  `remux.cast_live`, `cast_flow._with_container_mime`, `quality.CAST_VIDEO_DECODABLE`.
+  `caster.status`, `caster.lan_media`, `caster._cast_via_catt`, `caster.catt_lib_play`,
+  `bridge._media_load_args`, `urlproxy.probe`, `urlproxy.plan`, `urlproxy.is_remote`,
+  `serve.serve_file` (`upstream=`), `remux.cast_live`, `cast_flow._with_container_mime`,
+  `quality.CAST_VIDEO_DECODABLE`, `quality.CAST_CONTAINER_DECODABLE`.
 - ADR 0005, 0007, 0013, 0015, 0022, 0039, 0050 (catt remux/file LOAD title + HTTPS
   `thumb`/`images[]` + BUFFERED via library; CLI has no `--thumb`). catt 0.13
   `DefaultCastController.play_media_url` (contentType defaults to `video/mp4`).

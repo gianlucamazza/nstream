@@ -1209,6 +1209,17 @@ def test_direct_cast_reports_direct_delivery(monkeypatch):
     assert _run(_opts(), stream).delivery == "direct"
 
 
+def test_lan_proxy_cast_reports_lan_delivery(monkeypatch):
+    """When caster Range-served the remote url (ADR 0045), delivery is `lan` not `direct`."""
+    stream: Stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("direct", stream))
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: cast_delivery.CastResult(0.0, 0.0, started=True, delivery="lan"),
+    )  # fmt: skip
+    assert _run(_opts(), stream).delivery == "lan"
+
+
 def test_no_auto_mirror_when_the_live_tier_can_run(monkeypatch):
     """The 55 GB 4K Dolby release that used to auto-mirror (1080p SDR) goes live instead:
     native 4K video, seconds to start, no whole-file download."""

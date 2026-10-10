@@ -21,7 +21,7 @@ date, or reject via a superseding ADR.
 | [0008](adr/0008-castbridge-socket-activation.md) | castbridge systemd socket activation | Interim: `systemd-run` transient unit in `bridge.ensure_daemon`. Full socket activation still **Proposed** — blocked on castbridge graduating from WIP packaging. |
 | [0013](adr/0013-custom-cast-receiver.md) | Custom CAF receiver | Would reduce Tier-2 remux and unlock track switching. Large external build; remains **Proposed**. |
 | [0040](adr/0040-subtitles-off-the-start-path.md) | Subtitles off the cast start path | Embedded text track first; alignment from the producer pass after the start; `--sub-shift` during the cast. Phase 0: three gates on the TV. |
-| [0045](adr/0045-philips-cast-volume-and-hevc-delivery.md) | Philips Cast volume + HEVC delivery | Volume CLI contract shipped: 0–100% ↔ Cast 0–1 MASTER; this DMR reports `step=null`; catt may quantize (14→13). Cast % ≠ TV OSD — no `osd_max`. Phase 0 CLI grid done. Open: OSD photo table, HEVC HEAD/Range, JointSpace pairing. No remux-720 default. |
+| [0045](adr/0045-philips-cast-volume-and-hevc-delivery.md) | Philips Cast volume + HEVC delivery | Volume CLI contract shipped (Phase 0). Phase 1 CODE: LAN Range-proxy of a remote url (`cast_lan_proxy`, default on); video native; Matroska still `-c copy` to MP4. Open: OSD photo table, board HEVC playback HEAD, JointSpace pairing. No remux-720 default. |
 
 ## Possible product extensions
 

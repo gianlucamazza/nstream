@@ -112,11 +112,11 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `cast_delivery` | Shared castbridge event loop (ADR 0011) |
 | `cast_control` | TUI lifecycle: stop/status/pause/seek/volume + runtime health |
 | `caster` | Device resolve; castbridge or catt LOAD (`catt_lib_play` / `_catt_load` / CLI `-l` + BUFFERED, ADR 0050) |
-| `remux` / `serve` | Tier-2 file + Range server |
+| `remux` / `serve` | Tier-2 file + Range server; `serve` also LAN Range-proxies a remote url (ADR 0045) |
 | `mirror` | Realtime 1080p path |
 | `bridge` | castbridge IPC client + daemon ensure |
 | `discovery` | Non-blocking Chromecast discovery |
-| `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv |
+| `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv. Also probe/plan for the LAN Range-proxy (ADR 0045) |
 | `live` | Live HLS-TS producer for Tier-2 (ADR 0039): ffmpeg argv, playlist timeline, pruning behind the play head, pausing far ahead |
 
 ### Subs

@@ -27,10 +27,22 @@ import time
 import tty
 import urllib.parse
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import bridge, cast_delivery, discovery, languages, log, notices, serve, srt, ui, util
+from . import (
+    bridge,
+    cast_delivery,
+    discovery,
+    languages,
+    log,
+    notices,
+    serve,
+    srt,
+    ui,
+    urlproxy,
+    util,
+)
 from .config import Config
 
 _log = log.get_logger("cast")
@@ -804,6 +816,65 @@ def _switch_cast_audio(
         )
 
 
+@dataclass(frozen=True)
+class LanMedia:
+    """A remote stream re-homed on the LAN Range server (ADR 0045 Phase 1)."""
+
+    url: str
+    content_type: str
+    shutdown: Callable[[], None] | None
+    plan: urlproxy.LanPlan
+
+
+def lan_media(
+    cfg: Config,
+    url: str,
+    device: str | None,
+    *,
+    container: str = "",
+    video_codec: str = "",
+    follow: bool = True,
+) -> LanMedia | None:
+    """Range-serve `url` on the host LAN so the TV does not pull a remote debrid host.
+
+    None when the config gate is off, the url is already local, the container needs a
+    rewrap (ADR 0022), or the detached server cannot start. Never logs `url`."""
+    if not cfg.cast_lan_proxy or not urlproxy.is_remote(url):
+        return None
+    probed = urlproxy.probe(url)
+    planned = urlproxy.plan(container, probed, video_codec)
+    if planned.mode != "proxy":
+        return None
+    bind_ip = serve.lan_ip(device) if device else "0.0.0.0"
+    serve.ensure_firewall(bind_ip)
+    serve.reap_proxy_server()
+    if follow:
+        server, port, _thread = serve.serve_file(
+            None, bind_ip,
+            upstream=url, upstream_type=planned.content_type,
+            upstream_length=planned.content_length, upstream_ranged=planned.ranged,
+            media_name=planned.media_name,
+        )  # fmt: skip
+        return LanMedia(
+            serve.served_url(bind_ip, port, server.token, planned.media_name),
+            planned.content_type,
+            server.shutdown,
+            planned,
+        )
+    spawned = serve.spawn_detached(bind_ip, proxy=urlproxy.proxy_job(url, planned))
+    if spawned is None:
+        _log.warning("lan-proxy: detach fallito")
+        return None
+    pid, port, token = spawned
+    serve.register_proxy_server(pid)
+    return LanMedia(
+        serve.served_url(bind_ip, port, token, planned.media_name),
+        planned.content_type,
+        None,
+        planned,
+    )
+
+
 @log.phase("cast_direct")
 def cast(
     cfg: Config,
@@ -820,6 +891,8 @@ def cast(
     follow: bool = True,
     meta: CastMeta | None = None,
     on_event: EventCb | None = None,
+    container: str = "",
+    video_codec: str = "",
 ) -> cast_delivery.CastResult:
     """Cast `url` to a Chromecast and track playback so resume and series auto-advance work like
     the mpv path. Returns a `CastResult` — read it by attribute (ADR 0031). The advance decision
@@ -831,11 +904,48 @@ def cast(
     in-cast audio switch ('a') reuses that same library/helper path.
     `on_event` receives normalized events for the headless `--follow` JSONL path.
 
+    A remote http(s) url is Range-served from the host LAN first (ADR 0045 Phase 1) so the
+    TV does not pull a debrid host; `CastResult.delivery` is then `"lan"`. `container` /
+    `video_codec` feed the proxy-vs-rewrap decision (`quality.CAST_*`).
+
     `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast. Both
     senders now carry subtitles: the castbridge path serves the SRT as a side-loaded WebVTT track
     (`sub_lang` labels it), the catt path uses `-s`."""
     # The in-cast switch needs a frontend menu (`choose_lang`, ADR 0037); stdin being a TTY
     # is only the capability to read the 'a' keypress (`_poll_wait`), not the policy.
+    lan = lan_media(cfg, url, device, container=container, video_codec=video_codec, follow=follow)
+    if lan is not None:
+        url = lan.url
+        meta = replace(meta or CastMeta(), content_type=lan.content_type)
+    try:
+        return _cast_senders(
+            cfg, title, url, device=device, start=start, sub_paths=sub_paths,
+            sub_lang=sub_lang, langs=langs, resolve_lang=resolve_lang,
+            choose_lang=choose_lang, follow=follow, meta=meta, on_event=on_event,
+            delivery="lan" if lan is not None else "",
+        )  # fmt: skip
+    finally:
+        if lan is not None and lan.shutdown is not None:
+            lan.shutdown()
+
+
+def _cast_senders(
+    cfg: Config,
+    title: str,
+    url: str,
+    *,
+    device: str | None,
+    start: float | None,
+    sub_paths: tuple[str, ...],
+    sub_lang: str | None,
+    langs: tuple[str, ...],
+    resolve_lang: Callable[[str], str | None] | None,
+    choose_lang: ChooseLang | None,
+    follow: bool,
+    meta: CastMeta | None,
+    on_event: EventCb | None,
+    delivery: str,
+) -> cast_delivery.CastResult:
     can_switch = bool(langs) and resolve_lang is not None and choose_lang is not None and follow
     if device and bridge.bridge_available() and not can_switch:
         result = _cast_via_bridge(
@@ -851,7 +961,7 @@ def cast(
             app_id=(cfg.cast_receiver_app_id or "").strip(),
         )
         if result is not None:
-            return result  # else castbridge couldn't start → fall back to catt below
+            return result._replace(delivery=delivery or result.delivery)
     warn_catt_ignores_app_id(cfg)
     catt_result = _cast_via_catt(
         cfg,
@@ -869,7 +979,7 @@ def cast(
     )
     # Explicit construction, never `(*catt_result, …)`: splatting a NamedTuple flattens it
     # into a wider plain tuple, losing both the type and the arity with no error here (ADR 0031).
-    return catt_result._replace(subs_delivered=bool(sub_paths))
+    return catt_result._replace(subs_delivered=bool(sub_paths), delivery=delivery)
 
 
 def _cast_via_bridge(
