@@ -891,7 +891,9 @@ def test_cast_file_detached_copies_srt_out_of_workdir(monkeypatch, tmp_path):
     assert sidecar.exists() and sidecar.read_text().startswith("WEBVTT")
     assert "00:00:00.000 --> 00:00:01.000\nciao" in sidecar.read_text()
     args, _kw = rec["popen"][0]
-    assert args[-2:] == ["-s", str(sidecar)]
+    assert args[args.index("-s") + 1] == str(sidecar)
+    assert args[args.index("-l") + 1] == "T"
+    assert args[-2:] == ["--stream-type", "BUFFERED"]
 
 
 def test_teardown_removes_srt_sidecar(monkeypatch, tmp_path):

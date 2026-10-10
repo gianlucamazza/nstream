@@ -874,9 +874,7 @@ def test_catt_cast_argv_title_and_buffered(monkeypatch):
         poster="https://images.example.test/poster/tt7068946.jpg",
         content_type="video/mp4",
     )
-    caster.cast(
-        CFG, "The Nice Guys", "http://u", device="TV", follow=False, meta=meta
-    )
+    caster.cast(CFG, "The Nice Guys", "http://u", device="TV", follow=False, meta=meta)
     launch = calls[0]
     assert launch[launch.index("-l") + 1] == "The Nice Guys"
     assert launch[launch.index("--stream-type") + 1] == "BUFFERED"
