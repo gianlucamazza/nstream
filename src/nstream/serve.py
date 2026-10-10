@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import secrets
@@ -46,6 +47,8 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
+import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -102,6 +105,69 @@ def poster_url_path(token: str) -> str:
 
 def served_poster_url(ip: str, port: int, token: str) -> str:
     return f"http://{ip}:{port}{poster_url_path(token)}"
+
+
+_POSTER_MAX = 5 * 1024 * 1024
+_POSTER_TIMEOUT = 8.0
+_JPEG_TYPES = frozenset({"image/jpeg", "image/jpg"})
+
+
+def fetch_poster_jpeg(url: str) -> str | None:
+    """GET a poster URL, verify JPEG, cache under XDG posters. None on webp /
+    non-jpeg / network / I/O. Rewrites metahub `/poster/small/` (webp) to
+    `/poster/medium/` (jpeg). Never logs `url`. Best-effort — must not block
+    playback.
+    """
+    raw = (url or "").strip()
+    if not raw.startswith("https://"):
+        return None
+    if raw.lower().endswith(".webp"):
+        return None
+    parts = urllib.parse.urlsplit(raw)
+    path = parts.path or ""
+    if "/poster/small/" in path:
+        raw = urllib.parse.urlunsplit(
+            parts._replace(path=path.replace("/poster/small/", "/poster/medium/", 1))
+        )
+    dest = _poster_jpeg_cache_path(raw)
+    try:
+        if dest.is_file() and dest.stat().st_size > 0:
+            return str(dest)
+    except OSError:
+        return None
+    data = _download_poster_jpeg(raw)
+    if not data:
+        return None
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        util.atomic_write_bytes(dest, data, prefix=".poster-")
+        return str(dest)
+    except OSError:
+        return None
+
+
+def _poster_jpeg_cache_path(url: str) -> Path:
+    h = hashlib.sha256(url.encode()).hexdigest()
+    return _cache_dir() / "posters" / f"{h}.jpg"
+
+
+def _download_poster_jpeg(url: str) -> bytes | None:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 nstream"})
+    try:
+        with urllib.request.urlopen(req, timeout=_POSTER_TIMEOUT) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype not in _JPEG_TYPES:
+                return None
+            data = resp.read(_POSTER_MAX + 1)
+    except (OSError, urllib.error.URLError, ValueError):
+        return None
+    if len(data) > _POSTER_MAX or len(data) < 2:
+        return None
+    if data[:2] != b"\xff\xd8":
+        return None
+    if data[:4] == b"RIFF" and b"WEBP" in data[:16]:
+        return None
+    return data
 
 
 def hls_url_path(token: str) -> str:
@@ -748,6 +814,7 @@ def spawn_detached(
     hls_dir: str | None = None,
     job: live.Job | None = None,
     proxy: dict | None = None,
+    poster_path: str | None = None,
 ) -> tuple[int, int, str] | None:
     """Spawn a detached `python -m nstream.serve` serving `file_path` and/or a WebVTT `sub_path`
     on `bind_ip`, returning (pid, port, token) once it announces them, or None on failure. Detached
@@ -764,6 +831,8 @@ def spawn_detached(
         cmd += ["--subs", sub_path]
     if hls_dir:
         cmd += ["--hls", hls_dir]
+    if poster_path:
+        cmd += ["--poster", poster_path]
     if proxy and not job:
         cmd.append("--proxy")
     payload = json.dumps(job.to_dict() if job else (proxy or {})) + "\n" if (job or proxy) else None
@@ -1076,6 +1145,7 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--subs")  # optional side-loaded WebVTT caption track
     ap.add_argument("--hls")  # live HLS directory; the producer job arrives on stdin
+    ap.add_argument("--poster")  # optional LAN-served JPEG poster (image/jpeg)
     ap.add_argument("--proxy", action="store_true")  # remote url arrives on stdin (never argv)
     ap.add_argument("--idle-exit", type=float, default=IDLE_EXIT_S)
     args = ap.parse_args(argv)
@@ -1088,6 +1158,9 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
     if args.subs and not os.path.isfile(args.subs):
         print(f"serve: sottotitoli non trovati: {args.subs}", file=sys.stderr)
+        return 2
+    if args.poster and not os.path.isfile(args.poster):
+        print(f"serve: poster non trovato: {args.poster}", file=sys.stderr)
         return 2
     if not args.file and not args.subs and not args.hls and not args.proxy:
         print("serve: né file né --subs né --hls né --proxy specificati", file=sys.stderr)
@@ -1140,10 +1213,16 @@ def _main(argv: list[str] | None = None) -> int:
             upstream_length=length_i,
             upstream_ranged=bool(proxy_spec.get("ranged")),
             media_name=str(proxy_spec.get("media_name") or "stream.mp4"),
+            poster_path=args.poster,
         )  # fmt: skip
     else:
         server = _make_server(
-            args.bind, args.file, preferred_port=args.port, sub_path=args.subs, hls_dir=args.hls
+            args.bind,
+            args.file,
+            preferred_port=args.port,
+            sub_path=args.subs,
+            hls_dir=args.hls,
+            poster_path=args.poster,
         )
     server.producer = producer
     if producer is not None:

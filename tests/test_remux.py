@@ -26,6 +26,7 @@ def _no_catt_lib(monkeypatch):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: False)
     monkeypatch.setattr(remux.caster, "catt_supports_load_meta", lambda: True)
     monkeypatch.setattr(remux.caster, "catt_inprocess_supports_load_meta", lambda: True)
+    monkeypatch.setattr(remux.serve, "fetch_poster_jpeg", lambda url: None)
 
 
 @pytest.fixture(autouse=True)
@@ -514,10 +515,14 @@ def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
     """Library remux LOAD: nstream serves, catt.api play_url gets thumb + video/mp4 + BUFFERED."""
     f = _tmp_remux(tmp_path)
     poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    lan_poster = "http://192.168.1.10:45000/cast/tok/poster.jpg"
+    jpeg = tmp_path / "poster.jpg"
+    jpeg.write_bytes(b"\xff\xd8\xff\xd9")
     seen: dict = {}
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
     monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "fetch_poster_jpeg", lambda url: str(jpeg))
     monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
     monkeypatch.setattr(
         remux.serve,
@@ -550,9 +555,9 @@ def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
     assert seen["url"].endswith("/stream.mp4")
     assert seen["title"] == "The Nice Guys"
     assert seen["content_type"] == "video/mp4"
-    assert seen["meta"].poster == poster
+    assert seen["meta"].poster == lan_poster
     body = caster.catt_lib_media_info("The Nice Guys", seen["meta"], content_type="video/mp4")
-    assert body["metadata"]["images"][0]["url"] == poster
+    assert body["metadata"]["images"][0]["url"] == lan_poster
     assert body["contentType"] == "video/mp4" and body["streamType"] == "BUFFERED"
     assert remux._read_state() == {
         "pid": 4242, "file": str(f), "device": "10.0.0.5", "mode": "serve",

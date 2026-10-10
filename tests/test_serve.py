@@ -74,7 +74,7 @@ def test_lan_poster_route_returns_200_image_jpeg(tmp_path):
         with urllib.request.urlopen(url, timeout=5) as resp:
             assert resp.status == 200
             ctype = (resp.headers.get("Content-Type") or "").lower()
-            assert ctype.startswith("image/")
+            assert ctype.startswith("image/jpeg")
             assert resp.read() == poster.read_bytes()
         # Token gate: a scanner hitting the media host does not get the poster.
         bad = url.rsplit("/", 1)[0] + "/other.jpg"
@@ -83,6 +83,43 @@ def test_lan_poster_route_returns_200_image_jpeg(tmp_path):
         assert err.value.code == 404
     finally:
         server.shutdown()
+
+
+def test_fetch_poster_jpeg_accepts_jpeg_rejects_webp(tmp_path, monkeypatch):
+    """Upstream must be image/jpeg with JPEG SOI. webp / wrong type → None."""
+    jpeg = b"\xff\xd8\xff\xd9" + b"x" * 16
+    webp = b"RIFF\x00\x00\x00\x00WEBP" + b"x" * 16
+
+    class _Resp:
+        def __init__(self, data, ctype):
+            self.headers = {"Content-Type": ctype}
+            self._data = data
+
+        def read(self, n=-1):
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_open(req, timeout=0):
+        url = getattr(req, "full_url", str(req))
+        if "webp" in url:
+            return _Resp(webp, "image/webp")
+        if "lied" in url:
+            return _Resp(webp, "image/jpeg")
+        return _Resp(jpeg, "image/jpeg")
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(serve.urllib.request, "urlopen", fake_open)
+    path = serve.fetch_poster_jpeg("https://images.metahub.space/poster/small/tt6263850/img")
+    assert path and Path(path).read_bytes() == jpeg
+    assert "poster" in path and path.endswith(".jpg")
+    assert serve.fetch_poster_jpeg("https://images.metahub.space/poster/small/tt1/img.webp") is None
+    assert serve.fetch_poster_jpeg("https://images.metahub.space/webp/tt1/img") is None
+    assert serve.fetch_poster_jpeg("https://images.metahub.space/lied/tt1/img") is None
 
 
 def test_full_get_returns_200(tmp_path):

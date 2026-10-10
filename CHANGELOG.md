@@ -41,6 +41,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **LAN catt poster JPEG (ADR 0050):** headless `--json --cast` now
+  passes Cinemeta `meta.poster` through `lan_media`. On a LAN Range
+  proxy the LOAD `images[0].url` is the token-gated
+  `http://<lan>:<port>/cast/<token>/poster.jpg` (same origin as the
+  stream, `image/jpeg`). Metahub `/poster/small/` is webp — rewritten
+  to `/poster/medium/` and verified `image/jpeg` before serving.
+  Never webp (Philips DMR strips it). HTTPS JPEG fallback only when
+  there is no LAN route. `--debug` logs `catt lib LOAD media=` with
+  the capability token redacted.
 - **LAN catt poster images (ADR 0050):** the library LOAD now puts
   `images: [{"url": <Cinemeta/metahub https poster>}]` on Movie/TvShow
   `media_info.metadata` (not only `thumb=`). catt 0.13.3 forwards
