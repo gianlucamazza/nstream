@@ -3,13 +3,15 @@ loop (resume/auto-advance), and the in-cast audio-language switch."""
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
 
-from nstream import cast_delivery, caster
+from nstream import _catt_load, cast_delivery, caster
 from nstream.config import Config
 
 _DATA = Path(__file__).resolve().parent / "data"
@@ -25,6 +27,13 @@ def _catt_on_path(monkeypatch):
     """resolve_device guards on catt's presence; keep tests hermetic (the makepkg
     check() chroot, for one, has no catt installed)."""
     monkeypatch.setattr(caster.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+
+
+@pytest.fixture(autouse=True)
+def _no_catt_lib(monkeypatch):
+    """Default: no catt.api in the test env. Tests that pin the library LOAD
+    override `catt_can_lib_load` / `catt_lib_play`."""
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -851,21 +860,163 @@ def _fixture_media(name: str) -> dict:
 
 
 def test_catt_media_info_remux_file_matches_fixture():
-    """catt CLI remux/file LOAD: title + BUFFERED + video/mp4; no images (no --thumb)."""
+    """catt CLI remux/file fallback LOAD: title + BUFFERED + video/mp4; no images."""
     got = caster.catt_cli_media_info("The Nice Guys")
     assert got == _fixture_media("catt_load_mediainfo_remux.json")
     assert "images" not in got["metadata"] and "thumb" not in got["metadata"]
     assert "contentId" not in got  # never a debrid / LAN URL in the fixture contract
 
 
-def test_catt_media_info_poster_is_play_media_url_only():
-    """pychromecast play_media_url *would* send images[] when thumb= is set.
-    catt 0.13 CLI cannot; this pins the artwork residual, not a shipped catt argv."""
+def test_catt_lib_media_info_remux_includes_images():
+    """Library LOAD (the shipped catt path): title + images[0].url + BUFFERED + mp4."""
     poster = "https://images.example.test/poster/tt7068946.jpg"
-    got = caster.catt_media_info(title="The Nice Guys", poster=poster)
+    meta = caster.CastMeta(poster=poster, content_type="video/mp4")
+    got = caster.catt_lib_media_info("The Nice Guys", meta)
     assert got == _fixture_media("catt_load_mediainfo_with_poster.json")
-    argv = caster.catt_cast_argv("10.0.0.5", "/tmp/cast-x.mp4", title="The Nice Guys")
-    assert "--thumb" not in argv and poster not in argv
+    assert got["metadata"]["images"][0]["url"] == poster
+    assert got["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    assert got["contentType"] == "video/mp4" and got["streamType"] == "BUFFERED"
+
+
+def test_catt_play_kwargs_one_load_with_thumb():
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    meta = caster.CastMeta(poster=poster, content_type="video/mp4")
+    kw = caster.catt_play_kwargs("The Nice Guys", meta, content_type="video/mp4")
+    assert kw["title"] == "The Nice Guys"
+    assert kw["thumb"] == poster
+    assert kw["content_type"] == "video/mp4"
+    assert kw["stream_type"] == "BUFFERED"
+    assert kw["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+
+
+def test_catt_play_kwargs_tvshow_metadata_type():
+    meta = caster.CastMeta(
+        poster="https://images.example.test/poster/show.jpg",
+        series_title="The Boys",
+        season=2,
+        episode=5,
+    )
+    kw = caster.catt_play_kwargs("Good for the Soul", meta)
+    assert kw["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_TVSHOW
+    assert kw["media_info"]["metadata"]["seriesTitle"] == "The Boys"
+    assert kw["thumb"] == "https://images.example.test/poster/show.jpg"
+    body = caster.catt_lib_media_info("Good for the Soul", meta)
+    assert body["metadata"]["images"][0]["url"] == kw["thumb"]
+    assert body["metadata"]["metadataType"] == 2
+
+
+def test_catt_poster_url_https_only():
+    assert caster.catt_poster_url("https://images.metahub.space/p.jpg")
+    assert caster.catt_poster_url("http://192.168.1.10/p.jpg") == ""
+    assert caster.catt_poster_url("http://10.0.0.5/cast/tok/poster.jpg") == ""
+    assert caster.catt_poster_url("") == ""
+
+
+def test_catt_load_helper_play_media_url_kwargs(monkeypatch):
+    """_catt_load.py (catt's interpreter) forwards title/thumb/BUFFERED/mp4 to play_media_url."""
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            seen["prep"] = True
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+            seen["kw"] = kw
+
+    class _Dev:
+        def __init__(self, ip_addr=""):
+            seen["ip"] = ip_addr
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(
+        _catt_load.importlib, "import_module", lambda name: types.SimpleNamespace(CattDevice=_Dev)
+    )
+    payload = {
+        "ip": "10.0.0.5",
+        "url": "http://192.168.1.10:45000/cast/tok/stream.mp4",
+        "title": "The Nice Guys",
+        "thumb": "https://images.example.test/poster/tt7068946.jpg",
+        "content_type": "video/mp4",
+        "stream_type": "BUFFERED",
+        "media_info": {"metadata": {"metadataType": 1}},
+    }
+    monkeypatch.setattr(_catt_load.sys, "stdin", io.StringIO(json.dumps(payload)))
+    assert _catt_load.main() == 0
+    assert seen["ip"] == "10.0.0.5" and seen["prep"] is True
+    assert seen["kw"]["title"] == "The Nice Guys"
+    assert seen["kw"]["thumb"] == payload["thumb"]
+    assert seen["kw"]["content_type"] == "video/mp4"
+    assert seen["kw"]["stream_type"] == "BUFFERED"
+    assert seen["kw"]["media_info"]["metadata"]["metadataType"] == 1
+
+
+def test_catt_lib_play_inprocess_play_media_url(monkeypatch):
+    """In-process catt.api: one play_media_url LOAD with thumb + metadataType 1."""
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            seen["prep"] = True
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+            seen["kw"] = kw
+
+    class _Dev:
+        def __init__(self, ip_addr=""):
+            seen["ip"] = ip_addr
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    poster = "https://images.example.test/poster/tt7068946.jpg"
+    assert caster.catt_lib_play(
+        "10.0.0.5",
+        "http://192.168.1.10:45000/cast/tok/stream.mp4",
+        title="The Nice Guys",
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert seen["ip"] == "10.0.0.5" and seen["prep"] is True
+    assert seen["kw"]["title"] == "The Nice Guys"
+    assert seen["kw"]["thumb"] == poster
+    assert seen["kw"]["content_type"] == "video/mp4"
+    assert seen["kw"]["stream_type"] == "BUFFERED"
+    assert seen["kw"]["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+
+
+def test_catt_play_kwargs_drops_non_https_poster():
+    kw = caster.catt_play_kwargs("T", caster.CastMeta(poster="http://10.0.0.5/cast/tok/p.jpg"))
+    assert "thumb" not in kw
+
+
+def test_catt_lib_play_used_before_cli(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+
+    def fake_play(ip, url, **kw):
+        seen.update(ip=ip, url=url, **kw)
+        return True
+
+    monkeypatch.setattr(caster, "catt_lib_play", fake_play)
+    calls = _cast_run(monkeypatch)
+    poster = "https://images.example.test/poster/tt7068946.jpg"
+    caster.cast(
+        CFG,
+        "The Nice Guys",
+        "http://u",
+        device="10.0.0.5",
+        follow=False,
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert seen["ip"] == "10.0.0.5" and seen["url"] == "http://u"
+    assert seen["title"] == "The Nice Guys" and seen["meta"].poster == poster
+    assert all("cast" not in c or "info" in c for c in calls)
 
 
 def test_catt_cast_argv_title_and_buffered(monkeypatch):
@@ -879,6 +1030,7 @@ def test_catt_cast_argv_title_and_buffered(monkeypatch):
     assert launch[launch.index("-l") + 1] == "The Nice Guys"
     assert launch[launch.index("--stream-type") + 1] == "BUFFERED"
     assert meta.poster not in launch
+    assert "--thumb" not in launch
 
 
 def test_catt_display_title_series():

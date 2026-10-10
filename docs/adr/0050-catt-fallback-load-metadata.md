@@ -1,4 +1,4 @@
-# 0050. catt 0.13 fallback LOAD carries title + BUFFERED; poster stays on castbridge
+# 0050. catt 0.13 fallback LOAD: title + thumb/images + BUFFERED via the library
 
 - **Status:** Accepted
 - **Date:** 2026-10-10
@@ -40,14 +40,30 @@ required for chrome. On this board the custom id is never launched anyway
 
 ## Decision
 
-nstream's catt fallback (direct URL and remux/file) builds argv with
-`caster.catt_cast_argv`: `-l` from `catt_display_title` and `--stream-type BUFFERED`
-for complete VOD / remux files. Poster / Movie / TvShow blocks stay on
-**castbridge** (`bridge._media_load_args`). No `--thumb` wrapper, no pychromecast
-import, no remux-resolution or `cast_mode` change, no OSD volume map (ADR 0045).
+nstream's catt fallback prefers **catt as a library** (`CattDevice.controller.
+play_media_url`, not `play_url` — that one waits 10s for PLAYING and false-misses
+a remux start) so one LOAD carries title, `thumb` (Cinemeta/metahub **https**
+poster → `metadata.images[0].url`), `contentType` (`video/mp4` on remux/file),
+and `streamType: BUFFERED`. `media_info.metadata.metadataType` is 1 (Movie) or
+2 (TvShow) — pychromecast `play_media(metadata=)` supports this and is cheap via
+catt's `media_info` (the wrapper does not pass `metadata=` but **does** pass
+`media_info`, which overwrites `media.metadata` before title/thumb are applied,
+so the type sticks).
 
-`caster.catt_media_info` / `catt_cli_media_info` pin the MediaInformation body
-catt 0.13 would put on LOAD (fixture `tests/data/catt_load_mediainfo_*.json`).
+- In-process `import catt.api` when the env already has catt (not a declared
+  nstream dependency).
+- Else `_catt_load.py` on the `catt` console-script interpreter.
+- CLI fallback (`caster.catt_cast_argv`: `-l` + `--stream-type`) when import
+  fails. The CLI still has no `--thumb`.
+
+A remux file is served by nstream's Range server (ADR 0007 split: we own the
+bytes, catt is only the sender). `play_url(resolve=False)` — never yt-dlp on a
+LAN or debrid URL. Poster is never proxied through the remux/debrid host.
+
+No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
+
+`caster.catt_lib_media_info` pins the library LOAD body (fixture
+`tests/data/catt_load_mediainfo_with_poster.json`, `images[0].url` present).
 `contentId` is never logged or emitted in `--json`.
 
 ## Rationale
@@ -55,18 +71,20 @@ catt 0.13 would put on LOAD (fixture `tests/data/catt_load_mediainfo_*.json`).
 | Option | Title | Artwork | Cost | Verdict |
 | --- | --- | --- | --- | --- |
 | Leave catt argv bare | temp stem / empty | no | status quo | Rejected |
-| **CLI `-l` + `--stream-type BUFFERED`** | Cinemeta title | no | flags catt already has | **Chosen** |
-| nstream Range server + `CattDevice.play_url(thumb=)` | yes | yes | second sender stack; yt-dlp on a served URL is unsafe (`catt cast http://…` extracts) | Rejected (ADR 0007 already refused mixed sessions / extra Cast stacks) |
-| Require castbridge / custom receiver for all chrome | yes | yes | binary absent on the production board | Honest residual for **poster only** |
+| CLI `-l` + `--stream-type` only | Cinemeta title | no | flags catt already has | Fallback when `catt.api` is missing |
+| **catt library `play_media_url(thumb=)`** (+ nstream serve for remux) | yes | yes | uses the catt already on PATH; no yt-dlp | **Chosen** |
+| Require castbridge / custom receiver for chrome | yes | yes | binary absent on the production board | Not required for DMR title+poster |
 | Remux-forever 720 / always-remux | — | — | quality downgrade | Rejected (ADR 0045) |
 
 ## Consequences
 
-- Remux/file and direct catt casts show the title on DMR chrome; `streamType:
+- Remux/file and direct catt casts show title + poster on DMR chrome when
+  `catt.api` is importable (in-process or catt's interpreter). `streamType:
   BUFFERED` lets the receiver expose duration from the complete MP4.
-- Artwork on a catt-only host remains generic. That is a **CLI gap**, not a
-  receiver-hard limit. Install castbridge for `metadata.images`.
-- Live HLS is unchanged (castbridge-only, ADR 0039).
+- **CLI-only residual:** if catt cannot be imported, argv has no `--thumb` —
+  title + BUFFERED still go out; artwork needs the library path or castbridge.
+- Live HLS is unchanged (castbridge-only, ADR 0039). Event-sourced `--follow`
+  JSONL still prefers castbridge.
 - `--json` shape unchanged (no new fields). `--status` already reports receiver
   `title` / `content_type` / `stream_type`.
 
@@ -77,6 +95,7 @@ catt 0.13 would put on LOAD (fixture `tests/data/catt_load_mediainfo_*.json`).
   `guessed_content_type`).
 - pychromecast `MediaController._send_start_play_media` (GENERIC metadataType,
   `thumb` → `images[]`).
-- Symbols: `caster.catt_cast_argv`, `caster.catt_display_title`,
-  `caster.catt_media_info`, `caster.catt_cli_media_info`, `caster._cast_via_catt`,
-  `remux.cast_file`, `bridge._media_load_args`.
+- Symbols:   `caster.catt_lib_play`, `caster.catt_play_kwargs`,
+  `caster.catt_lib_media_info`, `caster.catt_cast_argv`, `caster._cast_via_catt`,
+  `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
+  `bridge._media_load_args`.

@@ -10,7 +10,10 @@ directly (the poll loop needs returncode/stderr and a per-iteration process).
 from __future__ import annotations
 
 import contextlib
+import functools
+import importlib
 import json
+import os
 import select
 import shutil
 import subprocess
@@ -20,6 +23,7 @@ import time
 import tty
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from . import bridge, cast_delivery, discovery, languages, log, notices, serve, srt, ui, util
 from .config import Config
@@ -30,9 +34,10 @@ _log = log.get_logger("cast")
 @dataclass(frozen=True)
 class CastMeta:
     """Now-playing metadata for the receiver LOAD. castbridge sends the full block
-    (Movie/TvShow + poster). The catt 0.13 CLI fallback sends title + streamType only
-    (`-l`, `--stream-type`); it has no `--thumb` (ADR 0050). Sourced from Cinemeta in
-    `cli` / `headless`. Empty fields are omitted."""
+    (Movie/TvShow + poster). The catt 0.13 **library** path (`play_media_url`)
+    sends title + thumb/images + streamType + contentType in one LOAD (ADR 0050).
+    The CLI fallback (`-l`, `--stream-type`) has no `--thumb`. Sourced from Cinemeta
+    in `cli` / `headless`. Empty fields are omitted."""
 
     poster: str = ""
     subtitle: str = ""
@@ -43,13 +48,16 @@ class CastMeta:
 
 
 # catt 0.13 DefaultCastController.play_media_url → pychromecast play_media.
-# CLI exposes `-l/--title` and `--stream-type`; not `--thumb` / metadataType.
+# Library: title/thumb/content_type/stream_type + media_info.metadata.metadataType.
+# CLI: `-l/--title` and `--stream-type` only (no `--thumb`).
 CATT_STREAM_BUFFERED = "BUFFERED"
-CATT_METADATA_GENERIC = 0  # pychromecast METADATA_TYPE_GENERIC when metadataType omitted
+CATT_METADATA_GENERIC = 0
+CATT_METADATA_MOVIE = 1  # pychromecast METADATA_TYPE_MOVIE
+CATT_METADATA_TVSHOW = 2  # pychromecast METADATA_TYPE_TVSHOW
 
 
 def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
-    """Single-line title for catt `-l`. The CLI has no TvShow block, so series become
+    """Single-line title for catt `-l` / play_url(title=). Series become
     `Show · SxxEyy · episode` (same shape as `labels.display_title`, no labels import)."""
     name = " ".join((title or "").split())
     if not meta:
@@ -65,6 +73,13 @@ def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
     return show
 
 
+def catt_poster_url(poster: str) -> str:
+    """Public HTTPS poster the TV fetches itself (Cinemeta / metahub). Empty if not
+    LAN-reachable as https — never rewritten onto the remux/debrid host."""
+    raw = (poster or "").strip()
+    return raw if raw.startswith("https://") else ""
+
+
 def catt_cast_argv(
     device: str | None,
     source: str,
@@ -74,14 +89,13 @@ def catt_cast_argv(
     sub_path: str | None = None,
     stream_type: str = CATT_STREAM_BUFFERED,
 ) -> list[str]:
-    """`catt cast` argv for a URL or local remux file (ADR 0050).
+    """`catt cast` argv — CLI **fallback** when `catt.api` is not importable (ADR 0050).
 
     `-l` overrides catt's local-file stem / yt-dlp title. `--stream-type BUFFERED` is
     required for a complete remux: catt's StreamInfo only infers BUFFERED on a remote
-    URL that yt-dlp gave a duration, so a `cast-*.mp4` would otherwise LOAD with
-    `streamType: null` (pychromecast default LIVE is not applied when the kwarg is
-    None). No `--thumb`: catt 0.13 has none. Never put a debrid URL in logs — callers
-    redact `source` themselves.
+    URL that yt-dlp gave a duration. No `--thumb`: catt 0.13 has none; the library
+    path sends `thumb=` instead. Never put a debrid URL in logs — callers redact
+    `source` themselves.
     """
     args = ["catt", *(["-d", device] if device else []), "cast", source]
     if start and start > 1:
@@ -96,6 +110,51 @@ def catt_cast_argv(
     return args
 
 
+def catt_metadata_type(meta: CastMeta | None) -> int:
+    """Movie (1) or TvShow (2). pychromecast `play_media(metadata=)` / `media_info`."""
+    if meta and meta.series_title and meta.season > 0 and meta.episode > 0:
+        return CATT_METADATA_TVSHOW
+    return CATT_METADATA_MOVIE
+
+
+def catt_play_kwargs(
+    title: str,
+    meta: CastMeta | None = None,
+    *,
+    content_type: str = "video/mp4",
+    start: float | None = None,
+    subtitle_url: str = "",
+) -> dict:
+    """kwargs for catt 0.13 `CattDevice.controller.play_media_url` (one LOAD).
+
+    title, thumb (https poster), content_type, stream_type=BUFFERED, plus
+    `media_info.metadata.metadataType` 1/2 (pychromecast keeps it when already set).
+    """
+    meta = meta or CastMeta()
+    mime = (meta.content_type or content_type or "video/mp4").strip() or "video/mp4"
+    md: dict = {"metadataType": catt_metadata_type(meta)}
+    if meta.series_title and md["metadataType"] == CATT_METADATA_TVSHOW:
+        md["seriesTitle"] = meta.series_title.strip()
+        md["season"] = int(meta.season)
+        md["episode"] = int(meta.episode)
+    if meta.subtitle:
+        md["subtitle"] = meta.subtitle
+    out: dict = {
+        "title": catt_display_title(title, meta),
+        "content_type": mime,
+        "stream_type": CATT_STREAM_BUFFERED,
+        "media_info": {"metadata": md},
+    }
+    poster = catt_poster_url(meta.poster)
+    if poster:
+        out["thumb"] = poster
+    if start and start > 1:
+        out["current_time"] = float(start)
+    if subtitle_url:
+        out["subtitle_url"] = subtitle_url
+    return out
+
+
 def catt_media_info(
     *,
     title: str = "",
@@ -103,26 +162,36 @@ def catt_media_info(
     content_type: str = "video/mp4",
     stream_type: str = CATT_STREAM_BUFFERED,
     content_id: str = "",
+    metadata_type: int = CATT_METADATA_MOVIE,
+    series_title: str = "",
+    season: int = 0,
+    episode: int = 0,
+    subtitle: str = "",
 ) -> dict:
     """MediaInformation body catt 0.13 / pychromecast `play_media` puts on LOAD.
 
     Reverse-engineered from `DefaultCastController.play_media_url` (catt v0.13.3) and
-    pychromecast `MediaController._send_start_play_media`. `content_id` is the Cast
-    `contentId` (the media URL). Tests pass a label, never a debrid URL. `poster`
-    becomes `metadata.thumb` + `images[0].url` — the CLI cannot set it; castbridge
-    can (`bridge._media_load_args`). metadataType is GENERIC (0) unless a caller
-    upgrades it; Movie/TvShow is a castbridge-only block.
+    pychromecast `MediaController._send_start_play_media`. `thumb=` becomes
+    `metadata.thumb` + `images[0].url`. `metadataType` 1/2 is cheap via
+    `media_info={"metadata": {"metadataType": N}}` (play_media keeps a pre-set type).
+    `content_id` is the Cast `contentId`; tests pass a label, never a debrid URL.
     """
-    metadata: dict = {}
+    metadata: dict = {"metadataType": int(metadata_type)}
     label = " ".join(title.split()) if title else ""
     if label:
         metadata["title"] = label
-    image = (poster or "").strip()
+    if series_title and metadata_type == CATT_METADATA_TVSHOW:
+        metadata["seriesTitle"] = series_title
+        if season > 0:
+            metadata["season"] = int(season)
+        if episode > 0:
+            metadata["episode"] = int(episode)
+    if subtitle:
+        metadata["subtitle"] = subtitle
+    image = catt_poster_url(poster)
     if image:
         metadata["thumb"] = image
         metadata["images"] = [{"url": image}]
-    if metadata:
-        metadata["metadataType"] = CATT_METADATA_GENERIC
     media: dict = {
         "streamType": stream_type or CATT_STREAM_BUFFERED,
         "contentType": content_type or "video/mp4",
@@ -133,6 +202,28 @@ def catt_media_info(
     return media
 
 
+def catt_lib_media_info(
+    title: str,
+    meta: CastMeta | None = None,
+    *,
+    content_type: str = "video/mp4",
+    content_id: str = "",
+) -> dict:
+    """LOAD MediaInformation the catt **library** path sends (title + images when https)."""
+    meta = meta or CastMeta()
+    return catt_media_info(
+        title=catt_display_title(title, meta),
+        poster=meta.poster,
+        content_type=(meta.content_type or content_type or "video/mp4"),
+        metadata_type=catt_metadata_type(meta),
+        series_title=meta.series_title,
+        season=meta.season,
+        episode=meta.episode,
+        subtitle=meta.subtitle,
+        content_id=content_id,
+    )
+
+
 def catt_cli_media_info(
     title: str,
     meta: CastMeta | None = None,
@@ -141,13 +232,116 @@ def catt_cli_media_info(
     stream_type: str = CATT_STREAM_BUFFERED,
     content_id: str = "",
 ) -> dict:
-    """LOAD MediaInformation the catt **CLI** can actually send (no poster)."""
+    """LOAD MediaInformation the catt **CLI** fallback can send (no poster)."""
     return catt_media_info(
         title=catt_display_title(title, meta),
         content_type=(meta.content_type if meta and meta.content_type else content_type),
         stream_type=stream_type,
         content_id=content_id,
+        metadata_type=CATT_METADATA_GENERIC,
     )
+
+
+def _catt_device_cls():
+    """CattDevice if `catt` is importable in this env (not a declared nstream dep)."""
+    try:
+        return importlib.import_module("catt.api").CattDevice
+    except ImportError:
+        return None
+
+
+@functools.cache
+def _catt_interpreter() -> str | None:
+    """Python that can `import catt.api` — shebang of `catt` on PATH, else None."""
+    catt = shutil.which("catt")
+    if not catt:
+        return None
+    py = ""
+    try:
+        with open(catt, encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    if first.startswith("#!"):
+        parts = first[2:].strip().split()
+        if parts and Path(parts[0]).name == "env" and len(parts) >= 2:
+            py = shutil.which(parts[-1]) or ""
+        elif parts:
+            py = parts[0]
+    if not py:
+        sibling = Path(catt).resolve().parent / "python"
+        py = str(sibling) if sibling.is_file() else ""
+    if not py:
+        return None
+    try:
+        probe = subprocess.run(
+            [py, "-c", "import catt.api"],
+            capture_output=True,
+            timeout=util.CATT_INFO_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return py if probe.returncode == 0 else None
+
+
+def catt_can_lib_load() -> bool:
+    """True when a catt library LOAD is possible (in-process or catt's interpreter)."""
+    return _catt_device_cls() is not None or _catt_interpreter() is not None
+
+
+def catt_lib_play(
+    ip: str,
+    url: str,
+    *,
+    title: str = "",
+    meta: CastMeta | None = None,
+    start: float | None = None,
+    content_type: str = "video/mp4",
+    subtitle_url: str = "",
+) -> bool:
+    """One LOAD via catt.api (in-process, else `_catt_load.py` on catt's Python).
+
+    Does not log `url`. False on import/device/LOAD failure so the caller can fall
+    back to the CLI. Uses `play_media_url` (no yt-dlp; no play_url PLAYING wait).
+    """
+    load = catt_play_kwargs(
+        title, meta, content_type=content_type, start=start, subtitle_url=subtitle_url
+    )
+    Device = _catt_device_cls()
+    if Device is not None:
+        try:
+            # play_media_url, not play_url: play_url waits 10s for PLAYING and
+            # raises APIError on a slow remux start (false miss → CLI, no thumb).
+            kwargs = {k: v for k, v in load.items() if k != "subtitle_url"}
+            if load.get("subtitle_url"):
+                kwargs["subtitles"] = load["subtitle_url"]
+            dev = Device(ip_addr=ip)
+            dev.controller.prep_app()
+            dev.controller.play_media_url(url, **kwargs)
+            return True
+        except Exception as exc:  # catt/pychromecast: device missing, LOAD refused, …
+            _log.warning("catt lib LOAD failed: %s", type(exc).__name__)
+            return False
+    py = _catt_interpreter()
+    helper = Path(__file__).with_name("_catt_load.py")
+    if not py or not helper.is_file():
+        return False
+    payload = {"ip": ip, "url": url, **load}
+    try:
+        proc = subprocess.run(
+            [py, os.fspath(helper)],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=util.CATT_CAST_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning("catt helper LOAD failed: %s", type(exc).__name__)
+        return False
+    if proc.returncode != 0:
+        _log.warning("catt helper LOAD rc=%s", proc.returncode)
+        return False
+    return True
 
 
 # Callback the headless `--follow` JSONL path passes in to receive normalized playback events
@@ -396,9 +590,10 @@ def cast(
     the mpv path. Returns a `CastResult` — read it by attribute (ADR 0031). The advance decision
     belongs to `cast_flow`, not to a delivery backend (ADR 0029).     Prefers the **castbridge**
     native sender (Movie/TvShow LOAD + poster + a real event stream) when its binary is
-    available; falls back to **catt** (`-l` title + `--stream-type BUFFERED`; no poster —
-    the 0.13 CLI has no `--thumb`, ADR 0050) otherwise, when castbridge can't start, or
-    for the interactive in-cast audio switch ('a') (see docs/adr/0007, docs/adr/0050).
+    available; falls back to **catt library** `play_url` (title + https thumb + BUFFERED
+    in one LOAD, ADR 0050), then the catt **CLI** (`-l` + `--stream-type`; no `--thumb`)
+    when catt.api is not importable. Interactive in-cast audio switch ('a') stays a
+    catt-path capability (see docs/adr/0007, docs/adr/0050).
     `on_event` receives normalized events for the headless `--follow` JSONL path.
 
     `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast. Both
@@ -583,48 +778,72 @@ def _cast_via_catt(
     separates a real handoff from a failure — both used to be `(0.0, 0.0)` (ADR 0031).
     `cast_flow` turns pos/dur into the advance decision (ADR 0029).
 
-    The LOAD carries `-l` title and `--stream-type BUFFERED` (ADR 0050). Poster is
-    omitted: catt 0.13 has no `--thumb`. `meta.content_type` is not a CLI flag —
-    catt guesses from the path; a remux `.mp4` is `video/mp4`.
+    Prefers catt **library** `play_url` (title + https thumb + BUFFERED + contentType
+    in one LOAD, ADR 0050). CLI fallback: `-l` + `--stream-type BUFFERED` (no `--thumb`).
 
-    `follow=False` (headless fire-and-return): once `catt cast` has handed the media to
+    `follow=False` (headless fire-and-return): once the LOAD has handed the media to
     the receiver, return immediately without the resume poll loop — so an agent isn't
     held for the whole runtime. No position is tracked (no resume) in that mode."""
     base = ["catt", *(["-d", device] if device else [])]
-    launch = catt_cast_argv(
-        device,
-        url,
-        title=catt_display_title(title, meta),
-        start=start,
-        sub_path=catt_sub(sub_paths[0]) if sub_paths else None,
-    )
     dest = device or "Chromecast"
-    # Never log the URL itself: the redaction regexes cover the known token carriers, but a
-    # signed native-CDN link (TorBox/Premiumize requestdl) is a capability in its own right
-    # and its query params don't necessarily match them.
-    _log.debug("catt launch: %s", " ".join(a if a != url else "<url>" for a in launch))
-    # `catt cast` blocks while the receiver buffers the remote URL (~10s); say so.
-    ui.status(f"consegno a {dest}…", kind="tv")
-    try:
-        proc = subprocess.run(
-            launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT
+    loaded = False
+    sub_shutdown = None
+    if device and catt_can_lib_load():
+        cap: dict = {}
+        if sub_paths:
+            vtt = srt.to_vtt(sub_paths[0]) or None
+            sub_shutdown = _serve_subtitle(vtt, device, None, follow, cap)
+        ui.status(f"consegno a {dest}…", kind="tv")
+        loaded = catt_lib_play(
+            device,
+            url,
+            title=title,
+            meta=meta,
+            start=start,
+            content_type=(meta.content_type if meta and meta.content_type else ""),
+            subtitle_url=str(cap.get("subtitle_url") or ""),
         )
-    except FileNotFoundError:
-        notices.emit("catt non trovato")
-        _emit(on_event, "failed", error="catt_missing", message="catt non trovato")
-        return cast_delivery.CastResult(0.0, 0.0, error="catt_missing")
-    except subprocess.TimeoutExpired:
-        # A catt hung on a half-dead device must not block the caller forever.
-        _log.warning("catt cast bloccato oltre %.0fs → annullato", util.CATT_CAST_TIMEOUT)
-        notices.emit("cast non riuscito (timeout)")
-        _emit(on_event, "failed", error="cast_timeout", message="cast non riuscito (timeout)")
-        return cast_delivery.CastResult(0.0, 0.0, error="cast_timeout")
-    if proc.returncode != 0:
-        # catt prints the cause (e.g. device unreachable); never echo the URL/token.
-        _log.warning("cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300])
-        notices.emit("cast non riuscito")
-        _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
-        return cast_delivery.CastResult(0.0, 0.0, error="cast_failed")
+        if loaded:
+            _log.debug("catt lib LOAD ok (url redacted)")
+        else:
+            _log.debug("catt lib LOAD missed → CLI fallback")
+            if sub_shutdown is not None:
+                sub_shutdown()
+                sub_shutdown = None
+            serve.reap_sub_server()
+    if not loaded:
+        launch = catt_cast_argv(
+            device,
+            url,
+            title=catt_display_title(title, meta),
+            start=start,
+            sub_path=catt_sub(sub_paths[0]) if sub_paths else None,
+        )
+        # Never log the URL itself: the redaction regexes cover the known token carriers, but a
+        # signed native-CDN link (TorBox/Premiumize requestdl) is a capability in its own right
+        # and its query params don't necessarily match them.
+        _log.debug("catt launch: %s", " ".join(a if a != url else "<url>" for a in launch))
+        ui.status(f"consegno a {dest}…", kind="tv")
+        try:
+            proc = subprocess.run(
+                launch, capture_output=True, text=True, timeout=util.CATT_CAST_TIMEOUT
+            )
+        except FileNotFoundError:
+            notices.emit("catt non trovato")
+            _emit(on_event, "failed", error="catt_missing", message="catt non trovato")
+            return cast_delivery.CastResult(0.0, 0.0, error="catt_missing")
+        except subprocess.TimeoutExpired:
+            _log.warning("catt cast bloccato oltre %.0fs → annullato", util.CATT_CAST_TIMEOUT)
+            notices.emit("cast non riuscito (timeout)")
+            _emit(on_event, "failed", error="cast_timeout", message="cast non riuscito (timeout)")
+            return cast_delivery.CastResult(0.0, 0.0, error="cast_timeout")
+        if proc.returncode != 0:
+            _log.warning(
+                "cast non riuscito (rc=%s): %s", proc.returncode, proc.stderr.strip()[:300]
+            )
+            notices.emit("cast non riuscito")
+            _emit(on_event, "failed", error="cast_failed", message="cast non riuscito")
+            return cast_delivery.CastResult(0.0, 0.0, error="cast_failed")
 
     can_switch = bool(langs) and resolve_lang is not None and choose_lang is not None
     if can_switch and follow:
@@ -637,6 +856,8 @@ def _cast_via_catt(
         _emit(on_event, "started", title=title)
         # `catt cast` returned rc 0: the receiver ACCEPTED the handoff. That is the strongest
         # evidence available without a poll loop, so it counts as started (ADR 0031).
+        if sub_shutdown is not None:
+            sub_shutdown()
         return cast_delivery.CastResult(0.0, 0.0, started=True)
 
     holder = {"position": 0.0, "duration": 0.0}
@@ -705,6 +926,8 @@ def _cast_via_catt(
             position=round(holder["position"], 1),
             duration=round(holder["duration"], 1),
         )
+    if sub_shutdown is not None:
+        sub_shutdown()
     return cast_delivery.CastResult(
         holder["position"], holder["duration"],
         started=started, error=None if started else "cast_never_started",

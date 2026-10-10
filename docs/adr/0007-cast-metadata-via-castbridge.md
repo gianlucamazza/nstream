@@ -3,10 +3,11 @@
 - **Status:** Accepted
 - **Date:** 2026-06-05
 - **Deciders:** project maintainer
-- **Amended by:** [0050](0050-catt-fallback-load-metadata.md) — catt 0.13 *can* send
-  title + `streamType` via `-l` / `--stream-type`. The “metadata-less LOAD” claim
-  below is the 0.13.1 reading without those flags; poster / Movie / TvShow still
-  need castbridge (no `--thumb` on the CLI).
+- **Amended by:** [0050](0050-catt-fallback-load-metadata.md) — catt 0.13
+  `play_media_url` sends title + `thumb`/`images[]` + streamType. The CLI still
+  has no `--thumb`; nstream calls `catt.api` (or catt's interpreter) so the
+  catt-only board gets poster without castbridge. The “metadata-less LOAD” claim
+  below is the 0.13.1 CLI-only reading.
 - **Supersedes:** the *delivery mechanism* of ADR 0005 (catt as Cast sender + file server);
   ADR 0005's findings on the DMR (HEVC/4K/HDR native, no Dolby passthrough, complete-file +
   Range-served requirement, audio-track selection needs remux) all still hold.

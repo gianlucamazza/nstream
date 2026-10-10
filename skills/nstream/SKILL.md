@@ -88,8 +88,8 @@ Always pass `--json`. Quote the title.
   freeing disk, or `--local`.
 - `audio_verified: false` with `audio_lang: null` after a cast = the remux failed mid-way and
   the file went out as-is: warn the user the audio may be missing.
-- Remux/file via catt (no castbridge): TV should show the title; artwork needs castbridge
-  (ADR 0050). Generic chrome after this fix is a poster residual, not a remux-720 issue.
+- Remux/file via catt (no castbridge): TV should show title + Cinemeta poster when
+  `catt.api` is importable (ADR 0050). CLI-only hosts still get the title. Not a remux-720 issue.
 - Details: `docs/user/cast.md`, `docs/headless.md`.
 
 ### Parsing

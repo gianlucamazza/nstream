@@ -157,8 +157,9 @@ HEVC (do **not** remux to 720; leave the triage file alone):
   `caster.volume_level_to_percent`, `caster.format_volume_bits`, `caster.set_volume`,
   `caster.status`, `caster._cast_via_catt`, `bridge._media_load_args`,
   `remux.cast_live`, `cast_flow._with_container_mime`, `quality.CAST_VIDEO_DECODABLE`.
-- ADR 0005, 0007, 0013, 0015, 0022, 0039, 0050 (catt remux/file LOAD title + BUFFERED;
-  poster still castbridge-only). catt 0.13 `DefaultCastController.play_media_url`
-  (contentType defaults to `video/mp4`). Google Cast `Volume` / `controlType`.
+- ADR 0005, 0007, 0013, 0015, 0022, 0039, 0050 (catt remux/file LOAD title + HTTPS
+  `thumb`/`images[]` + BUFFERED via library; CLI has no `--thumb`). catt 0.13
+  `DefaultCastController.play_media_url` (contentType defaults to `video/mp4`).
+  Google Cast `Volume` / `controlType`.
 - Philips JointSpace v6 (`/audio/volume` `{current,min,max}`) — unauthenticated GET
   is 404/401 on this TPM191E; pairing required.

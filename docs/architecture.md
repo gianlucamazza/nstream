@@ -13,6 +13,7 @@ src/nstream/
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
 │                    · remux · live · mirror · bridge · serve · urlproxy · discovery
+│                    · (_catt_load: catt.api helper on catt's interpreter)
 ├── subs             subs · subalign · srt · oshash · (_bench · _subalign_remote dev-only)
 ├── playback         playback · player · labels · picker · preview · ui · explain
 ├── discovery/API    api · addons · net
@@ -110,7 +111,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `cast_vet` | Audio plan, video codec, container |
 | `cast_delivery` | Shared castbridge event loop (ADR 0011) |
 | `cast_control` | TUI lifecycle: stop/status/pause/seek/volume + runtime health |
-| `caster` | Device resolve; castbridge or catt LOAD (`catt_cast_argv`: `-l` + BUFFERED, ADR 0050) |
+| `caster` | Device resolve; castbridge or catt LOAD (`catt_lib_play` / `_catt_load` / CLI `-l` + BUFFERED, ADR 0050) |
 | `remux` / `serve` | Tier-2 file + Range server |
 | `mirror` | Realtime 1080p path |
 | `bridge` | castbridge IPC client + daemon ensure |

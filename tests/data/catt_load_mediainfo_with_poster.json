@@ -1,8 +1,8 @@
 {
   "_provenance": {
     "recorded": "2026-10-10",
-    "source": "same play_media_url kwargs when thumb= is set (castbridge _media_load_args poster; catt CLI cannot)",
-    "note": "Pin of the artwork residual: DMR accepts images[] (ADR 0007 field validation). catt 0.13 CLI has no --thumb, so the production catt-only board never sends this block. Fake poster host — not fetched in tests."
+    "source": "catt v0.13.3 CattDevice.play_url → play_media_url(title, thumb, content_type, stream_type=BUFFERED, media_info.metadata.metadataType=1) + pychromecast _send_start_play_media",
+    "note": "Library LOAD for a remux/file cast. thumb= becomes metadata.thumb + images[0].url. Poster is public HTTPS (Cinemeta/metahub); TV fetches it. Fake poster host — not fetched in tests. contentId omitted (never a debrid token)."
   },
   "streamType": "BUFFERED",
   "contentType": "video/mp4",
@@ -10,6 +10,6 @@
     "title": "The Nice Guys",
     "thumb": "https://images.example.test/poster/tt7068946.jpg",
     "images": [{"url": "https://images.example.test/poster/tt7068946.jpg"}],
-    "metadataType": 0
+    "metadataType": 1
   }
 }

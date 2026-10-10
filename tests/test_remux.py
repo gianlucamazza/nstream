@@ -21,6 +21,11 @@ from nstream.tracks import Track, Tracks
 
 
 @pytest.fixture(autouse=True)
+def _no_catt_lib(monkeypatch):
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _state(tmp_path, monkeypatch):
     from nstream import tracks
 
@@ -463,8 +468,120 @@ def test_cast_file_catt_headless_detaches_and_keeps_state(monkeypatch, tmp_path)
     assert list(tmp_path.glob("catt-*.log")) == []  # diagnosis capture removed on startup
 
 
+def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
+    """Library remux LOAD: nstream serves, catt.api play_url gets thumb + video/mp4 + BUFFERED."""
+    f = _tmp_remux(tmp_path)
+    poster = "https://images.example.test/poster/tt7068946.jpg"
+    seen: dict = {}
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (4242, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
+    )
+    monkeypatch.setattr(
+        remux.serve,
+        "served_sub_url",
+        lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/subs.vtt",
+    )
+    monkeypatch.setattr(remux, "_await_start", lambda dev: True)
+
+    def fake_play(ip, url, **kw):
+        seen.update(ip=ip, url=url, **kw)
+        return True
+
+    monkeypatch.setattr(remux.caster, "catt_lib_play", fake_play)
+    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: pytest.fail("CLI fallback"))
+    out = remux.cast_file(
+        _cfg(),
+        "The Nice Guys",
+        str(f),
+        device="10.0.0.5",
+        follow=False,
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert out.started is True and out.error is None
+    assert seen["ip"] == "10.0.0.5"
+    assert seen["url"].endswith("/stream.mp4")
+    assert seen["title"] == "The Nice Guys"
+    assert seen["content_type"] == "video/mp4"
+    assert seen["meta"].poster == poster
+    body = caster.catt_lib_media_info("The Nice Guys", seen["meta"], content_type="video/mp4")
+    assert body["metadata"]["images"][0]["url"] == poster
+    assert body["contentType"] == "video/mp4" and body["streamType"] == "BUFFERED"
+    assert remux._read_state() == {
+        "pid": 4242, "file": str(f), "device": "10.0.0.5", "mode": "serve",
+    }  # fmt: skip
+
+
+def test_cast_file_catt_lib_follow_waits_for_start_before_idle(monkeypatch, tmp_path):
+    """Library follow: pre-start IDLE must not tear the Range server down."""
+    f = _tmp_remux(tmp_path)
+    poster = "https://images.example.test/poster/tt7068946.jpg"
+    srv = _FakeServer()
+    states = iter(
+        [
+            {"player_state": "PLAYING", "position": 10.0, "duration": 100.0},
+            {"player_state": "IDLE", "position": 99.0, "duration": 100.0},
+        ]
+    )
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
+    monkeypatch.setattr(remux.serve, "lan_ip", lambda ip: "192.168.1.10")
+    monkeypatch.setattr(remux.serve, "serve_file", lambda p, b, sub_path=None: (srv, 45000, None))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
+    )
+    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: True)
+    monkeypatch.setattr(remux, "_await_start", lambda dev: True)
+    monkeypatch.setattr(remux, "_STATUS_POLL", 0.0)
+    monkeypatch.setattr(remux.caster, "status", lambda dev: next(states))
+    monkeypatch.setattr(remux.subprocess, "Popen", lambda *a, **k: pytest.fail("CLI fallback"))
+    out = remux.cast_file(
+        _cfg(),
+        "The Nice Guys",
+        str(f),
+        device="10.0.0.5",
+        follow=True,
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert (out.pos, out.dur, out.started) == (99.0, 100.0, True)
+    assert srv.down and not f.exists()
+
+
+def test_cast_file_catt_lib_start_miss_falls_back_to_cli(monkeypatch, tmp_path):
+    """Library LOAD that never reaches PLAYING keeps the temp for the CLI fallback."""
+    f = _tmp_remux(tmp_path)
+    rec, _proc = _catt_wiring(monkeypatch)
+    monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(remux.serve, "spawn_detached", lambda *a, **k: (777, 45000, "tok"))
+    monkeypatch.setattr(
+        remux.serve,
+        "served_url",
+        lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
+    )
+    monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: True)
+    n = {"await": 0}
+
+    def await_start(_dev):
+        n["await"] += 1
+        return n["await"] > 1  # lib miss, then CLI handoff
+
+    monkeypatch.setattr(remux, "_await_start", await_start)
+    out = remux.cast_file(_cfg(), "The Nice Guys", str(f), device="10.0.0.5", follow=False)
+    assert out.started is True
+    assert 777 in rec["killed"]
+    assert rec["popen"][0][0][:4] == ["catt", "-d", "10.0.0.5", "cast"]
+    assert f.exists()
+
+
 def test_cast_file_catt_sends_title_not_poster(monkeypatch, tmp_path):
-    """catt 0.13 remux/file LOAD: -l + BUFFERED. Poster stays off the argv (no --thumb)."""
+    """catt 0.13 remux/file CLI fallback: -l + BUFFERED. Poster stays off the argv."""
     f = _tmp_remux(tmp_path)
     rec, _proc = _catt_wiring(monkeypatch)
     poster = "https://images.example.test/poster/tt7068946.jpg"

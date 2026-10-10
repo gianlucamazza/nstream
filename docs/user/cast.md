@@ -14,11 +14,11 @@ See [selection.md](../selection.md) for scoring and cast vetting.
 | `ffmpeg` / `ffprobe` | Recommended | Track probe, Tier-2 remux, container rewrap |
 | LAN reachability | Required | Host ↔ TV; Tier-2 needs inbound ports (below) |
 
-Without castbridge, nstream falls back to `catt` 0.13 (same cast; title + `BUFFERED`
-via `-l` / `--stream-type`, ADR 0050). The catt CLI has no `--thumb`, so the TV
-now-playing card stays without artwork until castbridge LOADs `metadata.images`.
-Rich events still need castbridge. Without the mirror binary, `--mirror` / auto
-mirror-over-remux is unavailable.
+Without castbridge, nstream falls back to `catt` 0.13. The **library** path
+(`CattDevice.play_url`) sends title + Cinemeta/metahub HTTPS poster (`thumb` →
+`metadata.images`) + `BUFFERED` in one LOAD (ADR 0050). The CLI fallback (`-l` /
+`--stream-type`) has no `--thumb`. Rich events still need castbridge. Without
+the mirror binary, `--mirror` / auto mirror-over-remux is unavailable.
 
 A registered Custom Receiver is optional (`cast_receiver_app_id` in config). Empty keeps
 Google's Default Media Receiver. The id is forwarded only when **castbridge** is the
@@ -92,22 +92,25 @@ stderr shows a prepare message during remux. JSON field `reencoded: true` when r
 
 ### Remux / file metadata on the TV (ADR 0050)
 
-A complete-file remux is a local `cast-*.mp4`. catt would otherwise LOAD that stem as
-the title and leave `streamType` unset (generic chrome, no duration). nstream now
-passes the Cinemeta title (`-l`) and `--stream-type BUFFERED` on both the remux/file
-and the direct-URL catt paths — same DMR (`CC1AD845`) as a non-remux catt cast.
+A complete-file remux is a local `cast-*.mp4`. catt's CLI would otherwise LOAD that
+stem as the title and leave `streamType` unset. nstream serves the file (Range HTTP)
+and calls catt **library** `play_url` so one LOAD has the Cinemeta title, the public
+HTTPS poster (`thumb` → `images[0].url`), `contentType: video/mp4`, and
+`streamType: BUFFERED`. The poster is **not** rewritten onto the remux host — the
+TV fetches Cinemeta/metahub itself. If `catt.api` cannot be imported, the CLI
+fallback still sends `-l` + `--stream-type BUFFERED` (no artwork).
 
-| LOAD field | catt 0.13 remux/file | catt 0.13 direct URL | castbridge (either tier) |
+| LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |
 | --- | --- | --- | --- |
-| `metadata.title` | Cinemeta title (`-l`) | same | same (+ TvShow block) |
-| `metadata.images` / poster | **not sent** (no `--thumb`) | **not sent** | Cinemeta HTTPS poster |
-| `contentType` | `video/mp4` (`.mp4` guess) | path/URL guess | declared (`_with_container_mime` / remux MP4) |
-| `streamType` | `BUFFERED` | `BUFFERED` | BUFFERED (live HLS is a different path) |
+| `metadata.title` | Cinemeta title | `-l` | same (+ TvShow block) |
+| `metadata.images` / poster | Cinemeta/metahub **https** `thumb` | **not sent** (no `--thumb`) | Cinemeta HTTPS poster |
+| `metadataType` | 1 Movie / 2 TvShow (`media_info`) | GENERIC (0) | Movie / TvShow |
+| `contentType` | `video/mp4` (remux); container MIME on URL | path guess | declared |
+| `streamType` | `BUFFERED` | `BUFFERED` | BUFFERED (live HLS is another path) |
 
-Artwork is a **sender** gap, not a receiver-hard limit: this DMR already echoes
-poster on a castbridge LOAD (ADR 0007). A custom receiver id is not required for
-chrome and is not launched on catt (`receiver_app_ignored`, ADR 0013 / 0045).
-Do not treat a 720 H.264 remux as the metadata fix.
+A custom receiver id is not required for DMR title+poster and is not launched on
+catt (`receiver_app_ignored`, ADR 0013 / 0045). Do not treat a 720 H.264 remux as
+the metadata fix.
 
 `--json` is unchanged. `--status` already reports the receiver's `title`,
 `content_type`, and `stream_type`.
