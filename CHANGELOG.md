@@ -37,10 +37,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- **ADR 0050:** catt 0.13 remux/file and direct fallback LOADs send Cinemeta
-  title + HTTPS poster (`thumb` → `images[]`) + `video/mp4` + `BUFFERED` via
-  `catt.api` / catt's interpreter. CLI fallback still has `-l` + `--stream-type`
-  (no `--thumb`). `--json` unchanged.
+- **ADR 0050:** catt **≥0.13.2** remux/file and direct fallback LOADs send
+  Cinemeta title + Cinemeta/metahub HTTPS poster (`thumb` → `images[]`) +
+  `video/mp4` + `BUFFERED` via `catt.api` / catt's interpreter. Older catt
+  (0.13.0/0.13.1) keeps the pre-0050 argv (`-l` would be `cast_failed`). CLI
+  fallback still has `-l` + `--stream-type` (no `--thumb`). `--json` unchanged.
 - catt-only casts with `cast_receiver_app_id` set emit `receiver_app_ignored` instead
   of silently staying on the Default Media Receiver `CC1AD845`.
 

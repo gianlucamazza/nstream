@@ -23,6 +23,7 @@ from nstream.tracks import Track, Tracks
 @pytest.fixture(autouse=True)
 def _no_catt_lib(monkeypatch):
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: False)
+    monkeypatch.setattr(remux.caster, "catt_supports_load_meta", lambda: True)
 
 
 @pytest.fixture(autouse=True)
@@ -471,7 +472,7 @@ def test_cast_file_catt_headless_detaches_and_keeps_state(monkeypatch, tmp_path)
 def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
     """Library remux LOAD: nstream serves, catt.api play_url gets thumb + video/mp4 + BUFFERED."""
     f = _tmp_remux(tmp_path)
-    poster = "https://images.example.test/poster/tt7068946.jpg"
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
     seen: dict = {}
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
     monkeypatch.setattr(remux.serve, "ensure_firewall", lambda ip: None)
@@ -520,7 +521,7 @@ def test_cast_file_catt_lib_sends_thumb(monkeypatch, tmp_path):
 def test_cast_file_catt_lib_follow_waits_for_start_before_idle(monkeypatch, tmp_path):
     """Library follow: pre-start IDLE must not tear the Range server down."""
     f = _tmp_remux(tmp_path)
-    poster = "https://images.example.test/poster/tt7068946.jpg"
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
     srv = _FakeServer()
     states = iter(
         [
@@ -581,10 +582,10 @@ def test_cast_file_catt_lib_start_miss_falls_back_to_cli(monkeypatch, tmp_path):
 
 
 def test_cast_file_catt_sends_title_not_poster(monkeypatch, tmp_path):
-    """catt 0.13 remux/file CLI fallback: -l + BUFFERED. Poster stays off the argv."""
+    """catt ≥0.13.2 remux/file CLI fallback: -l + BUFFERED. Poster stays off the argv."""
     f = _tmp_remux(tmp_path)
     rec, _proc = _catt_wiring(monkeypatch)
-    poster = "https://images.example.test/poster/tt7068946.jpg"
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
     remux.cast_file(
         _cfg(),
         "The Nice Guys",

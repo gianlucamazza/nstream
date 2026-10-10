@@ -570,9 +570,9 @@ def cast_file(
     the file and **castbridge** LOADs its URL with metadata (so the TV card + HUD widget light
     up); when `sub_paths` is set the server also serves a WebVTT track the LOAD side-loads (so subs
     now ride the native path too, `sub_lang` labelling the track). Without castbridge, the
-    same server + **catt library** `play_url` (title + https thumb + `video/mp4` + BUFFERED
-    in one LOAD, ADR 0050). Last resort: catt CLI serving+casting (`-l` + `--stream-type`;
-    no `--thumb`).
+    same server + **catt ≥0.13.2 library** `play_media_url` (title + Cinemeta/metahub
+    thumb + `video/mp4` + BUFFERED in one LOAD, ADR 0050). Last resort: catt CLI
+    serving+casting (`-l` + `--stream-type`; no `--thumb`).
     `follow=False` (headless) leaves the server detached and records its PID for `--stop`/GC;
     `follow=True` serves until playback ends, then removes the temp file."""
     serve.reap_sub_server()  # a new cast replaces any standalone Tier-1 subtitle server

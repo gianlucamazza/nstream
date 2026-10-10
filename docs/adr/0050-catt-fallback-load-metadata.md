@@ -1,4 +1,4 @@
-# 0050. catt 0.13 fallback LOAD: title + thumb/images + BUFFERED via the library
+# 0050. catt ≥0.13.2 fallback LOAD: title + thumb/images + BUFFERED via the library
 
 - **Status:** Accepted
 - **Date:** 2026-10-10
@@ -79,10 +79,21 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
 ## Consequences
 
 - Remux/file and direct catt casts show title + poster on DMR chrome when
-  `catt.api` is importable (in-process or catt's interpreter). `streamType:
-  BUFFERED` lets the receiver expose duration from the complete MP4.
+  catt is **≥0.13.2** and `catt.api` is importable (in-process or catt's
+  interpreter). `streamType: BUFFERED` lets the receiver expose duration from
+  the complete MP4.
+- **Version gate:** catt 0.13.0/0.13.1 have no `-l/--title`, drop `media_info`,
+  and 0.13.1 `play_media_url` can block with no timeout. nstream omits the new
+  CLI flags and skips the library path there (and retries once without the
+  flags if click still says `No such option`). A working cast must not become
+  `cast_failed`.
 - **CLI-only residual:** if catt cannot be imported, argv has no `--thumb` —
   title + BUFFERED still go out; artwork needs the library path or castbridge.
+- In-cast `a` (audio switch) reuses the same library/helper LOAD. A CLI-only
+  switch still has title on ≥0.13.2 (`-l`) but no artwork.
+- In-process `CattDevice` / `prep_app` / `play_media_url` is bounded by
+  `CATT_CAST_TIMEOUT` (thread + deadline). Friendly names use `name=`, not
+  `ip_addr=`. Poster `thumb` is Cinemeta/metahub HTTPS only.
 - Live HLS is unchanged (castbridge-only, ADR 0039). Event-sourced `--follow`
   JSONL still prefers castbridge.
 - `--json` shape unchanged (no new fields). `--status` already reports receiver

@@ -1,8 +1,9 @@
 """Standalone catt.api LOAD helper (no nstream imports).
 
 Run with the interpreter that has catt installed (the `catt` console-script
-shebang). Stdin is one JSON object: ip, url, optional title/thumb/content_type/
-stream_type/current_time/subtitle_url/media_info. Never prints the media URL.
+shebang). Stdin is one JSON object: url plus ip or name, optional title/thumb/
+content_type/stream_type/current_time/subtitle_url/media_info. Never prints the
+media URL.
 Exit 0 on play_media_url success. Used when nstream's env cannot `import catt`.
 """
 
@@ -19,8 +20,13 @@ def main() -> int:
     except json.JSONDecodeError:
         print("catt-load: invalid json", file=sys.stderr)
         return 2
-    if not isinstance(args, dict) or not args.get("ip") or not args.get("url"):
-        print("catt-load: ip and url required", file=sys.stderr)
+    if not isinstance(args, dict) or not args.get("url"):
+        print("catt-load: url required", file=sys.stderr)
+        return 2
+    ip = args.get("ip") or args.get("ip_addr")
+    name = args.get("name")
+    if not ip and not name:
+        print("catt-load: ip or name required", file=sys.stderr)
         return 2
     try:
         api = importlib.import_module("catt.api")
@@ -41,7 +47,8 @@ def main() -> int:
     try:
         # play_media_url (not play_url): one LOAD, no yt-dlp, no 10s PLAYING wait.
         # nstream polls the receiver. Never print args["url"].
-        device = api.CattDevice(ip_addr=str(args["ip"]))
+        ctor = {"ip_addr": str(ip)} if ip else {"name": str(name)}
+        device = api.CattDevice(**ctor)
         device.controller.prep_app()
         device.controller.play_media_url(str(args["url"]), **kwargs)
     except Exception:  # noqa: BLE001 — helper: any catt/pychromecast failure is rc 1
