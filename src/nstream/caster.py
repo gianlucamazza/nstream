@@ -73,6 +73,7 @@ CATT_METADATA_GENERIC = 0
 CATT_METADATA_MOVIE = 1  # pychromecast METADATA_TYPE_MOVIE
 CATT_METADATA_TVSHOW = 2  # pychromecast METADATA_TYPE_TVSHOW
 CATT_LOAD_META_MIN = (0, 13, 2)
+_SUB_IDLE_FOR = "_nstream_sub_idle_for"  # stashed on caption kwargs; never a LOAD field
 _CATT_POSTER_HOST_SUFFIX = (".metahub.space", ".strem.io")
 _CATT_POSTER_HOSTS = frozenset(
     {
@@ -1194,6 +1195,7 @@ def _cast_via_bridge(
         notices.emit(f"ricevitore custom {app_id}")
     vtt = srt.to_vtt(sub_paths[0]) if sub_paths else None
     sub_shutdown = _serve_subtitle(vtt, device, sub_lang, follow, kwargs)
+    kwargs.pop(_SUB_IDLE_FOR, None)
 
     def announce() -> None:
         # Title already printed as the play banner in the interactive path; keep it for
@@ -1249,6 +1251,7 @@ def _serve_subtitle(
     if follow:
         server, port, _thread = serve.serve_file(None, bind_ip, sub_path=vtt)
         kwargs.update(serve.caption_kwargs(bind_ip, port, server.token, sub_lang))
+        kwargs[_SUB_IDLE_FOR] = server.idle_for
         return server.shutdown
     # The VTT lives in the per-play work_dir, which dies with this process, while the
     # detached server opens it PER REQUEST and the receiver re-fetches the track (seek):
@@ -1292,6 +1295,18 @@ def _catt_unconfirmed_result() -> cast_delivery.CastResult:
     )
 
 
+def _schedule_unconfirmed_sub_reap(shutdown, device: str | None, url: str, idle_for=None) -> None:
+    """Keep an unconfirmed subtitle server; skip_if once at fire, same as remux/LAN."""
+    dest, served = device, url
+    serve.schedule_reap(
+        shutdown,
+        util.CATT_LIB_UNCONFIRMED_SERVE_S,
+        handle=shutdown,
+        skip_if=lambda: bool(dest and served and catt_receiver_has_load(dest, served)),
+        idle_for=idle_for,
+    )
+
+
 def _cast_via_catt(
     cfg: Config,
     title: str,
@@ -1330,11 +1345,13 @@ def _cast_via_catt(
     lib_attempted = False
     lib_unconfirmed = False
     sub_shutdown = None
+    sub_idle_for = None
     if device and catt_can_lib_load():
         cap: dict = {}
         if sub_paths:
             vtt = srt.to_vtt(sub_paths[0]) or None
             sub_shutdown = _serve_subtitle(vtt, device, None, follow, cap)
+            sub_idle_for = cap.pop(_SUB_IDLE_FOR, None)
         ui.status(f"consegno a {dest}…", kind="tv")
         lib_attempted = True
         try:
@@ -1361,11 +1378,7 @@ def _cast_via_catt(
             if not follow:
                 # Keep the subtitle server for a late TV fetch; idle-reap this handle.
                 if sub_shutdown is not None:
-                    serve.schedule_reap(
-                        sub_shutdown,
-                        util.CATT_LIB_UNCONFIRMED_SERVE_S,
-                        handle=sub_shutdown,
-                    )
+                    _schedule_unconfirmed_sub_reap(sub_shutdown, device, url, idle_for=sub_idle_for)
                 _emit(on_event, "failed", error="cast_never_started", message="cast non confermato")
                 return _catt_unconfirmed_result()
             loaded = True  # follow: poll; do not CLI-overwrite metadata
@@ -1494,9 +1507,7 @@ def _cast_via_catt(
         )
     if sub_shutdown is not None:
         if lib_unconfirmed and not started:
-            serve.schedule_reap(
-                sub_shutdown, util.CATT_LIB_UNCONFIRMED_SERVE_S, handle=sub_shutdown
-            )
+            _schedule_unconfirmed_sub_reap(sub_shutdown, device, url, idle_for=sub_idle_for)
         else:
             sub_shutdown()
     return cast_delivery.CastResult(

@@ -1676,3 +1676,40 @@ def test_catt_lib_play_false_before_0_13_2(monkeypatch):
     monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)
     monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
     assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
+
+
+def test_catt_unconfirmed_subtitle_reap_uses_skip_if(monkeypatch):
+    """Unconfirmed leftover VTT server gets skip_if (+ idle_for), not a fixed clock."""
+    scheduled: dict = {}
+
+    def idle() -> float:
+        return 0.0
+
+    def shut() -> None:
+        return None
+
+    monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(caster, "catt_can_lib_load", lambda: True)
+    monkeypatch.setattr(caster, "catt_lib_outcome", lambda *a, **k: caster.CATT_LIB_UNCONFIRMED)
+    monkeypatch.setattr(caster, "_catt_unconfirmed_notice", lambda: None)
+
+    def fake_sub(vtt, device, sub_lang, follow, kwargs):
+        kwargs[caster._SUB_IDLE_FOR] = idle
+        return shut
+
+    monkeypatch.setattr(caster, "_serve_subtitle", fake_sub)
+    monkeypatch.setattr(caster.srt, "to_vtt", lambda p: "WEBVTT")
+    monkeypatch.setattr(
+        caster.serve,
+        "schedule_reap",
+        lambda fn, seconds, **k: scheduled.update(fn=fn, s=seconds, k=k),
+    )
+    r = caster._cast_via_catt(
+        CFG, "T", "http://u", device="10.0.0.5", follow=False, sub_paths=("/tmp/x.srt",)
+    )
+    assert r.started is False and r.unconfirmed is True
+    assert scheduled["fn"] is shut
+    assert scheduled["s"] == caster.util.CATT_LIB_UNCONFIRMED_SERVE_S
+    assert scheduled["k"]["handle"] is shut
+    assert scheduled["k"]["idle_for"] is idle
+    assert scheduled["k"]["skip_if"] is not None

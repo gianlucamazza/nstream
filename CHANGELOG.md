@@ -53,11 +53,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   still unknown → no CLI, `CastResult(started=False,
   error=cast_never_started, unconfirmed=True)` (`--json` stays `ok: false`
   / `error: cast_failed` / `cast_error: cast_never_started`), notice
-  `cast_unconfirmed`, log `catt sender=lib unconfirmed`. Leftover servers
-  are reaped per-handle on HTTP idle (`CATT_LIB_UNCONFIRMED_SERVE_S`) or
-  skipped while the TV plays our content; headless bound is
-  `IDLE_EXIT_S` + `--stop`. CLI remains when `catt_can_lib_load()` is
-  false, the LOAD was never sent, or the TV refused our media.
+  `cast_unconfirmed`, log `catt sender=lib unconfirmed`. Leftover
+  remux/LAN/subtitle servers are reaped per-handle on HTTP idle
+  (`CATT_LIB_UNCONFIRMED_SERVE_S`); `skip_if` (`catt info`) runs once at
+  fire and re-arms a full window if the TV still has our content, not
+  every poll. Headless bound is `IDLE_EXIT_S` + `--stop`. CLI remains
+  when `catt_can_lib_load()` is false, the LOAD was never sent, or the
+  TV refused our media.
 - LAN-proxy `open_upstream` / `probe` pin each hop across **all** `getaddrinfo`
   results (skip blocked, interleave IPv6/IPv4, 2 per family, one connect
   deadline — not N×timeout — then `getpeername` per attempt), reject

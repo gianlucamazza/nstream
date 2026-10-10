@@ -110,10 +110,13 @@ LOAD is sent is a fail → CLI fallback. A session-wait raise **after** the
 LOAD is **unconfirmed**: no second CLI LOAD (that would wipe the poster).
 If the TV still has not confirmed our media after a short grace poll, the
 cast is reported as not started (`error: cast_never_started` / notice
-`cast_unconfirmed`) rather than success. Interactive follow (caster and
-remux) keeps polling; fire-and-return returns immediately. A leftover
-in-process remux/LAN server is reaped after 15 minutes of HTTP idle (or
-skipped while the TV is on our content). Headless leftover servers live
+`cast_unconfirmed`) rather than success. Interactive follow on caster
+keeps polling; remux follow polls once more (up to 40s) then returns
+not-started. Fire-and-return returns immediately. A leftover in-process
+remux/LAN/subtitle server is reaped after 15 minutes of HTTP idle (or a
+monotonic deadline when idle is unknown). The receiver probe (`skip_if`)
+runs once at that fire point and re-arms a full window if the TV still
+has our content — not on every poll. Headless leftover servers live
 until the detached idle limit (`IDLE_EXIT_S`, 3 h) or `--stop`. In-cast
 `a` (audio switch) reuses the same library/helper LOAD so title/artwork
 survive.

@@ -114,13 +114,16 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `unconfirmed=True` (internal; not a `--json` field). `--json` reuses
   ADR 0031: `ok: false`, `error: cast_failed`, `cast_error: cast_never_started`.
   UI notice `code=cast_unconfirmed`. Log `catt sender=lib unconfirmed`.
-- Leftover remux/LAN servers after an unconfirmed LOAD: each reaper owns
-  one handle/pid (`serve.schedule_reap(..., handle=, skip_if=has_load,
-  idle_for=)`). Reap on HTTP idleness (`CATT_LIB_UNCONFIRMED_SERVE_S` =
-  15 min) or skip/re-arm while the TV is on our content. A later cast
-  cancels the earlier handle. Headless: the parent timer dies with the
-  CLI; the real bound is the detached idle reaper (`serve.IDLE_EXIT_S` =
-  3 h) and `--stop`.
+- Leftover remux/LAN/subtitle servers after an unconfirmed LOAD: each
+  reaper owns one handle/pid (`serve.schedule_reap(..., handle=,
+  skip_if=has_load, idle_for=)`). The wait loop is cheap (`idle_for() >=
+  seconds` and/or a monotonic deadline). `skip_if()` (`catt info`) runs
+  **once** at the fire point; True re-arms a full new window from now —
+  never on the 1s poll (a mid-film `catt info` storm would open a Cast
+  connection every second). A later `register_inproc_proxy` cancels the
+  earlier generation. Self-fire clears `_inproc_proxy_shutdown`.
+  Headless: the parent timer dies with the CLI; the real bound is the
+  detached idle reaper (`serve.IDLE_EXIT_S` = 3 h) and `--stop`.
 - Worst-case send: library 55s + grace 20s + one status 10s ≈ 85s. CLI
   +30s only when no LOAD was sent. Remux follow-unconfirmed adds
   `_await_start` (40s). Click-flag retry is CLI-only, 30+30=60s.
@@ -151,6 +154,7 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
   `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_cast_argv`,
   `caster._cast_via_catt`, `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
-  `caster._hook_catt_play_media`, `serve.schedule_reap`, `serve.cancel_reap`,
+  `caster._hook_catt_play_media`, `caster._schedule_unconfirmed_sub_reap`,
+  `serve.schedule_reap`, `serve.cancel_reap`, `serve.register_inproc_proxy`,
   `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
   `bridge._media_load_args`.

@@ -849,6 +849,8 @@ def register_proxy_server(pid: int) -> None:
 
 
 _inproc_proxy_shutdown = None
+_reap_lock = threading.Lock()
+_reap_current: dict[object, object] = {}  # handle → generation; old threads exit
 
 
 def register_inproc_proxy(shutdown) -> None:
@@ -862,17 +864,16 @@ def register_inproc_proxy(shutdown) -> None:
 def reap_inproc_proxy() -> bool:
     """Shut a leftover in-process LAN proxy. True if there was one."""
     global _inproc_proxy_shutdown
-    fn = _inproc_proxy_shutdown
-    _inproc_proxy_shutdown = None
+    with _reap_lock:
+        fn = _inproc_proxy_shutdown
+        _inproc_proxy_shutdown = None
+        if fn is not None:
+            _reap_current.pop(fn, None)
     if fn is None:
         return False
-    cancel_reap(fn)
     with contextlib.suppress(Exception):
         fn()
     return True
-
-
-_reap_live: set[object] = set()
 
 
 def schedule_reap(
@@ -886,18 +887,21 @@ def schedule_reap(
 ) -> None:
     """Reap only `fn` (this server/pid). Daemon: process exit also ends it.
 
-    `handle` is this leftover's identity; `cancel_reap(handle)` or a later
-    `schedule_reap` with the same handle supersedes it. A different handle
-    is a different server — this timer will not close it.
+    `handle` is this leftover's identity. Each schedule stores a fresh
+    generation; `cancel_reap(handle)`, `register_inproc_proxy` (via
+    `reap_inproc_proxy`), or a later `schedule_reap` on the same handle
+    makes the old thread exit. A different handle is a different server.
 
-    When `idle_for` is set, wait until it reports ≥ `seconds` of HTTP idle
-    (a playing HEVC cast keeps requesting). `skip_if()` True (receiver has
-    our content) re-arms. Headless: the thread dies with the CLI; the
-    detached child is bounded by `IDLE_EXIT_S` / `--stop`.
+    The wait loop is cheap: HTTP `idle_for() >= seconds` and/or a monotonic
+    deadline. `skip_if()` (a `catt info` probe) runs **once** at the fire
+    point; True re-arms a full new window from now. Headless: the thread
+    dies with the CLI; the detached child is bounded by `IDLE_EXIT_S` /
+    `--stop`.
     """
-    token: object = object() if handle is None else handle
-    _reap_live.discard(token)
-    _reap_live.add(token)
+    key: object = object() if handle is None else handle
+    gen = object()
+    with _reap_lock:
+        _reap_current[key] = gen
     if poll is not None:
         poll_s = poll
     elif seconds < 1:
@@ -905,40 +909,60 @@ def schedule_reap(
     else:
         poll_s = min(1.0, max(0.05, seconds / 4))
 
+    def _current() -> bool:
+        with _reap_lock:
+            return _reap_current.get(key) is gen
+
+    def _take() -> bool:
+        """Atomic: if this generation is still live, drop it (and the inproc
+        slot when it names this server) then return True so the caller can fire."""
+        global _inproc_proxy_shutdown
+        with _reap_lock:
+            if _reap_current.get(key) is not gen:
+                return False
+            del _reap_current[key]
+            if _inproc_proxy_shutdown is not None and _inproc_proxy_shutdown in (fn, key):
+                _inproc_proxy_shutdown = None
+            return True
+
     def later() -> None:
         deadline = time.monotonic() + max(seconds, 0.0)
         while True:
-            if token not in _reap_live:
+            if not _current():
                 return
-            if skip_if is not None and skip_if():
-                deadline = time.monotonic() + max(seconds, 0.05)
-                time.sleep(poll_s)
-                continue
+            leftover = deadline - time.monotonic()
+            idle_ready = True
             if idle_for is not None:
                 try:
-                    idle = float(idle_for())
+                    idle_ready = float(idle_for()) >= seconds
                 except Exception:
-                    idle = 0.0
-                if idle >= seconds:
-                    break
-                time.sleep(poll_s)
-                continue
-            leftover = deadline - time.monotonic()
-            if leftover <= 0:
+                    idle_ready = False
+            if leftover <= 0 and idle_ready:
                 break
-            time.sleep(min(poll_s, leftover))
-        if token not in _reap_live:
+            if leftover <= 0 and idle_for is None:
+                break
+            nap = poll_s if leftover <= 0 else min(poll_s, leftover)
+            time.sleep(max(nap, 0.0))
+        if not _current():
             return
         if skip_if is not None and skip_if():
-            schedule_reap(fn, seconds, handle=token, skip_if=skip_if, idle_for=idle_for, poll=poll)
+            if _current():
+                schedule_reap(
+                    fn,
+                    seconds,
+                    handle=key,
+                    skip_if=skip_if,
+                    idle_for=idle_for,
+                    poll=poll,
+                )
             return
-        _reap_live.discard(token)
+        if not _take():
+            return
         with contextlib.suppress(Exception):
             fn()
 
     if seconds <= 0 and idle_for is None and skip_if is None:
-        if token in _reap_live:
-            _reap_live.discard(token)
+        if _take():
             with contextlib.suppress(Exception):
                 fn()
         return
@@ -947,7 +971,8 @@ def schedule_reap(
 
 def cancel_reap(handle: object) -> None:
     """Drop a pending owned reaper (a later cast replaced this server)."""
-    _reap_live.discard(handle)
+    with _reap_lock:
+        _reap_current.pop(handle, None)
 
 
 def reap_proxy_server() -> bool:

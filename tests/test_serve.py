@@ -407,6 +407,111 @@ def test_schedule_reap_does_not_close_later_server():
     assert "old" not in closed
 
 
+def test_schedule_reap_skip_if_not_called_while_busy():
+    """idle_for()==0 keeps the cheap loop; skip_if (catt info) is never probed."""
+    probes: list[int] = []
+    hits: list[int] = []
+    handle = object()
+    try:
+        serve.schedule_reap(
+            lambda: hits.append(1),
+            0.12,
+            handle=handle,
+            skip_if=lambda: probes.append(1) or False,
+            idle_for=lambda: 0.0,
+            poll=0.03,
+        )
+        time.sleep(0.22)
+        assert probes == []
+        assert hits == []
+    finally:
+        serve.cancel_reap(handle)
+
+
+def test_schedule_reap_skip_if_once_per_window():
+    """After idle expiry, skip_if True is once per window — not per poll."""
+    probes: list[int] = []
+    hits: list[int] = []
+    idle = {"v": 0.0}
+    handle = object()
+    try:
+        serve.schedule_reap(
+            lambda: hits.append(1),
+            0.16,
+            handle=handle,
+            skip_if=lambda: probes.append(1) or True,
+            idle_for=lambda: idle["v"],
+            poll=0.03,
+        )
+        time.sleep(0.22)
+        assert probes == [] and hits == []
+        idle["v"] = 1.0
+        assert _wait_until(lambda: len(probes) >= 1)
+        assert len(probes) == 1
+        time.sleep(0.08)  # several poll ticks, still inside the re-armed window
+        assert len(probes) == 1
+        assert _wait_until(lambda: len(probes) >= 2)
+        assert len(probes) == 2
+        assert hits == []
+    finally:
+        serve.cancel_reap(handle)
+
+
+def test_schedule_reap_cancelled_by_later_inproc_registration():
+    """A real second register_inproc_proxy reaps A and cancels A's timer."""
+    closed: list[str] = []
+
+    def old() -> None:
+        closed.append("old")
+
+    def new() -> None:
+        closed.append("new")
+
+    try:
+        serve.register_inproc_proxy(old)
+        serve.schedule_reap(old, 0.20, handle=old)
+        serve.register_inproc_proxy(new)
+        serve.schedule_reap(new, 0.40, handle=new)
+        assert closed == ["old"]
+        time.sleep(0.28)
+        assert closed == ["old"]
+    finally:
+        serve.cancel_reap(old)
+        serve.cancel_reap(new)
+        serve.reap_inproc_proxy()
+    assert closed == ["old", "new"]
+
+
+def test_schedule_reap_self_fire_clears_inproc_slot():
+    hits: list[int] = []
+
+    def shutdown() -> None:
+        hits.append(1)
+
+    try:
+        serve.register_inproc_proxy(shutdown)
+        serve.schedule_reap(shutdown, 0.05, handle=shutdown)
+        assert _wait_until(lambda: hits == [1])
+        assert serve.reap_inproc_proxy() is False
+        assert hits == [1]
+    finally:
+        serve.cancel_reap(shutdown)
+        serve.reap_inproc_proxy()
+
+
+def test_schedule_reap_reschedule_replaces_thread():
+    """A later schedule_reap on the same handle retires the earlier thread."""
+    hits: list[str] = []
+    try:
+        serve.schedule_reap(lambda: hits.append("a"), 0.08, handle="h")
+        serve.schedule_reap(lambda: hits.append("b"), 0.08, handle="h")
+        assert _wait_until(lambda: "b" in hits)
+        time.sleep(0.12)
+        assert hits == ["b"]
+    finally:
+        serve.cancel_reap("h")
+
+
 def test_detached_server_exits_when_idle(tmp_path):
     f = tmp_path / "m.mp4"
     f.write_bytes(b"x" * 10)
