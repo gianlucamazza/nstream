@@ -478,16 +478,23 @@ def catt_receiver_has_load(device: str | None, url: str) -> bool:
 
 
 def _catt_lib_finish(device: str, url: str, outcome: str) -> bool:
-    """Map a lib/helper outcome to bool. Timeout is 'loaded, unconfirmed'."""
+    """Map a lib/helper outcome to bool. A sent LOAD is 'loaded, unconfirmed'.
+
+    catt `play_media_url` calls pychromecast `play_media` first, then waits for
+    the media session (WAIT_TIMEOUT ≈ 30s). A native HEVC LAN start often misses
+    that window and raises *after* the LOAD (title + thumb + metadataType) is
+    already on the TV. That is not `_LIB_FAIL`: the caller must not CLI-fallback
+    (a second LOAD would wipe metadataType 1 / images down to GENERIC 0).
+    """
     if outcome == _LIB_OK:
         return True
     if outcome != _LIB_UNCONFIRMED:
         return False
     if catt_receiver_has_load(device, url):
         _log.debug("catt lib LOAD unconfirmed → receiver already has media")
-        return True
-    _log.warning("catt lib LOAD timed out; receiver has no matching media")
-    return False
+    else:
+        _log.info("catt sender=lib (unconfirmed; no CLI)")
+    return True
 
 
 def _catt_play_media_kwargs(load: dict) -> dict:
@@ -498,17 +505,18 @@ def _catt_play_media_kwargs(load: dict) -> dict:
 
 
 def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) -> str:
-    """play_media_url on a worker thread. Timeout → unconfirmed (LOAD may be sent)."""
-    box: dict[str, object] = {"ok": False, "err": ""}
+    """play_media_url on a worker thread. Timeout after the LOAD → unconfirmed."""
+    box: dict[str, object] = {"ok": False, "err": "", "sent": False}
     kwargs = _catt_play_media_kwargs(load)
 
     def run() -> None:
         try:
             dev = Device(**ident)
             dev.controller.prep_app()
+            box["sent"] = True  # play_media_url sends LOAD before its session wait
             dev.controller.play_media_url(url, **kwargs)
             box["ok"] = True
-        except Exception as exc:  # catt/pychromecast: device missing, LOAD refused, …
+        except Exception as exc:  # catt/pychromecast: device missing, session wait, …
             box["err"] = type(exc).__name__
 
     worker = threading.Thread(target=run, name="nstream-catt-lib", daemon=True)
@@ -516,9 +524,12 @@ def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) ->
     worker.join(util.CATT_LIB_LOAD_TIMEOUT)
     if worker.is_alive():
         _log.warning("catt lib LOAD timed out")
-        return _LIB_UNCONFIRMED
+        return _LIB_UNCONFIRMED if box["sent"] else _LIB_FAIL
     if box["ok"]:
         return _LIB_OK
+    if box["sent"]:
+        _log.warning("catt lib LOAD unconfirmed after play_media_url: %s", box["err"] or "unknown")
+        return _LIB_UNCONFIRMED
     _log.warning("catt lib LOAD failed: %s", box["err"] or "unknown")
     return _LIB_FAIL
 
@@ -535,12 +546,13 @@ def catt_lib_play(
 ) -> bool:
     """One LOAD via catt.api (in-process, else `_catt_load.py` on catt's Python).
 
-    Does not log `url`. False on import/device/LOAD failure so the caller can fall
-    back to the CLI. A timeout is unconfirmed: the caller must not fallback or
-    tear down a remux server until `catt_receiver_has_load` is False. Uses
-    `play_media_url` (no yt-dlp; no play_url PLAYING wait). Outer bound is
-    CATT_LIB_LOAD_TIMEOUT (above catt's 30s PLAYING wait + connect). `device`
-    is an IP or a friendly name (`catt -d` accepts both).
+    Does not log `url`. False only when no LOAD was sent (import / device /
+    prep_app / helper missing) so the caller can fall back to the CLI. A
+    timeout or a `play_media_url` raise after the LOAD is unconfirmed: the
+    caller must not CLI-fallback or tear down a remux/LAN server (ADR 0050).
+    Uses `play_media_url` (no yt-dlp; no play_url PLAYING wait). Outer bound
+    is CATT_LIB_LOAD_TIMEOUT (above catt's 30s session wait + connect).
+    `device` is an IP or a friendly name (`catt -d` accepts both).
     """
     load = catt_play_kwargs(
         title, meta, content_type=content_type, start=start, subtitle_url=subtitle_url
@@ -576,9 +588,13 @@ def catt_lib_play(
     except (OSError, subprocess.SubprocessError) as exc:
         _log.warning("catt helper LOAD failed: %s", type(exc).__name__)
         return False
-    if proc.returncode != 0:
-        _log.warning("catt helper LOAD rc=%s", proc.returncode)
+    if proc.returncode in (2, 3):
+        _log.warning("catt helper LOAD rc=%s (never sent)", proc.returncode)
         return False
+    if proc.returncode != 0:
+        # rc 1: play_media_url raised — LOAD is the first call, then the session wait.
+        _log.warning("catt helper LOAD rc=%s", proc.returncode)
+        return _catt_lib_finish(device, url, _LIB_UNCONFIRMED)
     return True
 
 
@@ -1161,7 +1177,10 @@ def _cast_via_catt(
     `cast_flow` turns pos/dur into the advance decision (ADR 0029).
 
     Prefers catt ≥0.13.2 **library** `play_media_url` (title + Cinemeta/metahub thumb
-    + BUFFERED in one LOAD, ADR 0050). CLI fallback: `-l` + `--stream-type` (no `--thumb`).
+    + BUFFERED in one LOAD, ADR 0050) for remux, LAN Range-proxy, hev1-rewrap, and
+    direct LAN URLs. CLI fallback (`-l` + `--stream-type`; no `--thumb`) only when
+    `catt_can_lib_load()` is false or the library call raises before a LOAD.
+    A post-LOAD session timeout is loaded/unconfirmed — no second CLI LOAD.
     Older catt (0.13.0/0.13.1) keeps the pre-0050 argv so click does not reject `-l`.
 
     `follow=False` (headless fire-and-return): once the LOAD has handed the media to
@@ -1179,24 +1198,30 @@ def _cast_via_catt(
             sub_shutdown = _serve_subtitle(vtt, device, None, follow, cap)
         ui.status(f"consegno a {dest}…", kind="tv")
         lib_attempted = True
-        loaded = catt_lib_play(
-            device,
-            url,
-            title=title,
-            meta=meta,
-            start=start,
-            content_type=(meta.content_type if meta and meta.content_type else ""),
-            subtitle_url=str(cap.get("subtitle_url") or ""),
-        )
+        try:
+            loaded = catt_lib_play(
+                device,
+                url,
+                title=title,
+                meta=meta,
+                start=start,
+                content_type=(meta.content_type if meta and meta.content_type else ""),
+                subtitle_url=str(cap.get("subtitle_url") or ""),
+            )
+        except Exception as exc:  # lib path raised before a LOAD — CLI is the fallback
+            _log.warning("catt lib LOAD raised: %s → CLI fallback", type(exc).__name__)
+            loaded = False
+            lib_attempted = False
         if loaded:
-            _log.debug("catt lib LOAD ok (url redacted)")
+            _log.info("catt sender=lib")
         else:
-            _log.debug("catt lib LOAD missed → CLI fallback")
+            _log.info("catt lib LOAD never sent → CLI fallback")
             if sub_shutdown is not None:
                 sub_shutdown()
                 sub_shutdown = None
             serve.reap_sub_server()
     if not loaded:
+        _log.info("catt sender=cli")
         launch = catt_cast_argv(
             device,
             url,

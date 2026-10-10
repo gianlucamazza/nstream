@@ -95,24 +95,27 @@ stderr shows a prepare message during remux. JSON field `reencoded: true` when r
 
 ### Remux / file metadata on the TV (ADR 0050)
 
-A complete-file remux is a local `cast-*.mp4`. catt's CLI would otherwise LOAD that
-stem as the title and leave `streamType` unset. nstream serves the file (Range HTTP)
-and calls catt **≥0.13.2 library** `play_media_url` so one LOAD has the Cinemeta
+A complete-file remux is a local `cast-*.mp4`. The same library LOAD is used for
+a LAN Range-proxy, an hev1 rewrap, and a direct LAN URL. catt's CLI would
+otherwise LOAD a remux stem as the title, leave `streamType` unset, and send
+`metadataType` 0 with no artwork. nstream serves the bytes (Range HTTP) and
+calls catt **≥0.13.2 library** `play_media_url` so one LOAD has the Cinemeta
 title, the public Cinemeta/metahub HTTPS poster (`thumb` → `images[0].url`),
-`contentType: video/mp4`, and `streamType: BUFFERED`. The poster is **not**
-rewritten onto the remux host — the TV fetches Cinemeta/metahub itself. Other
-https hosts are not sent as `thumb`. If `catt.api` cannot be imported, the CLI
-fallback still sends `-l` + `--stream-type BUFFERED` (no artwork). A library
-timeout is confirmed against the receiver before a second LOAD or tearing down
-the remux server (the TV may already have the media). In-cast `a` (audio
-switch) reuses the same library/helper LOAD so title/artwork survive.
+`contentType` (`video/mp4` on remux/file; the LAN mime on a proxy), and
+`streamType: BUFFERED`. The poster is **not** rewritten onto the remux/LAN
+host — the TV fetches Cinemeta/metahub itself. Other https hosts are not sent
+as `thumb`. If `catt.api` cannot be imported, the CLI fallback still sends `-l`
++ `--stream-type BUFFERED` (no artwork). A library timeout or a session-wait
+raise after the LOAD is **loaded, unconfirmed** — no second CLI LOAD (that
+would wipe the poster). In-cast `a` (audio switch) reuses the same
+library/helper LOAD so title/artwork survive.
 
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |
 | --- | --- | --- | --- |
 | `metadata.title` | Cinemeta title | `-l` | same (+ TvShow block) |
 | `metadata.images` / poster | Cinemeta/metahub **https** `thumb` | **not sent** (no `--thumb`) | Cinemeta HTTPS poster |
 | `metadataType` | 1 Movie / 2 TvShow (`media_info`) | GENERIC (0) | Movie / TvShow |
-| `contentType` | `video/mp4` (remux); container MIME on URL | path guess | declared |
+| `contentType` | `video/mp4` (remux); LAN mime on proxy | path guess | declared |
 | `streamType` | `BUFFERED` | `BUFFERED` | BUFFERED (live HLS is another path) |
 
 A custom receiver id is not required for DMR title+poster and is not launched on

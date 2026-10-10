@@ -105,6 +105,16 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   JSONL still prefers castbridge.
 - `--json` shape unchanged (no new fields). `--status` already reports receiver
   `title` / `content_type` / `stream_type`.
+- **LAN / HEVC (board 2026-10-10, main @ 26970282):** catt `play_media_url`
+  sends the LOAD (metadataType 1 + `thumb`/`images`) then waits for the media
+  session (`WAIT_TIMEOUT` ≈ 30s). A native HEVC LAN start can miss that window
+  and raise after the LOAD is already on the TV. `_cast_via_catt` used to treat
+  that as `_LIB_FAIL` and CLI-fallback, overwriting chrome to GENERIC 0 / no
+  images. A post-LOAD timeout or CastError is now **loaded, unconfirmed**: no
+  second CLI LOAD. Applies to LAN Range-proxy, hev1 rewrap (`remux.cast_file`),
+  and direct LAN URLs. CLI remains only when `catt_can_lib_load()` is false or
+  the library call raises before a LOAD. Logged as `catt sender=lib` /
+  `catt sender=cli` (never the URL).
 
 ## References
 
@@ -115,5 +125,6 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   `thumb` → `images[]`).
 - Symbols:   `caster.catt_lib_play`, `caster.catt_receiver_has_load`, `caster.catt_play_kwargs`,
   `caster.catt_lib_media_info`, `caster.catt_cast_argv`, `caster._cast_via_catt`,
+  `caster._catt_inprocess_play`, `caster._catt_lib_finish`,
   `nstream._catt_load`, `remux._cast_file_via_catt_lib`, `remux.cast_file`,
   `bridge._media_load_args`.

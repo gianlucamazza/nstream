@@ -1322,6 +1322,73 @@ def test_cast_lib_timeout_confirmed_skips_cli(monkeypatch):
     assert not [c for c in calls if "cast" in c and url in c]
 
 
+def test_catt_lib_play_session_wait_raise_is_unconfirmed(monkeypatch):
+    """play_media_url raises after sending LOAD → loaded, unconfirmed (no CLI)."""
+    seen: dict = {}
+
+    class _Ctrl:
+        def prep_app(self):
+            return None
+
+        def play_media_url(self, url, **kw):
+            seen["url"] = url
+            seen["kw"] = kw
+            raise RuntimeError("CastError")
+
+    class _Dev:
+        def __init__(self, **kw):
+            return None
+
+        @property
+        def controller(self):
+            return _Ctrl()
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: _Dev)
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    assert caster.catt_lib_play(
+        "10.0.0.5",
+        url,
+        title="The Nice Guys",
+        meta=caster.CastMeta(poster=poster, content_type="video/mp4"),
+    )
+    assert seen["url"] == url
+    assert seen["kw"]["thumb"] == poster
+    assert seen["kw"]["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+
+
+def test_catt_helper_rc1_is_unconfirmed(monkeypatch):
+    """Helper rc 1 is play_media_url after LOAD — not a never-sent miss."""
+    url = "http://192.168.1.10:45000/cast/tok/stream.mp4"
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+
+    class _P:
+        returncode = 1
+        stdout = ""
+        stderr = "catt-load: play_media_url failed"
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda *a, **k: _P())
+    monkeypatch.setattr(caster, "receiver_info", lambda dev: {})
+    assert caster.catt_lib_play("10.0.0.5", url, title="T") is True
+
+
+def test_catt_helper_rc2_never_sent(monkeypatch):
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python")
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+
+    class _P:
+        returncode = 2
+        stdout = ""
+        stderr = "catt-load: url required"
+
+    monkeypatch.setattr(caster.subprocess, "run", lambda *a, **k: _P())
+    assert caster.catt_lib_play("10.0.0.5", "http://u", title="T") is False
+
+
 def test_catt_lib_play_false_before_0_13_2(monkeypatch):
     monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: False)
     monkeypatch.setattr(caster, "catt_inprocess_supports_load_meta", lambda: False)

@@ -596,8 +596,8 @@ def test_cast_file_catt_lib_follow_waits_for_start_before_idle(monkeypatch, tmp_
     assert srv.down and not f.exists()
 
 
-def test_cast_file_catt_lib_start_miss_falls_back_to_cli(monkeypatch, tmp_path):
-    """Library LOAD that never reaches PLAYING keeps the temp for the CLI fallback."""
+def test_cast_file_catt_lib_start_miss_no_cli(monkeypatch, tmp_path):
+    """LOAD already sent: a late PLAYING wait must not CLI-overwrite metadata."""
     f = _tmp_remux(tmp_path)
     rec, _proc = _catt_wiring(monkeypatch)
     monkeypatch.setattr(remux.caster, "catt_can_lib_load", lambda: True)
@@ -608,17 +608,12 @@ def test_cast_file_catt_lib_start_miss_falls_back_to_cli(monkeypatch, tmp_path):
         lambda ip, port, tok: f"http://{ip}:{port}/cast/{tok}/stream.mp4",
     )
     monkeypatch.setattr(remux.caster, "catt_lib_play", lambda *a, **k: True)
-    n = {"await": 0}
-
-    def await_start(_dev):
-        n["await"] += 1
-        return n["await"] > 1  # lib miss, then CLI handoff
-
-    monkeypatch.setattr(remux, "_await_start", await_start)
+    monkeypatch.setattr(remux, "_await_start", lambda dev: False)
+    monkeypatch.setattr(remux.caster, "catt_receiver_has_load", lambda *a, **k: False)
     out = remux.cast_file(_cfg(), "The Nice Guys", str(f), device="10.0.0.5", follow=False)
-    assert out.started is True
-    assert 777 in rec["killed"]
-    assert rec["popen"][0][0][:4] == ["catt", "-d", "10.0.0.5", "cast"]
+    assert out.started is True and out.error is None
+    assert rec["killed"] == []
+    assert rec["popen"] == []
     assert f.exists()
 
 

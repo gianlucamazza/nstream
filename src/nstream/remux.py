@@ -719,10 +719,11 @@ def _cast_file_via_catt_lib(
 ) -> cast_delivery.CastResult | None:
     """Serve the remux and LOAD via catt.api (title + https thumb + video/mp4 + BUFFERED).
 
-    None when catt.api is unavailable or the LOAD fails, so `cast_file` falls back to
-    the CLI (temp kept). A library timeout is confirmed on the receiver before this
-    returns None — do not kill a server the TV is already reading. nstream owns the
-    Range server (ADR 0007); catt is the sender only.
+    None when catt.api is unavailable or no LOAD was sent, so `cast_file` falls back
+    to the CLI (temp kept). A library timeout or a `play_media_url` raise after the
+    LOAD is unconfirmed — do not CLI-overwrite metadata and do not kill a server the
+    TV is already reading. nstream owns the Range server (ADR 0007); catt is the
+    sender only.
     """
     if not caster.catt_can_lib_load():
         return None
@@ -753,10 +754,12 @@ def _cast_file_via_catt_lib(
             content_type=meta.content_type or "video/mp4",
             subtitle_url=sub_url,
         )
-        if not (ok and _await_start(device)) and not caster.catt_receiver_has_load(device, served):
+        # LOAD already sent (ok) or the TV already has our path: never CLI-overwrite.
+        if not ok and not caster.catt_receiver_has_load(device, served):
             _kill(pid)
             _rm(vtt_persist)
             return None
+        _await_start(device)
         _write_state(pid, file_path, device, mode="serve")
         ui.cast_live(device, follow=False)
         if on_event:
@@ -778,10 +781,11 @@ def _cast_file_via_catt_lib(
             subtitle_url=sub_url,
         )
         # Do not treat a pre-start IDLE as ended — wait for PLAYING first.
-        # Late LOAD: if the TV already has our capability path, do not return
-        # None (that would CLI-fallback / second LOAD) and do not kill the server.
-        if not (ok and _await_start(device)) and not caster.catt_receiver_has_load(device, served):
+        # A sent LOAD (ok) or the TV already on our path: do not return None
+        # (that would CLI-fallback / second LOAD) and do not kill the server.
+        if not ok and not caster.catt_receiver_has_load(device, served):
             return None
+        _await_start(device)
         keep_temp = False
         ui.cast_live(device, follow=True)
         if on_event:

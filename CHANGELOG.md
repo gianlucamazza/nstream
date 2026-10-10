@@ -41,6 +41,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **LAN catt poster (ADR 0050):** a LAN / hev1 / direct-LAN load that already
+  sent `play_media_url` (metadataType 1 + Cinemeta/metahub `images[]`) no
+  longer CLI-falls-back when catt's 30s media-session wait raises. That second
+  LOAD was wiping the poster to GENERIC 0 (`catt info` on the Philips board).
+  CLI remains only when `catt_can_lib_load()` is false or the library call
+  raises before a LOAD. Logged `catt sender=lib` / `catt sender=cli` (no URL).
 - LAN-proxy `open_upstream` / `probe` pin each hop across **all** `getaddrinfo`
   results (skip blocked, interleave IPv6/IPv4, 2 per family, one connect
   deadline — not N×timeout — then `getpeername` per attempt), reject
