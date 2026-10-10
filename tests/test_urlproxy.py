@@ -72,7 +72,8 @@ def test_loopback_and_non_http_urls_pass_through():
 
 
 def test_is_remote_skips_lan_and_stubs():
-    assert urlproxy.is_remote("https://debrid.example/realdebrid=SECRET/f.mp4")
+    assert urlproxy.is_remote("https://debrid.example.com/realdebrid=SECRET/f.mp4")
+    assert not urlproxy.is_remote("http://rd.example/f.mp4")  # RFC 2606 stub
     assert not urlproxy.is_remote("http://127.0.0.1:8090/stream/x")
     assert not urlproxy.is_remote("http://192.168.1.10:8090/f.mp4")
     assert not urlproxy.is_remote("http://10.0.0.5/f.mp4")

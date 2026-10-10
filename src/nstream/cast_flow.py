@@ -357,8 +357,7 @@ def _settle(
         # MKV is already needs_rewrap (ADR 0022). Probe is memoized for lan_media.
         tr = tracks.probe_tracks(chosen["url"])
         lan = urlproxy.plan(container, urlproxy.probe(chosen["url"]), tr.video_codec, tr.codec_tag)
-        if lan.mode == "fail":
-            raise CastRemuxInfeasible(lan.reason)
+        # probe fail: caster.cast fail-closes (do not invent remux_infeasible for a stub url)
         if lan.mode in ("rewrap", "cache"):
             needs_remux = True
             if lan.reason in ("container", "hev1"):

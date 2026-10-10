@@ -200,7 +200,11 @@ def _resolves_private(host: str) -> bool:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror:
         return False
-    return any(_is_private_host(info[4][0]) or _is_local(info[4][0]) for info in infos)
+    for info in infos:
+        ip = info[4][0]
+        if isinstance(ip, str) and (_is_private_host(ip) or _is_local(ip)):
+            return True
+    return False
 
 
 def open_upstream(url: str, method: str, rng: str | None, timeout: float = _UPSTREAM_TIMEOUT):
@@ -248,12 +252,14 @@ def copy_body(
     delivered. A drop is an error OR an early EOF: http.client returns b"" short of the
     Content-Length instead of raising. `rng` must be a start-end Range (normalize suffix
     ranges via `range_from_content_range` first). Client-gone writes are silent."""
-    spec = _resume_spec(rng) or _resume_spec("bytes=0-")
-    first, last = spec
-    # A suffix (`bytes=-N`) is not a start-end spec: refuse to resume from 0+sent.
-    if rng and _resume_spec(rng) is None:
-        resumable = False
+    parsed = _resume_spec(rng)
+    if parsed is None:
+        # Suffix / missing: do not guess start=0 on resume.
         first, last = 0, ""
+        if rng:
+            resumable = False
+    else:
+        first, last = parsed
     sent = 0
     tries = 0
     while True:
@@ -336,6 +342,8 @@ def is_remote(url: str) -> bool:
     host = (parts.hostname or "").lower()
     if not host or _is_local(host) or _is_private_host(host):
         return False
+    if host.endswith((".example", ".test", ".invalid", ".localhost")):
+        return False  # RFC 2606 / test stubs (http://rd.example/…)
     if parts.path.startswith("/cast/"):
         return False
     return "." in host or ":" in host
