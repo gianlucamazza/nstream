@@ -48,6 +48,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   from a strict IMDb id (`^tt\d{1,10}$`), else none. Search-hit Amazon
   CDN URLs stay off the allowlist (they were why `poster.jpg` 404'd and
   LOAD had no `images`). INFO `cast poster source=` with no URL.
+  Malformed poster URLs (`urlsplit` / `.hostname` ValueError) are
+  skipped, not fatal; `resolve_cast_poster` never raises.
 - **LAN catt poster JPEG (ADR 0050):** headless `--json --cast` now
   passes Cinemeta `meta.poster` through `lan_media`. On a LAN Range
   proxy the LOAD `images[0].url` is the token-gated

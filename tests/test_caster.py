@@ -1070,6 +1070,37 @@ def test_resolve_cast_poster_allowlisted_search_when_no_meta():
     assert caster.resolve_cast_poster("", search, "tt1") == search
 
 
+def test_resolve_cast_poster_malformed_search_falls_through_to_derived(caplog):
+    """A bad search/cache URL must not abort: fall through to derived metahub."""
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+    bad = "https://[::1"
+    assert caster.catt_poster_url(bad) == ""
+    assert caster.catt_jpeg_poster_url(bad) == ""
+    assert caster.catt_image_url(bad) == ""
+    assert caster.catt_image_url("http://[::1/cast/tok/poster.jpg") == ""
+    assert caster._scrub_catt_load_url(bad) == "<url>"
+    got = caster.resolve_cast_poster("", bad, "tt6263850")
+    assert got == "https://images.metahub.space/poster/medium/tt6263850/img"
+    assert "source=derived" in caplog.text
+    assert "[::1" not in caplog.text
+
+
+def test_resolve_cast_poster_never_raises(monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="nstream.cast")
+
+    def boom(_poster: str) -> str:
+        raise RuntimeError("poster helper exploded")
+
+    monkeypatch.setattr(caster, "catt_jpeg_poster_url", boom)
+    assert caster.resolve_cast_poster("https://x", "https://y", "tt1") == ""
+    assert "source=none" in caplog.text
+    assert "http" not in caplog.text
+
+
 def test_catt_lib_load_debug_redacts_token(caplog):
     """`--debug` LOAD dump keeps the path, never the capability token."""
     import logging

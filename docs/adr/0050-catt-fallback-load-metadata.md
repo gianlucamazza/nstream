@@ -195,7 +195,9 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   when the id matches `^tt\d{1,10}$` (episode `:s:e` stripped first);
   (d) empty. Amazon CDN is **not** added to the allowlist. INFO log
   `cast poster source=` (`meta` / `search` / `derived` / `none`) with
-  no URL.
+  no URL. Poster helpers catch `urlsplit` / `.hostname` `ValueError`
+  (malformed IPv6/port) and return empty so a bad API/cache string
+  falls through; `resolve_cast_poster` never raises.
 - **Mute flip on LOAD:** nstream's library path never sends `SET_VOLUME` or
   `set_volume_muted`. catt 0.13.3 `play_media_url` (controllers.py:597-608)
   forwards only url/content_type/current_time/title/thumb/subtitles/

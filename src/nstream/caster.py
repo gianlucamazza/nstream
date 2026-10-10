@@ -96,13 +96,32 @@ def catt_display_title(title: str, meta: CastMeta | None = None) -> str:
 _LAN_POSTER_PATH = re.compile(r"^/cast/[^/]+/poster\.jpg$")
 
 
+def _urlsplit(raw: str) -> urllib.parse.SplitResult | None:
+    """`urlsplit` that never raises. Malformed IPv6 / port → None."""
+    try:
+        return urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+
+
+def _url_host(parts: urllib.parse.SplitResult) -> str:
+    """Hostname from a split URL. Invalid port → empty (`.hostname` can raise)."""
+    try:
+        return (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return ""
+
+
 def catt_poster_url(poster: str) -> str:
     """Cinemeta / metahub HTTPS poster the TV fetches itself. Empty otherwise —
     never rewritten onto the remux/debrid host, never an arbitrary https URL."""
     raw = (poster or "").strip()
     if not raw.startswith("https://"):
         return ""
-    host = (urllib.parse.urlsplit(raw).hostname or "").lower().rstrip(".")
+    parts = _urlsplit(raw)
+    if parts is None:
+        return ""
+    host = _url_host(parts)
     if not host:
         return ""
     if serve.poster_host_allowed(host):
@@ -118,7 +137,9 @@ def catt_jpeg_poster_url(poster: str) -> str:
         return ""
     if raw.lower().endswith(".webp"):
         return ""
-    parts = urllib.parse.urlsplit(raw)
+    parts = _urlsplit(raw)
+    if parts is None:
+        return ""
     path = parts.path or ""
     if "/poster/small/" in path:
         path = path.replace("/poster/small/", "/poster/medium/", 1)
@@ -132,8 +153,10 @@ def catt_image_url(poster: str) -> str:
     debrid host."""
     raw = (poster or "").strip()
     if raw.startswith("http://"):
-        parts = urllib.parse.urlsplit(raw)
-        if _LAN_POSTER_PATH.match(parts.path or "") and (parts.hostname or ""):
+        parts = _urlsplit(raw)
+        if parts is None:
+            return ""
+        if _LAN_POSTER_PATH.match(parts.path or "") and _url_host(parts):
             return raw
         return ""
     return catt_jpeg_poster_url(raw)
@@ -163,22 +186,26 @@ def resolve_cast_poster(
     Order: (a) full Cinemeta meta poster if allowlisted; (b) search-hit poster
     if allowlisted; (c) derived metahub `/poster/medium/<imdb_id>/img` when
     `imdb_id` is a strict IMDb id; (d) empty. Never allowlists the Amazon CDN.
-    Logs `source=` at INFO with no URL.
+    Logs `source=` at INFO with no URL. Never raises: a bad poster string
+    must not abort the cast.
     """
-    jpeg = catt_jpeg_poster_url(full_meta_poster)
-    if jpeg:
-        source = "meta"
-        url = jpeg
-    else:
-        jpeg = catt_jpeg_poster_url(search_poster)
+    try:
+        jpeg = catt_jpeg_poster_url(full_meta_poster)
         if jpeg:
-            source = "search"
+            source = "meta"
             url = jpeg
         else:
-            ident = poster_imdb_id(imdb_id)
-            derived = _METAHUB_MEDIUM.format(imdb_id=ident) if ident else ""
-            url = catt_jpeg_poster_url(derived)
-            source = "derived" if url else "none"
+            jpeg = catt_jpeg_poster_url(search_poster)
+            if jpeg:
+                source = "search"
+                url = jpeg
+            else:
+                ident = poster_imdb_id(imdb_id)
+                derived = _METAHUB_MEDIUM.format(imdb_id=ident) if ident else ""
+                url = catt_jpeg_poster_url(derived)
+                source = "derived" if url else "none"
+    except Exception:
+        source, url = "none", ""
     _log.info("cast poster source=%s", source)
     return url
 
@@ -462,12 +489,14 @@ def _scrub_catt_load_url(raw: str) -> str:
     text = (raw or "").strip()
     if not text:
         return text
-    parts = urllib.parse.urlsplit(text)
+    parts = _urlsplit(text)
+    if parts is None:
+        return "<url>"
     path = parts.path or ""
     if path.startswith("/cast/"):
         return _CAST_CAP_PATH.sub(r"\1<token>", path)
     if parts.scheme in ("http", "https"):
-        host = (parts.hostname or "").lower().rstrip(".")
+        host = _url_host(parts)
         if serve.poster_host_allowed(host):
             return f"{host}{path}"
         return "<url>"
