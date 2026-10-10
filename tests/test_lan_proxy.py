@@ -888,6 +888,7 @@ def test_lan_cast_cli_when_lib_unavailable(monkeypatch):
     monkeypatch.setattr(caster, "lan_media", lambda *a, **k: lan)
     monkeypatch.setattr(caster.bridge, "bridge_available", lambda: False)
     monkeypatch.setattr(caster, "catt_can_lib_load", lambda: False)
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
     monkeypatch.setattr(caster, "catt_receiver_has_load", lambda *a, **k: False)
     calls: list[list[str]] = []
 
