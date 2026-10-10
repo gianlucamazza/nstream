@@ -417,7 +417,7 @@ def _catt_play_media_kwargs(load: dict) -> dict:
 
 def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) -> bool:
     """play_media_url on a worker thread; False if it exceeds CATT_CAST_TIMEOUT."""
-    box: dict = {"ok": False, "err": ""}
+    box: dict[str, object] = {"ok": False, "err": ""}
     kwargs = _catt_play_media_kwargs(load)
 
     def run() -> None:
@@ -435,11 +435,10 @@ def _catt_inprocess_play(Device, ident: dict[str, str], url: str, load: dict) ->
     if worker.is_alive():
         _log.warning("catt lib LOAD timed out")
         return False
-    if not box["ok"]:
-        if box["err"]:
-            _log.warning("catt lib LOAD failed: %s", box["err"])
-        return False
-    return True
+    if box["ok"]:
+        return True
+    _log.warning("catt lib LOAD failed: %s", box["err"] or "unknown")
+    return False
 
 
 def catt_lib_play(
