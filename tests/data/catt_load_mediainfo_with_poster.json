@@ -1,8 +1,8 @@
 {
   "_provenance": {
     "kind": "expected",
-    "derived_from": "pychromecast MediaController._send_start_play_media + catt ≥0.13.2 play_media_url(title, thumb, content_type, stream_type=BUFFERED, media_info.metadata.metadataType=1)",
-    "note": "Derived from library source, not a field capture. thumb= becomes metadata.thumb + images[0].url. Poster is Cinemeta/metahub HTTPS; TV fetches it. contentId omitted (never a debrid token)."
+    "derived_from": "nstream catt_play_kwargs media_info.metadata + pychromecast 14.0.1 _send_start_play_media (media.py:475-493) + catt 0.13.3 play_media_url (controllers.py:597-608)",
+    "note": "Movie metadata carries images[{url}] explicitly; thumb= is also forwarded. Poster is Cinemeta/metahub HTTPS; TV fetches it. contentId omitted (never a debrid token)."
   },
   "streamType": "BUFFERED",
   "contentType": "video/mp4",

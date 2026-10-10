@@ -62,6 +62,29 @@ def test_range_request_returns_206(tmp_path):
         server.shutdown()
 
 
+def test_lan_poster_route_returns_200_image_jpeg(tmp_path):
+    """LAN capability path `/cast/<token>/poster.jpg` is 200 with an image content-type."""
+    media = tmp_path / "movie.mp4"
+    media.write_bytes(b"x" * 32)
+    poster = tmp_path / "poster.jpg"
+    poster.write_bytes(b"\xff\xd8\xff\xd9")  # minimal JPEG SOI/EOI
+    server, port, _thread = serve.serve_file(str(media), "127.0.0.1", poster_path=str(poster))
+    try:
+        url = serve.served_poster_url("127.0.0.1", port, server.token)
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            assert resp.status == 200
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            assert ctype.startswith("image/")
+            assert resp.read() == poster.read_bytes()
+        # Token gate: a scanner hitting the media host does not get the poster.
+        bad = url.rsplit("/", 1)[0] + "/other.jpg"
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(bad, timeout=5)
+        assert err.value.code == 404
+    finally:
+        server.shutdown()
+
+
 def test_full_get_returns_200(tmp_path):
     server, port, data = _serve(tmp_path)
     try:

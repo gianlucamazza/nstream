@@ -41,6 +41,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **LAN catt poster images (ADR 0050):** the library LOAD now puts
+  `images: [{"url": <Cinemeta/metahub https poster>}]` on Movie/TvShow
+  `media_info.metadata` (not only `thumb=`). catt 0.13.3 forwards
+  `media_info` into pychromecast 14.0.1, which **replaces** `metadata`
+  before copying `thumb` into `images[]` — a type-only metadata dict
+  left the Philips DMR echo without an `images` key. The LAN Range-proxy
+  can serve the same bytes at `/cast/<token>/poster.jpg` (`image/jpeg`).
+  Library LOAD still does not `SET_VOLUME` / unmute (standby mute flip
+  is receiver-side).
 - **LAN catt poster (ADR 0050):** a LAN / hev1 / direct-LAN `play_media_url`
   that already sent LOAD (metadataType 1 + Cinemeta/metahub `images[]`) no
   longer CLI-falls-back when catt's 30s media-session wait raises — that

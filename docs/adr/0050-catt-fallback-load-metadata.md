@@ -44,11 +44,19 @@ nstream's catt fallback prefers **catt as a library** (`CattDevice.controller.
 play_media_url`, not `play_url` — that one waits 10s for PLAYING and false-misses
 a remux start) so one LOAD carries title, `thumb` (Cinemeta/metahub **https**
 poster → `metadata.images[0].url`), `contentType` (`video/mp4` on remux/file),
-and `streamType: BUFFERED`. `media_info.metadata.metadataType` is 1 (Movie) or
-2 (TvShow) — pychromecast `play_media(metadata=)` supports this and is cheap via
-catt's `media_info` (the wrapper does not pass `metadata=` but **does** pass
-`media_info`, which overwrites `media.metadata` before title/thumb are applied,
-so the type sticks).
+and `streamType: BUFFERED`. `media_info.metadata` is Movie (1) or TvShow (2) **and** carries
+`images: [{"url": <https poster>}]` when the poster is an allowlisted
+Cinemeta/metahub URL. catt 0.13.3 `play_media_url` (controllers.py:597-608)
+forwards `thumb=` and `media_info=` to pychromecast 14.0.1
+`_send_start_play_media` (media.py:475-493): `**media_info` **replaces**
+`media.metadata`, then `thumb=` is copied into `metadata.thumb` and appended
+to `images[]` only when `thumb` is truthy. A metadata dict that only set
+`metadataType` therefore left the LOAD without `images` whenever `thumb` was
+empty or dropped. nstream now puts `images[]` on the Movie/TvShow block
+itself (`catt_play_kwargs` ← `catt_lib_media_info`). The LAN Range-proxy can
+also serve the same poster bytes at `/cast/<token>/poster.jpg` (`image/jpeg`);
+the LOAD `images[0].url` stays the Cinemeta/metahub **https** URL the TV
+fetches itself (never a debrid host).
 
 - In-process `import catt.api` when the env already has catt (not a declared
   nstream dependency).
@@ -142,14 +150,30 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   LOAD was never sent, or the receiver refused it. Logged as
   `catt sender=lib` / `catt sender=lib unconfirmed` / `catt sender=cli`
   (never the URL).
+- **Poster echo (board 2026-10-10, main @ cd284770):** Odroid → Philips
+  43PUS9235 DMR. LAN delivery and `metadataType` 1 / title were present;
+  `catt info` `media_metadata` had **no `images` key** in two reads.
+  `catt info` reports the receiver echo (`MediaStatus.media_metadata` ←
+  STATUS `media.metadata`, pychromecast 14.0.1 media.py:332/260-264), not
+  the LOAD we sent. Putting `images[]` on `media_info.metadata` makes the
+  Movie payload match the fixture even if `thumb=` is missing; a later
+  empty echo then means the DMR dropped a failed fetch, not a sender omit.
+- **Mute flip on LOAD:** nstream's library path never sends `SET_VOLUME` or
+  `set_volume_muted`. catt 0.13.3 `play_media_url` (controllers.py:597-608)
+  forwards only url/content_type/current_time/title/thumb/subtitles/
+  stream_type/media_info. `CastController.volume` / `volumemute`
+  (controllers.py:465/474) are CLI-only. A standby wake that flips
+  `volume_muted` true→false (volume level untouched) is **receiver
+  behaviour on a new DMR session**, not an nstream unmute.
 
 ## References
 
 - catt v0.13.3 `catt/cli.py` (`--title`, `--stream-type`), `catt/controllers.py`
   (`play_media_url`), `catt/stream_info.py` (`video_title` / `video_thumbnail` /
   `guessed_content_type`).
-- pychromecast `MediaController._send_start_play_media` (GENERIC metadataType,
-  `thumb` → `images[]`).
+- pychromecast **14.0.1** (catt 0.13.3 pin `>=14.0.1,<15`)
+  `controllers/media.py` `_send_start_play_media` (475-493: `**media_info`
+  then `thumb` → `images[]`; 260-264 / 332: STATUS echo `media_metadata`).
 - Symbols:   `caster.catt_lib_outcome`, `caster.catt_lib_play`,
   `caster.catt_receiver_load_state`, `caster.catt_receiver_has_load`,
   `caster.catt_play_kwargs`, `caster.catt_lib_media_info`, `caster.catt_cast_argv`,

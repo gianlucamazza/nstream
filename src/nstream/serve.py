@@ -95,6 +95,15 @@ def sub_url_path(token: str) -> str:
     return f"/cast/{token}/subs.vtt"
 
 
+def poster_url_path(token: str) -> str:
+    """The secret URL path for a LAN-served poster (`image/jpeg`)."""
+    return f"/cast/{token}/poster.jpg"
+
+
+def served_poster_url(ip: str, port: int, token: str) -> str:
+    return f"http://{ip}:{port}{poster_url_path(token)}"
+
+
 def hls_url_path(token: str) -> str:
     """The secret URL prefix of a live HLS directory (playlist + segments)."""
     return f"/cast/{token}/hls/"
@@ -220,6 +229,8 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             return srv.file_path or "", ct
         if srv.sub_path and secrets.compare_digest(req, srv.sub_url_path.encode()):
             return srv.sub_path, "text/vtt; charset=utf-8"
+        if srv.poster_path and secrets.compare_digest(req, srv.poster_url_path.encode()):
+            return srv.poster_path, "image/jpeg"
         prefix = srv.hls_prefix.encode()
         if (
             srv.hls_dir
@@ -542,12 +553,14 @@ class _FileServer(ThreadingHTTPServer):
         upstream_length: int | None = None,
         upstream_ranged: bool = False,
         media_name: str = "stream.mp4",
+        poster_path: str | None = None,
     ):
         super().__init__(addr, RangeFileHandler)
         self.hls_dir = hls_dir  # live HLS directory (ADR 0039)
         self.producer: live.Producer | None = None  # its producer, when this process owns it
         self.file_path = file_path  # media file (None → sub-only / upstream proxy)
         self.sub_path = sub_path  # optional side-loaded WebVTT caption track
+        self.poster_path = poster_path  # optional LAN-served poster (image/jpeg)
         self.upstream = upstream  # remote url to Range-proxy (ADR 0045); never logged
         self.upstream_type = upstream_type
         self.upstream_length = upstream_length
@@ -555,6 +568,7 @@ class _FileServer(ThreadingHTTPServer):
         self.token = token or new_token()  # per-cast capability (see module docstring)
         self.url_path = url_path(self.token, media_name)
         self.sub_url_path = sub_url_path(self.token)
+        self.poster_url_path = poster_url_path(self.token)
         self.hls_prefix = hls_url_path(self.token)
         self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
         # Idle tracking for the detached server's exit (`_main`): only requests that hit
@@ -635,6 +649,7 @@ def _make_server(
     upstream_length: int | None = None,
     upstream_ranged: bool = False,
     media_name: str = "stream.mp4",
+    poster_path: str | None = None,
 ) -> _FileServer:
     """Bind a `_FileServer`, preferring the firewall-allowed cast port range so the receiver can
     actually reach us. `preferred_port > 0` forces that exact port; otherwise scan the range and
@@ -645,7 +660,7 @@ def _make_server(
             addr, file_path, token=token, sub_path=sub_path, hls_dir=hls_dir,
             upstream=upstream, upstream_type=upstream_type,
             upstream_length=upstream_length, upstream_ranged=upstream_ranged,
-            media_name=media_name,
+            media_name=media_name, poster_path=poster_path,
         )  # fmt: skip
 
     if preferred_port:
@@ -674,6 +689,7 @@ def serve_file(
     upstream_length: int | None = None,
     upstream_ranged: bool = False,
     media_name: str = "stream.mp4",
+    poster_path: str | None = None,
 ) -> tuple[_FileServer, int, threading.Thread]:
     """Start a threaded Range server for `file_path` (and/or a side-loaded WebVTT `sub_path`)
     bound to `bind_ip:0` (ephemeral port). Returns `(server, port, thread)`; the caller builds
@@ -687,7 +703,7 @@ def serve_file(
         bind_ip, file_path, sub_path=sub_path, hls_dir=hls_dir,
         upstream=upstream, upstream_type=upstream_type,
         upstream_length=upstream_length, upstream_ranged=upstream_ranged,
-        media_name=media_name,
+        media_name=media_name, poster_path=poster_path,
     )  # fmt: skip
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, name="nstream-serve", daemon=True)

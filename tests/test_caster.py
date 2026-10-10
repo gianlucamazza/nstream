@@ -936,6 +936,67 @@ def test_catt_play_kwargs_one_load_with_thumb():
     assert kw["content_type"] == "video/mp4"
     assert kw["stream_type"] == "BUFFERED"
     assert kw["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    assert kw["media_info"]["metadata"]["images"][0]["url"] == poster
+    assert kw["media_info"]["metadata"]["title"] == "The Nice Guys"
+
+
+def _pychromecast_14_0_1_load_media(url: str, **kw) -> dict:
+    """Replica of pychromecast 14.0.1 `MediaController._send_start_play_media`
+    (pychromecast/controllers/media.py:475-493). catt 0.13.3 pins
+    `pychromecast>=14.0.1,<15` and forwards `thumb=` + `media_info=`
+    (`catt/controllers.py:597-608`)."""
+    media_info = dict(kw.get("media_info") or {})
+    md = media_info.get("metadata")
+    if isinstance(md, dict):
+        media_info["metadata"] = dict(md)
+        if isinstance(md.get("images"), list):
+            media_info["metadata"]["images"] = list(md["images"])
+    media = {
+        "contentId": url,
+        "streamType": kw.get("stream_type") or "BUFFERED",
+        "contentType": kw.get("content_type") or "video/mp4",
+        "metadata": dict(kw.get("metadata") or {}),
+        **media_info,
+    }
+    if kw.get("title"):
+        media["metadata"]["title"] = kw["title"]
+    thumb = kw.get("thumb")
+    if thumb:
+        media["metadata"]["thumb"] = thumb
+        if "images" not in media["metadata"]:
+            media["metadata"]["images"] = []
+        media["metadata"]["images"].append({"url": thumb})
+    if media["metadata"] and "metadataType" not in media["metadata"]:
+        media["metadata"]["metadataType"] = 0
+    return media
+
+
+def test_catt_lib_load_payload_at_pychromecast_boundary():
+    """Exact LOAD media at the pychromecast 14.0.1 boundary: type 1, title, images[0]."""
+    poster = "https://images.metahub.space/poster/medium/tt7068946/img"
+    kw = caster.catt_play_kwargs(
+        "The Nice Guys", caster.CastMeta(poster=poster, content_type="video/mp4")
+    )
+    # nstream's media_info already carries images (not thumb-only).
+    assert kw["media_info"]["metadata"]["images"][0]["url"] == poster
+    media = _pychromecast_14_0_1_load_media("http://192.168.1.10:45000/cast/tok/stream.mp4", **kw)
+    assert media["metadata"]["metadataType"] == caster.CATT_METADATA_MOVIE
+    assert media["metadata"]["title"] == "The Nice Guys"
+    assert media["metadata"]["images"][0]["url"] == poster
+    assert media["contentType"] == "video/mp4"
+    assert media["streamType"] == "BUFFERED"
+
+
+def test_catt_play_kwargs_has_no_volume_or_mute():
+    """Library LOAD does not SET_VOLUME / unmute; muted flip is receiver-side."""
+    kw = caster.catt_play_kwargs(
+        "The Nice Guys",
+        caster.CastMeta(poster="https://images.metahub.space/poster/medium/tt1/img"),
+    )
+    banned = {"volume", "muted", "unmute", "volume_muted", "volume_level"}
+    assert banned.isdisjoint(kw)
+    assert banned.isdisjoint(kw.get("media_info") or {})
+    assert banned.isdisjoint((kw.get("media_info") or {}).get("metadata") or {})
 
 
 def test_catt_play_kwargs_tvshow_metadata_type():
@@ -949,6 +1010,7 @@ def test_catt_play_kwargs_tvshow_metadata_type():
     assert kw["media_info"]["metadata"]["metadataType"] == caster.CATT_METADATA_TVSHOW
     assert kw["media_info"]["metadata"]["seriesTitle"] == "The Boys"
     assert kw["thumb"] == "https://images.metahub.space/poster/medium/tt4236770/img"
+    assert kw["media_info"]["metadata"]["images"][0]["url"] == kw["thumb"]
     body = caster.catt_lib_media_info("Good for the Soul", meta)
     assert body["metadata"]["images"][0]["url"] == kw["thumb"]
     assert body["metadata"]["metadataType"] == 2
@@ -1045,6 +1107,7 @@ def test_catt_lib_play_inprocess_play_media_url(monkeypatch):
 def test_catt_play_kwargs_drops_non_https_poster():
     kw = caster.catt_play_kwargs("T", caster.CastMeta(poster="http://10.0.0.5/cast/tok/p.jpg"))
     assert "thumb" not in kw
+    assert "images" not in kw["media_info"]["metadata"]
 
 
 def test_catt_lib_play_used_before_cli(monkeypatch):
