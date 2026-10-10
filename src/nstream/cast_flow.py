@@ -47,6 +47,7 @@ from . import (
     subs,
     tracks,
     ui,
+    urlproxy,
 )
 from .config import Config, PlayOpts
 from .types import Stream
@@ -346,6 +347,22 @@ def _settle(
     container = cast_vet.cast_container(cfg, chosen)
     needs_rewrap = not quality.container_castable(container)
     needs_remux = plan.mode == "remux" or plan.needs_remux or needs_rewrap
+    if (
+        cfg.cast_lan_proxy
+        and not needs_remux
+        and chosen.get("url")
+        and urlproxy.is_remote(chosen["url"])
+    ):
+        # No synthesized 206: no-Range / unknown length / hev1 go to remux/live.
+        # MKV is already needs_rewrap (ADR 0022). Probe is memoized for lan_media.
+        tr = tracks.probe_tracks(chosen["url"])
+        lan = urlproxy.plan(container, urlproxy.probe(chosen["url"]), tr.video_codec, tr.codec_tag)
+        if lan.mode == "fail":
+            raise CastRemuxInfeasible(lan.reason)
+        if lan.mode in ("rewrap", "cache"):
+            needs_remux = True
+            if lan.reason in ("container", "hev1"):
+                needs_rewrap = True
     refused_mirror, notice, full_refusal = "", None, ""
     if needs_remux and not opts.mirror:
         size_gb = quality.parse_stream(chosen).size_gb
@@ -755,6 +772,9 @@ def run_cast(
                 # remux failed mid-way (ffmpeg error, or a guard tripped after `refusal`)
                 # → direct cast of a file whose first audio track is Dolby (silent on the
                 # DMR) or the wrong dub. The planned track no longer describes what plays.
+                # With the LAN proxy on, never hand the debrid URL to the TV over the WAN.
+                if cfg.cast_lan_proxy and urlproxy.is_remote(chosen["url"]):
+                    raise CastRemuxInfeasible("remux non riuscito; proxy LAN non applicabile")
                 notice = (
                     "remux non riuscito → cast diretto: l'audio potrebbe "
                     "risultare muto o in un'altra lingua"
@@ -765,12 +785,15 @@ def run_cast(
             langs, resolver, choose_lang = _lang_switch(
                 cfg, results, opts, exact=exact, allowed=allow_lang_switch, title=title
             )
+            video_codec = (
+                tracks.probe_tracks(chosen["url"]).video_codec if chosen.get("url") else ""
+            )
             delivery = caster.cast(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, sub_lang=sub_lang,
                 langs=langs, resolve_lang=resolver, choose_lang=choose_lang, follow=follow,
                 meta=meta, on_event=on_event,
-                container=final_container,
+                container=final_container, video_codec=video_codec,
             )  # fmt: skip
             pos, dur, subs_delivered = delivery.pos, delivery.dur, delivery.subs_delivered
             action = "cast"

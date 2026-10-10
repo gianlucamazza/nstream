@@ -141,11 +141,12 @@ probes HEAD + a 1-byte Range GET (never logs the url) and decides:
 
 | Upstream / container | Delivery | `contentType` |
 | -------------------- | -------- | ------------- |
-| MP4 / WebM, `Accept-Ranges` or a 206 on `bytes=0-0` | LAN proxy, Range passed through | `video/mp4` / `video/webm` |
-| MP4 / WebM, no Range, `Content-Length` known | LAN proxy, 206 **synthesized** (skip-from-start) | same |
-| MP4 / WebM, no Range and no length | LAN proxy best-effort (`lan_unknown_length`); DMR may still refuse | same |
-| Matroska / other non-`CAST_CONTAINER_DECODABLE` | remux `-c copy` to MP4 (ADR 0022), not a 720 transcode | `video/mp4` |
-| Video codec outside `CAST_VIDEO_DECODABLE` | still proxy native bytes (ADR 0017 already failed/mirrored) | container mime |
+| MP4 / WebM, Range + known length | LAN proxy, Range passed through | `video/mp4` / `video/webm` |
+| MP4 / WebM, no Range (`lan_no_range`) or unknown length (`lan_unknown_length`) | **not proxyable** — existing ADR 0022 / 0039 remux or live tier (disk-capped). No synthesized 206. | `video/mp4` after remux |
+| Matroska / other non-`CAST_CONTAINER_DECODABLE` | existing ADR 0022 `cast_flow` rewrap (`-c copy` to MP4), not a parallel proxy table and not a 720 transcode | `video/mp4` |
+| MP4 tagged `hev1` | rewrap with `-tag:v hvc1` (Chromecast rejects / mishandles `hev1`) | `video/mp4` |
+| Video codec outside `CAST_VIDEO_DECODABLE` | still proxy native bytes when Range-capable (ADR 0017 already failed/mirrored) | container mime |
+| `device` missing / probe fail | fail closed — no `0.0.0.0` bind, no silent WAN-direct | — |
 
 The LOAD url is `http://<lan>:<port>/cast/<token>/stream.mp4` (`.webm` when that is the
 container) so catt 0.13 guesses `video/mp4` / `video/webm`. `caster.CastMeta.content_type`
@@ -157,9 +158,10 @@ argv); the LAN bind, token path, idle-exit, and detached stdin job (`--proxy`, u
 on argv) are `serve`. Fire-and-return registers `RunState("lan-proxy")`; `--stop` /
 `remux.stop` reaps it. Config gate `cast_lan_proxy` defaults **on** — off is debug only.
 
-Live board HEAD/ffprobe traces remain NEED_PLAYBACK; the fixture tests cover Range and
-no-Range MP4 + MKV. Status stays **Proposed** until an Odroid 1080 HEVC cast confirms
-smooth playback.
+Live board HEAD/ffprobe traces remain NEED_PLAYBACK; the fixture tests cover a Range
+MP4 proxy, no-Range routing to remux/live (no synthesized 206), and MKV as ADR 0022
+rewrap. Status stays **Proposed** until an Odroid 1080 HEVC cast confirms smooth
+playback.
 
 ### Board verification (Odroid; no install)
 
@@ -199,7 +201,10 @@ Volume:
 HEVC (do **not** remux to 720; leave the triage file alone):
 
 1. **CODE shipped.** LAN Range-proxy of a remote url (`urlproxy.probe` / `urlproxy.plan` /
-   `serve` upstream / `caster.lan_media`). Fixture tests cover Range + no-Range MP4/MKV.
+   `serve` upstream / `caster.lan_media`). No synthesized 206: no-Range / unknown
+   length routes to remux/live. MKV is ADR 0022 `cast_flow`, not a proxy path.
+   Residual: `hev1` MP4s are rewrapped with `-tag:v hvc1`; confirm on the board that
+   a proxied `hvc1` HEVC MP4 plays and that an `hev1` source takes the rewrap.
 2. During a **new** 1080 HEVC **lan** cast on the board: `catt info -j` (`content_type`,
    `stream_type`, `app_id`, player_state) + the headless JSON (`delivery=lan`, `codec`,
    `container` if present). No stream URL. Confirm smoothness. **NEED_PLAYBACK.**

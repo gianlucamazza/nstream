@@ -54,6 +54,7 @@ from . import (
     serve,
     srt,
     subalign,
+    tracks,
     ui,
     urlproxy,
     util,
@@ -116,8 +117,6 @@ def _probe_meta(url: str):
     third network read. Returns `(Tracks, n_video, duration_s)`, all empty/zero if ffprobe is
     unavailable or the probe fails (the caller then falls back to a track-blind remux). The
     url (which may embed a debrid token) is passed only to ffprobe, never logged."""
-    from . import tracks
-
     t = tracks.probe_tracks(url)
     return t, t.n_video, t.duration
 
@@ -515,13 +514,16 @@ def remux_to_file(
     else:
         codec = cfg.cast_audio_codec or "aac"
         acodec = ["-c:a", codec, "-b:a", _audio_bitrate(sel.channels if sel else None)]
+    # Chromecast rejects / mishandles `hev1`; ffmpeg writes that tag unless we force hvc1.
+    vcodec = tracks.probe_tracks(url).video_codec
+    vtag = ["-tag:v", "hvc1"] if vcodec in ("hevc", "h265") else []
     path = _new_remux_temp()
     cmd = [
         "ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
         # A stalled source must fail the remux, not hang it forever (30s, microseconds).
         "-rw_timeout", "30000000", "-i", urlproxy.local_url(url),  # token kept out of argv
         "-map", "0:v:0", "-map", amap,
-        "-c:v", "copy", *acodec,
+        "-c:v", "copy", *vtag, *acodec,
         "-movflags", "+faststart", path,
         # The embedded subtitle, extracted in the same read of the source (ADR 0042).
         *(["-map", f"0:s:{sub_index}", "-c:s", "webvtt", embedded_vtt(path)]
@@ -926,7 +928,7 @@ def _cast_file_via_bridge(
     finally:
         disconnected = bool(out and out.disconnected)
         if not disconnected:
-            server.shutdown()
+            serve.close_server(server)
         if out and out.started and not disconnected:
             # A started cast ran to its end → clean the temp file (fallback keeps it,
             # and a disconnect leaves it for the still-streaming receiver / GC).
@@ -1298,7 +1300,7 @@ def cast_live(
 
     def teardown() -> None:
         if server is not None:
-            server.shutdown()
+            serve.close_server(server)
         if producer is not None:
             producer.stop()
             _INPROC.pop(out_dir, None)

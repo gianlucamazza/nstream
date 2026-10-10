@@ -219,6 +219,26 @@ def test_remux_to_file_copies_decodable_track(monkeypatch, tmp_path):
     assert "-b:a" not in cmd
 
 
+def test_remux_to_file_tags_hevc_hvc1(monkeypatch, tmp_path):
+    """Chromecast rejects hev1; the rewrap must force `-tag:v hvc1`."""
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux, "_gc_stale", lambda: None)
+    seen = {}
+    monkeypatch.setattr(remux, "_run_ffmpeg", _fake_ffmpeg_ok(seen))
+    from nstream import tracks as tracks_mod
+
+    monkeypatch.setattr(
+        tracks_mod,
+        "probe_tracks",
+        lambda *a, **k: Tracks(video_codec="hevc", codec_tag="hev1"),
+    )
+    remux.remux_to_file(
+        "http://x", _cfg(), audio_index=0, audio=[Track(id=1, lang="ita", codec="aac")]
+    )
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
+
+
 def test_remux_to_file_failure_cleans_up(monkeypatch, tmp_path):
     monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux, "_gc_stale", lambda: None)

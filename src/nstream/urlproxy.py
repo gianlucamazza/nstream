@@ -22,8 +22,10 @@ import http.client
 import ipaddress
 import re
 import secrets
+import socket
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,7 +50,9 @@ _RESUME_TRIES = 3
 _CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 _RANGE = re.compile(r"bytes=(\d+)-(\d*)$")
 _CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", re.I)
-_PROBE_TIMEOUT = 8.0
+# HEAD + optional 1-byte Range GET share this budget (well under a 16 s stall).
+_PROBE_BUDGET = 8.0
+_PROBE_TIMEOUT = 4.0
 
 _lock = threading.Lock()
 _routes: dict[str, str] = {}
@@ -109,9 +113,14 @@ class _Handler(BaseHTTPRequestHandler):
             resumable = resp.headers.get("Accept-Ranges") == "bytes" or resp.status == 206
             length = resp.headers.get("Content-Length")
             expected = int(length) if length and length.isdigit() else None
+            up_range = None
+            if resp.status == 206:
+                up_range = range_from_content_range(resp.headers.get("Content-Range"))
+                if up_range is None and is_start_end_range(rng):
+                    up_range = rng
             copy_body(
-                resp, self.wfile.write, upstream, rng if resp.status == 206 else None,
-                resumable, expected,
+                resp, self.wfile.write, upstream, up_range,
+                resumable and (up_range is not None or resp.status != 206), expected,
             )  # fmt: skip
 
 
@@ -154,13 +163,82 @@ def local_url(url: str) -> str:
     return f"http://{host}:{port}/{route}"
 
 
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow 3xx only to public http(s) hosts. Reject private/loopback/link-local
+    targets and https→http downgrades (SSRF / token-leak on the probe and serve paths)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _guard_redirect(req.full_url, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_SafeRedirect)
+
+
+def _guard_redirect(src_url: str, dst_url: str) -> None:
+    src = urllib.parse.urlsplit(src_url)
+    dst = urllib.parse.urlsplit(dst_url)
+    if dst.scheme not in ("http", "https"):
+        raise urllib.error.URLError("redirect scheme")
+    if src.scheme == "https" and dst.scheme != "https":
+        raise urllib.error.URLError("redirect downgrade")
+    host = (dst.hostname or "").lower()
+    if not host or _is_local(host) or host.endswith(".localhost"):
+        raise urllib.error.URLError("redirect to private")
+    if _is_private_host(host) or _resolves_private(host):
+        raise urllib.error.URLError("redirect to private")
+
+
+def _resolves_private(host: str) -> bool:
+    """True when `host` (a name, not an IP we already classified) has a private A/AAAA."""
+    try:
+        ipaddress.ip_address(host)
+        return False  # already handled by _is_private_host
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return False
+    return any(_is_private_host(info[4][0]) or _is_local(info[4][0]) for info in infos)
+
+
 def open_upstream(url: str, method: str, rng: str | None, timeout: float = _UPSTREAM_TIMEOUT):
-    """GET/HEAD `url`, optionally with a Range. Never logs the url (it may carry a token)."""
+    """GET/HEAD `url`, optionally with a Range. Never logs the url (it may carry a token).
+
+    Redirects are filtered (`_SafeRedirect`): private/loopback/link-local targets and
+    https→http downgrades are rejected on both the probe and the serve path."""
     headers = {"User-Agent": UA}
     if rng:
         headers["Range"] = rng
     req = urllib.request.Request(url, headers=headers, method=method)
-    return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
+    return _opener.open(req, timeout=timeout)  # noqa: S310
+
+
+def is_start_end_range(rng: str | None) -> bool:
+    """True for `bytes=start-` / `bytes=start-end`. False for a suffix (`bytes=-N`)."""
+    return bool(rng and _RANGE.match(rng))
+
+
+def range_from_content_range(header: str | None) -> str | None:
+    """Normalize a `Content-Range` into `bytes=start-end` for resume. None if absent/unparsed.
+
+    A client suffix (`bytes=-N`) must not be replayed as `bytes=0+sent-`: the start is
+    the upstream's Content-Range first byte."""
+    if not header:
+        return None
+    m = _CONTENT_RANGE.match(str(header).strip())
+    if not m:
+        return None
+    return f"bytes={m.group(1)}-{m.group(2)}"
+
+
+def _resume_spec(rng: str | None) -> tuple[int, str] | None:
+    """`(first, last)` from a start-end Range. None for suffix/malformed — do not guess 0."""
+    m = _RANGE.match(rng or "")
+    if not m:
+        return None
+    return int(m.group(1)), m.group(2)
 
 
 def copy_body(
@@ -168,9 +246,14 @@ def copy_body(
 ) -> None:
     """Stream `resp` to `write`; on an upstream drop, re-request the rest from the last byte
     delivered. A drop is an error OR an early EOF: http.client returns b"" short of the
-    Content-Length instead of raising."""
-    m = _RANGE.match(rng or "bytes=0-")
-    first, last = (int(m.group(1)), m.group(2)) if m else (0, "")
+    Content-Length instead of raising. `rng` must be a start-end Range (normalize suffix
+    ranges via `range_from_content_range` first). Client-gone writes are silent."""
+    spec = _resume_spec(rng) or _resume_spec("bytes=0-")
+    first, last = spec
+    # A suffix (`bytes=-N`) is not a start-end spec: refuse to resume from 0+sent.
+    if rng and _resume_spec(rng) is None:
+        resumable = False
+        first, last = 0, ""
     sent = 0
     tries = 0
     while True:
@@ -183,6 +266,10 @@ def copy_body(
             chunk = resp.read(_CHUNK)
             if not chunk and expected is not None and sent < expected:
                 raise http.client.IncompleteRead(b"", expected - sent)
+        except _CLIENT_GONE:
+            if resp is not None:
+                resp.close()
+            return
         except (OSError, http.client.HTTPException) as e:
             if resp is not None:
                 resp.close()
@@ -195,7 +282,11 @@ def copy_body(
         if not chunk:
             resp.close()
             return
-        write(chunk)
+        try:
+            write(chunk)
+        except _CLIENT_GONE:
+            resp.close()
+            return
         sent += len(chunk)
 
 
@@ -211,13 +302,16 @@ def discard(resp, n: int) -> int:
 
 
 def copy_n(resp, write, n: int) -> int:
-    """Copy exactly `n` bytes (or until EOF) from `resp` to `write`."""
+    """Copy exactly `n` bytes (or until EOF) from `resp` to `write`. Client-gone is silent."""
     sent = 0
     while sent < n:
         chunk = resp.read(min(_CHUNK, n - sent))
         if not chunk:
             break
-        write(chunk)
+        try:
+            write(chunk)
+        except _CLIENT_GONE:
+            return sent
         sent += len(chunk)
     return sent
 
@@ -257,13 +351,20 @@ class Probe:
     ranged: bool = False
 
 
+_probe_cache: dict[str, Probe] = {}
+
+
 @dataclass(frozen=True)
 class LanPlan:
     """How to hand a remote stream to a DMR (ADR 0045 Phase 1).
 
-    `proxy`: LAN Range-serve the remote bytes, video untouched.
-    `rewrap`: container is not DMR-loadable — remux `-c copy` to MP4 (ADR 0022), not a
-    720 H.264 transcode.
+    `proxy`: LAN Range-serve the remote bytes, video untouched. Requires a successful
+    probe, a known length, and an upstream that honours Range.
+    `rewrap`: container / `hev1` tag is not DMR-loadable — remux `-c copy` to MP4
+    (ADR 0022), not a 720 H.264 transcode.
+    `cache`: no Range (or unknown length) — not proxyable; `cast_flow` routes to the
+    disk-capped remux / live tier.
+    `fail`: probe failed; do not WAN-direct and do not advertise Accept-Ranges.
     """
 
     mode: str
@@ -324,11 +425,19 @@ def _probe_range(url: str, timeout: float) -> tuple[bool, int | None]:
         return False, _int_len(resp.headers)
 
 
-def probe(url: str, timeout: float = _PROBE_TIMEOUT) -> Probe:
-    """HEAD (then a 1-byte Range GET if needed) of `url`. Never logs the url."""
+def probe(url: str, timeout: float = _PROBE_BUDGET) -> Probe:
+    """HEAD (then a 1-byte Range GET if needed) of `url`. Never logs the url.
+
+    Total wait is `timeout` (default 8 s) split across HEAD + Range GET — well under
+    a 16 s stall. Memoized per url so `cast_flow` + `lan_media` share one probe."""
+    hit = _probe_cache.get(url)
+    if hit is not None:
+        return hit
+    deadline = time.monotonic() + max(0.1, timeout)
+    per = min(_PROBE_TIMEOUT, timeout)
     ct, cl, ranged, ok = "", None, False, False
     try:
-        resp = open_upstream(url, "HEAD", None, timeout=timeout)
+        resp = open_upstream(url, "HEAD", None, timeout=per)
     except urllib.error.HTTPError as e:
         try:
             ok = e.code < 500
@@ -339,42 +448,57 @@ def probe(url: str, timeout: float = _PROBE_TIMEOUT) -> Probe:
             e.close()
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as e:
         _log.warning("probe: upstream irraggiungibile (%s)", type(e).__name__)
-        return Probe(False)
+        result = Probe(False)
+        _probe_cache[url] = result
+        return result
     else:
         with resp:
             ok = True
             ct = _ctype(resp.headers)
             cl = _int_len(resp.headers) or _length_from_range(resp.headers)
             ranged = resp.status == 206 or _accepts_ranges(resp.headers)
-    if ok and not ranged:
-        hit, total = _probe_range(url, timeout)
-        ranged = hit
+    leftover = deadline - time.monotonic()
+    if ok and not ranged and leftover > 0:
+        hit_r, total = _probe_range(url, min(per, leftover))
+        ranged = hit_r
         cl = cl or total
-    return Probe(ok, ct, cl, ranged)
+    result = Probe(ok, ct, cl, ranged)
+    if len(_probe_cache) > 16:
+        _probe_cache.clear()
+    _probe_cache[url] = result
+    return result
 
 
-def plan(container: str, probe: Probe, video_codec: str = "") -> LanPlan:
-    """Choose LAN proxy vs container rewrap. Video stays native (ADR 0017 / 0045).
+def plan(container: str, probe: Probe, video_codec: str = "", codec_tag: str = "") -> LanPlan:
+    """Choose LAN proxy vs remux/live. Video stays native (ADR 0017 / 0045).
 
-    Matroska / other non-DMR containers → `rewrap` (`-c copy` to MP4). A known
-    undecodable video codec is still `proxy` (native bytes): remux-720 is not a
-    product answer. Missing Accept-Ranges is still `proxy` when we can synthesize
-    206 from Content-Length."""
+    Never proxies when the probe failed, the length is unknown, or the upstream does
+    not honour Range (no synthesized 206). Matroska / `hev1` → `rewrap` (`-c copy` to
+    MP4, ADR 0022). A known undecodable video codec is still `proxy` (native bytes):
+    remux-720 is not a product answer. Never advertise Accept-Ranges we cannot honour."""
     from . import quality
 
+    if not probe.ok:
+        return LanPlan("fail", "", None, False, "stream.mp4", "lan_probe_failed")
     mime = quality.container_mime(container)
     if container and not quality.container_castable(container):
         return LanPlan(
             "rewrap", "video/mp4", probe.content_length, probe.ranged, "stream.mp4", "container"
         )
+    if (codec_tag or "").lower() == "hev1":
+        return LanPlan(
+            "rewrap", "video/mp4", probe.content_length, probe.ranged, "stream.mp4", "hev1"
+        )
     ct = mime or _declared_mime(probe.content_type) or "video/mp4"
     name = "stream.webm" if container == "webm" or ct == "video/webm" else "stream.mp4"
+    if not probe.ranged:
+        return LanPlan("cache", ct, probe.content_length, False, name, "lan_no_range")
+    if probe.content_length is None:
+        return LanPlan("cache", ct, None, False, name, "lan_unknown_length")
     reason = "lan"
     if video_codec and video_codec not in quality.CAST_VIDEO_DECODABLE:
         reason = "lan_undecodable_video"
-    elif not probe.ranged and probe.content_length is None:
-        reason = "lan_unknown_length"
-    return LanPlan("proxy", ct, probe.content_length, probe.ranged, name, reason)
+    return LanPlan("proxy", ct, probe.content_length, True, name, reason)
 
 
 def proxy_job(url: str, lan: LanPlan) -> dict:

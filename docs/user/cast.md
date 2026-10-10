@@ -178,8 +178,10 @@ quantize (14→13). TV OSD ticks are a **different** scale — there is no
 Comfortable OSD ~12–15 means try Cast percents and read the TV, not a remapped
 CLI. HEVC 1080 stutter on a **WAN-direct** catt cast (TV pulls a remote URL) is
 a delivery path, not a codec miss. Default `cast_lan_proxy` Range-serves that
-url from the host (video `-c copy` / pass-through, `video/mp4`, 206). This DMR
-already plays HEVC/4K/HDR from a LAN Range file or live HLS. A 720 H.264 remux
-is triage, not the default. Missing `cast_sender` only blocks the mirror
-fallback. JSON `delivery` is `lan` when the proxy ran. Off (`cast_lan_proxy:
-false`) is debug only.
+url from the host when the upstream honours Range (video pass-through,
+`video/mp4`, real 206). No synthesized 206: an upstream without Range goes to
+the existing remux / live tier. MKV still follows ADR 0022 (`cast_flow` `-c
+copy` to MP4). This DMR already plays HEVC/4K/HDR from a LAN Range file or
+live HLS. A 720 H.264 remux is triage, not the default. Missing `cast_sender`
+only blocks the mirror fallback. JSON `delivery` is `lan` when the proxy ran.
+Off (`cast_lan_proxy: false`) is debug only.

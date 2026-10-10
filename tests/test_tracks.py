@@ -18,7 +18,7 @@ def _fresh_cache():
 FFPROBE_JSON = {
     "format": {"duration": "5400.25"},
     "streams": [
-        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 0, "codec_type": "video", "codec_name": "h264", "codec_tag_string": "avc1"},
         {"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2,
          "tags": {"language": "eng", "title": "Original"}},
         {"index": 2, "codec_type": "audio", "codec_name": "eac3", "channels": 6,
@@ -129,6 +129,17 @@ def test_clear_cache_forces_a_new_probe(monkeypatch):
 def test_parse_captures_first_video_codec():
     """The cast video vetting (ADR 0017) reads the real codec from the same probe."""
     assert tracks._parse_ffprobe(FFPROBE_JSON).video_codec == "h264"
+
+
+def test_parse_captures_codec_tag_string():
+    """hev1 vs hvc1 decides the ADR 0045 rewrap (`-tag:v hvc1`)."""
+    assert tracks._parse_ffprobe(FFPROBE_JSON).codec_tag == "avc1"
+    hev = {
+        "streams": [
+            {"codec_type": "video", "codec_name": "hevc", "codec_tag_string": "hev1"},
+        ]
+    }
+    assert tracks._parse_ffprobe(hev).codec_tag == "hev1"
 
 
 def test_parse_video_codec_empty_without_video_stream():

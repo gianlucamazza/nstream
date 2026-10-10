@@ -244,10 +244,12 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
 
     def do_HEAD(self) -> None:
-        self._respond(write_body=False)
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._respond(write_body=False)
 
     def do_GET(self) -> None:
-        self._respond(write_body=True)
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._respond(write_body=True)
 
     def do_OPTIONS(self) -> None:
         # CORS preflight the Cast receiver may send before fetching the VTT track.
@@ -280,14 +282,16 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         path, content_type = target
+        # Record before the reply: waiting until after the body races the client
+        # (test_hls_route_serves_playlist_and_segments on 3.14, run 38008509413).
+        producer = self.server.producer
+        if producer is not None and write_body:
+            producer.on_request(os.path.basename(path))
         self.server.touch(+1)
         try:
             self._serve_target(path, content_type, write_body=write_body)
         finally:
             self.server.touch(-1)
-        producer = self.server.producer
-        if producer is not None and write_body:
-            producer.on_request(os.path.basename(path))
 
     def _serve_playlist(self, path: str, *, write_body: bool) -> None:
         """A live playlist, in film time (`live.film_time_playlist`): small and growing, so
@@ -380,18 +384,17 @@ class RangeFileHandler(BaseHTTPRequestHandler):
     def _serve_upstream(self, content_type: str, *, write_body: bool) -> None:
         """Range-serve a remote url toward the DMR (ADR 0045 Phase 1).
 
-        The TV always sees Accept-Ranges / Content-Length / a correct Content-Type.
-        When the upstream honours Range we pass it through; when it does not but we
-        know the size we synthesize 206 by skipping from the start of a full GET.
-        Never logs the upstream url."""
+        Pass through an upstream 206. Never synthesize 206 by discarding from a
+        full GET (that scales with the seek offset at WAN speed). When the upstream
+        does not honour Range we do not advertise Accept-Ranges. Never logs the url."""
         srv = self.server
         upstream = srv.upstream
         if not upstream:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         size = srv.upstream_length
-        raw_range = self.headers.get("Range", "")
-        rng = _parse_range(raw_range, size) if size is not None else None
+        raw_range = self.headers.get("Range", "") if srv.upstream_ranged else ""
+        rng = _parse_range(raw_range, size) if raw_range and size is not None else None
         if raw_range and size is not None and rng is None and self._unsatisfiable(size):
             self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
             self._send_cors()
@@ -404,13 +407,16 @@ class RangeFileHandler(BaseHTTPRequestHandler):
                 start, end, status = 0, size - 1, HTTPStatus.OK
             else:
                 start, end, status = rng[0], rng[1], HTTPStatus.PARTIAL_CONTENT
-            self._upstream_headers(status, content_type, end - start + 1, start, end, size)
+            self._upstream_headers(
+                status, content_type, end - start + 1, start, end, size,
+                accept_ranges=srv.upstream_ranged,
+            )  # fmt: skip
             return
 
         up_range = None
         if rng is not None:
             up_range = f"bytes={rng[0]}-{rng[1]}"
-        elif raw_range and size is None:
+        elif raw_range and size is None and srv.upstream_ranged:
             up_range = raw_range
         method = "GET" if write_body else "HEAD"
         try:
@@ -429,23 +435,15 @@ class RangeFileHandler(BaseHTTPRequestHandler):
             if resp.status == 206:
                 self._relay_partial(resp, content_type, write_body=write_body)
                 return
-            if rng is not None and resp.status == 200 and size is not None:
-                start, end = rng
-                length = end - start + 1
-                self._upstream_headers(
-                    HTTPStatus.PARTIAL_CONTENT, content_type, length, start, end, size
-                )
-                if write_body:
-                    urlproxy.discard(resp, start)
-                    urlproxy.copy_n(resp, self.wfile.write, length)
-                return
+            # 200: the upstream ignored Range (or none was sent). Relay as 200.
+            # Never synthesize 206; never claim Accept-Ranges we cannot honour.
             length_h = resp.headers.get("Content-Length")
             expected = int(length_h) if length_h and str(length_h).isdigit() else None
-            status = HTTPStatus.OK
-            self.send_response(status)
+            self.send_response(HTTPStatus.OK)
             self._send_cors()
             self.send_header("Content-Type", content_type)
-            self.send_header("Accept-Ranges", "bytes")
+            if srv.upstream_ranged:
+                self.send_header("Accept-Ranges", "bytes")
             if expected is not None:
                 self.send_header("Content-Length", str(expected))
             else:
@@ -453,9 +451,7 @@ class RangeFileHandler(BaseHTTPRequestHandler):
                 self.close_connection = True
             self.end_headers()
             if write_body:
-                urlproxy.copy_body(
-                    resp, self.wfile.write, upstream, None, srv.upstream_ranged, expected
-                )
+                urlproxy.copy_body(resp, self.wfile.write, upstream, None, False, expected)
 
     def _upstream_headers(
         self,
@@ -465,11 +461,14 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         start: int,
         end: int,
         size: int,
+        *,
+        accept_ranges: bool = True,
     ) -> None:
         self.send_response(status)
         self._send_cors()
         self.send_header("Content-Type", content_type)
-        self.send_header("Accept-Ranges", "bytes")
+        if accept_ranges:
+            self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(length))
         if status == HTTPStatus.PARTIAL_CONTENT:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -490,9 +489,14 @@ class RangeFileHandler(BaseHTTPRequestHandler):
         upstream = self.server.upstream
         if write_body and upstream:
             expected = int(cl) if cl and str(cl).isdigit() else None
+            # Resume from the upstream's Content-Range start, never a raw suffix.
+            up_range = urlproxy.range_from_content_range(cr)
+            raw = self.headers.get("Range")
+            if up_range is None and urlproxy.is_start_end_range(raw):
+                up_range = raw
             urlproxy.copy_body(
                 resp, self.wfile.write, upstream,
-                self.headers.get("Range"), True, expected,
+                up_range, up_range is not None, expected,
             )  # fmt: skip
 
     def _unsatisfiable(self, size: int) -> bool:
@@ -560,6 +564,13 @@ class _FileServer(ThreadingHTTPServer):
         self._last_activity = time.monotonic()
         self._bases: dict[str, float] = {}  # first segment → film time it starts at
         self._codecs: dict[str, str] = {}  # first segment → CODECS of its generation
+
+    def handle_error(self, request, client_address) -> None:
+        # Never print a traceback (the stdlib default) on the user's terminal: a TV
+        # that hung up on seek is normal (urlproxy._Server does the same).
+        exc = sys.exception()
+        if not isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            _log.debug("serve: errore di richiesta (%s)", type(exc).__name__)
 
     def playlist_base(self, path: str) -> float:
         """Film time at which a live playlist's generation starts (its first segment's PTS;
@@ -682,6 +693,14 @@ def serve_file(
     thread = threading.Thread(target=server.serve_forever, name="nstream-serve", daemon=True)
     thread.start()
     return server, port, thread
+
+
+def close_server(server: _FileServer) -> None:
+    """follow-mode teardown: stop the thread and release the socket."""
+    with contextlib.suppress(Exception):
+        server.shutdown()
+    with contextlib.suppress(Exception):
+        server.server_close()
 
 
 def _cache_dir() -> Path:

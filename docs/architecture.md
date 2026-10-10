@@ -116,7 +116,7 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `mirror` | Realtime 1080p path |
 | `bridge` | castbridge IPC client + daemon ensure |
 | `discovery` | Non-blocking Chromecast discovery |
-| `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv. Also probe/plan for the LAN Range-proxy (ADR 0045) |
+| `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv. Probe/plan for the LAN Range-proxy (ADR 0045): proxy only when Range + length are known; else remux/live |
 | `live` | Live HLS-TS producer for Tier-2 (ADR 0039): ffmpeg argv, playlist timeline, pruning behind the play head, pausing far ahead |
 
 ### Subs

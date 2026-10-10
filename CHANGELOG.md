@@ -29,10 +29,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   0–100% ↔ `SET_VOLUME` 0–1 MASTER (Phase 0: this DMR reports
   `volume_control_type=master`, `volume_step_interval=null`; catt may quantize
   14→13). Cast % is not TV OSD — no `osd_max`. Phase 1: a remote debrid url is
-  Range-served from the host LAN (`cast_lan_proxy`, default on; JSON
-  `delivery: lan`) so 1080 HEVC stays native — not remux-720. Matroska still
-  remux `-c copy` to MP4 (ADR 0022). Open: OSD photo table, board HEVC
-  playback HEAD, JointSpace pairing.
+  Range-served from the host LAN when the upstream honours Range
+  (`cast_lan_proxy`, default on; JSON `delivery: lan`) so 1080 HEVC stays
+  native — not remux-720. No synthesized 206. No-Range / unknown length go to
+  the existing remux or live tier. Matroska still follows ADR 0022 in
+  `cast_flow` (`-c copy` to MP4, `-tag:v hvc1` for HEVC). Open: OSD photo
+  table, board HEVC playback HEAD, JointSpace pairing.
 - `--json --status` reports `volume_control_type`, `volume_step_interval`,
   `volume_percent`, `app_id`, `content_type`, `stream_type` (ADR 0045). Never
   `content_id`. `--volume` / TUI copy names Cast % ≠ OSD.

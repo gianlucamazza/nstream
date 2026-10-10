@@ -837,15 +837,23 @@ def lan_media(
 ) -> LanMedia | None:
     """Range-serve `url` on the host LAN so the TV does not pull a remote debrid host.
 
-    None when the config gate is off, the url is already local, the container needs a
-    rewrap (ADR 0022), or the detached server cannot start. Never logs `url`."""
+    None when the config gate is off, the url is already local, `device` is missing
+    (fail closed — never bind `0.0.0.0` / LOAD `http://0.0.0.0`), the plan is not
+    `proxy` (rewrap / no-Range / unknown length / probe fail), or the detached
+    server cannot start. Never logs `url`."""
     if not cfg.cast_lan_proxy or not urlproxy.is_remote(url):
         return None
+    if not device:
+        _log.warning("lan-proxy: device assente → bind rifiutato")
+        return None
+    from . import tracks
+
     probed = urlproxy.probe(url)
-    planned = urlproxy.plan(container, probed, video_codec)
+    tr = tracks.probe_tracks(url)
+    planned = urlproxy.plan(container, probed, video_codec or tr.video_codec, tr.codec_tag)
     if planned.mode != "proxy":
         return None
-    bind_ip = serve.lan_ip(device) if device else "0.0.0.0"
+    bind_ip = serve.lan_ip(device)
     serve.ensure_firewall(bind_ip)
     serve.reap_proxy_server()
     if follow:
@@ -858,7 +866,7 @@ def lan_media(
         return LanMedia(
             serve.served_url(bind_ip, port, server.token, planned.media_name),
             planned.content_type,
-            server.shutdown,
+            lambda: serve.close_server(server),
             planned,
         )
     spawned = serve.spawn_detached(bind_ip, proxy=urlproxy.proxy_job(url, planned))
@@ -906,7 +914,9 @@ def cast(
 
     A remote http(s) url is Range-served from the host LAN first (ADR 0045 Phase 1) so the
     TV does not pull a debrid host; `CastResult.delivery` is then `"lan"`. `container` /
-    `video_codec` feed the proxy-vs-rewrap decision (`quality.CAST_*`).
+    `video_codec` feed the proxy-vs-rewrap decision (`quality.CAST_*`). With
+    `cast_lan_proxy` on, a non-proxyable plan (no Range, unknown length, rewrap, missing
+    `device`) fails closed — never a silent WAN-direct of the debrid url.
 
     `subs_delivered`: whether the requested `sub_paths` were actually attached to the cast. Both
     senders now carry subtitles: the castbridge path serves the SRT as a side-loaded WebVTT track
@@ -917,6 +927,11 @@ def cast(
     if lan is not None:
         url = lan.url
         meta = replace(meta or CastMeta(), content_type=lan.content_type)
+    elif cfg.cast_lan_proxy and urlproxy.is_remote(url):
+        # Fail closed: never hand the debrid URL to the TV over the WAN.
+        reason = "lan_no_bind" if not device else _lan_fail_reason(url, container, video_codec)
+        _log.warning("lan-proxy: rifiuto WAN-direct (%s)", reason)
+        return cast_delivery.CastResult(0.0, 0.0, error=reason)
     try:
         return _cast_senders(
             cfg, title, url, device=device, start=start, sub_paths=sub_paths,
@@ -927,6 +942,15 @@ def cast(
     finally:
         if lan is not None and lan.shutdown is not None:
             lan.shutdown()
+
+
+def _lan_fail_reason(url: str, container: str, video_codec: str) -> str:
+    from . import tracks
+
+    probed = urlproxy.probe(url)
+    tr = tracks.probe_tracks(url)
+    planned = urlproxy.plan(container, probed, video_codec or tr.video_codec, tr.codec_tag)
+    return planned.reason if planned.mode != "proxy" else "lan_unavailable"
 
 
 def _cast_senders(
