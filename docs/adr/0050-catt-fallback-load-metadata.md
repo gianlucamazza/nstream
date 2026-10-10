@@ -11,7 +11,7 @@
 
 ## Context
 
-Field, 2026-10-05: Odroid N2 → Philips 43PUS9235/12, `cast_mode=dmr`,
+Field, 2026-10-05: the board → Philips 43PUS9235/12, `cast_mode=dmr`,
 `cast_remux=true`, catt 0.13.3, **castbridge absent**, `cast_receiver_app_id=07841171`
 ignored (`receiver_app_ignored` → `CC1AD845`). A 720p H.264/AAC remux played
 (`delivery: file`) but the TV showed generic player chrome — no title, no artwork,
@@ -153,7 +153,7 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   LOAD was never sent, or the receiver refused it. Logged as
   `catt sender=lib` / `catt sender=lib unconfirmed` / `catt sender=cli`
   (never the URL).
-- **Poster echo (board 2026-10-10, main @ cd284770):** Odroid → Philips
+- **Poster echo (board 2026-10-10, main @ cd284770):** the board → Philips
   43PUS9235 DMR. LAN delivery and `metadataType` 1 / title were present;
   `catt info` `media_metadata` had **no `images` key** in two reads.
   `catt info` reports the receiver echo (`MediaStatus.media_metadata` ←
@@ -161,7 +161,7 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   the LOAD we sent. Putting `images[]` on `media_info.metadata` makes the
   Movie payload match the fixture even if `thumb=` is missing; a later
   empty echo then means the DMR dropped a failed fetch, not a sender omit.
-- **Poster JPEG / headless (board 2026-10-10, tip 8282d240):** Odroid
+- **Poster JPEG / headless (board 2026-10-10, tip 8282d240):** the board
   `--json --cast` on the Philips. `catt info` still had
   `{metadataType 1, title}` and **no `images`**. Two causes: (1) Cinemeta
   `poster/small/` is `image/webp` — DMR rejects and strips it; (2) LOAD
@@ -178,7 +178,7 @@ No remux-resolution / `cast_mode` / ranking / OSD-volume change (ADR 0045).
   allowlist (https only, max 3 hops). Deadline 3 s across connect+read.
   A failed LAN JPEG fetch falls back to the allowlisted https JPEG
   rather than omitting `images`. Cache dir pruned to 200 newest files.
-- **Poster resolution (board 2026-10-10, main @ 3d24edb1):** Odroid
+- **Poster resolution (board 2026-10-10, main @ 3d24edb1):** the board
   `--json --cast` LOAD was `{metadataType 1, title}` with **no
   `images`**. `HEAD /cast/<token>/poster.jpg` was 404. Headless
   `CastMeta.poster` came from the `api.search` hit

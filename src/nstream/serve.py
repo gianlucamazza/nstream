@@ -270,7 +270,7 @@ def caption_kwargs(bind_ip: str, port: int, token: str, lang: str | None) -> dic
 
 
 def _lan_subnet(host_ip: str) -> str:
-    """The /24 the host's LAN IP belongs to (e.g. 192.168.1.75 → 192.168.1.0/24), matching
+    """The /24 the host's LAN IP belongs to (e.g. 192.0.2.75 → 192.0.2.0/24), matching
     skill-cast's `cast-screen lan_subnet()` so the ufw rule is scoped identically."""
     return ".".join(host_ip.split(".")[:3]) + ".0/24"
 
