@@ -282,19 +282,18 @@ def catt_play_kwargs(
     """kwargs for catt ≥0.13.2 `CattDevice.controller.play_media_url` (one LOAD).
 
     title, thumb (https poster), content_type, stream_type=BUFFERED, plus
-    `media_info.metadata.metadataType` 1/2 (pychromecast keeps it when already set).
+    `media_info.metadata` with metadataType 1/2 **and** `images: [{url}]` when
+    the poster is an allowlisted Cinemeta/metahub https URL. pychromecast 14.x
+    `**media_info` replaces `media.metadata` before it copies `thumb=` into
+    `images[]`; a metadata dict that only had `metadataType` left the LOAD
+    without `images` whenever `thumb` was missing. Put images on the Movie
+    block ourselves (ADR 0050).
     """
     meta = meta or CastMeta()
     mime = (meta.content_type or content_type or "video/mp4").strip() or "video/mp4"
-    md: dict = {"metadataType": catt_metadata_type(meta)}
-    if meta.series_title and md["metadataType"] == CATT_METADATA_TVSHOW:
-        md["seriesTitle"] = meta.series_title.strip()
-        md["season"] = int(meta.season)
-        md["episode"] = int(meta.episode)
-    if meta.subtitle:
-        md["subtitle"] = meta.subtitle
+    md = dict(catt_lib_media_info(title, meta, content_type=mime)["metadata"])
     out: dict = {
-        "title": catt_display_title(title, meta),
+        "title": md.get("title") or catt_display_title(title, meta),
         "content_type": mime,
         "stream_type": CATT_STREAM_BUFFERED,
         "media_info": {"metadata": md},

@@ -124,7 +124,7 @@ survive.
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |
 | --- | --- | --- | --- |
 | `metadata.title` | Cinemeta title | `-l` | same (+ TvShow block) |
-| `metadata.images` / poster | Cinemeta/metahub **https** `thumb` | **not sent** (no `--thumb`) | Cinemeta HTTPS poster |
+| `metadata.images` / poster | Cinemeta/metahub **https** on Movie `images[{url}]` + `thumb=` | **not sent** (no `--thumb`) | Cinemeta HTTPS poster |
 | `metadataType` | 1 Movie / 2 TvShow (`media_info`) | GENERIC (0) | Movie / TvShow |
 | `contentType` | `video/mp4` (remux); LAN mime on proxy | path guess | declared |
 | `streamType` | `BUFFERED` | `BUFFERED` | BUFFERED (live HLS is another path) |
