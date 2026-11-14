@@ -6,9 +6,10 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from . import log, player, subs
+from . import log, media_identity, player, subs
 from .config import Config, PlayOpts
 from .playback import PlaybackOutcome, require_started
+from .state import playback_session
 from .types import Stream
 
 _log = log.get_logger("application")
@@ -27,6 +28,7 @@ class LocalRequest:
     cast_enabled: bool = False
     auto: bool = True
     safety_sub_lang: str | None = None
+    on_started: Callable[[dict], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -73,19 +75,24 @@ def play_local(
         aid, sid, paths = tracks
         pick = subs.SubsPick(paths)
     _log.debug("phase=subtitles elapsed_ms=%.1f", (time.monotonic() - started) * 1000)
-    outcome = require_started(
-        backend(
-            cfg,
-            request.title,
-            request.stream["url"],
-            start=request.start,
-            sub_paths=pick.paths,
-            audio_id=aid,
-            sub_id=sid,
-            next_label=request.next_label,
-            cast_enabled=request.cast_enabled,
-            work_dir=request.work_dir,
-            audio_lang=request.opts.audio_lang,
+    metadata = playback_session.media(request.typ, request.video_id, request.title, request.opts)
+    metadata["release"] = media_identity.release_key(request.stream)
+    if request.stream.get("engine_port"):
+        metadata["engine_port"] = request.stream["engine_port"]
+    with playback_session.local_request(metadata, request.on_started):
+        outcome = require_started(
+            backend(
+                cfg,
+                request.title,
+                request.stream["url"],
+                start=request.start,
+                sub_paths=pick.paths,
+                audio_id=aid,
+                sub_id=sid,
+                next_label=request.next_label,
+                cast_enabled=request.cast_enabled,
+                work_dir=request.work_dir,
+                audio_lang=request.opts.audio_lang,
+            )
         )
-    )
     return LocalResult(outcome, pick)

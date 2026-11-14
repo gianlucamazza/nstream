@@ -286,7 +286,7 @@ def test_lua_signal_contract_pinned():
     other, and no harness executes the Lua — so pin the contract at the source level:
     the script must read its options under the "nstream" prefix (play() passes
     `--script-opts-append=nstream-signal=<path>`) and write exactly the literals
-    play() strips and returns ("next" / "cast"). Renaming either side breaks this
+    play() handles ("next" / "transfer-cast"). Renaming either side breaks this
     test before it breaks a movie night."""
     import pathlib
 
@@ -294,9 +294,10 @@ def test_lua_signal_contract_pinned():
     assert 'options.read_options(opts, "nstream")' in lua
     assert "signal" in lua  # the opts key play() appends as nstream-signal=
     assert 'f:write("next\\n")' in lua
-    assert 'f:write("cast\\n")' in lua
+    assert 'f:write("transfer-cast\\n")' in lua
     # play() strips the trailing newline: both spellings must land on the same tokens
-    assert "next\n".strip() == "next" and "cast\n".strip() == "cast"
+    assert "next\n".strip() == "next"
+    assert 'mp.commandv("quit")' not in lua[lua.index('f:write("transfer-cast') :]
 
 
 def test_playlist_arg_keeps_url_out_of_argv(tmp_path):

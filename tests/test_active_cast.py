@@ -96,3 +96,80 @@ def test_older_follower_cannot_erase_replacement():
     play(title="Show", device="TV")
     session = state.active_cast_info()
     assert session is not None and session["session_id"] == "replacement"
+
+
+@pytest.mark.parametrize("reason", ["finished", "stopped", "interrupted"])
+def test_terminal_snapshot_retires_matching_detached_presence(reason):
+    active_cast._publish(
+        {
+            "session_id": "same",
+            "title": "Film",
+            "device": "TV",
+            "ts": time.time(),
+            "backend_id": "daemon-start",
+            "receiver_session_id": 5,
+        }
+    )
+    active_cast.reconcile_terminal(
+        {
+            "backend_id": "daemon-start",
+            "data": {"session": "idle", "media": {"mediaSessionId": 5, "endReason": reason}},
+        }
+    )
+    assert state.active_cast_info() is None
+
+
+@pytest.mark.parametrize(
+    "backend,receiver,reason",
+    [
+        ("daemon-start", 5, "disconnected"),
+        ("daemon-start", 6, "finished"),
+        ("new-daemon", 5, "finished"),
+        ("daemon-start", 5, None),
+    ],
+)
+def test_uncertain_or_other_generation_snapshot_preserves_presence(backend, receiver, reason):
+    active_cast._publish(
+        {
+            "session_id": "same",
+            "title": "Film",
+            "device": "TV",
+            "ts": time.time(),
+            "backend_id": "daemon-start",
+            "receiver_session_id": 5,
+        }
+    )
+    active_cast.reconcile_terminal(
+        {
+            "backend_id": backend,
+            "data": {"session": "idle", "media": {"mediaSessionId": receiver, "endReason": reason}},
+        }
+    )
+    current_cast = state.active_cast_info()
+    assert current_cast is not None and current_cast["session_id"] == "same"
+
+
+def test_intentional_reload_rebinds_same_logical_session():
+    active_cast._publish(
+        {
+            "session_id": "same",
+            "device": "TV",
+            "ts": time.time(),
+            "backend_id": "daemon",
+            "receiver_session_id": 1,
+            "transfer_fingerprint": "old",
+        }
+    )
+    active_cast.rebind_cast("old-session", {"backend_id": "daemon", "receiver_session_id": 2})
+    assert (state.active_cast_info() or {})["receiver_session_id"] == 1
+    active_cast.rebind_cast("same", {"backend_id": "daemon", "receiver_session_id": 2})
+    value = state.active_cast_info() or {}
+    assert value["receiver_session_id"] == 2 and "transfer_fingerprint" not in value
+    active_cast.reconcile_terminal(
+        {"backend_id": "daemon", "data": {"media": {"mediaSessionId": 1, "endReason": "finished"}}}
+    )
+    assert state.active_cast_info() is not None
+    active_cast.reconcile_terminal(
+        {"backend_id": "daemon", "data": {"media": {"mediaSessionId": 2, "endReason": "finished"}}}
+    )
+    assert state.active_cast_info() is None

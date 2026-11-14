@@ -631,3 +631,34 @@ def test_media_load_args_text_language():
     args = bridge._media_load_args("ip", "url", text_language="it")
     assert args["textLanguage"] == "it"
     assert "textLanguage" not in bridge._media_load_args("ip", "url")
+
+
+def test_cached_snapshot_never_starts_daemon_or_requests_receiver(monkeypatch):
+    client, server = socket.socketpair()
+    monkeypatch.setattr(bridge, "_connect", lambda: client)
+    monkeypatch.setattr(bridge, "_peer_key", lambda _: "owned-daemon")
+    monkeypatch.setattr(bridge, "ensure_daemon", lambda *a: pytest.fail("must not start daemon"))
+    requests = []
+
+    def respond():
+        with server:
+            requests.append(json.loads(server.recv(4096)))
+            server.sendall(
+                b'{"id":1,"ok":true,"data":{"session":"idle","media":{"endReason":"finished"}}}\n'
+            )
+
+    thread = threading.Thread(target=respond)
+    thread.start()
+    result = bridge.peek_snapshot()
+    thread.join(2)
+    assert result == {
+        "backend_id": "owned-daemon",
+        "data": {"session": "idle", "media": {"endReason": "finished"}},
+    }
+    assert requests == [{"id": 1, "action": "status", "args": {}}]
+
+
+def test_cached_snapshot_unavailable_does_not_spawn(monkeypatch):
+    monkeypatch.setattr(bridge, "_connect", lambda: None)
+    monkeypatch.setattr(bridge, "ensure_daemon", lambda *a: pytest.fail("must not start daemon"))
+    assert bridge.peek_snapshot() is None

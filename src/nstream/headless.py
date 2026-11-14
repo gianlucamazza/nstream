@@ -26,6 +26,7 @@ from . import (
     desktop,
     explain,
     failures,
+    handoff,
     headless_play,
     log,
     mirror,
@@ -175,6 +176,60 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             }
         )
         return 2
+    if getattr(args, "transfer_to", None):
+        if (
+            not getattr(args, "session_id", None)
+            or any(
+                getattr(args, name, None)
+                for name in (
+                    "cast",
+                    "local",
+                    "mirror",
+                    "no_mirror",
+                    "subs",
+                    "sub_lang",
+                    "sub_offset",
+                    "sub_fps",
+                    "audio_lang",
+                    "quality",
+                    "movies",
+                    "series",
+                    "year",
+                    "season",
+                    "episode",
+                    "no_history",
+                    "no_autoplay",
+                    "play",
+                    "settings",
+                    "explain",
+                )
+            )
+            or getattr(args, "follow", None) is not None
+            or args.query
+            or args.stop
+            or args.status
+            or args.pause
+            or args.resume
+            or args.seek is not None
+            or args.volume is not None
+            or args.cont
+            or args.browse
+            or args.probe
+            or getattr(args, "history", False)
+            or getattr(args, "watch", False)
+            or getattr(args, "sub_shift", None) is not None
+        ):
+            _emit_json(
+                {
+                    "ok": False,
+                    "error": "usage",
+                    "message": "--transfer-to richiede solo --session-id e un eventuale --device",
+                }
+            )
+            return 2
+        result = handoff.transfer(cfg, args.session_id, args.transfer_to, args.device)
+        _emit_json(result)
+        return 0 if result["ok"] else 1
     if getattr(args, "watch", False):
         conflicts = (
             "stop",

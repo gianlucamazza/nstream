@@ -271,6 +271,17 @@ def _shutdown() -> None:
     """Terminate only the server we spawned (atexit)."""
     global _spawned
     if _spawned and _spawned.poll() is None:
+        # Another independently owned player may have borrowed this server during transfer.
+        from .state import active_cast_info
+        from .state.playback_session import local_info
+
+        port = urllib.parse.urlsplit(_base_url or "").port
+        if port and any(
+            value and value.get("engine_port") == port
+            for value in (active_cast_info(), local_info())
+        ):
+            _spawned = None
+            return
         with contextlib.suppress(OSError):
             _spawned.terminate()
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
@@ -412,6 +423,7 @@ def resolve(cfg: Config, stream: Stream) -> str:
         file_idx + 1 if isinstance(file_idx, int) else _largest_index(added.get("file_stats", []))
     )
     _wait_buffer(base, file_hash)
+    stream["engine_port"] = cfg.engine_port
     return f"http://{_lan_ip()}:{cfg.engine_port}/stream?link={file_hash}&index={index}&play"
 
 

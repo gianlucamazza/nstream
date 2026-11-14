@@ -38,6 +38,7 @@ from . import (
     engine,
     languages,
     log,
+    media_identity,
     mirror,
     notices,
     quality,
@@ -619,6 +620,22 @@ def run_cast(
     final_container, needs_rewrap, needs_remux = st.container, st.needs_rewrap, st.needs_remux
     refused_mirror = st.refused_mirror
     notice_defer = st.notice or notice_defer
+    event_sink = on_event
+
+    def media_event(event: dict) -> None:
+        if event_sink:
+            event_sink(
+                {
+                    **event,
+                    "audio_lang": plan.real_lang,
+                    "engine_port": chosen.get("engine_port"),
+                    "release": media_identity.release_key(chosen),
+                }
+                if event.get("kind") == "started"
+                else event
+            )
+
+    on_event = media_event if event_sink else None
     info = quality.parse_stream(chosen)
     source = str(chosen.get("addon") or "Sorgente")
     if info.resolution:

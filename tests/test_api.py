@@ -21,27 +21,38 @@ CFG = Config(torrentio_base="tb")
 
 
 def test_single_source_deadline_ignores_late_success(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
     from nstream.state import breaker
 
+    # Exercise an already available worker. Queued, never-started tasks intentionally
+    # have no breaker effect and are covered separately.
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.submit(lambda: None).result(timeout=2)
+    monkeypatch.setattr(api, "_addon_pool", pool)
+    entered = threading.Event()
     release = threading.Event()
     ended = threading.Event()
     records = []
-    monkeypatch.setattr(api, "_GATHER_BUDGET", 0.02)
+    monkeypatch.setattr(api, "_GATHER_BUDGET", 0.2)
     monkeypatch.setattr(breaker, "record_failure", lambda *a, **kw: records.append("failed"))
     monkeypatch.setattr(breaker, "record_success", lambda *a: records.append("success"))
 
     def slow():
+        entered.set()
         try:
-            release.wait(1)
+            release.wait(5)
             return [1]
         finally:
             ended.set()
 
     try:
         assert api._gather([slow], keys=["http://test"]) == []
+        assert entered.is_set()
         assert records == ["failed"]
     finally:
         release.set()
+        pool.shutdown(wait=True)
     assert ended.wait(1)
     assert records == ["failed"]
 

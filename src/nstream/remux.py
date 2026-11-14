@@ -240,6 +240,7 @@ def _read_state() -> dict | None:
     return _runstate().read()
 
 
+@util.state_update(_state_path)
 def _write_state(
     pid: int, file: str, device: str | None, mode: str = "catt", **extra: object
 ) -> None:
@@ -1734,6 +1735,9 @@ def _live_load(dev: str, st: dict, at: float) -> bool:
     """LOAD the live cast's current playlist at film time `at`, re-activating its subtitle
     rendition when it has one (a new LOAD starts with no text track)."""
     extra = {"text_language": st["text_language"]} if st.get("text_language") else {}
+    from .state.active_cast import active_cast_info, rebind_cast
+
+    active = active_cast_info()
     events = bridge.cast_load(
         dev, str(st["url"]), follow=False, title=str(st.get("title") or ""),
         content_type=_HLS_TYPE, current_time=at, **extra,
@@ -1741,6 +1745,8 @@ def _live_load(dev: str, st: dict, at: float) -> bool:
     try:
         for ev in events:
             if ev.get("kind") == "started":
+                if active and active.get("device") == dev:
+                    rebind_cast(active["session_id"], ev)
                 return True
             if ev.get("kind") == "failed":
                 return False
@@ -1832,6 +1838,27 @@ def _teardown(pid: int | None, file_path: str | None) -> None:
         _rm(f"{file_path}.vtt")  # WebVTT sidecar of the detached castbridge path, if any
         _rm(embedded_vtt(file_path))  # an embedded track extracted by the remux
     _clear_state()
+
+
+def delivery_identity(device: str | None) -> dict | None:
+    """Pin serving resources without including the receiver URL."""
+    value = _read_state()
+    if not value or value.get("device") != device:
+        return None
+    return {
+        **{key: value.get(key) for key in ("pid", "file", "device", "inproc")},
+        "proc_start": util.proc_start(value.get("pid")),
+    }
+
+
+@util.state_update(_state_path)
+def retire_delivery(expected: dict | None) -> None:
+    """Reap only the pinned detached delivery, without sending another receiver STOP."""
+    if not expected or expected.get("inproc"):
+        return  # The interactive owner tears down when its receiver stops.
+    current = delivery_identity(expected.get("device"))
+    if current == expected:
+        _teardown(expected.get("pid"), expected.get("file"))
 
 
 def stop(device: str | None = None) -> bool:

@@ -19,11 +19,13 @@ CAST_SESSION_TTL = 6 * 3600.0
 
 
 @util.state_update(lambda: util.RunState(CAST_SESSION).path)
-def clear_cast_session() -> None:
+def clear_cast_session(*, expected: dict | None = None) -> None:
     """Drop the fire-and-return cast session, if any. Called at the start of every new
     cast (`cast_flow.run_cast` / Alt-C): the new content replaces what the session
     described, and a stale session would attribute the receiver's position to it."""
-    util.RunState(CAST_SESSION).clear()
+    slot = util.RunState(CAST_SESSION)
+    if expected is None or slot.read() == expected:
+        slot.clear()
 
 
 @util.state_update(lambda: util.RunState(CAST_SESSION).path)

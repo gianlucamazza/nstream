@@ -18,6 +18,28 @@ with this document.
    `--audio-lang` apply through reselects (language, cast vet), not only the first pick.
 4. **Explicit `--year` is hard** (ADR 0030): no soft fall-through to another year.
 
+## Active playback transfer
+
+Use the `session_id` from `--watch`, then call:
+
+```sh
+nstream --json --transfer-to local --session-id SESSION_ID
+nstream --json --transfer-to cast --session-id SESSION_ID --device "Salotto"
+```
+
+These commands require no title or playback flags. They move the exact active video and
+release, including when history is disabled. The source keeps playing during preparation;
+success requires destination cursor/state verification and source retirement:
+`{"ok":true,"action":"transfer","target":"local","session_id":"…","position":123.4,"source_stopped":true,"error":null}`.
+
+The destination has an independent lifetime after the command returns. A failed resolve
+leaves the source playing. Errors include `session_changed`, `session_not_transferable`,
+`target_busy`, `target_unavailable`, `release_unavailable`, `edition_mismatch`,
+`duration_unverified`, `target_timeout` and `transfer_incomplete`. The last means source
+retirement/restoration could not be proved; inspect both players before retrying.
+Legacy sessions without release metadata and mirror sessions are not transferable.
+See [ADR 0060](adr/0060-transactional-playback-transfer.md).
+
 ## Invocation patterns
 
 Always pass `--json`. Quote the title.
@@ -56,11 +78,15 @@ Incompatible with `--json`: interactive-only flags such as `--sub-menu` → `err
 `nstream --json --watch` is a dedicated, persistent JSONL command. It emits an initial
 snapshot and a heartbeat every second, including while receiver I/O is slow. Each object
 contains `ok`, `action: "watch"`, `api_version: 1`, `capabilities` (`watch`, `session_guard`,
-`receiver_interest`), increasing `sequence`, Unix `captured_at`, `entries`, `prefer_cast`,
-`cast_session` and `telemetry`. Unknown additive fields may be ignored; unsupported major
+`receiver_interest`, `transfer`), increasing `sequence`, Unix `captured_at`, `entries`, `prefer_cast`,
+`cast_session`, `local_session` and `telemetry`. Unknown additive fields may be ignored; unsupported major
 versions or missing required capabilities must disable controls with a compatibility error.
 
-`cast_session` is null or `{session_id, title, device}`. Its identity changes when the
+`cast_session` is null or `{session_id, title, device, transferable}`.
+`local_session` is null or `{session_id, title, type, video_id, transferable}`.
+The additive `transfer` capability enables transfer controls; require `transferable: true`
+for that source and an unoccupied destination. Private socket paths and release descriptors
+are never included in these snapshots. Its identity changes when the
 cast is replaced, even on the same device. `--history` also exposes this identity and
 `prefer_cast` as additive fields. History is refreshed every five seconds; presence is read
 on each tick. All payloads use the normal secret-redacting JSON writer.
@@ -71,6 +97,9 @@ on each tick. All payloads use the normal secret-redacting JSON writer.
 clients must mark it stale when disconnected or older than ten seconds. Missing stream
 heartbeats for five seconds also makes the observation stale. Connection loss never means
 playback completed. `telemetry_connected` is also an additive field on `--status`.
+
+A matching cached daemon terminal reason clears detached cast presence without a receiver
+query; disconnected or unclassified idle does not clear it (ADR 0061).
 
 Receiver queries are opt-in: write `{"observe":true}\n` to stdin while the panel is open,
 and `{"observe":false}\n` when closed. Queries run at most once per three seconds, with

@@ -28,6 +28,7 @@ import os
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import time
 from collections.abc import Callable, Generator, Iterator
@@ -195,6 +196,38 @@ def ensure_daemon(timeout: float = _DAEMON_START_TIMEOUT) -> bool:
         if lock_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(lock_fd)
+
+
+def _peer_key(sock: socket.socket) -> str | None:
+    try:
+        pid, _, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        start = util.proc_start(pid)
+        return f"{pid}:{start}" if start is not None else None
+    except (OSError, AttributeError, struct.error):
+        return None
+
+
+def peek_snapshot() -> dict | None:
+    """Read cached daemon state with generation identity; never start it or query the TV."""
+    sock = _connect()
+    if sock is None:
+        return None
+    try:
+        sock.settimeout(0.15)
+        backend = _peer_key(sock)
+        if not backend:
+            return None
+        _send(sock, {"id": 1, "action": "status", "args": {}})
+        for message in _messages(sock):
+            if message is None:
+                return None
+            if isinstance(message, dict) and message.get("id") == 1 and message.get("ok"):
+                return {"backend_id": backend, "data": message.get("data")}
+        return None
+    except OSError:
+        return None
+    finally:
+        sock.close()
 
 
 def _send(sock: socket.socket, obj: dict) -> None:
@@ -425,7 +458,12 @@ def cast_load(
 
             if not started and state in ("PLAYING", "PAUSED", "BUFFERING"):
                 started = True
-                yield {"kind": "started", "title": title, "tracks": tracks}
+                event = {"kind": "started", "title": title, "tracks": tracks}
+                backend = _peer_key(sock)
+                receiver_id = block.get("mediaSessionId")
+                if backend and isinstance(receiver_id, int):
+                    event.update(backend_id=backend, receiver_session_id=receiver_id)
+                yield event
                 if not follow:
                     return
             elif started and state and state != last_state:

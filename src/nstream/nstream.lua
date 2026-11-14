@@ -193,17 +193,16 @@ mp.register_event("end-file", function(ev)
 end)
 
 -- In-player "send to TV": Alt+C signals nstream to re-cast from the current position
--- and quits mpv. Bound for the whole session, only when nstream enabled it (catt found).
+-- without quitting mpv. The core retires this player only after confirmed TV playback.
 if opts.cast == "yes" then
     mp.add_forced_key_binding("alt+c", "nstream-cast", function()
         if opts.signal ~= "" then
             local f = io.open(opts.signal, "w")
             if f then
-                f:write("cast\n")
+                f:write("transfer-cast\n")
                 f:close()
             end
         end
-        mp.osd_message("nstream: invio al TV...", 3)
-        mp.commandv("quit")
+        mp.osd_message("nstream: preparo il trasferimento alla TV...", 5)
     end)
 end

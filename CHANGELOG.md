@@ -7,6 +7,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.48.0] — 2026-11-15
+
+### Added
+
+- Core TV ↔ computer playback transfer with exact video/release identity, live cursor and
+  pause-state verification, independent destination lifetime and conservative rollback.
+  Expose `--transfer-to`, mpv Alt+C, cast-panel c and optional desktop transfer capability.
+- Confirmed local-player presence independent of history; retain borrowed TorrServer during transfer.
+
+### Fixed
+
+- Clear detached cast presence when the same native daemon/media session confirms completion;
+  preserve presence on control loss. Rebind intentional HLS reloads without changing the logical session.
+- Retire only the original transfer's delivery resources, without a second receiver STOP.
+
+
 ## [1.47.0] — 2026-11-14
 
 ### Fixed

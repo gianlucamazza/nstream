@@ -98,6 +98,10 @@ The host application must remain running for its in-process services. Returning 
 leaves the current item playing; automatic episode advancement continues only while
 following the attached playback flow.
 
+After confirmed cast startup, **c** transfers playback to this computer. Local **Alt+C**
+uses the same verified transaction to move to the TV; a failed preparation keeps mpv
+playing. The destination must be free and the current session transferable.
+
 Local mpv audio switch: mpv's `#`. Details: [cast.md](cast.md).
 
 ## Series binge

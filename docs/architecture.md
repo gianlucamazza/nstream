@@ -9,13 +9,13 @@ because it owns independent stores. Domains below are logical clusters (not impo
 
 ```
 src/nstream/
-├── orchestration    cli · cli_args · headless · headless_play · desktop · launcher · application · series · settings · doctor
+├── orchestration    cli · cli_args · headless · headless_play · desktop · launcher · application · handoff · series · settings · doctor
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
 │                    · remux · live · mirror · bridge · serve · urlproxy · discovery
 │                    · (_catt_load: catt.api helper on catt's interpreter)
 ├── subs             subs · subalign · srt · oshash · (_bench · _subalign_remote dev-only)
-├── playback         playback · player · labels · picker · preview · ui · tui_output · tui_cast · explain
+├── playback         playback · player · local_control · media_identity · labels · picker · preview · ui · tui_output · tui_cast · explain
 ├── discovery/API    api · addons · net
 └── foundation       config · types · state/ · log · util · languages · providers · notices
 ```
@@ -49,7 +49,7 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
 - `availability` is a leaf under selection (probe + denylist); `stream_select` orchestrates targets
 - Domain payloads: import from `nstream.types`, not `config`
 - State: `from nstream import state` (package public API); stores live in `state.history` /
-  `state.cast_session` / `state.dead` / `state.breaker`
+  `state.cast_session` / `state.active_cast` / `state.playback_session` / `state.dead` / `state.breaker`
 
 ```mermaid
 flowchart BT
@@ -83,6 +83,7 @@ flowchart BT
 | `launcher` | Single-window desktop activation and lifetime lock (ADR 0058) |
 | `desktop` | Versioned desktop snapshots, session identity and opt-in receiver observation (ADR 0057) |
 | `headless_play` | One-title resolve → prepare_stream → play/cast → success JSON |
+| `handoff` | Transactional TV ↔ mpv transfer, private worker readiness, alignment and rollback (ADR 0060) |
 | `application` | Shared local subtitle/track preparation and verified playback for both frontends |
 | `doctor` | Read-only installation/config diagnostics; no network or backend effects |
 | `series` | series-only flow (ADR 0009) + continuation policy: `next_up` / `next_video` (ADR 0029) |
@@ -192,6 +193,11 @@ cycles, no domain→TUI edge, and a bottom tier (`util`, `log`, `notices`, `lang
 
 `state.active_cast` observes `cast_flow.run_cast` events and publishes history-independent
 playback presence in `$XDG_RUNTIME_DIR/nstream-active-cast.json` (ADR 0054).
+Bound terminal daemon snapshots reconcile detached completion (ADR 0061).
+`state.playback_session` owns confirmed mpv presence in `nstream-active-local.json`,
+safe release descriptors and private transfer correlation IDs. `local_control` operates
+only that owned mpv socket; `media_identity` builds provider-neutral release identifiers.
+Neither presence store requires watch history.
 `headless --history` reads that presence, falling back to the legacy watch session,
 and projects resumable history without network or garbage collection.
 | `log` / `util` / `languages` | logging+redaction, atomic I/O + text folding, language tokens |

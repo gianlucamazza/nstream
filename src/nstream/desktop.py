@@ -12,11 +12,12 @@ import threading
 import time
 from collections.abc import Callable
 
-from . import caster, log, state
+from . import bridge, caster, log, state
 from .config import Config
+from .state import playback_session
 
 API_VERSION = 1
-CAPABILITIES = ["watch", "session_guard", "receiver_interest"]
+CAPABILITIES = ["watch", "session_guard", "receiver_interest", "transfer"]
 
 
 def session_info() -> dict | None:
@@ -114,6 +115,11 @@ def watch(cfg: Config) -> int:
             if now - last_history >= 5 or not history:
                 history = history_payload(cfg)
                 last_history = now
+            active = state.active_cast_info()
+            if active and active.get("backend_id"):
+                snapshot = bridge.peek_snapshot()
+                if snapshot:
+                    state.active_cast.reconcile_terminal(snapshot)
             session = session_info()
             telemetry = observer.tick(session, observe, now)
             if (
@@ -140,7 +146,24 @@ def watch(cfg: Config) -> int:
                     "sequence": sequence,
                     "captured_at": time.time(),
                     **history,
-                    "cast_session": session,
+                    "cast_session": (
+                        {
+                            **session,
+                            "transferable": playback_session.transferable(state.active_cast_info()),
+                        }
+                        if session
+                        else None
+                    ),
+                    "local_session": (
+                        {
+                            **local,
+                            "transferable": playback_session.transferable(
+                                playback_session.local_info()
+                            ),
+                        }
+                        if (local := playback_session.public_local())
+                        else None
+                    ),
                     "telemetry": telemetry,
                 }
             )

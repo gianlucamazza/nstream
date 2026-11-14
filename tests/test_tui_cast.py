@@ -358,3 +358,16 @@ def test_existing_cast_reopens_without_load_or_source_list(task, monkeypatch):
             existing.cancelled.set()
             existing.thread.join(timeout=1)
             assert existing.done.is_set()
+
+
+def test_computer_key_uses_core_transfer_after_startup(task, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        tui_cast.handoff,
+        "transfer_to_local",
+        lambda cfg, **kw: calls.append(kw) or (True, "Transferred"),
+    )
+    task.started.set()
+    task.control("c")
+    wait_command(task)
+    assert calls == [{"device": task.device}]

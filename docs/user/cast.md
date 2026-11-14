@@ -58,6 +58,19 @@ issues no new LOAD. DMR controls include pause, seek, volume and managed-source 
 reselection. Mirror exposes home, details and stop. This is independent of headless
 `--follow`/`--no-follow` behavior and does not extend service lifetime past process exit.
 
+## Move playback between TV and computer
+
+During local mpv playback, **Alt+C** prepares the TV while the computer keeps playing.
+In the cast panel, **c** moves playback to this computer. The optional desktop plugin
+offers **Move to this computer** / **Move to TV** when both the core and session support
+transfer. Its continue-watching target buttons still resume saved history.
+
+Transfer uses the same video and release, verifies the current cursor and pause state,
+then stops the old player. Missing metadata/release, an occupied destination or unknown
+duration prevents transfer. Mirror and sessions started before transfer metadata was
+available require a fresh playback start. Preparation may take time for a TV remux.
+Core transfers work without the plugin; history may be disabled.
+
 ## Delivery backends
 
 ```mermaid

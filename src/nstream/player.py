@@ -15,6 +15,7 @@ import math
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -24,6 +25,7 @@ from importlib import resources
 from . import log, quality, util
 from .config import Config
 from .playback import PlaybackError, PlaybackOutcome, require_started
+from .state import playback_session
 
 # IPC socket handshake: mpv creates the socket shortly after launch, so retry a few
 # times before giving up. The recv timeout lets the tracker notice mpv exiting promptly
@@ -39,6 +41,9 @@ def _track_position(
     sock_path: str,
     holder: dict[str, float],
     proc: subprocess.Popen,
+    metadata: dict | None = None,
+    ready=None,
+    registration: dict | None = None,
 ) -> None:
     """Observe mpv's time-pos/duration over the IPC socket; record the last values."""
     started_at = time.monotonic()
@@ -111,10 +116,65 @@ def _track_position(
                                     (time.monotonic() - started_at) * 1000,
                                 )
                             holder["started"] = 1.0
+                        if (
+                            metadata
+                            and holder.get("started")
+                            and registration is not None
+                            and not registration
+                        ):
+                            registration["attempted"] = True
+                            value = playback_session.publish_local(metadata, proc.pid, sock_path)
+                            if value:
+                                registration.update(value)
+                                if ready:
+                                    ready(value)
     except OSError:
         pass
     finally:
         sock.close()
+
+
+def _watch_transfer(
+    sock_path: str, signal_path: str, registration: dict, proc: subprocess.Popen
+) -> None:
+    """Alt+C uses the same guarded CLI use case; mpv stays alive during preparation."""
+    from . import local_control
+
+    while proc.poll() is None:
+        requested = ""
+        with contextlib.suppress(OSError), open(signal_path, encoding="utf-8") as source:
+            requested = source.read(64).strip()
+        if requested == "transfer-cast" and registration.get("session_id"):
+            with contextlib.suppress(OSError):
+                os.unlink(signal_path)
+            try:
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "nstream",
+                        "--json",
+                        "--transfer-to",
+                        "cast",
+                        "--session-id",
+                        registration["session_id"],
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    timeout=300,
+                )
+                ok = result.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            if not ok and proc.poll() is None:
+                with contextlib.suppress(local_control.LocalUnavailable):
+                    local_control.command(
+                        registration,
+                        ["show-text", "nstream: spostamento non riuscito; continuo qui", 5000],
+                    )
+        time.sleep(0.2)
 
 
 def _mpv_conf_lines() -> Iterator[str]:
@@ -351,10 +411,22 @@ def play(
             proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
             raise PlaybackError("player_missing", "mpv non trovato — installa mpv") from None
+        metadata, ready = playback_session.local_context.get()
+        registration: dict = {}
         tracker = threading.Thread(
-            target=_track_position, args=(sock_path, holder, proc), daemon=True
+            target=_track_position,
+            args=(sock_path, holder, proc, metadata, ready, registration)
+            if metadata
+            else (sock_path, holder, proc),
+            daemon=True,
         )
         tracker.start()
+        if cast_enabled and metadata:
+            threading.Thread(
+                target=_watch_transfer,
+                args=(sock_path, signal_path, registration, proc),
+                daemon=True,
+            ).start()
         try:
             rc = proc.wait()
         except BaseException:
@@ -368,6 +440,8 @@ def play(
             raise
         finally:
             tracker.join(timeout=_TRACKER_JOIN_TIMEOUT)
+            if registration.get("session_id"):
+                playback_session.clear_local(registration["session_id"])
         with contextlib.suppress(OSError, ValueError):
             with open(outcome_path, encoding="utf-8") as f:
                 loaded, reason = f.read(64).splitlines()

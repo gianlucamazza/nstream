@@ -10,6 +10,7 @@ import argparse
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from . import (
@@ -19,6 +20,7 @@ from . import (
     caster,
     failures,
     log,
+    media_identity,
     notices,
     quality,
     state,
@@ -132,12 +134,25 @@ class _Selected:
     audio_verified: bool | None
 
 
-def _select(cfg: Config, opts: PlayOpts, typ: str, video_id: str, title: str) -> _Selected | int:
+def _select(
+    cfg: Config, opts: PlayOpts, typ: str, video_id: str, title: str, *, release: dict | None = None
+) -> _Selected | int:
     """Fetch, prune and vet the streams for one video; on failure emit the JSON error and
     return the exit code. Same primitives as the TUI (api.streams → prepare_stream), never
     a menu (auto=True, reselect_on_wrong_audio=False)."""
     print(f"{ui.g().play} {title} — cerco la sorgente migliore…", file=sys.stderr)
     results = api.streams(cfg, typ, video_id)
+    if release:
+        results = [stream for stream in results if media_identity.same_release(stream, release)]
+        if not results:
+            emit_json(
+                {
+                    "ok": False,
+                    "error": "release_unavailable",
+                    "message": "la stessa release non è disponibile sul destinatario",
+                }
+            )
+            return 1
     if not results:
         err = stream_select.no_stream_source_error(cfg) or "no_streams"
         emit_json(
@@ -241,6 +256,9 @@ def auto_play(
     cast_meta: caster.CastMeta | None = None,
     *,
     name: str | None = None,
+    start_override: float | None = None,
+    on_started: Callable[[dict], None] | None = None,
+    release: dict | None = None,
 ) -> int:
     """Resolve the best stream for one video and play/cast it headlessly, then emit JSON.
     Reuses the same primitives as the interactive flow (api.streams → prepare_stream →
@@ -254,7 +272,11 @@ def auto_play(
             device = _resolve_device(cfg, headless=True, prefer=args.device)
         except CastUnavailable as e:
             return emit_failure(e)
-    sel = _select(cfg, opts, typ, video_id, title)
+    sel = (
+        _select(cfg, opts, typ, video_id, title, release=release)
+        if release
+        else _select(cfg, opts, typ, video_id, title)
+    )
     if isinstance(sel, int):
         return sel
     results, vetted, expected_s = sel.results, sel.vetted, sel.expected_s
@@ -294,7 +316,11 @@ def auto_play(
         )  # fmt: skip
 
     with tempfile.TemporaryDirectory(prefix="nstream-", dir=runtime) as work_dir:
-        start = state.resume_position(cfg, video_id) if opts.history else None
+        start = (
+            start_override
+            if start_override is not None
+            else (state.resume_position(cfg, video_id) if opts.history else None)
+        )
         if opts.cast:
             device_name = args.device or cfg.cast_device or device
 
@@ -346,6 +372,10 @@ def auto_play(
                     }
                 )
                 return 1
+            if on_started:
+                active = state.active_cast_info()
+                if active:
+                    on_started(active)
             chosen = outcome.stream
             stream_block = describe_stream(cfg, chosen)  # may have been reselected
             if outcome.audio_lang or outcome.audio_degraded:
@@ -401,6 +431,7 @@ def auto_play(
                     work_dir,
                     start=start,
                     safety_sub_lang=vetted.safety_sub_lang,
+                    on_started=on_started,
                 ),
                 backend=play,
                 acquire_subs=auto_subs,

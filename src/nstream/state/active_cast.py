@@ -8,8 +8,9 @@ import time
 import uuid
 from collections.abc import Callable
 
-from .. import util
+from .. import media_identity, util
 from .cast_session import CAST_SESSION_TTL
+from .playback_session import media as playback_media
 
 ACTIVE_CAST = "active-cast"
 
@@ -65,13 +66,22 @@ def track_cast[R](fn: Callable[..., R]) -> Callable[..., R]:
     @functools.wraps(fn)
     def tracked(*args, **kwargs) -> R:
         follow = kwargs.get("follow", True)
-        session = {
+        session: dict = {
             "session_id": uuid.uuid4().hex,
             "title": str(kwargs["title"])[:200],
             "device": str(kwargs["device"])[:80],
             "follow": follow,
             "ts": time.time(),
         }
+        if kwargs.get("video_id") and kwargs.get("opts"):
+            session.update(
+                playback_media(
+                    kwargs.get("typ", "movie"), kwargs["video_id"], session["title"], kwargs["opts"]
+                )
+            )
+        chosen = kwargs.get("chosen") or (args[2] if len(args) > 2 else {})
+        if isinstance(chosen, dict):
+            session["release"] = media_identity.release_key(chosen)
         if follow:
             session["pid"] = os.getpid()
         callback = kwargs.get("on_event")
@@ -84,6 +94,17 @@ def track_cast[R](fn: Callable[..., R]) -> Callable[..., R]:
             if kind == "started" and not started:
                 started = True
                 session["ts"] = time.time()
+                if event.get("backend_id") and event.get("receiver_session_id") is not None:
+                    session["backend_id"] = event["backend_id"]
+                    session["receiver_session_id"] = event["receiver_session_id"]
+                if event.get("release"):
+                    session["release"] = event["release"]
+                if event.get("delivery"):
+                    session["delivery"] = event["delivery"]
+                if event.get("engine_port"):
+                    session["engine_port"] = event["engine_port"]
+                if event.get("audio_lang"):
+                    session.setdefault("preferences", {})["audio_lang"] = event["audio_lang"]
                 _publish(session)
             elif kind == "disconnected" and started:
                 # Losing the observer is not evidence that the TV stopped playing.
@@ -102,3 +123,52 @@ def track_cast[R](fn: Callable[..., R]) -> Callable[..., R]:
                 clear_active_cast(session_id=session["session_id"])
 
     return tracked
+
+
+@util.state_update(lambda: util.RunState(ACTIVE_CAST).path)
+def rebind_cast(identity: str, event: dict) -> None:
+    """An intentional HLS reload keeps the logical session and changes receiver identity."""
+    slot = util.RunState(ACTIVE_CAST)
+    value = slot.read()
+    if (
+        value
+        and value.get("session_id") == identity
+        and event.get("backend_id")
+        and event.get("receiver_session_id") is not None
+    ):
+        value.update(
+            backend_id=event["backend_id"], receiver_session_id=event["receiver_session_id"]
+        )
+        value.pop("transfer_fingerprint", None)
+        slot.write(value)
+
+
+@util.state_update(lambda: util.RunState(ACTIVE_CAST).path)
+def reconcile_terminal(snapshot: dict) -> None:
+    """Retire only a terminal event bound to this daemon generation and receiver session."""
+    slot = util.RunState(ACTIVE_CAST)
+    active = slot.read()
+    data = snapshot.get("data")
+    media = data.get("media") if isinstance(data, dict) else None
+    if (
+        not active
+        or not isinstance(media, dict)
+        or not active.get("backend_id")
+        or snapshot.get("backend_id") != active["backend_id"]
+        or media.get("mediaSessionId") != active.get("receiver_session_id")
+        or media.get("endReason") not in ("finished", "stopped", "interrupted")
+    ):
+        return
+    slot.clear()
+    # Do not let the legacy fallback resurrect this same retired playback.
+    from .cast_session import cast_session_info, clear_cast_session
+
+    legacy = cast_session_info()
+    if legacy and legacy.get("device") == active.get("device"):
+        same = (
+            legacy.get("video_id") == active.get("video_id")
+            if active.get("video_id")
+            else legacy.get("title") == active.get("title")
+        )
+        if same:
+            clear_cast_session(expected=legacy)

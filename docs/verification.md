@@ -113,3 +113,25 @@ The test did not issue STOP or LOAD and did not expose media URLs or tokens.
 This is empirical evidence for this receiver/session, not a guarantee for every receiver
 or source. The fault tests control-path interruption, not host/network loss of HLS media.
 See ADRs 0056, 0058 and 0059.
+
+
+## Transfer and presence checks — 1.48.0 / plugin 0.5.0 (2026-11-15)
+
+The full gate passed 1,996 tests, Ruff, types and wheel/sdist installation checks.
+Local-only tests exercise exact release filtering, pause/cursor alignment, rollback,
+physical receiver replacement, identity-checked legacy presence cleanup, daemon terminal
+binding and HLS reload rebinding. Torrent hash alone does not identify a file in a pack.
+
+Real mpv tests use generated WAV media with null audio/video. They verify presence without
+history, pause, seek, quit and cleanup. A separate process test verifies readiness ACK,
+exact episode metadata, continued worker lifetime after ACK and player cleanup on SIGTERM.
+The same local lifecycle smoke passed against the installed package.
+
+The optional plugin passed all 29 helper/contract/QML tests against that installed core.
+Its installed idle panel was visually checked: no active TV title or transport controls;
+continue-watching remains available. Neither this check nor the local player smokes sent
+STOP or LOAD to the Philips.
+
+A complete physical TV ↔ computer transfer, including visible frames/audible audio and
+TV-specific seek accuracy, remains an acceptance check. The earlier Philips reconnect
+acceptance does not certify this new transfer transaction.

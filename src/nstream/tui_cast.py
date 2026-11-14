@@ -17,7 +17,18 @@ from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from . import cast_control, cast_flow, cast_vet, caster, failures, languages, log, tui_output, util
+from . import (
+    cast_control,
+    cast_flow,
+    cast_vet,
+    caster,
+    failures,
+    handoff,
+    languages,
+    log,
+    tui_output,
+    util,
+)
 from .config import Config, PlayOpts
 from .picker import fzf, fzf_index
 from .types import Stream
@@ -346,6 +357,11 @@ class CastTask:
                 return
             self.command(self.stop)
             return
+        if key == "c" and self.started.is_set() and not self.mirror:
+            self.command(
+                lambda: self.feedback(handoff.transfer_to_local(self.cfg, device=self.device))
+            )
+            return
         if (
             not self.started.is_set()
             or self.mirror
@@ -437,7 +453,10 @@ class CastTask:
     def help(self) -> str:
         text = "Esc: home · s: ferma · d: dettagli"
         if not self.mirror:
-            text = "Esc: home · s: ferma · d: dettagli · Spazio: pausa · ←/→: ±30s · +/-: volume"
+            text = (
+                "Esc: home · s: ferma · d: dettagli · Spazio: pausa · ←/→: ±30s · "
+                "+/-: volume · c: computer"
+            )
             if self.results:
                 text += " · a: audio"
         return text

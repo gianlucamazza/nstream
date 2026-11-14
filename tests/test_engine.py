@@ -433,3 +433,27 @@ def test_p2p_notice_once_per_process(monkeypatch):
         engine._p2p_notice_once(cfg)
         engine._p2p_notice_once(cfg)
     assert len(bag) == 1 and saved == [{"p2p_ack": True}]
+
+
+@pytest.mark.parametrize("borrower", ["local", "cast", None])
+def test_shutdown_preserves_server_borrowed_by_active_playback(monkeypatch, borrower):
+    from unittest.mock import Mock
+
+    from nstream import state
+    from nstream.state import playback_session
+
+    proc = Mock()
+    proc.poll.return_value = None
+    engine._spawned = proc
+    engine._base_url = "http://127.0.0.1:8090"
+    monkeypatch.setattr(
+        state, "active_cast_info", lambda: {"engine_port": 8090} if borrower == "cast" else None
+    )
+    monkeypatch.setattr(
+        playback_session,
+        "local_info",
+        lambda: {"engine_port": 8090} if borrower == "local" else None,
+    )
+    engine._shutdown()
+    assert proc.terminate.call_count == (0 if borrower else 1)
+    assert engine._spawned is None

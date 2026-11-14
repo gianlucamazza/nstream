@@ -153,7 +153,7 @@ def test_watch_rejects_malformed_or_oversized_interest(payload, tmp_path):
         capture_output=True,
         text=True,
         env=env,
-        timeout=5,
+        timeout=15,  # Includes cold interpreter/import startup on a busy desktop.
     )
     assert proc.returncode == 2
     snapshot = json.loads(proc.stdout.splitlines()[0])
@@ -214,3 +214,64 @@ def test_watch_uses_shared_secret_redaction(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "privatecredential" not in output
     assert json.loads(output)["api_version"] == 1
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--cast"],
+        ["--local"],
+        ["--follow"],
+        ["--quality", "720"],
+        ["--audio-lang", "ita"],
+        ["--no-history"],
+    ],
+)
+def test_transfer_rejects_ignored_playback_flags(monkeypatch, capsys, extra):
+    monkeypatch.setattr(
+        headless.handoff, "transfer", lambda *a: pytest.fail("invalid invocation must not transfer")
+    )
+    args = build_parser().parse_args(
+        ["--json", "--transfer-to", "local", "--session-id", "a" * 32, *extra]
+    )
+    assert headless.run(CFG, args, OPTS) == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "usage"
+
+
+def test_closed_panel_heartbeat_retires_confirmed_detached_cast(monkeypatch, capsys):
+    import time
+
+    from nstream.state import active_cast
+
+    active_cast._publish(
+        {
+            "session_id": "ended",
+            "title": "Finished film",
+            "device": "TV",
+            "ts": time.time(),
+            "backend_id": "daemon",
+            "receiver_session_id": 1,
+        }
+    )
+    monkeypatch.setattr(
+        desktop.bridge,
+        "peek_snapshot",
+        lambda: {
+            "backend_id": "daemon",
+            "data": {"session": "idle", "media": {"mediaSessionId": 1, "endReason": "finished"}},
+        },
+    )
+    observer = desktop.Observer(lambda *a: pytest.fail("closed panel must not query TV"))
+    monkeypatch.setattr(desktop, "Observer", lambda: observer)
+    monkeypatch.setattr(desktop.select, "select", lambda *a: ([desktop.sys.stdin], [], []))
+    monkeypatch.setattr(desktop.os, "read", lambda *a: b"")
+
+    class Input:
+        def fileno(self):
+            return 0
+
+    monkeypatch.setattr(desktop.sys, "stdin", Input())
+    assert desktop.watch(Config(history_enabled=False)) == 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["cast_session"] is None
+    assert response["telemetry"]["connection"] == "idle"
