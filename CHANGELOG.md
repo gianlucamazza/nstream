@@ -7,6 +7,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.45.0] — 2026-11-14
+
 ### Changed
 
 - **ADR 0055:** unify TUI menus around the terminal palette and persistent keyboard
