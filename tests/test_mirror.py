@@ -454,3 +454,15 @@ def test_launch_sender_config_overrides_and_failure(monkeypatch):
 
     monkeypatch.setattr(mirror.subprocess, "Popen", boom)
     assert mirror._launch_sender(cfg, "10.0.0.5", "0xBBB") is None
+
+
+def test_sender_bin_prefers_env_then_dev_build_then_path(monkeypatch, tmp_path):
+    dev = tmp_path / "cast_sender"
+    monkeypatch.setattr(mirror, "_DEV_SENDER", str(dev))
+    monkeypatch.setattr(mirror.shutil, "which", lambda name: "/usr/bin/cast_sender")
+    monkeypatch.setenv("CAST_MIRROR_BIN", "/opt/cs")
+    assert mirror._sender_bin() == "/opt/cs"
+    monkeypatch.delenv("CAST_MIRROR_BIN")
+    assert mirror._sender_bin() == "/usr/bin/cast_sender"
+    dev.write_text("")
+    assert mirror._sender_bin() == str(dev)

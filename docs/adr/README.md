@@ -78,6 +78,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0049](0049-trakt-catalogs-on-the-board.md) | Trakt catalogs on the board (not an indexer, not history sync) | Accepted | 2026-10-05 |
 | [0050](0050-catt-fallback-load-metadata.md) | catt ≥0.13.2 fallback LOAD: title + thumb/images + BUFFERED via library | Accepted | 2026-10-10 |
 | [0051](0051-codec-labels-probed-beats-release-name.md) | Codec labels: probed beats release name | Accepted | 2026-10-10 |
+| [0052](0052-widget-process-supervision.md) | Widget process supervision and session-bound cast controls | Accepted | 2026-11-14 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

@@ -102,7 +102,8 @@ def _select_meta(
     the localized-title case, where the catalog name is English) or "first" (a guess).
 
     An explicit --year is a hard constraint: when every candidate provably has another
-    year, this raises YearMismatch instead of playing the wrong film (ADR 0030). A year
+    year — or it refuted every dated one and the dateless survivors are named otherwise —
+    this raises YearMismatch instead of playing the wrong film (ADR 0030). A year
     merely inferred from a trailing token in the query stays soft — it may reorder, never
     refuse, or "blade runner 2049" and "1917" become unplayable.
 
@@ -132,6 +133,14 @@ def _select_meta(
         return exact[0], "exact"
     if hits:
         return hits[0], "year"
+    if explicit and year and len(pool) < len(metas):
+        # The year refuted every dated candidate, and what is left is dateless AND named
+        # otherwise: no evidence supports any survivor. Guessing among them would get round
+        # the hard --year (ADR 0030 amendment: "Big Buck Bunny" --year 2008 cast the dateless
+        # "The Big Bunny"). With no dated candidate at all, the year proved nothing: fall
+        # through as before.
+        offered = dict.fromkeys(str(m.get("releaseInfo", "")) for m in metas)
+        raise YearMismatch(tuple(offered))
     return pool[0], "first"
 
 
@@ -189,6 +198,11 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     if args.pause or args.resume or args.seek is not None:
         return _run_control(cfg, args)
     query = " ".join(args.query)
+    # Read-only listings for front-ends (pickers, desktop widgets): never play.
+    if getattr(args, "history", False):
+        return _run_history(cfg, tfilter)
+    if getattr(args, "search", False):
+        return _run_search(cfg, query, tfilter, args.year)
     if args.volume is not None and not query and not args.browse and not args.cont:
         # Standalone volume: act on the current cast instead of demanding a re-cast.
         return _run_volume(cfg, args)
@@ -366,6 +380,76 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     )  # fmt: skip
 
 
+SEARCH_LIMIT = 30
+
+
+def _run_search(cfg: Config, query: str, typ: str | None, year: str | None) -> int:
+    """`--json --search "X"`: the candidate titles a picker would show, never played.
+    The same `api.search` ranking the play path chooses from, so a front-end that lets the
+    user pick and then runs `--year`/`--movies`/`--series` lands on the row they chose."""
+    if not query:
+        _emit_json({"ok": False, "error": "usage", "message": "--search richiede un titolo"})
+        return 2
+    metas = api.search(cfg, query, typ)
+    if typ:
+        metas = [m for m in metas if m.get("type", "movie") == typ]
+    if year:
+        # Drop only the provably wrong years: an unknown span is absence of evidence.
+        metas = [m for m in metas if _year_matches(m, year) is not False]
+    _emit_json(
+        {
+            "ok": True,
+            "action": "search",
+            "query": query,
+            "results": [
+                {
+                    "id": m.get("id", ""),
+                    "type": m.get("type", "movie"),
+                    "name": m.get("name", ""),
+                    "year": str(m.get("releaseInfo", "")),
+                }
+                for m in metas[:SEARCH_LIMIT]
+            ],
+            "error": None,
+        }
+    )
+    return 0
+
+
+def _run_history(cfg: Config, typ: str | None) -> int:
+    """`--json --history`: what `-c` can continue, most recent first (`state.resumable`,
+    ADR 0029), plus the live fire-and-return cast session. A pure local read — no network,
+    no receiver probe — so a widget can poll it cheaply and call `--status` only while
+    `cast_session` is set. `next: true` marks a finished episode `-c` advances past."""
+    session = state.cast_session_info()
+    _emit_json(
+        {
+            "ok": True,
+            "action": "history",
+            "entries": [
+                {
+                    "title": e.get("title", ""),
+                    "type": e.get("type", "movie"),
+                    "season": e.get("season") or None,
+                    "episode": e.get("episode") or None,
+                    "position": round(float(e.get("position") or 0.0), 1),
+                    "duration": round(float(e.get("duration") or 0.0), 1),
+                    "ts": e.get("ts") or 0.0,
+                    "next": state.is_watched(e),
+                }
+                for e in state.resumable(cfg, typ=typ)
+            ],
+            "cast_session": (
+                {"title": session.get("title") or "", "device": session.get("device") or ""}
+                if session
+                else None
+            ),
+            "error": None,
+        }
+    )
+    return 0
+
+
 def _reconcile_cast_session(cfg: Config) -> None:
     """Fold the receiver's real position into history before deciding what to continue.
 
@@ -439,11 +523,19 @@ def _run_auto_resume(
     )  # fmt: skip
 
 
+def _lifecycle_device(cfg: Config, args: argparse.Namespace) -> str:
+    """Explicit device, else the active session, else headless discovery."""
+    # Session devices are already resolved IPs. Re-discovery can select another TV,
+    # and --device resolves names rather than accepting those recorded IPs.
+    if not args.device and (device := state.cast_session_device()):
+        return device
+    return _resolve_device(cfg, headless=True, prefer=args.device)
+
+
 def _headless_device(cfg: Config, args: argparse.Namespace) -> str | None:
-    """Resolve the cast device for a lifecycle action (--stop/--status), or None (emitting a
-    device_not_found JSON) when no Chromecast can be resolved without a picker."""
+    """Resolve a lifecycle device, emitting one JSON error if unavailable."""
     try:
-        return _resolve_device(cfg, headless=True, prefer=args.device)
+        return _lifecycle_device(cfg, args)
     except CastUnavailable as e:
         _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
         return None
@@ -455,7 +547,7 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     # tear it down first, independent of DMR device resolution.
     mirror_stopped = mirror.stop()
     try:
-        device = _resolve_device(cfg, headless=True, prefer=args.device)
+        device = _lifecycle_device(cfg, args)
     except CastUnavailable as e:
         # The TV is off/unreachable: still reclaim the local side (detached remux server,
         # its multi-GB temp file, a subtitle server) — it would otherwise pin disk forever.

@@ -818,8 +818,11 @@ def catt_lib_outcome(
     else:
         payload["name"] = ident["name"]
     try:
+        # -I: the script's own directory (nstream's package dir) must not lead sys.path —
+        # there `types.py` shadowed the stdlib `types`, and every helper LOAD died on import
+        # before sending anything (field evidence 2026-11-14).
         proc = subprocess.run(
-            [py, os.fspath(helper)],
+            [py, "-I", os.fspath(helper)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,
@@ -836,7 +839,10 @@ def catt_lib_outcome(
     if proc.returncode == 4:
         _log.warning("catt helper LOAD rc=4 (session wait after LOAD)")
         return _catt_lib_finish(device, url, _LIB_UNCONFIRMED)
-    _log.warning("catt helper LOAD rc=%s (never sent)", proc.returncode)
+    # The helper prints only an exception type (never the url): keep it so the cause of a
+    # "never sent" LOAD is in the log, not just its rc.
+    cause = (proc.stderr or "").strip().splitlines()[-1:] or ["?"]
+    _log.warning("catt helper LOAD rc=%s (never sent): %s", proc.returncode, cause[0][:160])
     return _LIB_FAIL
 
 
@@ -1576,7 +1582,8 @@ def _cast_via_catt(
                 sub_shutdown()
                 sub_shutdown = None
             serve.reap_sub_server()
-    if not loaded:
+    via_cli = not loaded
+    if via_cli:
         _log.info("catt sender=cli")
         launch = catt_cast_argv(
             device,
@@ -1616,10 +1623,23 @@ def _cast_via_catt(
     else:
         ui.cast_live(dest, follow=follow)
     if not follow:
-        # Fire-and-return: the receiver has the media; don't poll for the whole runtime.
+        # Fire-and-return: don't poll for the whole runtime — but `catt cast` rc 0 only
+        # means the media session opened (catt waits for PLAYING only with --block), and a
+        # TV can still go IDLE/ERROR right after. Confirm with the same bounded receiver
+        # poll the library path uses before claiming a start (ADR 0044 amendment).
+        if via_cli and device:
+            state = _catt_lib_finish(device, url, CATT_LIB_UNCONFIRMED)
+            if state == CATT_LIB_FAIL:
+                notices.emit("cast non riuscito: la TV ha rifiutato il contenuto")
+                _emit(on_event, "failed", error="cast_failed", message="la TV ha rifiutato")
+                return cast_delivery.CastResult(0.0, 0.0, error="cast_failed")
+            if state != CATT_LIB_OK:
+                _catt_unconfirmed_notice()
+                if sub_shutdown is not None:
+                    _schedule_unconfirmed_sub_reap(sub_shutdown, device, url, idle_for=sub_idle_for)
+                _emit(on_event, "failed", error="cast_never_started", message="cast non confermato")
+                return _catt_unconfirmed_result()
         _emit(on_event, "started", title=title)
-        # `catt cast` returned rc 0: the receiver ACCEPTED the handoff. That is the strongest
-        # evidence available without a poll loop, so it counts as started (ADR 0031).
         if sub_shutdown is not None:
             sub_shutdown()
         return cast_delivery.CastResult(0.0, 0.0, started=True)

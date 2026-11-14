@@ -69,8 +69,15 @@ def test_unknown_term_falls_back_to_symbols(clean_env):
     assert ui.detect_caps(use_cache=False).image_proto is ui.ImageProto.SYMBOLS
 
 
+def test_forced_sixel_overrides_generic_term(clean_env):
+    clean_env.setenv("TERM", "xterm-256color")
+    clean_env.setenv("NSTREAM_IMAGE_PROTO", "sixel")
+    assert ui.detect_caps(use_cache=False).image_proto is ui.ImageProto.SIXEL
+
+
 def test_image_mode_off_forces_none(clean_env):
     clean_env.setenv("TERM", "foot")
+    clean_env.setenv("NSTREAM_IMAGE_PROTO", "sixel")
     cfg = Config(torrentio_base="tb", image_mode="off")
     assert ui.detect_caps(cfg, use_cache=False).image_proto is ui.ImageProto.NONE
 

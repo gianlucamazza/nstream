@@ -98,6 +98,18 @@ same 2.04 GB ITA release, `delivery: file`, receiver `CA5T0001`. `--status`: `PL
 position advancing, `receiver_error: null`. The dual-layer (`n_video >= 2`) skip did not
 fire on this title; the playlist-head probe did.
 
+## Amendment — 2026-11-14: the catt CLI fire-and-return is confirmed too
+
+Field evidence: a headless `--cast` through the catt **CLI** fallback (the library LOAD was
+never sent) returned `ok: true` while the TV stayed IDLE. catt 0.13.3's `cast` waits only for
+the media session to open on a remote url (PLAYING only with `--block`), so rc 0 is not
+delivery. The CLI fire-and-return now runs the same bounded receiver poll the library path
+uses (`caster._catt_lib_finish`): our content PLAYING/PAUSED/BUFFERING → `started`; an explicit
+refuse (LOAD_FAILED / idle ERROR) → `cast_failed`; still unknown at the bound →
+`cast_never_started` + notice `cast_unconfirmed` (no second LOAD). With this, `ok: true`
+means an observed start on every sender, which is what `docs/headless.md` promises. The
+complete-file remux keeps its own start check (`remux._await_start`).
+
 ## References
 
 - ADR 0031 (`cast_delivery.CastResult.started`, `bridge.cast_load`)

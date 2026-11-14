@@ -51,6 +51,12 @@ def _boom(msg):
     return fail
 
 
+@pytest.fixture(autouse=True)
+def _castbridge_present(monkeypatch):
+    """Model a host with castbridge: its absence is the dev machine's, not the test's."""
+    monkeypatch.setattr(cast_flow.remux, "live_sender_missing", lambda cfg: False)
+
+
 def _wire(monkeypatch, plan, *, langs=("ita",)):
     """Hermetic run_cast: stub vet_cast_video/vet_cast_audio (the real ones ffprobe the
     url), the in-cast switch helpers, auto_subs and detach_spawned. Returns the spy dict."""
@@ -1377,3 +1383,15 @@ def test_prefetch_next_prepares_the_live_producer(monkeypatch):
 def test_prefetch_next_never_raises(monkeypatch):
     monkeypatch.setattr(cast_flow.api, "streams", lambda *a: (_ for _ in ()).throw(RuntimeError()))
     cast_flow.prefetch_next(CFG, "series", "tt:2", "Show", _opts(), "10.0.0.5")
+
+
+def test_headless_remux_without_castbridge_refuses_fast(monkeypatch):
+    # Field evidence 2026-11-14: no castbridge → no live tier → a fire-and-return cast sat
+    # >5 min in a complete-file remux. Headless now refuses at once with a usable reason.
+    stream: Stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.remux, "live_sender_missing", lambda cfg: True)
+    monkeypatch.setattr(cast_flow.remux, "remux_for_cast", _boom("must not start the remux"))
+    with pytest.raises(cast_flow.CastRemuxInfeasible) as e:
+        _run(_opts(), stream, follow=False)
+    assert "castbridge" in e.value.reason and "--mirror" in e.value.hint

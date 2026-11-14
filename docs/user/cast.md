@@ -11,6 +11,11 @@ See [selection.md](../selection.md) for scoring and cast vetting.
 | `catt` | Recommended | Discovery + fallback cast sender |
 | **castbridge** (`$CASTBRIDGE_BIN`) | Optional | Preferred sender: metadata + event stream |
 | **mirror sender** (`$CAST_MIRROR_BIN`) | Optional | Realtime 1080p SDR mirror |
+
+Both binaries come from the [`castbridge`](https://aur.archlinux.org/packages/castbridge)
+package (`/usr/bin/castbridge`, `/usr/bin/cast_sender`). Lookup order: the env var, then a
+local openscreen-fork build (`~/Workspace/tooling/openscreen-build/openscreen/out/Default/`),
+then `PATH`.
 | `ffmpeg` / `ffprobe` | Recommended | Track probe, Tier-2 remux, container rewrap |
 | LAN reachability | Required | Host ↔ TV; Tier-2 needs inbound ports (below) |
 

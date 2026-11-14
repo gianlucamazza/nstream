@@ -7,6 +7,7 @@ Audience map — pick the page that matches the job.
 | **New user** | [../README.md](../README.md) (install + quickstart) | [user/config.md](user/config.md), [user/tui.md](user/tui.md) |
 | **Cast / Chromecast** | [user/cast.md](user/cast.md) | [user/troubleshooting.md](user/troubleshooting.md) |
 | **Automation / agents** | [headless.md](headless.md) | [selection.md](selection.md) for ranking |
+| **Omarchy desktop** | [../integrations/omarchy-nstream/README.md](../integrations/omarchy-nstream/README.md) | bar widget: cast remote + continue watching |
 | **Contributor** | [../CONTRIBUTING.md](../CONTRIBUTING.md) | [architecture.md](architecture.md), [adr/](adr/README.md) |
 | **“Why was this stream picked?”** | [selection.md](selection.md) | `nstream "<title>" --explain` |
 | **Architectural why** | [adr/README.md](adr/README.md) | individual ADRs |

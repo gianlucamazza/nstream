@@ -10,7 +10,7 @@ The daemon (`castbridge --daemon`) is shared with the LibreWolf cast extension: 
 per `$XDG_RUNTIME_DIR` (socket `$XDG_RUNTIME_DIR/castbridge/sock`). If nothing is listening we
 spawn it under the same `spawn.lock` flock the relay uses, so concurrent starts don't race.
 The binary is located like `mirror.py` locates `cast_sender` — an env override, else the
-openscreen-fork build output.
+openscreen-fork build output, else the packaged binary on PATH.
 
 Key difference from catt: **the session lives in the daemon, not in our connection.** Once
 the receiver has entered PLAYING/PAUSED/BUFFERING the cast keeps playing even if we
@@ -25,6 +25,7 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -83,14 +84,20 @@ def _lock_path() -> str:
     return os.path.join(_runtime_dir(), "spawn.lock")
 
 
+_DEV_BINARY = "~/Workspace/tooling/openscreen-build/openscreen/out/Default/castbridge"
+
+
 def _binary() -> str:
-    """The castbridge binary (built separately inside the openscreen fork, like cast_sender)."""
+    """The castbridge binary: `$CASTBRIDGE_BIN`, else a local openscreen-fork build, else the
+    packaged one on PATH (`castbridge` AUR package → /usr/bin). The dev build wins so a
+    checkout under test is never shadowed by an older installed package."""
     env = os.environ.get("CASTBRIDGE_BIN")
     if env:
         return env
-    return os.path.expanduser(
-        "~/Workspace/tooling/openscreen-build/openscreen/out/Default/castbridge"
-    )
+    dev = os.path.expanduser(_DEV_BINARY)
+    if os.path.isfile(dev):
+        return dev
+    return shutil.which("castbridge") or dev
 
 
 def bridge_available() -> bool:

@@ -102,7 +102,7 @@ def describe(
         return Failure(
             "remux_infeasible",
             f"l'audio di questa release va convertito ma {exc.reason}",
-            hint="libera spazio, prova --quality 1080 o --local",
+            hint=exc.hint or "libera spazio, prova --quality 1080 o --local",
             fields={"reason": exc.reason},
         )
     if isinstance(exc, cast_flow.CastVideoUnsupported):

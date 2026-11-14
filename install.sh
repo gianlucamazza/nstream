@@ -32,6 +32,20 @@ if [[ ! -f "$CFG_DIR/config.json" ]]; then
 	echo "Created $CFG_DIR/config.json — edit it and set your Real-Debrid token."
 fi
 
+# Omarchy bar widget: copied, not linked — Omarchy refuses symlinked plugins and its
+# hot-reload watches the plugin directory itself. Enabling it stays the user's call.
+OMARCHY_PLUGINS="$HOME/.config/omarchy/plugins"
+if [[ -d "$HOME/.config/omarchy" ]]; then
+	PLUGIN_SRC="$REPO/integrations/omarchy-nstream"
+	PLUGIN_DST="$OMARCHY_PLUGINS/gianlucamazza.nstream"
+	mkdir -p "$PLUGIN_DST/i18n"
+	for f in manifest.json Panel.qml helper.py LICENSE README.md; do
+		install -m644 "$PLUGIN_SRC/$f" "$PLUGIN_DST/$f"
+	done
+	install -m644 "$PLUGIN_SRC"/i18n/*.json "$PLUGIN_DST/i18n/"
+	echo "Installed Omarchy widget → $PLUGIN_DST (enable: omarchy plugin enable gianlucamazza.nstream)."
+fi
+
 # Claude Code skill (local-dev): symlink SKILL.md into the personal scope so `/nstream`
 # can drive the headless CLI. Idempotent; loaded on the next Claude Code session start.
 SKILL_DIR="$HOME/.claude/skills/nstream"

@@ -810,13 +810,35 @@ def test_cast_uses_catt_when_bridge_absent(monkeypatch):
 
 
 def test_fire_and_return_reports_started(monkeypatch):
-    """The mirror image of the failure pins: a handoff catt accepted (rc 0) counts as
-    started even though no position was ever observed — otherwise every headless
-    fire-and-return cast would report itself failed (ADR 0031)."""
+    """A CLI handoff counts as started once the receiver confirms it — no position is
+    tracked in fire-and-return, but rc 0 alone is not delivery (ADR 0044 amendment)."""
     _cast_run(monkeypatch)
+    monkeypatch.setattr(caster, "_catt_lib_finish", lambda d, u, o: caster.CATT_LIB_OK)
     r = caster.cast(CFG, "M", "http://u", device="TV", follow=False)
     assert (r.pos, r.dur) == (0.0, 0.0)
     assert r.started is True and r.error is None
+
+
+def test_fire_and_return_cli_unconfirmed_is_not_started(monkeypatch):
+    # Field evidence 2026-11-14: catt rc 0, TV stayed IDLE, and nstream said ok: true.
+    _cast_run(monkeypatch)
+    seen = []
+
+    def finish(device, url, outcome):
+        seen.append((device, outcome))
+        return caster.CATT_LIB_UNCONFIRMED
+
+    monkeypatch.setattr(caster, "_catt_lib_finish", finish)
+    r = caster.cast(CFG, "M", "http://u", device="TV", follow=False)
+    assert seen == [("TV", caster.CATT_LIB_UNCONFIRMED)]
+    assert r.started is False and r.unconfirmed and r.error == "cast_never_started"
+
+
+def test_fire_and_return_cli_refused_is_a_failure(monkeypatch):
+    _cast_run(monkeypatch)
+    monkeypatch.setattr(caster, "_catt_lib_finish", lambda d, u, o: caster.CATT_LIB_FAIL)
+    r = caster.cast(CFG, "M", "http://u", device="TV", follow=False)
+    assert r.started is False and r.error == "cast_failed"
 
 
 def test_status_asks_the_receiver_once(monkeypatch):
@@ -1307,6 +1329,7 @@ def test_cast_retries_cli_without_meta_flags_on_click_usage(monkeypatch):
         return _P(0)
 
     monkeypatch.setattr(caster.subprocess, "run", fake)
+    monkeypatch.setattr(caster, "_catt_lib_finish", lambda d, u, o: caster.CATT_LIB_OK)
     r = caster.cast(CFG, "The Nice Guys", "http://u", device="TV", follow=False)
     assert r.started is True
     assert any("-l" in c for c in launches)
@@ -1868,3 +1891,34 @@ def test_catt_unconfirmed_subtitle_reap_uses_skip_if(monkeypatch):
     assert scheduled["k"]["handle"] is shut
     assert scheduled["k"]["idle_for"] is idle
     assert scheduled["k"]["skip_if"] is not None
+
+
+def test_catt_helper_runs_isolated_from_its_package_dir():
+    # Field evidence 2026-11-14: run as `python _catt_load.py`, the package dir led sys.path
+    # and nstream/types.py shadowed the stdlib `types` — every helper LOAD died on import.
+    import subprocess as sp
+    import sys
+    from pathlib import Path
+
+    helper = Path(caster.__file__).with_name("_catt_load.py")
+    bare = sp.run([sys.executable, str(helper)], input="{}", capture_output=True, text=True)
+    isolated = sp.run(
+        [sys.executable, "-I", str(helper)], input="{}", capture_output=True, text=True
+    )
+    assert "WrapperDescriptorType" in bare.stderr  # the trap is real
+    assert "WrapperDescriptorType" not in isolated.stderr and isolated.returncode in (2, 3)
+
+
+def test_catt_lib_outcome_invokes_the_helper_isolated(monkeypatch):
+    calls = []
+
+    class _P:
+        returncode = 0
+        stdout = stderr = ""
+
+    monkeypatch.setattr(caster, "_catt_device_cls", lambda: None)
+    monkeypatch.setattr(caster, "catt_supports_load_meta", lambda: True)
+    monkeypatch.setattr(caster, "_catt_interpreter", lambda: "/usr/bin/python3")
+    monkeypatch.setattr(caster.subprocess, "run", lambda cmd, **k: calls.append(cmd) or _P())
+    assert caster.catt_lib_outcome("10.0.0.5", "http://u") == caster.CATT_LIB_OK
+    assert calls[0][:2] == ["/usr/bin/python3", "-I"]

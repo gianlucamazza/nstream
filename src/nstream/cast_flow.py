@@ -42,6 +42,7 @@ from . import (
     notices,
     quality,
     remux,
+    serve,
     state,
     stream_select,
     subs,
@@ -118,8 +119,9 @@ class CastRemuxInfeasible(Exception):
     `ok: true` (2026-10-01) — the callers surface this instead (headless:
     `remux_infeasible`)."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, hint: str = ""):
         self.reason = reason
+        self.hint = hint  # recovery advice when the generic one (disk/size) doesn't apply
         super().__init__(f"remux non fattibile: {reason}")
 
 
@@ -715,6 +717,17 @@ def run_cast(
                 notices.emit(f"sottotitoli {embedded[1]} dal file")
             if live_delivery is None and st.full_refusal:
                 raise CastRemuxInfeasible(f"{st.full_refusal}; la diretta non è partita")
+        if (
+            needs_remux and live_delivery is None and not follow and not opts.interactive
+            and remux.live_sender_missing(cfg)
+        ):  # fmt: skip
+            # Headless fire-and-return would block for the whole file (field evidence
+            # 2026-11-14: >5 min, then killed, TV untouched). Refuse with a usable reason;
+            # `--follow` (the caller chose to wait) still prepares the file.
+            raise CastRemuxInfeasible(
+                "castbridge assente: senza diretta il file va preparato per intero (minuti)",
+                hint="usa --mirror o --follow, un'altra qualità, oppure installa castbridge",
+            )
         if needs_remux and live_delivery is None:
             print(_prepare_line(chosen, plan, target_lang), file=sys.stderr)
         remux_path = (
@@ -816,6 +829,12 @@ def run_cast(
         )
     elif sub_paths or embedded_used:
         subs.report_unverified(subs_pick, hint="se sfasati: --sub-shift ±s")
+    if not delivery.started:
+        # Served over the LAN and the TV never fetched a byte: say it's the firewall, with
+        # the exact rule (field evidence 2026-11-14: ufw dropped the TV, nothing said so).
+        hint = serve.unreached_hint(device)
+        if hint:
+            notices.emit(hint.removeprefix("nstream: "), code="lan_unreachable")
     if delivery.started:
         # The new cast replaced the TV's content: a previous fire-and-return session no
         # longer describes it (the headless caller writes a fresh one right after). Cleared

@@ -35,6 +35,13 @@ def test_headless_only_misuse_year_device_probe():
     assert "--year" in msg and "--device" in msg and "--probe" in msg
 
 
+def test_headless_only_misuse_search_history():
+    p = build_parser()
+    msg = headless_only_misuse(p.parse_args(["--search", "--history", "x"]))
+    assert msg is not None and "--search" in msg and "--history" in msg
+    assert headless_only_misuse(p.parse_args(["--json", "--search", "x"])) is None
+
+
 def test_audio_lang_is_not_headless_only():
     """--audio-lang holds on TUI too; must not be rejected without --json."""
     p = build_parser()

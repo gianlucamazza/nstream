@@ -1002,6 +1002,14 @@ def test_lan_cast_raise_before_load_falls_to_cli(monkeypatch):
         monkeypatch, seen, raise_before_load=TypeError("unexpected keyword argument")
     )
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    # The CLI handoff is confirmed by the receiver poll (ADR 0044 amendment); the library
+    # attempt before it keeps its real outcome.
+    real_finish = caster._catt_lib_finish
+    monkeypatch.setattr(
+        caster, "_catt_lib_finish",
+        lambda d, u, o: caster.CATT_LIB_OK
+        if any("cast" in c for c in calls) else real_finish(d, u, o),
+    )  # fmt: skip
     r = caster.cast(
         cfg, "The Nice Guys", "https://debrid.example/f.mp4",
         device="10.0.0.5", follow=False,
@@ -1054,6 +1062,14 @@ def test_lan_cast_session_wait_load_failed_falls_to_cli(monkeypatch):
         },
     )
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    # The CLI handoff is confirmed by the receiver poll (ADR 0044 amendment); the library
+    # attempt before it keeps its real outcome.
+    real_finish = caster._catt_lib_finish
+    monkeypatch.setattr(
+        caster, "_catt_lib_finish",
+        lambda d, u, o: caster.CATT_LIB_OK
+        if any("cast" in c for c in calls) else real_finish(d, u, o),
+    )  # fmt: skip
     r = caster.cast(
         cfg, "The Nice Guys", "https://debrid.example/f.mp4",
         device="10.0.0.5", follow=False,
@@ -1107,6 +1123,8 @@ def test_lan_cast_cli_when_lib_unavailable(monkeypatch):
 
     monkeypatch.setattr(caster.subprocess, "run", lambda cmd, **k: calls.append(list(cmd)) or _P())
     cfg = Config(torrentio_base="tb", cast_lan_proxy=True)
+    # The CLI handoff is confirmed by the receiver poll (ADR 0044 amendment).
+    monkeypatch.setattr(caster, "_catt_lib_finish", lambda d, u, o: caster.CATT_LIB_OK)
     r = caster.cast(
         cfg, "The Nice Guys", "https://debrid.example/f.mp4?token=SECRET",
         device="10.0.0.5", follow=False,

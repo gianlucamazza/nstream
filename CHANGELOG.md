@@ -9,6 +9,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Headless listings for front-ends:** `--json --search "X"` lists the candidate titles
+  (`id`, `type`, `name`, `year`; honours `--movies`/`--series`/`--year`) and
+  `--json --history` lists what `-c` can continue plus the live cast session, as a pure
+  local read (no network, no receiver probe). Neither ever plays. Used by the Omarchy
+  shell widget in `integrations/omarchy-nstream/` (published as
+  `gianlucamazza/omarchy-nstream`).
 - **ADR 0049 Accepted:** Trakt as a user-configured *catalog* addon on Film/Serie
   (**── Trakt ──**). Watch-history / lists / popular hang on `run_browse` →
   `api.catalog` → play. Not an indexer, not a sync of local continue-watching or
@@ -41,6 +47,36 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- **catt library LOAD never sent through the helper:** `_catt_load.py` ran with nstream's
+  package dir first on `sys.path`, so `nstream/types.py` shadowed the stdlib `types` and
+  every helper LOAD died on import (CLI fallback, no poster/metadata). It now runs with
+  `python -I`.
+- **Firewall dropping the TV went unexplained:** when a cast served over the LAN never
+  starts and the TV never fetched from this host, nstream emits `lan_unreachable` with the
+  exact ufw rule (it used to print it only for a failed complete-file remux).
+- **`ok: true` on an IDLE TV (catt CLI fire-and-return):** the CLI handoff now waits for
+  an observed receiver state like the library path (ADR 0044 amendment); unconfirmed →
+  `cast_never_started` + `cast_unconfirmed`, refused → `cast_failed`.
+- **Explicit `--year` cast a dateless stranger** ("Big Buck Bunny" 2008 → "The Big Bunny"):
+  when the year refuted every dated candidate and the dateless rest is named otherwise,
+  headless answers `no_result` with `years` (ADR 0030 amendment).
+- **Search catalogs cut too early:** when Cinemeta returns no row named like the query, the
+  other search catalogs get 8 s instead of 1.5 s, and one that still misses counts as a
+  breaker timeout (a dead addon stops slowing every search).
+- **Headless remux without castbridge blocked for minutes:** fire-and-return refuses at once
+  with `remux_infeasible` (suggesting `--mirror`, `--follow`, another quality or castbridge);
+  the log now says when the live tier is skipped for lack of castbridge and records remux
+  progress every 25%.
+- **`stream.backend` mislabelled `p2p`:** read from the stream (cached debrid / http url /
+  swarm), not from `playback_backend`.
+- **Debrid token in clear in `addon-breakers.json` and the log:** breaker keys are now
+  `host#sha256-prefix`; legacy URL keys are dropped on the next update.
+- `--doctor` reports `torrserver` (optional; P2P needs it). The LAN server logs the first
+  request of each client, so the TV's fetch is visible next to catt's own probe. A catt
+  helper LOAD that is never sent logs the exception type.
+- **castbridge / cast_sender from PATH:** the packaged binaries (`castbridge` AUR package →
+  `/usr/bin`) are now found; before, only `$CASTBRIDGE_BIN` / `$CAST_MIRROR_BIN` or the
+  openscreen dev build path were, so an installed castbridge silently fell back to catt.
 - **Cast poster resolution (ADR 0050):** every cast entry (headless,
   TUI, CLI; LAN and https) picks a poster via
   `caster.resolve_cast_poster`: cached full Cinemeta meta, then an

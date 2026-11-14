@@ -201,18 +201,29 @@ def _poster_block(url: str, cols: int, lines: int, caps: ui.Caps, cfg: Config) -
     if not path:
         return ""
     img_lines = min(max(lines - 8, 6), 20)  # leave room for the text card below
-    cmd = [
-        "chafa", "--format", caps.image_proto.value,
-        "--size", f"{cols}x{img_lines}",
-        "--animate", "off", "--polite", "on",
-    ]  # fmt: skip
-    if not caps.truecolor:
-        cmd += ["--colors", "256"]
-    if caps.image_proto is ui.ImageProto.SYMBOLS:
-        cmd += ["--symbols", "block+border+space"]
-    cmd.append(str(path))
-    proc = util.run_cmd(cmd, timeout=_CHAFA_TIMEOUT)
-    return proc.stdout if proc and proc.returncode == 0 else ""
+    protocols = [caps.image_proto]
+    if caps.image_proto is not ui.ImageProto.SYMBOLS:
+        protocols.append(ui.ImageProto.SYMBOLS)
+    for proto in protocols:
+        cmd = [
+            "chafa", "--format", proto.value,
+            "--size", f"{cols}x{img_lines}",
+            "--animate", "off", "--polite", "on",
+            # fzf owns terminal input; do not probe /dev/tty from its preview child.
+            "--probe", "off",
+        ]  # fmt: skip
+        if proto is ui.ImageProto.SIXEL:
+            # Sixel defines its own palette, independently of ANSI truecolor support.
+            cmd += ["--colors", "full"]
+        if proto is ui.ImageProto.SYMBOLS:
+            if not caps.truecolor:
+                cmd += ["--colors", "256"]
+            cmd += ["--symbols", "block+border+space"]
+        cmd.append(str(path))
+        proc = util.run_cmd(cmd, timeout=_CHAFA_TIMEOUT)
+        if proc and proc.returncode == 0:
+            return proc.stdout
+    return ""
 
 
 def _poster_cache_path(url: str) -> Path:

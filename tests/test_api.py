@@ -203,7 +203,7 @@ def test_gather_records_network_failure(monkeypatch, tmp_path):
 
     out = api._gather([boom], labels=["X"], keys=["http://x"])
     assert out == []
-    rec = brk._read().get("http://x")
+    rec = brk._read().get(brk.storage_key("http://x"))
     assert rec and rec.get("fails") == 1
 
 
@@ -1038,6 +1038,73 @@ def test_gather_quorum_drops_slow_secondary_without_breaker_failure(monkeypatch)
     assert rows == ["cinemeta"]
     assert time.monotonic() - t0 < 2.0
     assert records == ["http://cine"]  # slow is not down: no failure recorded
+
+
+def test_gather_weak_quorum_waits_longer_for_secondaries(monkeypatch):
+    # Cinemeta answered without the film: the secondary search catalog gets the longer grace.
+    from nstream.state import breaker
+
+    monkeypatch.setattr(breaker, "admit", lambda key: "normal")
+    monkeypatch.setattr(breaker, "record_failure", lambda *a, **k: None)
+    monkeypatch.setattr(breaker, "record_success", lambda key: None)
+    monkeypatch.setattr(api, "_QUORUM_GRACE_S", 0.05)
+    monkeypatch.setattr(api, "_WEAK_QUORUM_GRACE_S", 2.0)
+
+    def secondary():
+        time.sleep(0.3)
+        return ["tmdb"]
+
+    seen = []
+
+    def ok(rows):
+        seen.append(list(rows))
+        return False
+
+    rows = api._gather(
+        [lambda: ["cinemeta"], secondary], keys=["http://cine", "http://tmdb"],
+        primary=[True, False], quorum_ok=ok,
+    )  # fmt: skip
+    assert rows == ["cinemeta", "tmdb"] and seen == [["cinemeta"]]
+
+
+def test_gather_weak_quorum_miss_counts_as_timeout(monkeypatch):
+    from nstream.state import breaker
+
+    release = threading.Event()
+    failures = []
+    monkeypatch.setattr(breaker, "admit", lambda key: "normal")
+    monkeypatch.setattr(breaker, "record_failure", lambda key, **k: failures.append((key, k)))
+    monkeypatch.setattr(breaker, "record_success", lambda key: None)
+    monkeypatch.setattr(api, "_QUORUM_GRACE_S", 0.05)
+    monkeypatch.setattr(api, "_WEAK_QUORUM_GRACE_S", 0.1)
+
+    def dead():
+        release.wait(5)
+        return []
+
+    try:
+        api._gather(
+            [lambda: ["cinemeta"], dead], keys=["http://cine", "http://tmdb"],
+            primary=[True, False], quorum_ok=lambda rows: False,
+        )  # fmt: skip
+    finally:
+        release.set()
+    assert failures == [("http://tmdb", {"reason": "timeout"})]
+
+
+def test_search_judges_the_quorum_on_name_prefix(monkeypatch):
+    captured = {}
+
+    def fake_gather(tasks, **kw):
+        captured["ok"] = kw["quorum_ok"]
+        return []
+
+    monkeypatch.setattr(api, "_search_tasks", lambda cfg, t, q: ([], [], [], []))
+    monkeypatch.setattr(api, "_gather", fake_gather)
+    api.search(Config(), "Big Buck Bunny", "movie")
+    ok = captured["ok"]
+    assert ok([{"name": "Big Buck Bunny"}]) and ok([{"name": "Big-Buck Bunny: Remastered"}])
+    assert not ok([{"name": "The Big Bunny"}, {"name": "Big Buck Massacre"}])
 
 
 def test_gather_applies_one_breaker_effect_per_key(monkeypatch):

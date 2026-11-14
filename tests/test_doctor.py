@@ -33,3 +33,12 @@ def test_doctor_finds_castbridge_where_the_cast_path_does(monkeypatch):
     monkeypatch.setattr(doctor.bridge, "bridge_available", lambda: True)
     checks = {c["name"]: c["status"] for c in doctor.inspect()["checks"]}
     assert checks["castbridge"] == "ok"
+
+
+def test_doctor_reports_torrserver(monkeypatch):
+    monkeypatch.setattr(doctor.engine, "installed", lambda: False)
+    torr = next(c for c in doctor.inspect()["checks"] if c["name"] == "torrserver")
+    assert torr["status"] == "missing" and not torr["required"] and "P2P" in torr["detail"]
+    monkeypatch.setattr(doctor.engine, "installed", lambda: True)
+    torr = next(c for c in doctor.inspect()["checks"] if c["name"] == "torrserver")
+    assert torr["status"] == "ok" and "detail" not in torr

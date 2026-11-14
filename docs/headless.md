@@ -12,8 +12,9 @@ with this document.
 
 1. **No secrets in JSON** — stream URLs, debrid tokens, and resolve paths are never emitted.
    Work only with descriptive fields (`stream.resolution`, `audio_lang`, …).
-2. **`ok: true` requires delivery started** for cast/play (ADR 0031). A failed hand-off is
-   `ok: false` / `cast_failed`, never a success envelope.
+2. **`ok: true` requires delivery started** for cast/play (ADR 0031): an observed receiver
+   state on every sender (castbridge, catt library, catt CLI — ADR 0044 and its 2026-11-14
+   amendment). A failed hand-off is `ok: false` / `cast_failed`, never a success envelope.
 3. **Per-invocation constraints hold on every selection path** (ADR 0021): `--quality` and
    `--audio-lang` apply through reselects (language, cast vet), not only the first pick.
 4. **Explicit `--year` is hard** (ADR 0030): no soft fall-through to another year.
@@ -37,6 +38,8 @@ Always pass `--json`. Quote the title.
 | Force dub                         | `… --audio-lang eng`                                  |
 | Force resolution                  | `… --quality 1080` (`4k`/`2160`, `720`, `auto`, …)    |
 | Probe (no play)                   | `nstream --json --probe "X"`                          |
+| List search candidates (no play)  | `nstream --json --search "X"` (+ `--movies`/`--series`/`--year`) |
+| List continue-watching (no play)  | `nstream --json --history` (local read, no network)   |
 | List episodes                     | `nstream --json --probe "Series"` (no `--episode`)    |
 | Explain ranking                   | `nstream --json --explain "X"`                        |
 | Continue / next                   | `nstream --json -c ["X"]`                             |
@@ -69,7 +72,7 @@ Common fields:
 
 | Field                                                | Meaning                                                                                                                                                      |
 | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `action`                                             | `cast` \| `play` \| `probe` \| `episodes` \| `explain` \| lifecycle (`stop`/`status`/`pause`/`resume`/`seek`/`volume`) \| `forget_dead` \| `forget_breakers` |
+| `action`                                             | `cast` \| `play` \| `probe` \| `search` \| `history` \| `episodes` \| `explain` \| lifecycle (`stop`/`status`/`pause`/`resume`/`seek`/`volume`) \| `forget_dead` \| `forget_breakers` |
 | `title`                                              | Display title                                                                                                                                                |
 | `device`                                             | Cast device (when casting)                                                                                                                                   |
 | `stream`                                             | Descriptive pick (`resolution`, `codec`, `codec_source`, `size_gb`, …) — **no URL**. `codec_source` is `probed` when this url was already ffprobed (LAN proxy / remux / cast vet); otherwise `release_name` (the name parse, which can lie — ADR 0051). Cache-only: reporting never starts a probe. `--json --explain` rows (`pick` / `playable` / `excluded`) also carry `codec_source` (`explain._row_data`). |
@@ -82,7 +85,24 @@ Common fields:
 | `selection`                                          | Title pick: `exact` \| `year` \| `first`                                                                                                                     |
 | `subtitles` / `subtitles_match` / `subtitles_offset` | Sub lang and evidence tier                                                                                                                                   |
 | `volume` / `muted` / `notice`                        | Cast audio state. `audio_lang` is the dub that started. When the preferred language would need a full-file remux and a direct MP4/WebM exists in a later `audio_langs` entry, headless starts that direct cast and `notice` says why (ADR 0035). `--audio-lang` does not take this shortcut. |
-| `notices` | Domain notices of this run (ADR 0037) — what stderr says, as `[{text, code, level}]`, on every result and error object (not on `--follow` event lines). `code` is stable when set: `p2p_blocked`, `p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`, `subs_unverified` (the track is a language guess, sync unchecked), `volume_zero`, `receiver_app_ignored` (catt cannot launch `cast_receiver_app_id`); `""` = informational. Note: `volume` in JSON is the Cast level 0–1; `volume_percent` is the rounded 0–100 CLI/catt percent. `--volume N` takes that percent. `volume_control_type: master` = device master (this Philips DMR also reports `volume_step_interval: null`). catt may quantize (14→13). TV OSD is a **different** scale — no conversion factor until an OSD photo table exists (ADR 0045). |
+| `notices` | Domain notices of this run (ADR 0037) — what stderr says, as `[{text, code, level}]`, on every result and error object (not on `--follow` event lines). `code` is stable when set: `p2p_blocked`, `p2p_no_vpn`, `audio_lang_absent`, `remux_failed`, `subs_not_delivered`, `subs_unverified` (the track is a language guess, sync unchecked), `lan_unreachable` (the cast was served over the LAN and the TV never fetched from it — host firewall; the text names the ufw rule), `volume_zero`, `receiver_app_ignored` (catt cannot launch `cast_receiver_app_id`); `""` = informational. Note: `volume` in JSON is the Cast level 0–1; `volume_percent` is the rounded 0–100 CLI/catt percent. `--volume N` takes that percent. `volume_control_type: master` = device master (this Philips DMR also reports `volume_step_interval: null`). catt may quantize (14→13). TV OSD is a **different** scale — no conversion factor until an OSD photo table exists (ADR 0045). |
+
+`--search` (`action: "search"`) returns `query` and `results` (at most 30, same ranking the
+play path picks from): `[{id, type, name, year}]`. `year` is the raw Cinemeta
+`releaseInfo` (`"2021"`, `"2016-"`). No poster: `--json` scrubs every URL. An
+explicit `--year` drops only the provably wrong years. Play a chosen row with the same
+`--movies`/`--series` + `--year` filters.
+
+`--history` (`action: "history"`) returns `entries`, most recent first (`state.resumable`,
+ADR 0029): `[{title, type, season, episode, position, duration, ts, next}]` — `next: true`
+is a finished episode that `-c "title"` advances past — and `cast_session`
+(`{title, device}` or `null`), the live fire-and-return cast. It reads local state only (no
+receiver reconcile, unlike `-c`), so it is cheap to poll; call `--status` while
+`cast_session` is set.
+
+Lifecycle commands use an explicit `--device` first, otherwise the unexpired cast
+session's recorded device, and only then normal device discovery/configuration. This keeps
+status, stop and media controls on the TV that nstream actually started.
 
 `--status` adds `player_state`, `position`, `duration`, `active_tracks`, `receiver_error`,
 plus `volume_percent`, `volume_control_type`, `volume_step_interval`, `app_id`,
@@ -105,7 +125,7 @@ Manual `--sub-offset` / `--sub-fps` always win (engine steps aside). Toggle engi
 
 | `error`                   | Meaning                                                                                                                                                                  | Recovery                                                        |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
-| `no_result`               | No title match / empty history; with `--year`, every candidate has another year                                                                                          | Retry spelling; show `years`; `--movies`/`--series`             |
+| `no_result`               | No title match / empty history; with `--year`, every candidate has another year (or the year refuted the dated ones and the dateless rest is named otherwise — ADR 0030 amendment) | Retry spelling; show `years`; `--movies`/`--series`             |
 | `no_stream_sources`       | No addon configured                                                                                                                                                      | Enable Torrentio or add manifests                               |
 | `no_streams`              | Title ok, catalog empty for it                                                                                                                                           | Wait / other source                                             |
 | `id_untranslated`         | Catalog id (`tmdb:`, `kitsu:`, …) has no IMDb `tt` and no stream addon serves the original prefix (ADR 0047). `catalog_id` is the raw id. Never a fabricated `tt`        | Unlock the catalog addon's meta; retry; pick a Cinemeta/`tt` row |
@@ -115,7 +135,7 @@ Manual `--sub-offset` / `--sub-fps` always win (engine steps aside). Toggle engi
 | (slow / missing addon)    | Not an error code — Open circuit breaker (ADR 0027)                                                                                                                      | `--explain` lists Open addons; `--forget-breakers` to reset     |
 | `sources_truncated`       | Duration ≪ expected runtime                                                                                                                                              | Other quality/backend; check `expected_runtime_s`               |
 | `video_codec_unsupported` | Real codec not castable                                                                                                                                                  | `--local` or other quality                                      |
-| `remux_infeasible`       | The pick needs a host remux (undecodable audio / .mkv) that would be refused (disk, size cap, ffmpeg) and neither the mirror nor a verified direct release can stand in; `reason` says which | Free disk; `--quality 1080`; `--local`; do not retry unchanged |
+| `remux_infeasible`       | The pick needs a host remux (undecodable audio / .mkv) that would be refused (disk, size cap, ffmpeg) and neither the mirror nor a verified direct release can stand in — or, fire-and-return without castbridge, it would need the slow complete-file remux (no live tier); `reason` says which | Free disk; `--quality 1080`; `--local`; `--mirror`/`--follow`; install castbridge; do not retry unchanged |
 | `audio_lang_unavailable`  | Requested dub missing                                                                                                                                                    | Show `available_audio`                                          |
 | `quality_unavailable`     | Requested res missing                                                                                                                                                    | Show `available_resolutions`                                    |
 | `episode_not_found`       | Bad season/episode                                                                                                                                                       | Show `available`                                                |

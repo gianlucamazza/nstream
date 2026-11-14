@@ -94,6 +94,16 @@ On first run without config, a debrid wizard may write the initial file.
 | `image_mode` | Terminal image protocol: `auto` / `off` |
 | `NO_COLOR` | Honoured by `ui` design system |
 
+Poster previews require `chafa`. The desktop launcher opens foot with its native
+`TERM=foot`, enabling Sixel images even when the user's default terminal setting is
+generic. Sixel uses an image-specific palette; terminals without a recognized image
+protocol use character art. A failed graphics render also falls back to character art.
+
+When launching manually inside a Sixel-capable terminal that reports a generic `TERM`,
+use `NSTREAM_IMAGE_PROTO=sixel nstream`. This override is terminal-specific; do not set
+it globally for terminals without Sixel support. `image_mode=off` disables images even
+with an override. Preview rendering does not probe the terminal while fzf is running.
+
 ## Related
 
 - Ranking: [../selection.md](../selection.md)

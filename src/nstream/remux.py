@@ -409,6 +409,7 @@ def _await_ffmpeg(
     bucket = 1 if sys.stderr.isatty() else 10
     ui.progress(_frame(0 if duration > 0 else None))
     pct = 0 if duration > 0 else -1
+    logged = 0  # the log file gets a line every 25% (a headless run's stderr may be gone)
     if proc.stdout is not None:
         for line in proc.stdout:
             if duration > 0 and line.startswith("out_time_us="):
@@ -420,6 +421,9 @@ def _await_ffmpeg(
                 if shown != pct:
                     pct = shown
                     ui.progress(_frame(pct))
+                if pct // 25 > logged // 25:
+                    logged = pct
+                    _log.info("remux %d%%", (pct // 25) * 25)
     proc.wait()
     if sys.stderr.isatty():
         # Clear the progress line; the cast "in onda" line is the next status.
@@ -1162,6 +1166,13 @@ def _live_sub_input(sub_path: str, out_dir: str) -> str | None:
 def live_available(cfg: Config) -> bool:
     """Whether a Tier-2 cast can go live (ADR 0039): config on and ffmpeg present."""
     return cfg.cast_remux and cfg.cast_live and available()
+
+
+def live_sender_missing(cfg: Config) -> bool:
+    """The live tier is configured and ffmpeg is here, but castbridge — its only sender
+    (catt cannot seek a live playlist) — is not: a Tier-2 cast falls to the complete-file
+    remux, minutes before the TV gets anything."""
+    return live_available(cfg) and not bridge.bridge_available()
 
 
 def live_refusal(size_gb: float, duration: float) -> str | None:

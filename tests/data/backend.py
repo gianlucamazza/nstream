@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 
 if Path(sys.argv[0]).name == "catt":
+    # What the receiver "plays": the last cast url, reported back as content_id like a TV.
+    loaded = Path(sys.argv[0]).with_name("catt-loaded")
     if "scan" in sys.argv:
         print("127.0.0.1 - Fixture TV - Simulator")
     elif "info" in sys.argv:
@@ -20,12 +22,17 @@ if Path(sys.argv[0]).name == "catt":
                     "volume_level": 0.5,
                     "volume_muted": False,
                     "title": "Fixture",
+                    "content_id": loaded.read_text() if loaded.exists() else "",
                 }
             )
         )
     elif "cast" in sys.argv and os.environ.get("NSTREAM_TEST_CAST_FAIL") == "1":
         print("https://example.test/SECRET", file=sys.stderr)
         sys.exit(1)
+    elif "cast" in sys.argv:
+        urls = [a for a in sys.argv if a.startswith("http")]
+        if urls:
+            loaded.write_text(urls[0])
     sys.exit(0)
 
 if Path(sys.argv[0]).name == "ffprobe":

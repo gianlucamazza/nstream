@@ -40,6 +40,9 @@ def _hermetic_remux_feasibility(monkeypatch):
     The zero-volume recheck doesn't wait in tests."""
     monkeypatch.setattr(cast_flow.remux, "refusal", lambda *a, **k: None)
     monkeypatch.setattr(headless_play, "_VOLUME_RECHECK_S", 0.0)
+    # Whether castbridge is installed is a property of the dev machine: model a host that
+    # has it unless a test opts out (the fail-fast without it has its own test).
+    monkeypatch.setattr(cast_flow.remux, "live_sender_missing", lambda cfg: False)
 
 
 def _cast_opts(**kw):
@@ -672,6 +675,21 @@ def test_select_meta_missing_release_info_never_refuses():
     b = Meta(id="tt2", type="movie", name="Altro", releaseInfo="")
     meta, how = headless._select_meta([a, b], "qualcosa", "2006")
     assert meta["id"] == "tt1" and how == "first"
+
+
+def test_select_meta_refuses_dateless_stranger_once_the_year_refuted_the_rest():
+    # Field evidence 2026-11-14: Cinemeta's search for "Big Buck Bunny" lacks the film;
+    # --year 2008 refuted the two dated rows and "The Big Bunny" (no releaseInfo) was cast.
+    rows = [
+        Meta(id="tt1", type="movie", name="Big Buck Massacre", releaseInfo="2026"),
+        Meta(id="tt2", type="movie", name="The Big Bunny"),
+        Meta(id="tt3", type="movie", name="Hugh Hefner: The Big Bunny", releaseInfo="2018"),
+    ]
+    with pytest.raises(headless.YearMismatch) as e:
+        headless._select_meta(rows, "Big Buck Bunny", "2008")
+    assert e.value.years == ("2026", "", "2018")
+    # An inferred year (trailing token) stays soft: same rows, no refusal.
+    assert headless._select_meta(rows, "Big Buck Bunny 2008", None)[1] == "first"
 
 
 def test_select_meta_partial_unknown_pool_is_not_a_refusal():
@@ -2082,3 +2100,139 @@ def test_sub_shift_on_a_non_live_cast_is_a_usage_error(monkeypatch, capsys):
     monkeypatch.setattr(headless.remux, "live_sub_shift", lambda dev, d: 3.0)
     assert headless._run_sub_shift(CFG, argparse.Namespace(sub_shift=1.5)) == 0
     assert json.loads(capsys.readouterr().out)["shift"] == 3.0
+
+
+# --- read-only listings: --search / --history ------------------------------
+
+
+def test_lifecycle_uses_session_ip_without_discovery(monkeypatch):
+    monkeypatch.setattr(headless.state, "cast_session_device", lambda: "192.168.1.9")
+    monkeypatch.setattr(headless, "_resolve_device", _boom("must not discover another TV"))
+    assert headless._headless_device(CFG, _hns()) == "192.168.1.9"
+
+
+@pytest.mark.parametrize("session,explicit", [("192.168.1.9", "Bedroom"), (None, None)])
+def test_lifecycle_explicit_device_wins_and_missing_session_discovers(
+    monkeypatch, session, explicit
+):
+    monkeypatch.setattr(headless.state, "cast_session_device", lambda: session)
+    seen = []
+
+    def resolve(cfg, **kwargs):
+        seen.append(kwargs)
+        return "192.168.1.10"
+
+    monkeypatch.setattr(headless, "_resolve_device", resolve)
+    assert headless._headless_device(CFG, _hns(device=explicit)) == "192.168.1.10"
+    assert seen == [{"headless": True, "prefer": explicit}]
+
+
+def test_stop_targets_session_instead_of_configured_tv(monkeypatch, capsys):
+    monkeypatch.setattr(headless.state, "cast_session_device", lambda: "192.168.1.9")
+    monkeypatch.setattr(headless, "_resolve_device", _boom("must not discover another TV"))
+    monkeypatch.setattr(headless.mirror, "stop", lambda: False)
+    monkeypatch.setattr(headless.remux, "stop", lambda dev: False)
+    monkeypatch.setattr(headless.caster, "status", lambda dev: {})
+    seen = []
+    monkeypatch.setattr(headless.caster, "stop", lambda dev: seen.append(dev) or True)
+    assert headless._run_stop(replace(CFG, cast_device="Bedroom"), _hns()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] and out["device"] == "192.168.1.9"
+    assert seen == ["192.168.1.9"]
+
+
+def test_search_lists_candidates_without_playing(monkeypatch, capsys):
+    metas = [
+        {"id": "tt1", "type": "movie", "name": "Dune", "releaseInfo": "2021", "poster": "p"},
+        {"id": "tt2", "type": "movie", "name": "Dune", "releaseInfo": "1984"},
+        {"id": "tt3", "type": "series", "name": "Dune: Prophecy", "releaseInfo": "2024-"},
+    ]
+    monkeypatch.setattr(headless.api, "search", lambda cfg, q, typ=None: metas)
+    monkeypatch.setattr(headless_play, "auto_play", _boom("played"))
+    rc = headless.run_auto(CFG, _hns(query=["dune"], search=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "search" and out["query"] == "dune"
+    assert [r["id"] for r in out["results"]] == ["tt1", "tt2", "tt3"]
+    # No poster: every url is scrubbed from --json output, so it could only ever be "<url>".
+    assert out["results"][0] == {"id": "tt1", "type": "movie", "name": "Dune", "year": "2021"}
+
+
+def test_search_filters_type_and_provably_wrong_year(monkeypatch, capsys):
+    metas = [
+        {"id": "tt1", "type": "movie", "name": "Dune", "releaseInfo": "2021"},
+        {"id": "tt2", "type": "movie", "name": "Dune", "releaseInfo": "1984"},
+        {"id": "tt4", "type": "movie", "name": "Dune"},  # unknown year: kept
+        {"id": "tt3", "type": "series", "name": "Dune", "releaseInfo": "2021-"},
+    ]
+    monkeypatch.setattr(headless.api, "search", lambda cfg, q, typ=None: metas)
+    args = _hns(query=["dune"], search=True, movies=True, year="2021")
+    assert headless.run_auto(CFG, args, _hopts()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [r["id"] for r in out["results"]] == ["tt1", "tt4"]
+
+
+def test_search_requires_query(capsys):
+    assert headless.run_auto(CFG, _hns(search=True), _hopts()) == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "usage"
+
+
+def test_search_caps_results(monkeypatch, capsys):
+    metas = [{"id": f"tt{i}", "type": "movie", "name": "x"} for i in range(100)]
+    monkeypatch.setattr(headless.api, "search", lambda cfg, q, typ=None: metas)
+    headless.run_auto(CFG, _hns(query=["x"], search=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["results"]) == headless.SEARCH_LIMIT
+
+
+def test_history_lists_resumable_and_session_without_network(monkeypatch, capsys):
+    entries: list[HistoryEntry] = [
+        {"video_id": "tt9:1:2", "title": "Show", "type": "series", "series_id": "tt9",
+         "season": 1, "episode": 2, "position": 2990.0, "duration": 3000.0, "ts": 20.0},
+        {"video_id": "tt1", "title": "Dune", "type": "movie",
+         "position": 600.04, "duration": 9000.0, "ts": 10.0},
+    ]  # fmt: skip
+    seen: dict = {}
+
+    def resumable(cfg, limit=30, typ=None):
+        seen["typ"] = typ
+        return entries
+
+    monkeypatch.setattr(headless.state, "resumable", resumable)
+    monkeypatch.setattr(
+        headless.state, "cast_session_info", lambda: {"title": "Dune", "device": "TV", "x": 1}
+    )
+    monkeypatch.setattr(headless, "_resolve_device", _boom("discovery"))
+    monkeypatch.setattr(headless.caster, "status", _boom("receiver probe"))
+    rc = headless.run_auto(CFG, _hns(history=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["action"] == "history" and seen["typ"] is None
+    show, film = out["entries"]
+    assert show["season"] == 1 and show["episode"] == 2 and show["next"] is True
+    assert film["season"] is None and film["position"] == 600.0 and film["next"] is False
+    assert out["cast_session"] == {"title": "Dune", "device": "TV"}
+
+
+def test_history_without_session_and_type_filter(monkeypatch, capsys):
+    seen: dict = {}
+    monkeypatch.setattr(
+        headless.state, "resumable", lambda cfg, limit=30, typ=None: seen.update(typ=typ) or []
+    )
+    monkeypatch.setattr(headless.state, "cast_session_info", lambda: None)
+    headless.run_auto(CFG, _hns(history=True, series=True), _hopts())
+    out = json.loads(capsys.readouterr().out)
+    assert out["entries"] == [] and out["cast_session"] is None and seen["typ"] == "series"
+
+
+@pytest.mark.parametrize(
+    ("stream", "backend", "expected"),
+    [
+        ({"name": "x", "url": "https://cdn.example/f.mkv"}, "auto", "http"),
+        ({"name": "x", "infoHash": "ab" * 20}, "auto", "p2p"),
+        ({"name": "x", "url": "http://127.0.0.1:8090/stream/f"}, "local", "p2p"),
+        ({"name": "x", "url": "https://cdn.example/f.mkv"}, "native", "native"),
+    ],
+)
+def test_describe_stream_backend_reads_the_stream(stream, backend, expected):
+    # Field evidence 2026-11-14: an http url under playback_backend=auto said "p2p".
+    cfg = Config(playback_backend=backend, engine_port=8090)
+    assert headless_play.describe_stream(cfg, Stream(**stream))["backend"] == expected
