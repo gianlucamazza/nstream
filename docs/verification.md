@@ -89,3 +89,27 @@ audio language, subtitle visibility/timing, pause/seek/stop, disconnect/recovery
 and next-episode behavior. Check both visible video and audible audio; receiver state
 `PLAYING` alone is insufficient. Do not interrupt an unrelated active viewing session.
 Record device/backend, media characteristics, result, and any unavailable scenarios.
+
+## Philips recovery acceptance (2026-11-14)
+
+The active live-HLS cast was observed for 900 seconds, with
+60 bounded receiver/delivery samples. The operator explicitly authorized
+fault injection and confirmed continuous picture and audio, including the fault window.
+The test did not issue STOP or LOAD and did not expose media URLs or tokens.
+
+- At 60 seconds, the existing castbridge daemon was suspended for 40 seconds with
+  SIGSTOP and restored automatically with SIGCONT. Native telemetry reported
+  `disconnected`, then reattached to the same media session (ID 1).
+- Receiver state samples: {'PLAYING': 60}. Receiver position advanced
+  894.6 seconds. The final native state was PLAYING.
+- Every sample found the detached delivery server alive, the EVENT playlist HTTP 200
+  and the advertised media segment HEAD HTTP 200; no delivery error was reported.
+- Restarting the optional Omarchy shell/plugin during observation did not stop delivery.
+- Software exercised: castbridge 0.4.4 and the nstream 1.46/1.47 recovery code (unchanged
+  between those versions). The final local installation matches published nstream 1.47.0
+  and plugin 0.4.0. Launcher regression gates: 1947 Python tests and 27 plugin tests,
+  including Qt QML action execution and real history/watch contracts against PyPI.
+
+This is empirical evidence for this receiver/session, not a guarantee for every receiver
+or source. The fault tests control-path interruption, not host/network loss of HLS media.
+See ADRs 0056, 0058 and 0059.
