@@ -7,6 +7,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.44.0] — 2026-11-14
+
 ### Added
 
 - **ADR 0049 Accepted:** Trakt as a user-configured *catalog* addon on Film/Serie
@@ -40,6 +42,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
   `content_id`. `--volume` / TUI copy names Cast % ≠ OSD.
 
 ### Fixed
+
+- **ADR 0052:** discover castbridge on PATH after an explicit override; share HLS
+  eligibility checks across selection, prefetch and delivery. Doctor and the
+  complete-file prepare message explain missing HLS requirements. Remux progress
+  reports output size, processing speed and a guarded ETA excluding finalization;
+  logs distinguish elapsed processing and the observed finalization tail. HLS via
+  catt remains gated on receiver acceptance.
 
 - **Cast poster resolution (ADR 0050):** every cast entry (headless,
   TUI, CLI; LAN and https) picks a poster via
