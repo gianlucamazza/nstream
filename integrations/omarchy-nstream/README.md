@@ -65,6 +65,13 @@ omarchy plugin validate .
 Saving a file under `~/.config/omarchy/plugins/gianlucamazza.nstream/` reloads the widget;
 from the nstream checkout re-run `./install.sh` to copy changes over.
 
+## Source
+
+Developed in the nstream repository under `integrations/omarchy-nstream/` (so the widget and
+the `--json` contract it relies on change together) and mirrored here for
+`omarchy plugin add`. Open issues and pull requests on
+[nstream](https://github.com/gianlucamazza/nstream).
+
 ## License
 
 MIT
