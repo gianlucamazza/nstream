@@ -98,7 +98,8 @@ def main() -> int:
         if _is_catt_session_wait(exc) or sent["v"]:
             print("catt-load: media session unconfirmed", file=sys.stderr)
             return 4
-        print("catt-load: play_media_url failed", file=sys.stderr)
+        # The exception type only: catt/pychromecast messages can echo the url.
+        print(f"catt-load: play_media_url failed: {type(exc).__name__}", file=sys.stderr)
         return 1
     finally:
         if restore is not None:

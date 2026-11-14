@@ -53,14 +53,19 @@ _WINDOW_POLL_RETRIES = 40
 _WINDOW_POLL_DELAY = 0.1
 
 
+_DEV_SENDER = "~/Workspace/tooling/openscreen-build/openscreen/out/Default/cast_sender"
+
+
 def _sender_bin() -> str:
-    """The openscreen Cast Streaming sender binary (not bundled — built separately)."""
+    """The openscreen Cast Streaming sender: `$CAST_MIRROR_BIN`, else a local openscreen-fork
+    build, else the packaged one on PATH (shipped beside castbridge → /usr/bin)."""
     env = os.environ.get("CAST_MIRROR_BIN")
     if env:
         return env
-    return os.path.expanduser(
-        "~/Workspace/tooling/openscreen-build/openscreen/out/Default/cast_sender"
-    )
+    dev = os.path.expanduser(_DEV_SENDER)
+    if os.path.isfile(dev):
+        return dev
+    return shutil.which("cast_sender") or dev
 
 
 def unavailable_reason() -> str | None:

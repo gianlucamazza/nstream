@@ -7,7 +7,7 @@ import shutil
 import stat
 import sys
 
-from . import __version__, bridge, log, mirror
+from . import __version__, bridge, engine, log, mirror
 from .config import ConfigError, config_path, load
 
 
@@ -34,6 +34,13 @@ def inspect() -> dict:
     if why:
         mirror_check["detail"] = why
     checks.append(mirror_check)
+    # TorrServer backs P2P playback (playback_backend local/auto). Without it a hash-only
+    # source can't play — say so here rather than at the first P2P pick.
+    torr = {"name": "torrserver", "required": False,
+            "status": "ok" if engine.installed() else "missing"}  # fmt: skip
+    if torr["status"] != "ok":
+        torr["detail"] = "riproduzione P2P non disponibile (solo link diretti/debrid)"
+    checks.append(torr)
     try:
         load(secure_permissions=False)
         private = stat.S_IMODE(config_path().stat().st_mode) & 0o077 == 0

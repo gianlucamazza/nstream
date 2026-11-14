@@ -45,6 +45,10 @@ _addon_pool = net.AddonPool(workers=_MAX_WORKERS)
 _GATHER_BUDGET = 25.0
 # Minimum wait for secondary sources once the authoritative ones answered (`_gather`).
 _QUORUM_GRACE_S = 1.5
+# The same wait when the authority's rows do not answer the request (`quorum_ok` false):
+# Cinemeta's search can miss a film outright ("Big Buck Bunny"), and a secondary search
+# catalog is then the only source that may have it — cutting it at 1.5 s defeats it.
+_WEAK_QUORUM_GRACE_S = 8.0
 # In-process TTL cache for token-free metadata (search/catalog/meta/episodes). Each
 # CLI run is a fresh process, but the home TUI / browse / pick loops live in one
 # process, so this makes back-navigation and re-browse within a session instant.
@@ -107,6 +111,7 @@ def _gather(
     keys: list[str] | None = None,
     primary: list[bool] | None = None,
     outcome: dict | None = None,
+    quorum_ok: Callable[[list], bool] | None = None,
 ) -> list:
     """Run per-addon/per-type fetch tasks concurrently, flattening results in task
     order (so the built-in providers keep priority for dedup). A task raising
@@ -123,7 +128,10 @@ def _gather(
 
     `primary` marks authoritative tasks (built-in Cinemeta for search): once all of them
     finished, the others get a short grace — `max(_QUORUM_GRACE_S, 2× primary latency)` —
-    and are then dropped without a breaker effect (slow is not down).
+    and are then dropped without a breaker effect (slow is not down). `quorum_ok`
+    (optional) judges the authority's rows: when it returns False the grace is
+    `_WEAK_QUORUM_GRACE_S` instead, because the secondaries are then the only hope — and
+    a secondary that misses that longer grace counts as a breaker timeout.
 
     `outcome` (optional) receives `primary` (authoritative tasks requested) and `primary_ok`
     (how many of them answered): an empty result is "nothing exists" only when the
@@ -213,6 +221,8 @@ def _gather(
     probe_keys = {key for _i, _t, _lab, key, probe in active if probe}
     primary_left = sum(1 for v in fut_map.values() if v[3])
     quorum_cut = False
+    weak_quorum = False
+    grace = 0.0
     try:
         pending = set(fut_map)
         done = 0
@@ -241,8 +251,15 @@ def _gather(
                 primary_ok += status == "ok"
                 primary_left -= 1
                 if primary_left == 0 and pending:
-                    # Quorum: the authority answered; the rest get a short grace only.
-                    grace = max(_QUORUM_GRACE_S, 2 * (time.monotonic() - started))
+                    # Quorum: the authority answered; the rest get a short grace only —
+                    # a longer one when its rows do not answer the request.
+                    floor = _QUORUM_GRACE_S
+                    if quorum_ok is not None:
+                        prim_rows = [r for j, rs in results_by_i.items() if prim[j] for r in rs]
+                        if not quorum_ok(prim_rows):
+                            floor = _WEAK_QUORUM_GRACE_S
+                            weak_quorum = True
+                    grace = max(floor, 2 * (time.monotonic() - started))
                     if time.monotonic() + grace < deadline:
                         deadline = time.monotonic() + grace
                         quorum_cut = True
@@ -257,8 +274,15 @@ def _gather(
                 # no verdict on it — counting a timeout would open breakers on healthy addons.
                 _log.info("addon mai interrogato (pool occupato) → nessun effetto (%s)", lab)
                 continue
-            if quorum_cut and key not in probe_keys:
+            if quorum_cut and key not in probe_keys and not weak_quorum:
                 _log.info("addon lento, risultati principali già arrivati → salto (%s)", lab)
+                continue
+            if quorum_cut and weak_quorum:
+                # It had the long grace and was the only hope: a miss is a real timeout, so
+                # a dead search addon opens its breaker instead of costing every search.
+                timed_out += 1
+                _note(key, "timeout")
+                _log.warning("addon senza risposta in %.0fs → scartato (%s)", grace, lab)
                 continue
             # A half-open probe that didn't answer in time failed its health check, even
             # when the quorum cut it: otherwise the key stays half-open, is re-probed on
@@ -356,7 +380,15 @@ def search(cfg: Config, query: str, typ: str | None = None) -> list[Meta]:
         keys += t_keys
         primary += t_primary
     outcome: dict = {}
-    gathered = _gather(tasks, labels=labels, keys=keys, primary=primary, outcome=outcome)
+    wanted = norm_text(query)
+
+    def answered(rows: list) -> bool:
+        """Cinemeta returned a row named like the query (exact or prefix)."""
+        return any(norm_text(m.get("name")).startswith(wanted) for m in rows if wanted)
+
+    gathered = _gather(
+        tasks, labels=labels, keys=keys, primary=primary, outcome=outcome, quorum_ok=answered
+    )
     results = _dedup([_play_id_meta(m) for m in gathered], lambda m: m.get("id") or id(m))
     if not results and outcome.get("primary") and not outcome.get("primary_ok"):
         # The catalog authority never answered (timeout, network, breaker): "no result"

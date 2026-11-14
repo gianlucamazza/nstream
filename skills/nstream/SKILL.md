@@ -41,6 +41,8 @@ Always pass `--json`. Quote the title.
 | Quality | `… --quality 1080` (`4k`/`2160`, `720`, `auto`) |
 | Probe (no play) | `nstream --json --probe "X"` |
 | Episodes list | `nstream --json --probe "X"` without `--episode` → `action: "episodes"` |
+| Ambiguous title → candidates | `nstream --json --search "X"` → `results` (then `--year`/`--movies`/`--series`) |
+| What can I continue? | `nstream --json --history` → `entries` + `cast_session` (no network) |
 | Continue / next | `nstream --json -c ["X"]` |
 | Explain | `nstream --json --explain "X"` (add `--cast` for TV profile) |
 | Browse | `nstream --json --cast --browse popolari\|nuovi\|top` |

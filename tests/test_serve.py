@@ -735,3 +735,34 @@ def test_detached_server_exits_when_idle(tmp_path):
         assert not t.is_alive()  # serve_forever returned
     finally:
         server.server_close()
+
+
+def test_first_request_is_logged_once_per_client(tmp_path, monkeypatch):
+    # Field evidence 2026-11-14: catt's own probe took the server's only INFO line, so
+    # whether the TV ever fetched the media was invisible. Each client gets its own line.
+    server, port, _data = _serve(tmp_path)
+    lines: list[str] = []
+    monkeypatch.setattr(serve._log, "info", lambda msg, *a: lines.append(msg % a))
+    try:
+        for _ in range(2):
+            with urllib.request.urlopen(_url(server, port), timeout=5) as resp:
+                resp.read()
+        server.seen_clients.add("192.0.2.10")  # another client already seen
+        lines = [m for m in lines if "prima richiesta" in m]
+        assert len(lines) == 1 and "127.0.0.1" in lines[0]
+        assert server.seen_clients == {"127.0.0.1", "192.0.2.10"}
+    finally:
+        server.shutdown()
+
+
+def test_unreached_hint_names_the_firewall_only_when_the_tv_never_came(monkeypatch):
+    monkeypatch.setattr(serve, "_served", {"servers": 0})
+    monkeypatch.setattr(serve, "_reached", set())
+    monkeypatch.setattr(serve, "lan_ip", lambda dev: "192.168.1.75")
+    assert serve.unreached_hint("192.168.1.228") is None  # nothing served here
+    serve._served["servers"] = 1
+    hint = serve.unreached_hint("192.168.1.228")
+    assert hint and "firewall" in hint and "45000:47000" in hint
+    assert serve.unreached_hint("Salotto") is None  # not an address: no verdict
+    serve._reached.add("192.168.1.228")
+    assert serve.unreached_hint("192.168.1.228") is None  # the TV came: not the firewall

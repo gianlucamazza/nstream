@@ -556,3 +556,18 @@ def test_media_load_args_text_language():
     args = bridge._media_load_args("ip", "url", text_language="it")
     assert args["textLanguage"] == "it"
     assert "textLanguage" not in bridge._media_load_args("ip", "url")
+
+
+def test_binary_prefers_env_then_dev_build_then_path(monkeypatch, tmp_path):
+    dev = tmp_path / "castbridge"
+    monkeypatch.setattr(bridge, "_DEV_BINARY", str(dev))
+    monkeypatch.setattr(bridge.shutil, "which", lambda name: "/usr/bin/castbridge")
+    monkeypatch.setenv("CASTBRIDGE_BIN", "/opt/cb")
+    assert bridge._binary() == "/opt/cb"
+    monkeypatch.delenv("CASTBRIDGE_BIN")
+    assert bridge._binary() == "/usr/bin/castbridge"  # packaged (AUR) install
+    dev.write_text("")
+    assert bridge._binary() == str(dev)  # a local build is never shadowed
+    dev.unlink()
+    monkeypatch.setattr(bridge.shutil, "which", lambda name: None)
+    assert bridge._binary() == str(dev)  # nothing installed: the path the docs name

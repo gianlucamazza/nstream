@@ -37,6 +37,8 @@ _HEADLESS_ONLY: tuple[tuple[str, str], ...] = (
     ("episode", "--episode"),
     ("device", "--device"),
     ("probe", "--probe"),
+    ("search", "--search"),
+    ("history", "--history"),
     ("stop", "--stop"),
     ("status", "--status"),
     ("pause", "--pause"),
@@ -204,6 +206,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--probe",
         action="store_true",
         help="elenca audio/sottotitoli disponibili (richiede --json; non riproduce)",
+    )
+    parser.add_argument(
+        "--search",
+        action="store_true",
+        help="elenca i titoli trovati per la ricerca (richiede --json; non riproduce)",
+    )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help="elenca cronologia e cast in corso, senza rete (richiede --json; non riproduce)",
     )
     parser.add_argument(
         "--stop",

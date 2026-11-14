@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "gianlucamazza.nstream",
+  "name": "nstream",
+  "version": "0.1.0",
+  "author": "Gianluca Mazza",
+  "license": "MIT",
+  "description": "Remote for nstream in the Omarchy bar: control the cast on your TV and continue watching on the TV or in mpv.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "nstream",
+    "description": "Play, pause, seek, volume and subtitle timing for the cast in progress, plus continue-watching to the TV or this computer.",
+    "category": "Media",
+    "aliases": ["nstream", "stremio", "cast", "chromecast", "movies", "series", "tv"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "historyLimit": 8
+    },
+    "schema": [
+      {
+        "key": "historyLimit",
+        "type": "integer",
+        "label": "Continue-watching rows",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 8
+      }
+    ]
+  }
+}

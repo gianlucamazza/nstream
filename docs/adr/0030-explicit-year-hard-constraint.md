@@ -113,6 +113,20 @@ common false negative.
   `--year`, an Italian query remains a guess. This ADR makes that guess _declarable_, not
   correct.
 
+## Amendment — 2026-11-14: a dateless stranger is not a candidate
+
+Field evidence: `nstream --json --cast --movies --year 2008 "Big Buck Bunny"` cast **The Big
+Bunny** (`tt2659136`, no `releaseInfo`). Cinemeta's search did not return the film at all; the
+year refuted the two dated rows (2026, 2018) and the only survivor was dateless and named
+otherwise, so it won as `"first"`.
+
+Rule 3 is narrowed, not reversed. When the explicit year has **refuted at least one dated
+candidate** and the surviving pool is dateless with **no name match**, `_select_meta` raises
+`YearMismatch` (`no_result` + `years`). Nothing supports any survivor: the year was checkable
+and checked, and the name disagrees. When **no** candidate is dated, the year proved nothing and
+the `unknown` pool still falls through as `"first"`, exactly as before. An inferred year stays
+soft. `--json --search` lists the candidates so a caller can see what was on offer.
+
 ## References
 
 - ADR 0021 — the same shape: a per-invocation constraint that must hold on every selection path,

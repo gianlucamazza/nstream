@@ -15,7 +15,7 @@ def test_closed_allows_and_opens_after_threshold(tmp_path, monkeypatch):
     brk.record_failure(key, reason="timeout")
     assert brk.allow(key) is False
     open_rows = brk.open_breakers()
-    assert any(r["key"] == key and r["state"] == "open" for r in open_rows)
+    assert any(r["key"] == brk.storage_key(key) and r["state"] == "open" for r in open_rows)
 
 
 def test_success_resets(tmp_path, monkeypatch):
@@ -25,7 +25,7 @@ def test_success_resets(tmp_path, monkeypatch):
     brk.record_failure(key)
     brk.record_success(key)
     assert brk.allow(key) is True
-    assert brk._read().get(key, {}).get("fails") == 0
+    assert brk._read().get(brk.storage_key(key), {}).get("fails") == 0
 
 
 def test_half_open_after_cooldown(tmp_path, monkeypatch):
@@ -40,10 +40,10 @@ def test_half_open_after_cooldown(tmp_path, monkeypatch):
     assert brk.allow(key, now=now + brk.OPEN_COOLDOWN_S - 1) is False
     # After cooldown: Half-Open probe allowed
     assert brk.allow(key, now=now + brk.OPEN_COOLDOWN_S + 1) is True
-    assert brk._read()[key]["state"] == "half_open"
+    assert brk._read()[brk.storage_key(key)]["state"] == "half_open"
     # Half-open failure → Open again (opened_at resets to current _now)
     brk.record_failure(key, reason="timeout")
-    assert brk._read()[key]["state"] == "open"
+    assert brk._read()[brk.storage_key(key)]["state"] == "open"
     assert brk.allow(key, now=now) is False
     # Still cooling at original + cooldown (opened_at was reset to `now`)
     assert brk.allow(key, now=now + brk.OPEN_COOLDOWN_S - 1) is False
@@ -59,7 +59,7 @@ def test_half_open_success_closes(tmp_path, monkeypatch):
     brk.allow(key, now=now + brk.OPEN_COOLDOWN_S + 1)
     brk.record_success(key)
     assert brk.allow(key) is True
-    assert brk._read()[key]["state"] == "closed"
+    assert brk._read()[brk.storage_key(key)]["state"] == "closed"
 
 
 def test_forget_breakers(tmp_path, monkeypatch):
@@ -118,3 +118,27 @@ def test_record_success_skips_rewrite_when_already_closed(monkeypatch):
     monkeypatch.setattr(brk, "_write", lambda e: writes.append(e))
     brk.record_success("http://ok")
     assert writes == []
+
+
+def test_state_file_never_holds_the_addon_url(tmp_path, monkeypatch):
+    # Field evidence 2026-11-14: keys were addon bases, debrid token included, in clear.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    secret = "https://addon.example/realdebrid=TOKEN123/manifest-base"
+    brk.record_failure(secret, reason="timeout")
+    raw = brk._path().read_text()
+    assert "TOKEN123" not in raw and "realdebrid" not in raw
+    assert brk.storage_key(secret).startswith("addon.example#")
+    assert brk._read()[brk.storage_key(secret)]["fails"] == 1
+    # A different config on the same host stays a different breaker.
+    assert brk.storage_key(secret) != brk.storage_key(secret.replace("123", "456"))
+
+
+def test_legacy_url_keys_are_dropped_on_read(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    brk._path().parent.mkdir(parents=True, exist_ok=True)
+    brk._path().write_text(
+        '{"version": 1, "breakers": {"https://a.example/tok=S": {"state": "open", "ts": 1}}}'
+    )
+    assert brk._read() == {}
+    brk.record_success("https://b.example")
+    assert "tok=S" not in brk._path().read_text()

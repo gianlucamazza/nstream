@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import secrets
@@ -56,6 +57,13 @@ from pathlib import Path
 from . import languages, live, log, srt, urlproxy, util
 
 _log = log.get_logger("serve")
+# Distinct clients whose first request is logged at INFO, per server.
+_MAX_LOGGED_CLIENTS = 4
+# In-process record of LAN serving: how many servers this process started and which clients
+# reached any of them — so a cast that never started can tell "the TV never came" (firewall)
+# from "the TV came and refused". Detached servers live in another process: no verdict there.
+_served = {"servers": 0}
+_reached: set[str] = set()
 
 # The receiver connects *back* to us over the LAN to fetch the file, so the bind port must be
 # one the host firewall lets in. A default-deny UFW/nftables drops a random ephemeral port; the
@@ -295,6 +303,19 @@ def firewall_hint(bind_ip: str, port: int | None = None) -> str:
     )
 
 
+def unreached_hint(device: str | None) -> str | None:
+    """`firewall_hint` when this process served media over the LAN and `device` (an IP)
+    never fetched anything from it — the signature of a host firewall dropping the TV —
+    else None. Silent when nothing was served here or the device is not an address."""
+    if not device or not _served["servers"] or device in _reached:
+        return None
+    try:
+        ipaddress.ip_address(device)
+    except ValueError:
+        return None
+    return firewall_hint(lan_ip(device))
+
+
 def _parse_range(header: str, size: int) -> tuple[int, int] | None:
     """Parse a single-range `bytes=start-end` header against a file of `size` bytes, returning an
     inclusive `(start, end)` byte range, or None when the header is absent/unsatisfiable/multi-range
@@ -414,9 +435,13 @@ class RangeFileHandler(BaseHTTPRequestHandler):
     def _respond(self, *, write_body: bool) -> None:
         # The first request proves the receiver can reach us — the key discriminator when a
         # Tier-2 cast fails to start (no request → network/firewall; request but no playback
-        # → media/receiver). One INFO line per server; later requests stay at debug.
-        if not self.server.got_request:
-            self.server.got_request = True
+        # → media/receiver). One INFO line per client (bounded), not per server: catt's own
+        # probe of the url used to take the only line and hide whether the TV ever came.
+        client = self.client_address[0]
+        _reached.add(client)
+        seen = self.server.seen_clients
+        if client not in seen and len(seen) < _MAX_LOGGED_CLIENTS:
+            seen.add(client)
             _log.info(
                 "serve: prima richiesta da %s: %s %s (Range=%s)",
                 self.client_address[0], self.command, self._mask(self.path),
@@ -706,7 +731,8 @@ class _FileServer(ThreadingHTTPServer):
         self.sub_url_path = sub_url_path(self.token)
         self.poster_url_path = poster_url_path(self.token)
         self.hls_prefix = hls_url_path(self.token)
-        self.got_request = False  # first-request INFO latch (see RangeFileHandler._respond)
+        self.seen_clients: set[str] = set()  # first-request INFO per client (see _respond)
+        _served["servers"] += 1
         # Idle tracking for the detached server's exit (`_main`): only requests that hit
         # the token paths count, so LAN scanners can't keep a finished cast's file pinned.
         self._activity_lock = threading.Lock()

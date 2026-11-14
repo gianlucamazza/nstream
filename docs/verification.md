@@ -34,7 +34,8 @@ and observed mpv startup. Timing records contain neither title nor URL.
 ## Local diagnostics and recovery
 
 - Run `nstream --doctor` or `nstream --json --doctor` before changing configuration.
-  Optional missing binaries are reported independently of required ones. Exit 1 means
+  Optional missing binaries are reported independently of required ones (`castbridge`,
+  `mirror` and `torrserver` carry a `detail` saying what their absence disables). Exit 1 means
   a required check failed. Config permission issues are reported without changing them.
 - Playback retains existing JSON files and schemas. There is no data migration.
   Before replacing malformed JSON, an update saves `<name>.json.corrupt-<timestamp>`

@@ -10,6 +10,7 @@ import argparse
 import sys
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass, replace
 
 from . import (
@@ -91,6 +92,23 @@ def _emit_unplayable(
     return 1
 
 
+def _backend_label(cfg: Config, chosen: Stream, *, cached: bool) -> str:
+    """How the pick is delivered, read from the stream itself — not from the config, which
+    only says what *may* be used: under `auto` an http url used to be labelled `p2p`.
+    `debrid` = a cached debrid release; `p2p` = a swarm (hash only, or the local engine);
+    `http` = any other direct url (addon link, uncached debrid link)."""
+    if cached:
+        return "debrid"
+    if cfg.playback_backend == "native":
+        return "native"
+    url = chosen.get("url") or ""
+    if not url:
+        return "p2p"
+    parts = urllib.parse.urlsplit(url)
+    local = parts.hostname in ("127.0.0.1", "localhost", "::1")
+    return "p2p" if local and parts.port == cfg.engine_port else "http"
+
+
 def describe_stream(cfg: Config, chosen: Stream) -> dict:
     """Descriptive JSON for the chosen stream — never the url/token.
 
@@ -100,13 +118,7 @@ def describe_stream(cfg: Config, chosen: Stream) -> dict:
     """
     info = quality.parse_stream(chosen)
     codec, codec_source = tracks.honest_codec(chosen.get("url") or "", info.codec)
-    backend = (
-        "debrid"
-        if info.cached
-        else {"local": "p2p", "auto": "p2p", "native": "native"}.get(
-            cfg.playback_backend, cfg.playback_backend
-        )
-    )
+    backend = _backend_label(cfg, chosen, cached=info.cached)
     return {
         "resolution": info.resolution,
         "codec": codec,

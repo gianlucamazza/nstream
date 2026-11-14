@@ -22,6 +22,16 @@ def _no_host_gpu_probe(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_lan_serving(monkeypatch):
+    """`serve` records process-wide which LAN servers ran and who reached them (the firewall
+    hint): servers one test started must not leak into another test's verdict."""
+    from nstream import serve
+
+    monkeypatch.setattr(serve, "_served", {"servers": 0})
+    monkeypatch.setattr(serve, "_reached", set())
+
+
+@pytest.fixture(autouse=True)
 def _isolated_storage(monkeypatch, tmp_path):
     for variable, directory in (
         ("XDG_CONFIG_HOME", "config"),

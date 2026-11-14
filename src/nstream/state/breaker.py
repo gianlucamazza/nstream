@@ -8,8 +8,10 @@ timeouts — not empty catalogs (an up addon may legitimately return zero stream
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import time
+import urllib.parse
 from pathlib import Path
 
 from .. import log, util
@@ -42,6 +44,17 @@ def _path() -> Path:
     return base / "nstream" / "addon-breakers.json"
 
 
+def storage_key(key: str) -> str:
+    """The persisted/logged form of an addon key: `host#<sha256 prefix>`. Addon bases carry
+    secrets (a debrid token in the path, a base64 config holding the API key), so the raw
+    URL never reaches the state file or the log — the hash still keeps two configs of one
+    host apart. Non-URL keys pass through."""
+    if "://" not in key:
+        return key
+    host = urllib.parse.urlsplit(key).hostname or "?"
+    return f"{host}#{hashlib.sha256(key.encode()).hexdigest()[:12]}"
+
+
 def _read() -> dict[str, dict]:
     data = util.load_json(_path(), {})
     if not isinstance(data, dict):
@@ -52,7 +65,10 @@ def _read() -> dict[str, dict]:
     return {
         key: rec
         for key, rec in entries.items()
-        if isinstance(rec, dict)
+        # Raw-URL keys come from before `storage_key`: dropped (rewritten without them on
+        # the next update), so a token stored in clear does not survive.
+        if "://" not in key
+        and isinstance(rec, dict)
         and all(
             isinstance(rec.get(field, 0), int | float) for field in ("ts", "opened_at", "fails")
         )
@@ -88,6 +104,7 @@ def admit(key: str, *, now: float | None = None) -> str | None:
     the caller bounds it with PROBE_BUDGET_S) or None (Open: skip without network)."""
     if not key:
         return "normal"
+    key = storage_key(key)
     now = _now() if now is None else now
     rec = _read().get(key)
     if not rec:
@@ -123,6 +140,7 @@ def allow(key: str, *, now: float | None = None) -> bool:
 def record_success(key: str) -> None:
     if not key:
         return
+    key = storage_key(key)
     entries = _read()
     prev = entries.get(key) or {}
     if prev.get("state", "closed") == "closed" and not prev.get("fails") and key in entries:
@@ -138,6 +156,7 @@ def record_failure(key: str, *, reason: str = "") -> None:
     """Count a retryable failure. Opens the breaker at FAIL_THRESHOLD."""
     if not key:
         return
+    key = storage_key(key)
     entries = _read()
     rec = dict(entries.get(key) or {})
     state = rec.get("state") or "closed"
