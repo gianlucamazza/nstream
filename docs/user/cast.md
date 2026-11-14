@@ -74,6 +74,12 @@ flowchart TD
 
 ### Tier-2 remux
 
+castbridge discovery uses `CASTBRIDGE_BIN`, then `PATH`, then the historical
+`~/Workspace/tooling/openscreen-build/openscreen/out/Default/castbridge` build.
+An explicit invalid override stays unavailable; it never selects a different binary.
+`nstream --doctor` reports the local HLS requirements under `cast_live`, without probing
+a source or starting a backend. A successful check does not certify the TV or free disk.
+
 DMR cannot decode AC-3/E-AC-3/DTS/TrueHD (silent TV). Selection **prefers AAC releases**;
 when only Dolby/DTS exist and `cast_remux` is on, the host remuxes (video `-c copy`, audio to
 `cast_audio_codec`). Caps:
@@ -91,6 +97,13 @@ decode skip live. The complete-file remux is the fallback when the live start fa
 `delivery` says which ran (`live` / `file`).
 
 stderr shows a prepare message during remux. JSON field `reencoded: true` when remux was used.
+Before a complete-file prepare, stderr explains why HLS is unavailable or did not start.
+Progress includes output GiB and FFmpeg processing speed when known. After five seconds
+and three stable speed samples, it also estimates remaining processing time; MP4
+finalization is extra. Unknown duration or unstable speed suppresses the estimate.
+Logs record elapsed time, processed media seconds, output bytes, speed and the interval
+from the last observed media advancement to process exit. That interval is only a tail
+estimate, not an isolated measurement of `+faststart`; output rate is not network throughput.
 `--stop` tears down the remux server and temp file; stale temps are GC'd on the next run.
 
 ### Remux / file metadata on the TV (ADR 0050)

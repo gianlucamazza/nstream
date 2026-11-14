@@ -114,10 +114,15 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `caster` | Device resolve; LAN Range-proxy wrap (`lan_media`, ADR 0045); castbridge or catt LOAD (`catt_lib_play` / `_catt_load` / CLI `-l` + BUFFERED, ADR 0050) |
 | `remux` / `serve` | Tier-2 file + Range server; `serve` also LAN Range-proxies a remote url (ADR 0045) |
 | `mirror` | Realtime 1080p path |
-| `bridge` | castbridge IPC client + daemon ensure |
+| `bridge` | castbridge IPC client + daemon ensure; binary discovery: override → PATH → historical build |
 | `discovery` | Non-blocking Chromecast discovery |
 | `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv. Probe/plan for the LAN Range-proxy (ADR 0045): proxy only when Range + length are known; else remux/live |
 | `live` | Live HLS-TS producer for Tier-2 (ADR 0039): ffmpeg argv, playlist timeline, pruning behind the play head, pausing far ahead |
+
+`remux.live_requirement_refusal` checks local HLS requirements without network or disk
+writes (also used by `doctor`). `remux.live_unavailable_reason` adds source and disk
+eligibility for selection, prefetch and delivery. Complete-file progress records processing
+metrics independently of the link-throughput store (ADR 0052).
 
 ### Subs
 

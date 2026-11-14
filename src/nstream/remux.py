@@ -1,15 +1,11 @@
 """Tier-2 cast delivery: native-fidelity casting of titles whose audio the Chromecast
 Default Media Receiver can't decode (AC-3/E-AC-3/DTS/TrueHD → silent on the DMR).
 
-The DMR plays HEVC/4K/HDR video natively but only ever plays a **complete, Range-served
-MP4 file** — every streaming-while-transcoding delivery (on-the-fly fMP4, HLS, a growing
-file) was tested against the target TV and shows a black screen (the receiver does one
-GET without a Range header and gives up). So we remux the whole stream to a complete temp
-file on disk (video `-c copy` → original HEVC/4K/HDR kept, audio → AAC, the receiver
-decodes it), then let **catt's own HTTP server** serve it (the one delivery the DMR
-accepts). Cost: a prepare wait (the file is downloaded+remuxed before playback). The
-selector prefers native-AAC releases first (`quality.score_components`), so this only
-triggers for titles with no AAC alternative.
+The preferred Tier-2 delivery is growing HLS-TS (ADR 0039), with original video and AAC
+stereo, via castbridge. When its requirements or receiver checks fail, prepare a complete,
+Range-served MP4 (video copy, channel-aware AAC) before playback. A growing ordinary MP4
+is not a substitute for HLS. The complete-file fallback costs a full download and remux;
+the selector prefers directly playable releases where possible.
 
 `catt cast <file>` serves the file and blocks for the whole runtime, so it is spawned in
 a **detached session**: headless callers return immediately (the detached catt keeps
@@ -29,6 +25,7 @@ import contextlib
 import dataclasses
 import fcntl
 import json
+import math
 import os
 import secrets
 import shutil
@@ -372,11 +369,20 @@ def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tup
     no-reader problem as the detached catt's stderr capture below."""
     g = ui.g().tv
     size_bit = f"  {size_label}" if size_label else ""
+    measure: dict = {}
 
     def _frame(pct: int | None) -> str:
+        metrics = ""
+        if measure.get("bytes", 0) > 0:
+            metrics += f"  {measure['bytes'] / 1024**3:.2f}GiB prodotti"
+        if measure.get("speed", 0) > 0:
+            metrics += f"  {measure['speed']:.1f}×"
+        eta = measure.get("eta")
+        if eta is not None:
+            metrics += f"  ~{math.ceil(eta / 60)}min + finalizzazione"
         if pct is None:
-            return f"{g} remux audio…{size_bit}"
-        return f"{g} remux audio  {pct:3d}%{size_bit}"
+            return f"{g} remux audio…{size_bit}{metrics}"
+        return f"{g} remux audio  {pct:3d}%{size_bit}{metrics}"
 
     with tempfile.TemporaryFile() as err:
         try:
@@ -387,7 +393,7 @@ def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tup
         except (OSError, subprocess.SubprocessError) as e:
             return None, str(e)
         try:
-            return _await_ffmpeg(proc, err, duration, _frame)
+            return _await_ffmpeg(proc, err, duration, _frame, measure=measure)
         except BaseException:
             # Ctrl-C / abort: stop ffmpeg BEFORE the caller deletes the partial file, or it
             # keeps writing (and downloading) into an unlinked inode.
@@ -400,27 +406,77 @@ def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tup
 
 
 def _await_ffmpeg(
-    proc: subprocess.Popen, err: BinaryIO, duration: float, _frame: Callable[[int | None], str]
+    proc: subprocess.Popen,
+    err: BinaryIO,
+    duration: float,
+    _frame: Callable[[int | None], str],
+    *,
+    measure: dict | None = None,
 ) -> tuple[int | None, str]:
     """Drain `-progress` into the in-place progress line, then wait and read stderr."""
     # A tty redraws in place (every percent). A pipe still needs the wait to be
     # visible (ADR 0035): one line up front, then each 10% — `ui.progress` already
     # prints a plain newline when stderr is not a tty.
     bucket = 1 if sys.stderr.isatty() else 10
+    measure = measure if measure is not None else {}
+    started = last_advance = time.monotonic()
+    last_report = started
+    media_s = 0.0
+    speeds: list[float] = []
     ui.progress(_frame(0 if duration > 0 else None))
     pct = 0 if duration > 0 else -1
     if proc.stdout is not None:
         for line in proc.stdout:
-            if duration > 0 and line.startswith("out_time_us="):
+            key, _, value = line.strip().partition("=")
+            if key in ("total_size", "speed"):
                 try:
-                    cur = int(line.split("=", 1)[1]) / 1_000_000
+                    number = float(value.removesuffix("x"))
+                except ValueError:
+                    if key == "speed":
+                        speeds.clear()
+                        measure.pop("speed", None)
+                    continue
+                if not math.isfinite(number) or number < 0:
+                    if key == "speed":
+                        speeds.clear()
+                        measure.pop("speed", None)
+                    continue
+                measure["bytes" if key == "total_size" else "speed"] = number
+                if key == "speed":
+                    speeds = [*speeds[-2:], number]
+            elif key == "out_time_us":
+                try:
+                    cur = int(value) / 1_000_000
                 except ValueError:
                     continue
-                shown = (min(99, int(cur / duration * 100)) // bucket) * bucket
+                if cur > media_s:
+                    media_s, last_advance = cur, time.monotonic()
+                if duration <= 0:
+                    continue
+                shown = (min(99, int(media_s / duration * 100)) // bucket) * bucket
                 if shown != pct:
                     pct = shown
                     ui.progress(_frame(pct))
+                    last_report = time.monotonic()
+            elif key == "progress":
+                measure.pop("eta", None)
+                if (
+                    duration > media_s > 0 and time.monotonic() - started >= 5
+                    and len(speeds) == 3 and min(speeds) > 0
+                    and max(speeds) / min(speeds) <= 1.25 and value != "end"
+                ):  # fmt: skip
+                    measure["eta"] = (duration - media_s) / (sum(speeds) / len(speeds))
+                if sys.stderr.isatty() or time.monotonic() - last_report >= 10:
+                    ui.progress(_frame(pct if duration > 0 else None))
+                    last_report = time.monotonic()
     proc.wait()
+    finished = time.monotonic()
+    _log.info(
+        "remux metrics: elapsed_s=%.2f media_s=%.2f output_bytes=%.0f "
+        "speed_x=%.2f last_advance_to_exit_s=%.2f rc=%s",
+        finished - started, media_s, measure.get("bytes", 0),
+        measure.get("speed", 0), finished - last_advance, proc.returncode,
+    )  # fmt: skip
     if sys.stderr.isatty():
         # Clear the progress line; the cast "in onda" line is the next status.
         ui.progress_done()
@@ -1081,7 +1137,7 @@ def prefetch_live(
     """Start the next episode's live producer ahead of time (binge): a detached serve with
     no LOAD. `cast_live` adopts it when the same release and job come up, so the episode
     change skips the producer start. One prefetch at a time; a stale one is reaped."""
-    if not live_available(cfg) or not bridge.bridge_available():
+    if live_unavailable_reason(cfg, url, 0.0):
         return False
     reap_prefetch()
     t, _n_video, _duration = _probe_meta(url)
@@ -1164,6 +1220,19 @@ def live_available(cfg: Config) -> bool:
     return cfg.cast_remux and cfg.cast_live and available()
 
 
+def live_requirement_refusal(cfg: Config) -> str | None:
+    """Local HLS requirements only: safe for read-only doctor (no probes or disk writes)."""
+    if not cfg.cast_remux:
+        return "remux disattivato (cast_remux)"
+    if not cfg.cast_live:
+        return "diretta disattivata (cast_live)"
+    if not available():
+        return "ffmpeg assente"
+    if not bridge.bridge_available():
+        return "castbridge assente o non eseguibile (CASTBRIDGE_BIN, PATH, build locale)"
+    return None
+
+
 def live_refusal(size_gb: float, duration: float) -> str | None:
     """Why the live window (10 min behind + 30 min ahead of the play head) would not fit
     on disk, or None. Far below the complete file: that is the point of going live."""
@@ -1184,12 +1253,18 @@ def live_feasible(cfg: Config, url: str, size_gb: float) -> bool:
     """Whether a live start can be attempted for `url` (decision time, ADR 0036): config,
     tools, disk window, and not a dual-layer DV source (ADR 0044). The probe is the
     memoized one the vetting already ran."""
-    if not live_available(cfg) or not bridge.bridge_available():
-        return False
+    return live_unavailable_reason(cfg, url, size_gb) is None
+
+
+def live_unavailable_reason(cfg: Config, url: str, size_gb: float) -> str | None:
+    """One eligibility decision for selection, prefetch and actual delivery."""
+    why = live_requirement_refusal(cfg)
+    if why:
+        return why
     _t, n_video, duration = _probe_meta(url)
     if n_video >= 2:
-        return False  # EL in MPEG-TS: the DMR refuses; complete-file drops 0:v:1
-    return live_refusal(size_gb, duration) is None
+        return "Dolby Vision dual-layer non compatibile con HLS su questo ricevitore"
+    return live_refusal(size_gb, duration)
 
 
 def _live_head_ok(out_dir: str, *, gen: int = 0, subs: bool = False) -> bool:
@@ -1326,16 +1401,11 @@ def cast_live(
     no progress, disk, or a receiver that never played it — so the caller falls back to
     the complete-file remux (`remux_for_cast` + `cast_file`). castbridge only: catt joins a
     live playlist at its edge and cannot seek it."""
-    if not live_available(cfg) or not bridge.bridge_available():
-        return None
-    t, n_video, duration = _probe_meta(url)
-    if n_video >= 2:
-        _log.info("live: Dolby Vision dual-layer (EL) — complete-file remux")
-        return None
-    why = live_refusal(size_gb, duration)
+    why = live_unavailable_reason(cfg, url, size_gb)
     if why:
         _log.info("live: %s", why)
         return None
+    t, _n_video, duration = _probe_meta(url)
     head = float(start or 0.0)
     if duration and head >= duration - 2 * live.SEGMENT_S:
         head = 0.0

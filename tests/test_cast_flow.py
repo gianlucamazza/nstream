@@ -107,7 +107,7 @@ def _run(opts, stream, *, start=None, results=None, **kw):
 # --- Tier-2 remux ------------------------------------------------------------
 
 
-def test_remux_success_uses_cast_file(monkeypatch):
+def test_remux_success_uses_cast_file(monkeypatch, capsys):
     """Tier-2 plan + remux OK → cast_file with start/follow/on_event threaded; the direct
     cast never runs and the outcome reports reencoded."""
     stream: Stream = _STREAM.copy()
@@ -137,6 +137,10 @@ def test_remux_success_uses_cast_file(monkeypatch):
     assert seen["path"] == "/tmp/out.mp4"
     assert seen["follow"] is False and seen["start"] == 42.0 and seen["on_event"] is cb
     assert out.reencoded is True and out.action == "cast" and out.notice is None
+    err = capsys.readouterr().err
+    assert "castbridge assente" in err
+    assert err.index("diretta non disponibile") < err.index("preparo il file intero")
+    assert stream["url"] not in err
 
 
 def test_remux_failure_degrades_to_direct(monkeypatch, capsys):
@@ -1204,10 +1208,11 @@ def test_live_tier_starts_instead_of_the_complete_remux(monkeypatch):
     assert out.delivery == "live" and out.reencoded is True and out.action == "cast"
 
 
-def test_live_failure_falls_back_to_the_complete_remux(monkeypatch):
+def test_live_failure_falls_back_to_the_complete_remux(monkeypatch, capsys):
     stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
     _live_on(monkeypatch)
+    monkeypatch.setattr(cast_flow.remux, "live_unavailable_reason", lambda *a: None)
     monkeypatch.setattr(cast_flow.remux, "cast_live", lambda *a, **k: None)
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast", lambda *a, **k: seen.update(full=True) or "/t.mp4"
@@ -1216,6 +1221,7 @@ def test_live_failure_falls_back_to_the_complete_remux(monkeypatch):
     monkeypatch.setattr(cast_flow.subs, "align_local", lambda cfg, pick, *a, **k: pick)
     out = _run(_opts(), stream)
     assert seen.get("full") and out.delivery == "file"
+    assert "avvio HLS non riuscito" in capsys.readouterr().err
 
 
 def test_live_failure_with_a_refused_complete_file_is_infeasible(monkeypatch):

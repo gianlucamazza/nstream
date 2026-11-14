@@ -9,7 +9,7 @@ catt/mpv/ffprobe. Leaf module (imports `log` + stdlib), never `cli` — like `ca
 The daemon (`castbridge --daemon`) is shared with the LibreWolf cast extension: one instance
 per `$XDG_RUNTIME_DIR` (socket `$XDG_RUNTIME_DIR/castbridge/sock`). If nothing is listening we
 spawn it under the same `spawn.lock` flock the relay uses, so concurrent starts don't race.
-The binary is located like `mirror.py` locates `cast_sender` — an env override, else the
+The binary is located through an env override, then PATH, then the historical
 openscreen-fork build output.
 
 Key difference from catt: **the session lives in the daemon, not in our connection.** Once
@@ -25,6 +25,7 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -84,10 +85,13 @@ def _lock_path() -> str:
 
 
 def _binary() -> str:
-    """The castbridge binary (built separately inside the openscreen fork, like cast_sender)."""
+    """Explicit override, installed binary, then the historical openscreen build tree."""
     env = os.environ.get("CASTBRIDGE_BIN")
     if env:
         return env
+    installed = shutil.which("castbridge")
+    if installed:
+        return installed
     return os.path.expanduser(
         "~/Workspace/tooling/openscreen-build/openscreen/out/Default/castbridge"
     )

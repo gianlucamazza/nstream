@@ -716,6 +716,13 @@ def run_cast(
             if live_delivery is None and st.full_refusal:
                 raise CastRemuxInfeasible(f"{st.full_refusal}; la diretta non è partita")
         if needs_remux and live_delivery is None:
+            why = (
+                remux.live_unavailable_reason(
+                    cfg, chosen["url"], quality.parse_stream(chosen).size_gb
+                )
+                or "avvio HLS non riuscito; uso il file completo"
+            )
+            print(f"nstream: diretta non disponibile: {why}", file=sys.stderr)
             print(_prepare_line(chosen, plan, target_lang), file=sys.stderr)
         remux_path = (
             remux.remux_for_cast(

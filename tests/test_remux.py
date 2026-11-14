@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -385,6 +386,55 @@ def test_run_ffmpeg_reports_tenths_when_stderr_is_not_a_tty(capsys, monkeypatch)
 def test_run_ffmpeg_launch_failure_returns_none():
     rc, stderr = remux._run_ffmpeg(["/nonexistent/ffmpeg-xyz"], duration=0.0)
     assert rc is None and stderr
+
+
+@pytest.mark.parametrize("duration", [0.0, 100.0])
+def test_remux_metrics_eta_and_finalization_tail(monkeypatch, duration):
+    clock = [0.0]
+    monkeypatch.setattr(remux.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+
+    def progress():
+        for n in (1, 2, 3):
+            clock[0] = n * 3.0
+            yield f"total_size={n * 1000}\n"
+            yield f"out_time_us={n * 10_000_000}\n"
+            yield "speed=2.0x\n"
+            yield "progress=continue\n"
+        clock[0] = 12.0
+
+    measure = {}
+    frames = []
+    timings = []
+    monkeypatch.setattr(remux.ui, "progress", lambda _: None)
+    monkeypatch.setattr(remux._log, "info", lambda *args: timings.append(args))
+
+    def frame(pct):
+        frames.append(dict(measure))
+        return "progress"
+
+    proc = Mock(stdout=progress(), returncode=0)
+    assert remux._await_ffmpeg(proc, io.BytesIO(), duration, frame, measure=measure) == (0, "")
+    assert frames[-1]["bytes"] == 3000 and frames[-1]["speed"] == 2.0
+    if duration:
+        assert frames[-1]["eta"] == 35.0
+    else:
+        assert "eta" not in frames[-1]
+    assert timings[-1][1:] == (12.0, 30.0, 3000.0, 2.0, 3.0, 0)
+
+
+@pytest.mark.parametrize("speeds", [("2x", "8x", "2x"), ("2x", "N/A", "2x"), ("2x", "nan", "2x")])
+def test_remux_eta_absent_for_unstable_or_invalid_speed(monkeypatch, speeds):
+    tick = iter(range(100))
+    monkeypatch.setattr(remux.time, "monotonic", lambda: float(next(tick) * 3))
+    monkeypatch.setattr(remux.ui, "progress", lambda _: None)
+    lines = []
+    for speed in speeds:
+        lines += ["out_time_us=1000000\n", f"speed={speed}\n", "progress=continue\n"]
+    measure = {}
+    proc = Mock(stdout=iter(lines), returncode=0)
+    remux._await_ffmpeg(proc, io.BytesIO(), 100, lambda _: "", measure=measure)
+    assert "eta" not in measure
 
 
 # --- cast_file dispatch (catt fallback path) --------------------------------
@@ -1453,6 +1503,44 @@ def test_remux_argv_never_carries_the_debrid_url(monkeypatch, tmp_path):
 
 
 # --- live HLS-TS (ADR 0039) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("config", "ffmpeg", "bridge_ok", "reason"),
+    [
+        ({"cast_remux": False}, True, True, "cast_remux"),
+        ({"cast_live": False}, True, True, "cast_live"),
+        ({}, False, True, "ffmpeg"),
+        ({}, True, False, "castbridge"),
+    ],
+)
+def test_live_requirements_are_local_and_shared(monkeypatch, config, ffmpeg, bridge_ok, reason):
+    monkeypatch.setattr(remux, "available", lambda: ffmpeg)
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: bridge_ok)
+    monkeypatch.setattr(remux, "_probe_meta", lambda _: pytest.fail("must not probe"))
+    cfg = _cfg(**config)
+    assert reason in (remux.live_requirement_refusal(cfg) or "")
+    assert not remux.live_feasible(cfg, "https://example.test/SECRET", 1.0)
+    assert (
+        remux.cast_live(cfg, "T", "https://example.test/SECRET", device="TV", audio_index=0) is None
+    )
+    assert not remux.prefetch_live(
+        cfg, "https://example.test/SECRET", device="TV", audio_index=0, source_key="test"
+    )
+
+
+@pytest.mark.parametrize("dual_layer", [False, True])
+def test_prefetch_honors_source_and_disk_refusals(monkeypatch, dual_layer):
+    monkeypatch.setattr(remux, "available", lambda: True)
+    monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
+    monkeypatch.setattr(remux, "_probe_meta", lambda _: (Tracks(), 2 if dual_layer else 1, 90))
+    monkeypatch.setattr(remux, "live_refusal", lambda *args: "spazio disco insufficiente")
+    monkeypatch.setattr(remux, "reap_prefetch", lambda: pytest.fail("must not touch previous job"))
+    reason = remux.live_unavailable_reason(_cfg(), "http://example.test", 1)
+    assert ("dual-layer" if dual_layer else "spazio disco") in (reason or "")
+    assert not remux.prefetch_live(
+        _cfg(), "http://example.test", device="TV", audio_index=0, source_key="test"
+    )
 
 
 def _live_wiring(monkeypatch, *, writes_segments: bool):

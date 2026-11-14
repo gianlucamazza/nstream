@@ -31,6 +31,29 @@ Do not infer internet playback latency from these microbenchmarks.
 Debug logs include named phase timings for search, gather, selection, probe, subtitles,
 and observed mpv startup. Timing records contain neither title nor URL.
 
+### Remux and HLS evidence (2026-11-14, ADR 0052)
+
+Local FFmpeg smoke used a generated 12-second 320×180@25 H.264 MKV, two-second
+keyframe spacing, E-AC-3 six-channel audio and Italian track metadata. Config, state,
+cache and runtime directories were isolated in a temporary directory; no TV was contacted.
+
+| Check | Observed result |
+| --- | --- |
+| Complete-file `remux_for_cast` + FFmpeg decode to null | Passed: H.264 + AAC, six channels; preparation 0.700 s |
+| `live.Producer` + `_live_head_ok` | Passed: 12 s HLS-TS output, valid first segment, AAC stereo |
+| Installed catt 0.13.3 `play_media_url`, captured underlying controller call | Passed: HLS MIME, BUFFERED and segment-format metadata forwarded |
+
+The catt controller transport was replaced with a recorder for this experiment. It tests
+installed-library argument forwarding, not receiver playback or seeking. The local fixture
+timing is not a measurement of remote-source speed or time to first frame on a TV.
+
+Hardware gate remains pending: run the same compatible remote source through HLS and
+complete-file delivery, record time to advancing receiver position and ten minutes of
+visible/audible stable playback. For the experimental catt sender, additionally verify
+start at zero, resume, seeks within and beyond produced segments, subtitles, pause/stop,
+and serving after headless return. Keep production HLS castbridge-only until all pass.
+At this check, castbridge was unavailable through override, PATH and historical discovery.
+
 ## Local diagnostics and recovery
 
 - Run `nstream --doctor` or `nstream --json --doctor` before changing configuration.

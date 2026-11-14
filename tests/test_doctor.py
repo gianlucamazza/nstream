@@ -33,3 +33,21 @@ def test_doctor_finds_castbridge_where_the_cast_path_does(monkeypatch):
     monkeypatch.setattr(doctor.bridge, "bridge_available", lambda: True)
     checks = {c["name"]: c["status"] for c in doctor.inspect()["checks"]}
     assert checks["castbridge"] == "ok"
+
+
+def test_doctor_explains_local_hls_requirements_without_probing(monkeypatch):
+    from nstream.config import Config
+
+    monkeypatch.setattr(doctor, "load", lambda **kwargs: Config(torrentio_base="tb"))
+    monkeypatch.setattr(doctor.remux, "available", lambda: True)
+    monkeypatch.setattr(doctor.bridge, "bridge_available", lambda: False)
+    monkeypatch.setattr(
+        doctor.remux, "_probe_meta", lambda _: (_ for _ in ()).throw(AssertionError())
+    )
+    checks = {c["name"]: c for c in doctor.inspect()["checks"]}
+    assert checks["cast_live"]["status"] == "missing"
+    assert "castbridge" in checks["cast_live"]["detail"]
+    monkeypatch.setattr(doctor.bridge, "bridge_available", lambda: True)
+    checks = {c["name"]: c for c in doctor.inspect()["checks"]}
+    assert checks["cast_live"]["status"] == "ok"
+    assert "non verificate" in checks["cast_live"]["detail"]

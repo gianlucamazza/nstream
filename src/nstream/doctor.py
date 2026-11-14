@@ -7,7 +7,7 @@ import shutil
 import stat
 import sys
 
-from . import __version__, bridge, log, mirror
+from . import __version__, bridge, log, mirror, remux
 from .config import ConfigError, config_path, load
 
 
@@ -21,8 +21,7 @@ def inspect() -> dict:
                 "status": "ok" if shutil.which(name) else "missing",
             }
         )
-    # castbridge is found where the cast path looks for it (`bridge._binary`: env override or
-    # the build tree), not on PATH — `which` reported it missing while every cast used it.
+    # Use the same discovery as playback (override, PATH, historical build tree).
     checks.append(
         {"name": "castbridge", "required": False,
          "status": "ok" if bridge.bridge_available() else "missing"}
@@ -34,12 +33,20 @@ def inspect() -> dict:
     if why:
         mirror_check["detail"] = why
     checks.append(mirror_check)
+    live_why = "configurazione non disponibile"
     try:
-        load(secure_permissions=False)
+        cfg = load(secure_permissions=False)
+        live_why = remux.live_requirement_refusal(cfg)
         private = stat.S_IMODE(config_path().stat().st_mode) & 0o077 == 0
         status = "ok" if private else "permissions"
     except (ConfigError, OSError, TypeError, ValueError):
         status = "invalid_or_missing"
+    live_check = {"name": "cast_live", "required": False, "status": "missing" if live_why else "ok"}
+    if live_why:
+        live_check["detail"] = live_why
+    else:
+        live_check["detail"] = "requisiti locali presenti; sorgente e TV non verificate"
+    checks.append(live_check)
     checks.append({"name": "config", "required": True, "status": status})
     return {
         "ok": all(c["status"] == "ok" for c in checks if c["required"]),

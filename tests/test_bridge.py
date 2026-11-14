@@ -21,6 +21,34 @@ from nstream import bridge
 # test so nothing ever spawns a real daemon. To test ensure_daemon ITSELF we capture the real
 # function at import time (collection runs before fixtures patch the module attribute).
 _REAL_ENSURE_DAEMON = bridge.ensure_daemon
+_REAL_BRIDGE_AVAILABLE = bridge.bridge_available
+
+
+def test_binary_explicit_invalid_override_does_not_fall_back(monkeypatch):
+    monkeypatch.setenv("CASTBRIDGE_BIN", "/missing/castbridge")
+    monkeypatch.setattr(bridge.shutil, "which", lambda _: pytest.fail("override must win"))
+    assert bridge._binary() == "/missing/castbridge"
+    assert not _REAL_BRIDGE_AVAILABLE()
+
+
+def test_binary_finds_installed_executable_before_build_tree(monkeypatch, tmp_path):
+    binary = tmp_path / "castbridge"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o700)
+    monkeypatch.delenv("CASTBRIDGE_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert bridge._binary() == str(binary)
+    assert _REAL_BRIDGE_AVAILABLE()
+
+
+def test_binary_nonexecutable_on_path_uses_historical_location(monkeypatch, tmp_path):
+    binary = tmp_path / "castbridge"
+    binary.write_text("not executable")
+    monkeypatch.delenv("CASTBRIDGE_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert bridge._binary() == os.path.expanduser(
+        "~/Workspace/tooling/openscreen-build/openscreen/out/Default/castbridge"
+    )
 
 
 def test_media_load_args_omits_empty():
