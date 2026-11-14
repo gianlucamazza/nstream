@@ -21,6 +21,6 @@ pkgbase = nstream
 	optdepends = torrserver-bin: local P2P playback without a debrid provider (AUR)
 	optdepends = libva-utils: GPU decode detection (vainfo) for hardware-aware stream ranking
 	source = nstream-1.48.0.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v1.48.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 295b4c52e6ea4b7fcc1c0795fc2c03e0ba8da48b0287920d7edfbe2287246733
 
 pkgname = nstream

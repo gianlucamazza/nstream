@@ -25,7 +25,7 @@ checkdepends=('python-pytest')
 install="$pkgname.install"
 # GitHub auto-generated source tarball (directory inside: nstream-$pkgver).
 source=("$pkgname-$pkgver.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('295b4c52e6ea4b7fcc1c0795fc2c03e0ba8da48b0287920d7edfbe2287246733')
 
 build() {
   cd "$pkgname-$pkgver"
