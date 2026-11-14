@@ -3,6 +3,10 @@
 Interactive UI language is **Italian**. Launch from the app menu (`nstream.desktop` →
 `nstream-fuzzel` → foot) or run `nstream` in a terminal.
 
+nstream works independently of Omarchy and its optional plugin. The TUI instance guard
+requires no desktop shell or compositor. Desktop activation uses optional Hyprland support
+to focus an existing window; ordinary terminal use requires neither Hyprland nor foot.
+
 ## Home menu
 
 | Entry | Role |
@@ -127,3 +131,19 @@ is required. Narrow terminals reduce panel details and keep the return-home hint
 - Ranking: [../selection.md](../selection.md)
 - Config: [config.md](config.md)
 - Headless (no fzf): [../headless.md](../headless.md)
+
+Desktop and plugin launches share `nstream-launch`: repeated activation focuses the
+existing window instead of creating another one, including simultaneous clicks. On
+Hyprland the launcher recognizes the stable `nstream` app ID and legacy foot windows
+titled `nstream`. Other compositors retain the singleton but may require manual focus.
+Interactive `nstream` invocations also share a per-display lifetime lock. A second
+invocation focuses the owning terminal instead of opening another TUI. JSON automation
+and observation clients use independent processes. Runtime disk failures remain best-effort.
+
+`nstream-launch --json` returns one activation acknowledgement (`api_version: 1`,
+`action: "launch"`, `ok`, `result`, `error`). Successful results distinguish a confirmed
+window (`opened`), activation (`focused`) and an existing instance without activation
+support (`already_open`). Errors are `terminal_missing`, `focus_failed`, `launch_busy`,
+`launch_failed` or `launch_timeout`. The supervisor retains the lifetime lock independently
+of this short request. A second interactive title/continue/browse request is not executed
+and exits 2 with a clear message; a bare invocation only activates the existing TUI.

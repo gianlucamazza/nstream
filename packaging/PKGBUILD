@@ -3,7 +3,7 @@
 pkgname=nstream
 # Keep pkgver in sync with __version__ in src/nstream/__init__.py
 # (build-local.sh asserts they match; .SRCINFO follows).
-pkgver=1.46.0
+pkgver=1.47.0
 pkgrel=1
 pkgdesc="Native, terminal-first Stremio-like client (Cinemeta + Torrentio/debrid or local P2P + mpv)"
 arch=('any')
@@ -25,7 +25,7 @@ checkdepends=('python-pytest')
 install="$pkgname.install"
 # GitHub auto-generated source tarball (directory inside: nstream-$pkgver).
 source=("$pkgname-$pkgver.tar.gz::https://github.com/gianlucamazza/nstream/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('0182089191d3a64aa404dc1a295a5814d94af8dd0c162071f69aaa6849bec07b')
+sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"

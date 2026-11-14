@@ -86,5 +86,9 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 
 | [0057](0057-desktop-observation-protocol.md) | Versioned desktop observation without playback ownership | Accepted | 2026-11-14 |
 
+| [0058](0058-single-interactive-instance.md) | One interactive instance per graphical display | Accepted | 2026-11-14 |
+
+| [0059](0059-desktop-activation-acknowledgements.md) | Acknowledge activation and reject ignored interactive requests | Accepted | 2026-11-14 |
+
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

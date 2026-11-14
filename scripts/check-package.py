@@ -37,6 +37,7 @@ def main():
         for command in (
             [str(python), "-I", "-m", "nstream", "--version"],
             [str(environment / "bin" / "nstream"), "--version"],
+            [str(environment / "bin" / "nstream-launch"), "--help"],
         ):
             subprocess.run(command, cwd=root, env=env, check=True)
         subprocess.run(

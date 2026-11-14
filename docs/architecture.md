@@ -9,7 +9,7 @@ because it owns independent stores. Domains below are logical clusters (not impo
 
 ```
 src/nstream/
-├── orchestration    cli · cli_args · headless · headless_play · desktop · application · series · settings · doctor
+├── orchestration    cli · cli_args · headless · headless_play · desktop · launcher · application · series · settings · doctor
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
 │                    · remux · live · mirror · bridge · serve · urlproxy · discovery
@@ -80,6 +80,7 @@ flowchart BT
 | `cli` | TUI flow + `main` dispatch (not argparse construction) |
 | `cli_args` | `build_parser()` — flag surface for TUI and `--json` |
 | `headless` | `--json` entry: title select, lifecycle (`--stop`/`--status`/…), delegates play |
+| `launcher` | Single-window desktop activation and lifetime lock (ADR 0058) |
 | `desktop` | Versioned desktop snapshots, session identity and opt-in receiver observation (ADR 0057) |
 | `headless_play` | One-title resolve → prepare_stream → play/cast → success JSON |
 | `application` | Shared local subtitle/track preparation and verified playback for both frontends |
@@ -212,3 +213,8 @@ Paths via `config.*_path()` / `state.breaker`.
 3. Add `tests/test_<mod>.py` (or package tests).
 4. Update **this file** only (not README architecture prose).
 5. New architectural trade-off → ADR ([CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+The Omarchy plugin is an optional external client of the public desktop/JSON APIs.
+nstream neither imports nor starts the plugin or Omarchy shell. The interactive instance
+guard uses stdlib kernel locks; optional Hyprland activation and the foot-based desktop
+launcher are separate from ordinary terminal execution.

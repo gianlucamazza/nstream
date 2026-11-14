@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Thin launcher for nstream: opens the TUI home menu in foot. All UI (search,
-# continue-watching, browse, settings) lives inside nstream itself — fuzzel is
-# no longer involved. Kept under this name for the existing .desktop entry.
+# Compatibility name for desktop entries: focus the existing nstream window or open it.
 set -euo pipefail
-# Keep the terminal open if nstream exits non-zero, so messages stay readable
-# instead of vanishing with the window.
-exec foot -T nstream sh -c \
-  'nstream; ec=$?; [ "$ec" -ne 0 ] && { printf "\n[nstream] uscita codice %s — INVIO per chiudere.\n" "$ec"; read -r _; }; exit "$ec"'
+exec nstream-launch

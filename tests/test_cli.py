@@ -1849,3 +1849,34 @@ def test_cast_prefetch_cannot_prompt_from_background(monkeypatch):
     assert not quiet.interactive
     assert quiet.confirm is quiet.choose is quiet.choose_stream is None
     assert quiet.quality == 1080
+
+
+@pytest.mark.parametrize("argv", [["Movie"], ["-c"], ["--browse", "popolari"]])
+def test_second_interactive_request_is_explicitly_rejected(monkeypatch, capsys, argv):
+    from nstream import launcher
+
+    args = cli.cli_args.build_parser().parse_args(argv)
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    monkeypatch.setattr(launcher, "focus_existing", lambda owner=None: True)
+    monkeypatch.setattr(
+        cli, "_dispatch_body", lambda *a: pytest.fail("must not execute ignored request")
+    )
+    with launcher.interactive_instance() as first:
+        assert first
+        assert cli._dispatch(CFG, args, opts) == 2
+    assert "nuova richiesta non eseguita" in capsys.readouterr().err
+
+
+def test_second_bare_interactive_activation_is_successful(monkeypatch):
+    from nstream import launcher
+
+    args = cli.cli_args.build_parser().parse_args([])
+    opts = cli.PlayOpts(
+        auto=True, cast=False, sub_mode=None, sub_lang=None, history=False, autoplay=False
+    )
+    monkeypatch.setattr(launcher, "focus_existing", lambda owner=None: True)
+    with launcher.interactive_instance() as first:
+        assert first
+        assert cli._dispatch(CFG, args, opts) == 0

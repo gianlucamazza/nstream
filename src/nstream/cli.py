@@ -29,6 +29,7 @@ from . import (
     explain,
     failures,
     headless,
+    launcher,
     log,
     menus,
     preview,
@@ -1151,11 +1152,21 @@ def _home_menu(cfg: Config, opts: PlayOpts, *, typ: str | None) -> int:
 def _dispatch(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
     if args.json or args.explain:
         return _dispatch_body(cfg, args, opts)
-    with tui_output.session():
-        try:
-            return _dispatch_body(cfg, args, opts)
-        except tui_cast.HomeRequested:
-            return run_home(cfg, opts)
+    with launcher.interactive_instance() as acquired:
+        if not acquired:
+            if args.query or args.cont or args.browse:
+                print(
+                    "nstream: nuova richiesta non eseguita; usa la TUI già aperta "
+                    "oppure --json per una richiesta indipendente",
+                    file=sys.stderr,
+                )
+                return 2
+            return 0
+        with tui_output.session():
+            try:
+                return _dispatch_body(cfg, args, opts)
+            except tui_cast.HomeRequested:
+                return run_home(cfg, opts)
 
 
 def _dispatch_body(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:

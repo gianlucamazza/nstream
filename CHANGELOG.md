@@ -7,6 +7,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.47.0] — 2026-11-14
+
+### Fixed
+
+- Share a single-window desktop launcher between the plugin and desktop entry; repeated
+  activation focuses the existing TUI and concurrent launches cannot create duplicate windows.
+- Acknowledge actual desktop activation through `nstream-launch --json`, report failures
+  visibly, and reject ignored second interactive queries with exit code 2 (ADR 0059).
+
 ## [1.46.0] — 2026-11-14
 
 ### Added
