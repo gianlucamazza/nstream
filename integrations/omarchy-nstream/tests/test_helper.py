@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import json
+import os
 import pathlib
+import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
+# The plugin is not a package: load helper.py from the plugin root (a dynamic import, so
+# no type checker needs an ignore whose rule name differs between ty versions).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-import helper  # noqa: E402  # ty: ignore[import-not-found]
+helper = importlib.import_module("helper")
 
 
 def call(*argv: str, results: list[dict] | None = None) -> tuple[dict, list[list[str]]]:
@@ -30,6 +36,11 @@ def call(*argv: str, results: list[dict] | None = None) -> tuple[dict, list[list
 
 
 class HistoryTest(unittest.TestCase):
+    def test_rejects_malformed_collection(self):
+        for entries in ({"title": "Show"}, "Show", None):
+            out, _ = call("history", results=[{"ok": True, "entries": entries}])
+            self.assertFalse(out["ok"])
+
     def test_bounds_and_sanitizes_entries(self):
         raw = {
             "ok": True,
@@ -65,6 +76,35 @@ class HistoryTest(unittest.TestCase):
 
 
 class ControlTest(unittest.TestCase):
+    def test_extreme_numeric_status_fields_are_bounded(self):
+        out, _ = call(
+            "status",
+            results=[
+                {
+                    "ok": True,
+                    "position": 10**400,
+                    "duration": "inf",
+                    "volume_percent": "nan",
+                }
+            ],
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual((out["position"], out["duration"], out["volume"]), (0, 0, 0))
+
+    def test_receiver_error_is_visible_without_forwarding_payload(self):
+        out, _ = call(
+            "status",
+            results=[
+                {
+                    "ok": True,
+                    "player_state": "IDLE",
+                    "receiver_error": {"code": "LOAD_FAILED", "url": "secret"},
+                }
+            ],
+        )
+        self.assertFalse(out["ok"])
+        self.assertNotIn("secret", json.dumps(out))
+
     def test_status_fields(self):
         st = {
             "ok": True,
@@ -116,18 +156,23 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(calls, [["-c", "--cast", "--", "--stop"]])
         self.assertTrue(out["ok"])
 
-    def test_local_is_detached(self):
-        out = io.StringIO()
-        with (
-            mock.patch.object(helper, "nstream_bin", return_value="/bin/nstream"),
-            mock.patch.object(helper.subprocess, "Popen") as popen,
-            contextlib.redirect_stdout(out),
+    def test_local_waits_for_result_and_reports_playback_failure(self):
+        for result in (
+            {"ok": True, "title": "Dune"},
+            {
+                "ok": False,
+                "error": "no_streams",
+                "message": "no streams",
+            },
         ):
-            helper.main(["continue", "local", "Dune"])
-        argv = popen.call_args.args[0]
-        self.assertEqual(argv, ["/bin/nstream", "--json", "-c", "--local", "--", "Dune"])
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        self.assertTrue(json.loads(out.getvalue())["local"])
+            with mock.patch.object(helper, "run", return_value=result) as run:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    helper.main(["continue", "local", "Dune"])
+            self.assertEqual(run.call_args.args, (["-c", "--local", "--", "Dune"], None))
+            response = json.loads(out.getvalue())
+            self.assertEqual(response["kind"], "local")
+            self.assertEqual(response["ok"], result["ok"])
 
     def test_rejects_bad_target_or_empty_title(self):
         for argv in (("continue", "tv", "Dune"), ("continue", "cast", "\x00\n")):
@@ -138,15 +183,80 @@ class ContinueTest(unittest.TestCase):
 
 class RunTest(unittest.TestCase):
     def test_parses_last_json_line_and_handles_missing_binary(self):
-        proc = mock.Mock(stdout='noise\n{"ok": true, "action": "x"}\n')
+        def fake_run(argv, **kwargs):
+            return mock.Mock(returncode=0, stdout=b'noise\n{"ok": true, "action": "x"}\n')
+
         with (
             mock.patch.object(helper, "nstream_bin", return_value="/bin/nstream"),
-            mock.patch.object(helper.subprocess, "run", return_value=proc) as run,
+            mock.patch.object(helper.subprocess, "run", side_effect=fake_run) as run,
         ):
             self.assertEqual(helper.run(["--status"], 5), {"ok": True, "action": "x"})
         self.assertEqual(run.call_args.args[0], ["/bin/nstream", "--json", "--status"])
+        self.assertTrue(run.call_args.kwargs["start_new_session"])
+        self.assertIn(os.path.expanduser("~/.local/bin"), run.call_args.kwargs["env"]["PATH"])
         with mock.patch.object(helper, "nstream_bin", return_value=None):
             self.assertEqual(helper.run(["--status"], 5)["error"], "missing")
+
+    def test_process_errors_return_json(self):
+        for error in (OSError("secret"), subprocess.TimeoutExpired("nstream", 1)):
+            with (
+                mock.patch.object(helper, "nstream_bin", return_value="/bin/nstream"),
+                mock.patch.object(helper.subprocess, "run", side_effect=error),
+            ):
+                response = helper.run(["--status"], 1)
+            self.assertFalse(response["ok"])
+            self.assertNotIn("secret", json.dumps(response))
+
+    def test_real_child_inherits_path_and_local_failure_is_observed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = pathlib.Path(directory) / "nstream"
+            executable.write_text(
+                f"#!{sys.executable}\nimport json, os, sys\n"
+                "print(json.dumps({'ok':False, 'error':'no_streams',"
+                "'message':os.environ['PATH']}))\nsys.exit(1)\n"
+            )
+            executable.chmod(0o755)
+            with mock.patch.dict(os.environ, {"PATH": directory}):
+                response = helper.run(["-c", "--local", "--", "Dune"], None)
+            self.assertFalse(response["ok"])
+            self.assertIn(os.path.expanduser("~/.local/bin"), response["message"])
+
+    def test_rejects_oversized_or_invalid_output_and_false_success(self):
+        for raw, code in (
+            (b"x" * (helper.MAX_OUTPUT + 1), 0),
+            (b"\xffnot json", 0),
+            (b'{"ok": true}', 1),
+        ):
+
+            def fake_run(argv, raw=raw, code=code, **kwargs):
+                return mock.Mock(returncode=code, stdout=raw)
+
+            with (
+                mock.patch.object(helper, "nstream_bin", return_value="/bin/nstream"),
+                mock.patch.object(helper.subprocess, "run", side_effect=fake_run),
+            ):
+                self.assertFalse(helper.run(["--status"], 1)["ok"])
+
+
+class OpenTest(unittest.TestCase):
+    def test_launcher_uses_augmented_environment_and_reports_missing_tools(self):
+        with mock.patch.object(helper.shutil, "which", return_value=None):
+            response, _ = call("open")
+        self.assertFalse(response["ok"])
+        with (
+            mock.patch.object(helper.shutil, "which", return_value="/bin/launcher"),
+            mock.patch.object(helper.subprocess, "Popen") as popen,
+        ):
+            response, _ = call("open")
+        self.assertTrue(response["ok"])
+        self.assertIn(os.path.expanduser("~/.local/bin"), popen.call_args.kwargs["env"]["PATH"])
+        with (
+            mock.patch.object(helper.shutil, "which", return_value="/bin/launcher"),
+            mock.patch.object(helper.subprocess, "Popen", side_effect=OSError("secret")),
+        ):
+            response, _ = call("open")
+        self.assertFalse(response["ok"])
+        self.assertNotIn("secret", json.dumps(response))
 
 
 if __name__ == "__main__":

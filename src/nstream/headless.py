@@ -523,11 +523,19 @@ def _run_auto_resume(
     )  # fmt: skip
 
 
+def _lifecycle_device(cfg: Config, args: argparse.Namespace) -> str:
+    """Explicit device, else the active session, else headless discovery."""
+    # Session devices are already resolved IPs. Re-discovery can select another TV,
+    # and --device resolves names rather than accepting those recorded IPs.
+    if not args.device and (device := state.cast_session_device()):
+        return device
+    return _resolve_device(cfg, headless=True, prefer=args.device)
+
+
 def _headless_device(cfg: Config, args: argparse.Namespace) -> str | None:
-    """Resolve the cast device for a lifecycle action (--stop/--status), or None (emitting a
-    device_not_found JSON) when no Chromecast can be resolved without a picker."""
+    """Resolve a lifecycle device, emitting one JSON error if unavailable."""
     try:
-        return _resolve_device(cfg, headless=True, prefer=args.device)
+        return _lifecycle_device(cfg, args)
     except CastUnavailable as e:
         _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
         return None
@@ -539,7 +547,7 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     # tear it down first, independent of DMR device resolution.
     mirror_stopped = mirror.stop()
     try:
-        device = _resolve_device(cfg, headless=True, prefer=args.device)
+        device = _lifecycle_device(cfg, args)
     except CastUnavailable as e:
         # The TV is off/unreachable: still reclaim the local side (detached remux server,
         # its multi-GB temp file, a subtitle server) — it would otherwise pin disk forever.

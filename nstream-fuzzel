@@ -5,5 +5,6 @@
 set -euo pipefail
 # Keep the terminal open if nstream exits non-zero, so messages stay readable
 # instead of vanishing with the window.
-exec foot -T nstream sh -c \
+# Identify this dedicated foot window even when the user's default TERM is generic.
+exec foot --term=foot -T nstream sh -c \
   'nstream; ec=$?; [ "$ec" -ne 0 ] && { printf "\n[nstream] uscita codice %s — INVIO per chiudere.\n" "$ec"; read -r _; }; exit "$ec"'

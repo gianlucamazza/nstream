@@ -23,6 +23,8 @@ BarWidget {
   property var status: null
   property string historyRaw: ""
   property string historyError: ""
+  property string statusError: ""
+  property string localTitle: ""
 
   property string message: ""
   property bool messageIsError: false
@@ -67,10 +69,20 @@ BarWidget {
   function control(args) {
     if (controlProc.running) return
     message = ""
+    controlProc.kind = args[0]
     controlProc.command = helperCommand(args)
     controlProc.running = true
   }
   function resumeEntry(entry) {
+    if (target === "local") {
+      if (localProc.running) return
+      localTitle = entry.title
+      message = ""
+      localProc.command = helperCommand(["continue", "local", entry.title])
+      localProc.running = true
+      notify(tr.t("notify.local").arg(entry.title), "")
+      return
+    }
     if (continueProc.running) return
     starting = entry.title
     message = ""
@@ -79,13 +91,16 @@ BarWidget {
   }
 
   function notify(summary, body) {
-    Quickshell.execDetached(["notify-send", "-a", "nstream", "-i", "video-x-generic", summary, body])
+    // Notification bodies support markup even though our panel text is plain.
+    var plainBody = String(body).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    Quickshell.execDetached(["notify-send", "-a", "nstream", "-i", "video-x-generic", "--", summary, plainBody])
   }
 
-  function receive(text) {
+  function receive(text, kind) {
     var d
-    try { d = JSON.parse(text) } catch (e) { return }
-    if (!d || typeof d !== "object") return
+    try { d = JSON.parse(text) } catch (e) { d = null }
+    if (!d || typeof d !== "object" || d.kind !== kind || typeof d.ok !== "boolean")
+      d = { kind: kind, ok: false, error: tr.t("process.failed") }
     if (d.kind === "history") {
       if (!d.ok) { historyError = String(d.error || ""); return }
       historyError = ""
@@ -95,10 +110,20 @@ BarWidget {
       entries = d.entries instanceof Array ? d.entries : []
       var wasCasting = casting
       session = d.session && typeof d.session === "object" ? d.session : null
-      if (!session) status = null
-      else if (!wasCasting) pollStatus()
+      if (!session) { status = null; statusError = "" }
+      else if (!wasCasting && opened) pollStatus()
     } else if (d.kind === "status") {
+      if (!casting) return
       status = d.ok ? d : null
+      statusError = d.ok ? "" : String(d.error || "")
+    } else if (d.kind === "local") {
+      if (!d.ok) {
+        messageIsError = true
+        message = String(d.error || "")
+        notify(tr.t("notify.failed").arg(localTitle), message)
+      }
+      localTitle = ""
+      pollHistory()
     } else if (d.kind === "continue") {
       var title = starting
       starting = ""
@@ -110,8 +135,7 @@ BarWidget {
       }
       messageIsError = false
       message = d.notice ? String(d.notice) : ""
-      if (d.local) notify(tr.t("notify.local").arg(title), "")
-      else notify(tr.t("notify.cast").arg(String(d.title || title)), String(d.device || ""))
+      notify(tr.t("notify.cast").arg(String(d.title || title)), String(d.device || ""))
       pollHistory()
     } else if (!d.ok) {
       messageIsError = true
@@ -120,6 +144,8 @@ BarWidget {
       session = null
       status = null
       pollHistory()
+    } else if (d.kind === "open") {
+      root.close()
     }
   }
 
@@ -168,13 +194,24 @@ BarWidget {
     function close(): void { root.opened = false }
   }
 
-  Process { id: historyProc; stdout: StdioCollector { onStreamFinished: root.receive(text) } }
-  Process { id: statusProc; stdout: StdioCollector { onStreamFinished: root.receive(text) } }
-  Process {
-    id: controlProc
-    stdout: StdioCollector { onStreamFinished: { root.receive(text); root.pollStatus() } }
+  component HelperProcess: Process {
+    id: proc
+    property string kind: ""
+    property bool received: false
+    onRunningChanged: if (running) received = false
+    stdout: StdioCollector {
+      onStreamFinished: { proc.received = true; root.receive(text, proc.kind) }
+    }
+    onExited: {
+      if (!received) root.receive("", kind)
+      if (proc === controlProc && root.opened) root.pollStatus()
+    }
   }
-  Process { id: continueProc; stdout: StdioCollector { onStreamFinished: root.receive(text) } }
+  HelperProcess { id: historyProc; kind: "history" }
+  HelperProcess { id: statusProc; kind: "status" }
+  HelperProcess { id: controlProc }
+  HelperProcess { id: continueProc; kind: "continue" }
+  HelperProcess { id: localProc; kind: "local" }
 
   // History is a local read (no network): cheap enough to poll in the background.
   Timer {
@@ -236,7 +273,8 @@ BarWidget {
           trailingControl: Component {
             Ui.Button {
               text: tr.t("open")
-              onClicked: { Quickshell.execDetached(["nstream-fuzzel"]); root.close() }
+              enabled: !controlProc.running
+              onClicked: root.control(["open"])
             }
           }
         }
@@ -251,6 +289,13 @@ BarWidget {
         }
 
         // Now playing on the TV
+        Plain {
+          width: parent.width
+          visible: root.statusError !== ""
+          text: root.statusError
+          color: root.urgent
+          wrapMode: Text.Wrap; elide: Text.ElideNone; maximumLineCount: 4
+        }
         Column {
           width: parent.width
           visible: root.casting
@@ -263,6 +308,7 @@ BarWidget {
           }
           Ui.PanelSlider {
             id: seekSlider
+            enabled: !controlProc.running
             width: parent.width
             bar: root.bar
             visible: root.duration > 0
@@ -304,6 +350,7 @@ BarWidget {
             visible: root.status !== null && root.status.volume >= 0
             Caption { id: volumeLabel; anchors.verticalCenter: parent.verticalCenter; text: tr.t("volume") }
             Ui.PanelSlider {
+              enabled: !controlProc.running
               width: parent.width - volumeLabel.width - parent.spacing
               anchors.verticalCenter: parent.verticalCenter
               bar: root.bar
@@ -329,6 +376,12 @@ BarWidget {
 
         // Continue watching
         Ui.PanelSectionHeader { width: parent.width; text: tr.t("continue") }
+        Caption {
+          width: parent.width
+          visible: root.localTitle !== ""
+          text: tr.t("local.pending").arg(root.localTitle)
+          wrapMode: Text.Wrap; elide: Text.ElideNone; maximumLineCount: 3
+        }
         Ui.ButtonGroup {
           focusable: false
           value: root.target
@@ -371,7 +424,7 @@ BarWidget {
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: root.iconPlay
                 tooltipText: root.target === "cast" ? tr.t("act.castHere") : tr.t("act.playHere")
-                enabled: !continueProc.running
+                enabled: root.target === "local" ? !localProc.running : !continueProc.running
                 onClicked: root.resumeEntry(entryRow.modelData)
               }
             }

@@ -4,6 +4,9 @@ rendering/caching, and the best-effort guarantee (never raises, always returns 0
 from __future__ import annotations
 
 from pathlib import Path
+from subprocess import CompletedProcess
+
+import pytest
 
 from nstream import preview, ui
 from nstream.config import Config
@@ -116,7 +119,51 @@ def test_poster_block_builds_chafa_argv(monkeypatch):
     assert cmd[0] == "chafa"
     assert "--format" in cmd and "sixel" in cmd
     assert "40x12" in cmd  # cols x min(lines-8, 20) = 40x12
-    assert "--colors" not in cmd  # truecolor → no 256 downgrade
+    assert cmd[cmd.index("--colors") + 1] == "full"
+    assert cmd[cmd.index("--probe") + 1] == "off"
+
+
+def test_sixel_palette_independent_of_ansi_truecolor(monkeypatch):
+    caps = ui.Caps(truecolor=False, image_proto=ui.ImageProto.SIXEL, has_chafa=True)
+    monkeypatch.setattr(preview, "_cached_poster", lambda url: Path("/tmp/p.img"))
+    calls = []
+    monkeypatch.setattr(preview.util, "run_cmd", lambda cmd, **kw: calls.append(cmd) or _ok())
+    assert preview._poster_block("http://x/p.jpg", 40, 20, caps, CFG) == "x"
+    assert calls[0][calls[0].index("--colors") + 1] == "full"
+
+
+@pytest.mark.parametrize("failure", [None, CompletedProcess([], 1, "partial-image")])
+@pytest.mark.parametrize("fallback_ok", [True, False])
+def test_graphics_failure_retries_symbols_once(monkeypatch, failure, fallback_ok):
+    downloads = []
+    monkeypatch.setattr(
+        preview, "_cached_poster", lambda url: downloads.append(url) or Path("/tmp/p.img")
+    )
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return failure
+        return _ok() if fallback_ok else failure
+
+    monkeypatch.setattr(preview.util, "run_cmd", run)
+    assert preview._poster_block("http://x/p.jpg", 40, 20, CAPS_IMG, CFG) == (
+        "x" if fallback_ok else ""
+    )
+    assert len(downloads) == 1
+    assert [cmd[cmd.index("--format") + 1] for cmd in calls] == ["sixel", "symbols"]
+    assert all(cmd[cmd.index("--probe") + 1] == "off" for cmd in calls)
+
+
+def test_symbols_failure_does_not_retry_or_hide_metadata(monkeypatch):
+    caps = ui.Caps(image_proto=ui.ImageProto.SYMBOLS, has_chafa=True)
+    monkeypatch.setattr(preview, "_cached_poster", lambda url: Path("/tmp/p.img"))
+    monkeypatch.setattr(preview.api, "meta_cached_disk", lambda *a: META)
+    calls = []
+    monkeypatch.setattr(preview.util, "run_cmd", lambda cmd, **kw: calls.append(cmd))
+    assert "Dune: Part Two" in preview._render_title(CFG, "movie", "tt1", 40, 20, caps)
+    assert len(calls) == 1
 
 
 def test_poster_block_symbols_adds_flags(monkeypatch):

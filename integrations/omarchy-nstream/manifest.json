@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "gianlucamazza.nstream",
   "name": "nstream",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Gianluca Mazza",
   "license": "MIT",
   "description": "Remote for nstream in the Omarchy bar: control the cast on your TV and continue watching on the TV or in mpv.",

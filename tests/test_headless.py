@@ -2105,6 +2105,42 @@ def test_sub_shift_on_a_non_live_cast_is_a_usage_error(monkeypatch, capsys):
 # --- read-only listings: --search / --history ------------------------------
 
 
+def test_lifecycle_uses_session_ip_without_discovery(monkeypatch):
+    monkeypatch.setattr(headless.state, "cast_session_device", lambda: "192.168.1.9")
+    monkeypatch.setattr(headless, "_resolve_device", _boom("must not discover another TV"))
+    assert headless._headless_device(CFG, _hns()) == "192.168.1.9"
+
+
+@pytest.mark.parametrize("session,explicit", [("192.168.1.9", "Bedroom"), (None, None)])
+def test_lifecycle_explicit_device_wins_and_missing_session_discovers(
+    monkeypatch, session, explicit
+):
+    monkeypatch.setattr(headless.state, "cast_session_device", lambda: session)
+    seen = []
+
+    def resolve(cfg, **kwargs):
+        seen.append(kwargs)
+        return "192.168.1.10"
+
+    monkeypatch.setattr(headless, "_resolve_device", resolve)
+    assert headless._headless_device(CFG, _hns(device=explicit)) == "192.168.1.10"
+    assert seen == [{"headless": True, "prefer": explicit}]
+
+
+def test_stop_targets_session_instead_of_configured_tv(monkeypatch, capsys):
+    monkeypatch.setattr(headless.state, "cast_session_device", lambda: "192.168.1.9")
+    monkeypatch.setattr(headless, "_resolve_device", _boom("must not discover another TV"))
+    monkeypatch.setattr(headless.mirror, "stop", lambda: False)
+    monkeypatch.setattr(headless.remux, "stop", lambda dev: False)
+    monkeypatch.setattr(headless.caster, "status", lambda dev: {})
+    seen = []
+    monkeypatch.setattr(headless.caster, "stop", lambda dev: seen.append(dev) or True)
+    assert headless._run_stop(replace(CFG, cast_device="Bedroom"), _hns()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] and out["device"] == "192.168.1.9"
+    assert seen == ["192.168.1.9"]
+
+
 def test_search_lists_candidates_without_playing(monkeypatch, capsys):
     metas = [
         {"id": "tt1", "type": "movie", "name": "Dune", "releaseInfo": "2021", "poster": "p"},

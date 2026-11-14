@@ -29,6 +29,8 @@
   "entry.progress": "%1% · mancano %2",
   "empty": "Ancora nulla da continuare",
   "notify.cast": "Sulla TV: %1",
-  "notify.local": "Apertura di %1 in mpv",
-  "notify.failed": "Impossibile avviare %1"
+  "notify.local": "Richiesta apertura di %1 in mpv",
+  "notify.failed": "Impossibile avviare %1",
+  "process.failed": "Il comando non ha restituito una risposta valida.",
+  "local.pending": "Richiesta locale: %1. Gli eventuali errori compariranno qui."
 }

@@ -49,7 +49,15 @@ the panel overrides it until the shell restarts.
 `Panel.qml` never runs nstream itself. `helper.py` (Python stdlib) validates every
 argument, runs `nstream --json …` as an argv list (never through a shell) and forwards only
 bounded descriptive fields; nstream never puts stream URLs or tokens in `--json` output.
-All text is rendered as plain text.
+All text is rendered as plain text. The helper adds `~/.local/bin` to the child
+process environment too, so nstream can find tools installed with `uv tool`.
+
+Cast controls use the active session's device; an explicit CLI `--device` still wins.
+Receiver and command errors remain visible in the panel. Local playback runs in a separate
+process: its notification acknowledges the request, and the helper waits for nstream's
+final result (normally when mpv closes) to report failures. Cast controls stay available
+while mpv runs. Closing or reloading the widget leaves the player running; a shell reload
+ends observation of that local result.
 
 Polling is cheap by design: `--history` is a local read, polled every 30 s (5 s while the
 panel is open). The TV is only asked for its state (`--status`) while the panel is open

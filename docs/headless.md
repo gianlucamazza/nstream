@@ -100,6 +100,10 @@ is a finished episode that `-c "title"` advances past — and `cast_session`
 receiver reconcile, unlike `-c`), so it is cheap to poll; call `--status` while
 `cast_session` is set.
 
+Lifecycle commands use an explicit `--device` first, otherwise the unexpired cast
+session's recorded device, and only then normal device discovery/configuration. This keeps
+status, stop and media controls on the TV that nstream actually started.
+
 `--status` adds `player_state`, `position`, `duration`, `active_tracks`, `receiver_error`,
 plus `volume_percent`, `volume_control_type`, `volume_step_interval`, `app_id`,
 `content_type`, `stream_type` (ADR 0045; each `null` when catt omitted it). Never
