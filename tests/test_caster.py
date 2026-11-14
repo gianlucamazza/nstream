@@ -900,6 +900,14 @@ def test_status_reports_the_probed_duration_on_a_live_cast(monkeypatch):
     assert st["position"] == 3100.0 and st["duration"] == 6472.0
 
 
+def test_status_distinguishes_producer_failure_from_receiver_failure(monkeypatch):
+    monkeypatch.setattr(caster, "receiver_info", lambda _: {"player_state": "BUFFERING"})
+    monkeypatch.setattr(caster, "_bridge_track_info", lambda _: ([], None))
+    monkeypatch.setattr(caster.live, "session_error", lambda _: "live_source_failed")
+    st = caster.status("TV")
+    assert st["receiver_error"] is None and st["delivery_error"] == "live_source_failed"
+
+
 # --- catt 0.13 LOAD / MediaInformation (ADR 0050) ---------------------------
 
 

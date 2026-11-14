@@ -169,7 +169,9 @@ def test_cache_invalidated_on_signature_change(clean_env):
 
 def test_fzf_color_arg_shape(clean_env):
     arg = ui.fzf_color_arg(ui.detect_caps(use_cache=False))
-    assert arg[0] == "--color" and "#e50914" in arg[1]
+    assert arg[0] == "--color"
+    assert "bg:-1" in arg[1] and "fg+:reverse" in arg[1]
+    assert "#" not in arg[1]
 
 
 def test_glyphs_nerd_vs_portable():
@@ -177,13 +179,15 @@ def test_glyphs_nerd_vs_portable():
     assert ui.glyphs(ui.Caps(nerd_font=False)) is ui.PORTABLE
 
 
-def test_glyphs_new_slots_portable_match_legacy_emoji():
-    """The 6 slots added for the hardcoded-glyph sweep: PORTABLE must equal the emoji
-    previously hardcoded at the call sites, so default output doesn't change."""
-    legacy = {"audio": "🔊", "subs": "💬", "globe": "🌐", "tv": "📺", "fail": "✗", "down": "↓"}
-    for slot, emoji in legacy.items():
-        assert getattr(ui.PORTABLE, slot) == emoji
-        assert getattr(ui.NERD, slot)  # present and non-empty in the Nerd Font set too
+def test_portable_glyphs_are_single_cell():
+    """Default symbols need no emoji font and do not shift column alignment."""
+    import unicodedata
+
+    for slot in ui.Glyphs.__dataclass_fields__:
+        symbol = getattr(ui.PORTABLE, slot)
+        assert len(symbol) == 1
+        assert unicodedata.east_asian_width(symbol) not in {"W", "F"}
+        assert getattr(ui.NERD, slot)
     assert ui.NERD.tv != ui.NERD.series  # distinct icons in nerd mode
 
 

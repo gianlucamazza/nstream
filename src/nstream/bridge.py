@@ -30,9 +30,9 @@ import socket
 import stat
 import subprocess
 import time
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 
-from . import log
+from . import log, util
 
 _log = log.get_logger("bridge")
 
@@ -284,7 +284,10 @@ def _media_load_args(
     return args
 
 
-def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[dict]:
+def cast_load(
+    ip: str, url: str, *, follow: bool = True,
+    delivery_error: Callable[[], str | None] | None = None, **meta,
+) -> Generator[dict]:  # fmt: skip
     """Cast `url` to the receiver at `ip` via castbridge with the given metadata, yielding
     normalized playback events:
 
@@ -339,6 +342,10 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
         title = str(meta.get("title") or "")
         deadline = time.monotonic() + _LOAD_TIMEOUT
         for msg in _messages(sock):
+            util.check_cancelled()
+            if delivery_error and (error := delivery_error()):
+                yield {"kind": "failed", "error": error}
+                return
             # Bound the pre-start wait on EVERY message, not only on read-timeout ticks: a
             # steady stream of unrelated events would otherwise postpone it forever.
             if not started and time.monotonic() > deadline:
@@ -370,11 +377,30 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
             if mtype not in ("media-status", "session"):
                 continue  # devices-changed / youtube / mirror events: not ours
             block = _media_block(msg)
-            if block is None:  # media session inactive → ended
+            if block is None:  # legacy idle notifications do not prove a natural finish
                 if started:
-                    yield {"kind": "ended", "position": round(pos, 1), "duration": round(dur, 1)}
+                    yield {
+                        "kind": "disconnected",
+                        "position": round(pos, 1),
+                        "duration": round(dur, 1),
+                        "end_reason": "disconnected",
+                    }
                     return
                 continue
+
+            reason = block.get("endReason")
+            if reason in ("finished", "stopped", "interrupted", "disconnected"):
+                _, end_pos, end_dur, _ = _progress(block)
+                if started:
+                    yield {
+                        "kind": "disconnected" if reason == "disconnected" else "ended",
+                        "position": round(end_pos or pos, 1),
+                        "duration": round(end_dur or dur, 1),
+                        "end_reason": reason,
+                    }
+                else:
+                    yield {"kind": "failed", "error": "cast_startup_failed"}
+                return
 
             # The receiver reported a failure (bad codec, unreachable media, a caption it
             # couldn't fetch — ADR 0016). Before `started` it's a load failure the caller
@@ -438,8 +464,8 @@ def cast_load(ip: str, url: str, *, follow: bool = True, **meta) -> Generator[di
 
 
 def _media_block(msg: dict) -> dict | None:
-    """The active media-status dict from a `media-status`/`session` event, or None when the media
-    session is inactive (ended). Callers pre-filter to those two event types. For `media-status`
+    """The media-status dict, including explicit terminal reasons on an idle session.
+    Legacy idle notifications return None: they do not prove a natural finish. For `media-status`
     the `data` field IS the media block (or null); for `session` it is `data.media` when the
     session is a media session (else mirror/youtube/idle → None)."""
     data = msg.get("data")
@@ -448,9 +474,14 @@ def _media_block(msg: dict) -> dict | None:
     if msg.get("type") == "media-status":
         return data
     # session event: only a media session carries our block.
+    media = data.get("media")
+    if isinstance(media, dict) and (
+        media.get("endReason") in ("finished", "stopped", "interrupted", "disconnected")
+        or media.get("error")
+    ):
+        return media
     if data.get("session") != "media":
         return None
-    media = data.get("media")
     return media if isinstance(media, dict) else None
 
 

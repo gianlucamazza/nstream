@@ -10,6 +10,7 @@ playback (callers that must surface an error let `atomic_write` re-raise).
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import fcntl
 import functools
 import json
@@ -27,6 +28,30 @@ import urllib.error
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO, cast
+
+_cancel: contextvars.ContextVar[Callable[[], bool] | None] = contextvars.ContextVar(
+    "cancel_work", default=None
+)
+
+
+@contextlib.contextmanager
+def cancel_scope(requested: Callable[[], bool]):
+    """Give blocking domain loops a cooperative abort, preserving their cleanup paths."""
+    token = _cancel.set(requested)
+    try:
+        yield
+    finally:
+        _cancel.reset(token)
+
+
+def cancellation_active() -> bool:
+    return _cancel.get() is not None
+
+
+def check_cancelled() -> None:
+    requested = _cancel.get()
+    if requested is not None and requested():
+        raise KeyboardInterrupt
 
 
 @contextlib.contextmanager

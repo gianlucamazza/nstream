@@ -14,6 +14,13 @@ def test_build_parser_version():
     assert "nstream" in p.prog
 
 
+def test_history_requires_json():
+    p = build_parser()
+    message = headless_only_misuse(p.parse_args(["--history"]))
+    assert message is not None and "--history" in message
+    assert headless_only_misuse(p.parse_args(["--json", "--history"])) is None
+
+
 def test_headless_only_misuse_without_json():
     p = build_parser()
     args = p.parse_args(["--stop"])

@@ -79,6 +79,10 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0050](0050-catt-fallback-load-metadata.md) | catt ≥0.13.2 fallback LOAD: title + thumb/images + BUFFERED via library | Accepted | 2026-10-10 |
 | [0051](0051-codec-labels-probed-beats-release-name.md) | Codec labels: probed beats release name | Accepted | 2026-10-10 |
 | [0052](0052-hls-discovery-and-remux-observability.md) | Discover installed HLS senders and explain complete-file preparation | Accepted | 2026-11-14 |
+| [0053](0053-event-retention-and-producer-health.md) | Coherent EVENT retention, producer health and adaptive startup | Accepted | 2026-11-14 |
+| [0054](0054-desktop-cast-presence.md) | Desktop cast presence independent of watch history | Accepted | 2026-11-14 |
+| [0055](0055-terminal-ownership-and-cast-panel.md) | Terminal ownership independent of cast monitoring | Accepted | 2026-11-14 |
+| [0056](0056-control-loss-is-not-playback-end.md) | Control loss is not playback completion | Accepted | 2026-11-14 |
 
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

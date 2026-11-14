@@ -21,7 +21,7 @@ def meta_label(m: Meta, *, watchlisted: bool = False) -> str:
     info = m.get("releaseInfo", "")
     year = f"  {ui.ansi(f'({info})', pal.dim)}" if info else ""
     star = f"{g.star} " if watchlisted else ""
-    label = f"{star}{icon}  {ui.ansi(m.get('name', '?'), pal.accent)}{year}"
+    label = f"{star}{icon}  {ui.ansi(m.get('name', '?'), pal.secondary)}{year}"
     # Cheap hint from the slim catalog (year only): flag titles from a future year.
     # Same-year-but-unreleased titles are caught precisely at selection time.
     yr = re.match(r"(\d{4})", str(info))

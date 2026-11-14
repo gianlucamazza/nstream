@@ -25,9 +25,9 @@ What stays in the callers: device resolution, the headless volume guard (gated o
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 
 from . import (
@@ -48,6 +48,7 @@ from . import (
     tracks,
     ui,
     urlproxy,
+    util,
 )
 from .config import Config, PlayOpts
 from .types import Stream
@@ -206,6 +207,7 @@ def prefetch_next(
             cfg, chosen["url"], device=device, audio_index=plan.audio_index,
             source_key=stream_select.source_key(chosen),
             embedded=_embedded_for(cfg, opts, chosen, vetted.safety_sub_lang),
+            size_gb=quality.parse_stream(chosen).size_gb,
         )  # fmt: skip
     except Exception as e:  # noqa: BLE001 — a prefetch never disturbs the playing episode
         _log.info("prefetch episodio successivo fallito: %s", type(e).__name__)
@@ -490,6 +492,7 @@ def _lang_switch(
 
 @log.phase("run_cast")
 @stream_select.with_ranking_runtime
+@state.track_cast
 def run_cast(
     cfg: Config,
     results: list[Stream],
@@ -510,6 +513,7 @@ def run_cast(
     safety_sub_lang: str | None = None,
     expected_runtime_s: float = 0.0,
     prefetch_next: Callable[[], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> CastOutcome:
     """Cast `chosen` to `device` in the target audio language. The Default Media Receiver
     plays a file's first audio track and can't switch tracks, so the language is enforced
@@ -524,9 +528,16 @@ def run_cast(
 
     `expected_runtime_s` (0 = unknown) keeps every reselect below off placeholder/sample
     files (ADR 0028) — the same guard `prepare_stream` already applied to `chosen`."""
+
     # One poster for every cast entry (headless / TUI / CLI, LAN and https). Prefer the
     # cached full Cinemeta meta, then an allowlisted search hit, then a derived metahub
     # medium JPEG from a strict IMDb id. Amazon CDN search posters are not allowlisted.
+    def check_cancelled() -> None:
+        util.check_cancelled()
+        if cancelled is not None and cancelled():
+            raise KeyboardInterrupt
+
+    check_cancelled()
     ident = caster.poster_imdb_id(video_id)
     poster = caster.resolve_cast_poster(
         api.cached_meta_poster(typ, ident or video_id),
@@ -608,6 +619,17 @@ def run_cast(
     final_container, needs_rewrap, needs_remux = st.container, st.needs_rewrap, st.needs_remux
     refused_mirror = st.refused_mirror
     notice_defer = st.notice or notice_defer
+    info = quality.parse_stream(chosen)
+    source = str(chosen.get("addon") or "Sorgente")
+    if info.resolution:
+        source += f" · {info.resolution}p"
+    ui.activity("source", source, state="done")
+    audio = languages.name(plan.real_lang) if plan.real_lang else "Lingua non verificata"
+    if not plan.verified:
+        audio += " · non verificato"
+    if plan.mode == "absent" and target_lang:
+        audio += f" · {languages.name(target_lang)} non disponibile"
+    ui.activity("audio", audio, state="warn" if plan.mode == "absent" else "done")
     # No dub carries the target language: cast the best pick anyway, with target-language
     # subtitles as a safety net (mirrors the local guard). Printed on both paths (norm. 1).
     # An EXPLICIT `--sub-lang` wins over this primary-language safety default: the user asked
@@ -647,14 +669,26 @@ def run_cast(
     # The resolved url/filename enable the exact-file hash match (ADR 0018). When the
     # delivery starts with a whole-file prepare, the subtitle fetch runs alongside it
     # instead of before it: its seconds hide behind the remux's minutes.
+    check_cancelled()
     pending_subs: Future[subs.SubsPick] | None = None
     embedded_used = False  # an embedded text track rides the live cast (ADR 0042)
     if needs_remux and not use_mirror:
-        pending_subs = _SUBS_POOL.submit(
-            subs.auto_subs, cfg, typ, video_id, work_dir, opts,
-            safety_sub_lang=safety_sub_lang,
-            video_url=chosen["url"], filename=subs.stream_filename(chosen),
-        )  # fmt: skip
+        sub_context = copy_context()
+
+        def acquire_subs() -> subs.SubsPick:
+            return sub_context.run(
+                subs.auto_subs,
+                cfg,
+                typ,
+                video_id,
+                work_dir,
+                opts,
+                safety_sub_lang=safety_sub_lang,
+                video_url=chosen["url"],
+                filename=subs.stream_filename(chosen),
+            )
+
+        pending_subs = _SUBS_POOL.submit(acquire_subs)
         subs_pick = subs.SubsPick()
     else:
         subs_pick = subs.auto_subs(
@@ -673,9 +707,11 @@ def run_cast(
             notices.emit(f"{notice}")
             if loud:
                 ui.status(notice, kind="tv")
+        check_cancelled()
         delivery = mirror.cast_via_mirror(
             cfg, title, chosen["url"],
             device=device, start=start, sub_paths=sub_paths, follow=follow,
+            on_event=on_event,
         )  # fmt: skip
         pos, dur = delivery.pos, delivery.dur
         subs_delivered = bool(sub_paths)  # mpv renders them into the mirrored frame
@@ -685,7 +721,7 @@ def run_cast(
         if opts.mirror is True:
             # Reached the else with --mirror forced ⇒ `mirror.available()` is False (the only
             # way `mirror_ok` is False here): honour the intent with an honest fallback notice.
-            print(MIRROR_UNAVAILABLE, file=sys.stderr)
+            ui.message(MIRROR_UNAVAILABLE)
         live_delivery = None
         embedded = _embedded_for(cfg, opts, chosen, safety_sub_lang) if needs_remux else None
         if needs_remux and remux.live_available(cfg):
@@ -700,6 +736,7 @@ def run_cast(
                 sub_paths = subs_pick.paths
                 sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
             start = _handoff_start(cfg, device, video_id, start)
+            check_cancelled()
             live_delivery = remux.cast_live(
                 cfg, title, chosen["url"],
                 device=device, audio_index=plan.audio_index, start=start,
@@ -722,8 +759,8 @@ def run_cast(
                 )
                 or "avvio HLS non riuscito; uso il file completo"
             )
-            print(f"nstream: diretta non disponibile: {why}", file=sys.stderr)
-            print(_prepare_line(chosen, plan, target_lang), file=sys.stderr)
+            ui.message(f"nstream: diretta non disponibile: {why}")
+            ui.message(_prepare_line(chosen, plan, target_lang))
         remux_path = (
             remux.remux_for_cast(
                 chosen["url"],
@@ -747,6 +784,7 @@ def run_cast(
             subs.report_safety_subs(subs_pick, safety_sub_lang)
             sub_paths = subs_pick.paths
             sub_lang = safety_sub_lang or opts.sub_lang or subs_pick.lang
+        check_cancelled()
         start = _handoff_start(cfg, device, video_id, start)
         if live_delivery is not None:
             delivery = live_delivery
@@ -778,6 +816,7 @@ def run_cast(
             delivery = mirror.cast_via_mirror(
                 cfg, title, chosen["url"],
                 device=device, start=start, sub_paths=sub_paths, follow=follow,
+                on_event=on_event,
             )  # fmt: skip
             pos, dur = delivery.pos, delivery.dur
             subs_delivered = bool(sub_paths)
@@ -837,7 +876,12 @@ def run_cast(
     # it inside the backends is how the Tier-2 remux and the mirror ended up hardcoding False:
     # a binge on the TV died after one episode whenever the audio needed a remux. A backend
     # reports what it observed (pos/dur); only this layer knows whether an episode follows.
-    advance = bool(next_label) and cast_delivery.is_finished(pos, dur)
+    advance = (
+        bool(next_label)
+        and not delivery.error
+        and delivery.end_reason in ("", "finished")
+        and cast_delivery.is_finished(pos, dur)
+    )
     return CastOutcome(
         pos=pos, dur=dur, advance=advance, action=action, stream=chosen,
         started=delivery.started, cast_error=delivery.error,

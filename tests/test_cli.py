@@ -554,7 +554,10 @@ def test_run_section_series_filters_recent_and_types_actions(monkeypatch):
 
     def fake_fzf(items, prompt, *, header=None, expect=("tab",), preview=None):
         prompts.append(prompt)
-        assert items[0][1] is entry  # the filtered continue-watching row leads the menu
+        assert items[0][1] == (cli._SEARCH, "")
+        assert items[1][1] == (cli._CONTINUE, "")
+        assert "1" in items[1][0]
+        assert entry not in [value for _, value in items]
         return next(it)
 
     monkeypatch.setattr(cli, "fzf_key", fake_fzf)
@@ -1758,3 +1761,91 @@ def test_confirm_cast_device_latches_yes_not_refusal(monkeypatch):
     assert "TV1" in prompts[-1][0] and prompts[-1][1] is True  # default yes
     monkeypatch.setattr(cli, "_confirm", lambda q, d: pytest.fail("must not re-ask"))
     assert cli._confirm_cast_device("TV1", "10.0.0.9") is True  # latched for the session
+
+
+def test_mpv_handoff_keeps_series_history_callback(monkeypatch):
+    """Returning home from a handoff must retain the series-aware history writer."""
+    from types import SimpleNamespace
+
+    seen = {}
+    save = lambda pos, dur: None  # noqa: E731
+    monkeypatch.setattr(cli.tui_output, "enabled", lambda: True)
+    monkeypatch.setattr(cli, "_resolve_device", lambda *args, **kwargs: "192.0.2.1")
+
+    def cast(*args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(started=True, pos=62, dur=300)
+
+    monkeypatch.setattr(cli.tui_cast, "play", cast)
+    opts = cli.PlayOpts(
+        auto=True,
+        cast=False,
+        sub_mode=None,
+        sub_lang=None,
+        history=True,
+        autoplay=True,
+        interactive=True,
+    )
+    assert cli._move_to_cast(
+        CFG,
+        [],
+        {},
+        "/unused",
+        "Show",
+        62,
+        300,
+        typ="series",
+        video_id="tt1:1:2",
+        opts=opts,
+        on_save=save,
+    ) == (62, 300, False)
+    assert seen["on_save"] is save
+
+
+def test_cast_prefetch_cannot_prompt_from_background(monkeypatch):
+    from types import SimpleNamespace
+
+    seen = {}
+    monkeypatch.setattr(cli.tui_output, "enabled", lambda: True)
+    monkeypatch.setattr(
+        cli.cast_flow, "prefetch_next", lambda c, typ, vid, title, opts, dev: seen.update(opts=opts)
+    )
+
+    def cast(*args, **kwargs):
+        kwargs["prefetch_next"]()
+        return SimpleNamespace(
+            started=True, pos=1, dur=300, advance=False, notice=None, cast_error=None
+        )
+
+    monkeypatch.setattr(cli.tui_cast, "play", cast)
+    opts = cli.PlayOpts(
+        auto=True,
+        cast=True,
+        sub_mode=None,
+        sub_lang=None,
+        history=True,
+        autoplay=True,
+        interactive=True,
+        quality=1080,
+        confirm=lambda *a: True,
+        choose=lambda *a: None,
+        choose_stream=lambda *a: None,
+    )
+    cli._play_on_cast(
+        CFG,
+        [],
+        {},
+        "/unused",
+        "192.0.2.1",
+        typ="series",
+        video_id="tt1:1:1",
+        title="Show",
+        opts=opts,
+        start=None,
+        next_label="next",
+        prefetch=("tt1:1:2", "Next"),
+    )
+    quiet = seen["opts"]
+    assert not quiet.interactive
+    assert quiet.confirm is quiet.choose is quiet.choose_stream is None
+    assert quiet.quality == 1080

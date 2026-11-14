@@ -28,6 +28,7 @@ import json
 import math
 import os
 import secrets
+import select
 import shutil
 import signal
 import subprocess
@@ -405,6 +406,27 @@ def _run_ffmpeg(cmd: list[str], duration: float, *, size_label: str = "") -> tup
             raise
 
 
+def _progress_lines(stream):
+    if not util.cancellation_active():
+        yield from stream
+        return
+    buf = b""
+    fd = stream.fileno()
+    while True:
+        util.check_cancelled()
+        if not select.select([fd], [], [], 0.1)[0]:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            if buf:
+                yield buf.decode(errors="replace")
+            return
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            yield line.decode(errors="replace")
+
+
 def _await_ffmpeg(
     proc: subprocess.Popen,
     err: BinaryIO,
@@ -423,10 +445,10 @@ def _await_ffmpeg(
     last_report = started
     media_s = 0.0
     speeds: list[float] = []
-    ui.progress(_frame(0 if duration > 0 else None))
+    ui.progress(_frame(0 if duration > 0 else None), activity="prepare")
     pct = 0 if duration > 0 else -1
     if proc.stdout is not None:
-        for line in proc.stdout:
+        for line in _progress_lines(proc.stdout):
             key, _, value = line.strip().partition("=")
             if key in ("total_size", "speed"):
                 try:
@@ -456,7 +478,7 @@ def _await_ffmpeg(
                 shown = (min(99, int(media_s / duration * 100)) // bucket) * bucket
                 if shown != pct:
                     pct = shown
-                    ui.progress(_frame(pct))
+                    ui.progress(_frame(pct), activity="prepare")
                     last_report = time.monotonic()
             elif key == "progress":
                 measure.pop("eta", None)
@@ -467,7 +489,7 @@ def _await_ffmpeg(
                 ):  # fmt: skip
                     measure["eta"] = (duration - media_s) / (sum(speeds) / len(speeds))
                 if sys.stderr.isatty() or time.monotonic() - last_report >= 10:
-                    ui.progress(_frame(pct if duration > 0 else None))
+                    ui.progress(_frame(pct if duration > 0 else None), activity="prepare")
                     last_report = time.monotonic()
     proc.wait()
     finished = time.monotonic()
@@ -479,7 +501,7 @@ def _await_ffmpeg(
     )  # fmt: skip
     if sys.stderr.isatty():
         # Clear the progress line; the cast "in onda" line is the next status.
-        ui.progress_done()
+        ui.progress_done(activity="prepare")
     err.seek(0)
     stderr = err.read().decode("utf-8", errors="replace")
     return proc.returncode, stderr
@@ -592,7 +614,7 @@ def remux_to_file(
         # An aborted prepare must not leak the partial multi-GB temp: the next-run GC may
         # never come for a user who just cancelled a huge fetch. ffmpeg itself dies with
         # the foreground group's SIGINT.
-        ui.progress_done()
+        ui.progress_done(activity="prepare")
         _rm(path)
         raise
     if rc != 0 or not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -711,7 +733,7 @@ def cast_file(
         _log_catt_stderr(err_path)
         notices.emit("il cast non è partito")
         if device:  # most common cause for a served file: the TV can't reach us (firewall)
-            print(serve.firewall_hint(serve.lan_ip(device)), file=sys.stderr)
+            ui.message(serve.firewall_hint(serve.lan_ip(device)))
         _teardown(proc.pid, file_path)
         _rm(err_path)
         return cast_delivery.CastResult(0.0, 0.0, error="cast_never_started")
@@ -1097,7 +1119,9 @@ def _cast_file_via_bridge(
     if not out.started:
         return None  # never started → let the caller fall back to catt
     delivered = cast_delivery.caption_active(kwargs, out.tracks)
-    return cast_delivery.CastResult(out.pos, out.dur, delivered, started=True)
+    return cast_delivery.CastResult(
+        out.pos, out.dur, delivered, started=True, error=out.error, end_reason=out.end_reason
+    )
 
 
 # --- live HLS-TS (ADR 0039) ---------------------------------------------------
@@ -1120,7 +1144,7 @@ def _comparable(job: live.Job) -> dict:
     """A job minus what legitimately differs between the prefetch and the real start: the
     resolved url (a debrid link may be minted per resolution) and the play head."""
     d = job.to_dict()
-    for key in ("url", "head_s", "ss_s"):
+    for key in ("url", "head_s", "ss_s", "max_bytes"):
         d.pop(key, None)
     return d
 
@@ -1133,15 +1157,16 @@ def prefetch_live(
     audio_index: int,
     source_key: str,
     embedded: tuple[int, str] | None = None,
+    size_gb: float = 0.0,
 ) -> bool:
     """Start the next episode's live producer ahead of time (binge): a detached serve with
     no LOAD. `cast_live` adopts it when the same release and job come up, so the episode
     change skips the producer start. One prefetch at a time; a stale one is reaped."""
-    if live_unavailable_reason(cfg, url, 0.0):
+    if live_unavailable_reason(cfg, url, size_gb):
         return False
     reap_prefetch()
     t, _n_video, _duration = _probe_meta(url)
-    job = _live_job(url, cfg, t.audio, audio_index, 0.0)
+    job = _live_job(url, cfg, t.audio, audio_index, 0.0, size_gb=size_gb)
     if embedded:
         job = dataclasses.replace(job, sub_map=f"0:s:{embedded[0]}", sub_lang=embedded[1])
         if cfg.sub_align and subalign.available():
@@ -1171,6 +1196,7 @@ def _adopt_prefetch(job: live.Job, source_key: str, bind_ip: str) -> tuple | Non
         not st or not source_key or st.get("key") != source_key
         or st.get("job") != _comparable(job) or st.get("bind") != bind_ip
         or not _pid_alive(st.get("pid"))
+        or live.producer_error(str(st.get("dir") or ""))
     ):  # fmt: skip
         return None
     _prefetch_state().clear()
@@ -1233,17 +1259,26 @@ def live_requirement_refusal(cfg: Config) -> str | None:
     return None
 
 
+def _live_free_gb() -> float:
+    """Prefetched bytes are either adopted or reclaimed before a new live producer."""
+    base = _cache_dir()
+    free = _free_gb(base)
+    if not free:
+        return 0.0
+    st = _prefetch_state().read()
+    if st and _pid_alive(st.get("pid")):
+        path = Path(str(st.get("dir") or ""))
+        if path.parent == base and path.name.startswith("cast-") and path.suffix == ".hls":
+            free += live.directory_bytes(str(path)) / 1024**3
+    return free
+
+
 def live_refusal(size_gb: float, duration: float) -> str | None:
-    """Why the live window (10 min behind + 30 min ahead of the play head) would not fit
-    on disk, or None. Far below the complete file: that is the point of going live."""
-    free = _free_gb(_cache_dir())
+    """EVENT retains the complete generation; reserve for its output before starting."""
+    free = _live_free_gb()
     if not free:
         return None  # unknown → don't block (best-effort, like `refusal`)
-    if size_gb > 0 and duration > 0:
-        window = (live.KEEP_BEHIND_S + live.AHEAD_MAX_S) / duration * size_gb
-        need = min(window, size_gb) * 1.2
-    else:
-        need = _MIN_FREE_GB
+    need = size_gb * 1.25 + live.DISK_RESERVE_BYTES / 1024**3 if size_gb > 0 else _MIN_FREE_GB
     if free < need:
         return f"spazio disco insufficiente per il cast in diretta (~{need:.0f}GB, {free:.0f}GB)"
     return None
@@ -1251,8 +1286,8 @@ def live_refusal(size_gb: float, duration: float) -> str | None:
 
 def live_feasible(cfg: Config, url: str, size_gb: float) -> bool:
     """Whether a live start can be attempted for `url` (decision time, ADR 0036): config,
-    tools, disk window, and not a dual-layer DV source (ADR 0044). The probe is the
-    memoized one the vetting already ran."""
+    tools, retained-output disk budget, and not a dual-layer DV source (ADR 0044).
+    The probe is the memoized one the vetting already ran."""
     return live_unavailable_reason(cfg, url, size_gb) is None
 
 
@@ -1287,7 +1322,9 @@ def _live_head_ok(out_dir: str, *, gen: int = 0, subs: bool = False) -> bool:
     return bool(t.audio and (t.audio[0].channels or 0) > 0)
 
 
-def _live_job(url: str, cfg: Config, audio: list, audio_index: int, head_s: float) -> live.Job:
+def _live_job(
+    url: str, cfg: Config, audio: list, audio_index: int, head_s: float, *, size_gb: float = 0.0
+) -> live.Job:
     """The producer job: the planned track, copied when it is already DMR-decodable stereo,
     else AAC stereo (AAC 5.1 in HLS stalls this receiver — ADR 0039 matrix #7/#8)."""
     sel = audio[audio_index] if 0 <= audio_index < len(audio) else (audio[0] if audio else None)
@@ -1296,7 +1333,12 @@ def _live_job(url: str, cfg: Config, audio: list, audio_index: int, head_s: floa
         args: tuple[str, ...] = ("-c:a", "copy")
     else:
         args = ("-c:a", cfg.cast_audio_codec or "aac", "-ac", "2", "-b:a", _audio_bitrate(2))
-    return live.Job(url, amap, args, head_s=head_s)
+    # Unknown sizes use the configured remux cap (20 GiB when it is disabled).
+    budget = int((size_gb * 2.5 if size_gb > 0 else cfg.cast_remux_max_size_gb or 20) * 1024**3)
+    free = _live_free_gb()
+    if free:
+        budget = min(budget, max(1, int(free * 1024**3) - live.DISK_RESERVE_BYTES))
+    return live.Job(url, amap, args, head_s=head_s, max_bytes=budget)
 
 
 def _await_live(
@@ -1308,22 +1350,33 @@ def _await_live(
     measure: dict | None = None,
     gen: int = 0,
     subs: bool = False,
+    adaptive: bool = False,
 ) -> bool:
     """Wait until the playlist covers `target_s` (the resume point plus two segments).
     False when the producer fails or makes no progress for `_LIVE_STALL_S`. `measure`
     receives the production `rate` (media seconds per wall second, from the first segment
     on — ffmpeg's start-up is not the link) and `bps` (segment bytes per wall second)."""
-    g = ui.g().tv
     last, last_change = -1.0, time.monotonic()
     shown = -1
     first: tuple[float, float, int] | None = None  # (wall, produced, bytes) at 1st segment
     while True:
+        util.check_cancelled()
         done = live.produced_s(out_dir, gen, subs)
         now = time.monotonic()
         if done > 0 and first is None:
             first = (now, done, _segment_bytes(out_dir))
-        if done >= target_s:
-            ui.progress_done()
+        # Terminal source failures take precedence over a partial but sufficient playlist.
+        if failed() or live.producer_error(out_dir, gen):
+            ui.progress_done(activity="prepare")
+            return False
+        if first is not None and adaptive and now - first[0] >= 3 and done > first[1]:
+            rate = (done - first[1]) / (now - first[0])
+            if rate < _LIVE_SLOW_RATE:
+                target_s = max(target_s, min(60.0, 30.0 / max(rate, 0.5)))
+        if done >= target_s or (
+            first is not None and done > 0 and live.production_complete(out_dir, gen, subs)
+        ):
+            ui.progress_done(activity="prepare")
             if measure is not None and first is not None and now - first[0] > 0.2:
                 dt = now - first[0]
                 measure["rate"] = (done - first[1]) / dt
@@ -1331,13 +1384,13 @@ def _await_live(
             return True
         if done > last:
             last, last_change = done, now
-        if failed() or now - last_change > _LIVE_STALL_S:
-            ui.progress_done()
+        if now - last_change > _LIVE_STALL_S:
+            ui.progress_done(activity="prepare")
             return False
         pct = min(99, int(done / target_s * 100)) if target_s else 0
         if pct // 10 != shown // 10:
             shown = pct
-            ui.progress(f"{g} audio in diretta  {pct:3d}%{label}")
+            ui.progress(f"audio in diretta  {pct:3d}%{label}", activity="prepare")
         time.sleep(_LIVE_POLL_S)
 
 
@@ -1414,7 +1467,7 @@ def cast_live(
     # field 2026-10-01). serve prepends a gap covering 0..base to the playlist
     # (`live.film_time_playlist`), so the receiver still speaks film time.
     fast = head > _LIVE_FAST_RESUME_S
-    job = _live_job(url, cfg, t.audio, audio_index, 0.0 if fast else head)
+    job = _live_job(url, cfg, t.audio, audio_index, 0.0 if fast else head, size_gb=size_gb)
     if fast:
         job = dataclasses.replace(job, ss_s=head)
     if embedded:
@@ -1446,22 +1499,9 @@ def cast_live(
     elif sub_paths:
         _log.warning("live: sottotitolo scaricato illeggibile, cast senza sottotitoli")
         job = dataclasses.replace(job, rms=False)  # nothing to align
-    producer: live.Producer | None = None
-    server = None
     pid: int | None = None
     if adopted:
-        _, pid, port, token = adopted  # its producer already ran ahead: the start is ~instant
-    elif follow:
-        producer = live.Producer.start(job, out_dir)
-        if producer is None:
-            _rm(out_dir)
-            return None
-        server, port, _thread = serve.serve_file(None, bind_ip, hls_dir=out_dir)
-        server.producer = producer
-        producer.run_pacing()
-        live.Aligner(producer).run()
-        _INPROC[out_dir] = producer
-        token = server.token
+        _, pid, port, token = adopted
     else:
         spawned = serve.spawn_detached(bind_ip, hls_dir=out_dir, job=job)
         if spawned is None:
@@ -1470,20 +1510,13 @@ def cast_live(
         pid, port, token = spawned
 
     def teardown() -> None:
-        if server is not None:
-            serve.close_server(server)
-        if producer is not None:
-            producer.stop()
-            _INPROC.pop(out_dir, None)
         st = _read_state()
-        if follow and st and st.get("file") == out_dir:  # the state this followed cast wrote
+        if st and st.get("file") == out_dir:
             _clear_state()
         _kill(pid)
         _rm(out_dir)
 
     def failed() -> bool:
-        if producer is not None:
-            return producer.failed()
         return not _pid_alive(pid)
 
     label = f"  → {int(head) // 60}:{int(head) % 60:02d}" if head > 60 else ""
@@ -1491,15 +1524,20 @@ def cast_live(
         target = (0.0 if fast else head) + 2 * live.SEGMENT_S
         measure: dict = {}
         ready = _await_live(
-            out_dir, target, failed=failed, label=label, measure=measure, subs=job.subs
+            out_dir,
+            target,
+            failed=failed,
+            label=label,
+            measure=measure,
+            subs=job.subs,
+            adaptive=True,
         )
     except BaseException:
         teardown()
         raise
     if not ready:
         _log.warning(
-            "live: il produttore non è partito%s",
-            f" ({producer.failure_reason()})" if producer is not None else "",
+            "live: il produttore non è partito",
         )
         teardown()
         return None
@@ -1522,10 +1560,8 @@ def cast_live(
     load_url = serve.served_hls_url(bind_ip, port, token, live.load_name(0, job.subs))
 
     def abort(started: bool) -> bool:
-        if not started or not follow:
-            teardown()
-            return True
-        return False
+        teardown()
+        return not started or not follow
 
     near_end_fired = False
 
@@ -1549,17 +1585,18 @@ def cast_live(
 
     def started() -> None:
         ui.cast_live(device, follow=follow)
-        if follow:
-            # The in-process cast gets the same live state as a detached one, so the TUI's
-            # seeks, sub-shift and status read it; `inproc` keeps --stop and GC from ever
-            # killing this process (the owner tears down when the cast ends). An adopted
-            # prefetch is a detached serve: its own pid, signalled like any other.
-            inproc = producer is not None
-            _write_state(
-                os.getpid() if inproc else (pid or 0), out_dir, device, mode="live",
-                url=load_url, title=title, base=base, duration=duration,
-                subs=job.subs, text_language=kwargs.get("text_language", ""), inproc=inproc,
-            )  # fmt: skip
+        _write_state(
+            pid or 0,
+            out_dir,
+            device,
+            mode="live",
+            url=load_url,
+            title=title,
+            base=base,
+            duration=duration,
+            subs=job.subs,
+            text_language=kwargs.get("text_language", ""),
+        )
 
     def disconnected(pos: float) -> None:
         _log.warning("daemon castbridge disconnesso a metà cast live (pos=%.0fs)", pos)
@@ -1571,11 +1608,17 @@ def cast_live(
             load_kwargs=kwargs, on_event=film_time if (on_event or on_near_end) else None,
             on_started=started, on_interrupt=abort,
             on_disconnect=disconnected if follow else None,
+            delivery_error=lambda: live.producer_error(out_dir),
         )  # fmt: skip
     finally:
         # The followed cast ended: its producer and segments go with it. A daemon
         # disconnect is not an end — the TV may still be playing from our server.
-        if follow and out is not None and out.started and not out.disconnected:
+        if (
+            follow
+            and out is not None
+            and out.started
+            and (out.error or out.end_reason in ("finished", "stopped", "interrupted"))
+        ):
             teardown()
     if out is None or not out.started:
         if out is not None and out.error:
@@ -1587,15 +1630,18 @@ def cast_live(
     # there is "not yet known" (ADR 0016), not a refusal (field 2026-10-02: [] at start,
     # [1] seconds later).
     delivered = job.subs
-    if not follow:
+    if not follow or out.disconnected or (not out.error and not out.end_reason):
         _write_state(
             pid or 0, out_dir, device, mode="live",
             url=load_url, title=title, base=base, duration=duration,
             subs=job.subs, text_language=kwargs.get("text_language", ""),
         )  # fmt: skip
-        return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
+        if not follow:
+            return cast_delivery.CastResult(0.0, 0.0, delivered, started=True)
     dur = out.dur if out.dur > 0 else duration
-    return cast_delivery.CastResult(out.pos, dur, delivered, started=True)
+    return cast_delivery.CastResult(
+        out.pos, dur, delivered, started=True, error=out.error, end_reason=out.end_reason
+    )
 
 
 # The receiver honours a seek on the live playlist only a little past where it plays
@@ -1624,6 +1670,8 @@ def live_seek(device: str | None, target: float) -> bool | None:
     subs = bool(st.get("subs"))
     pos = float(caster.status(dev).get("position") or 0.0)  # film time
     out_dir = str(st.get("file") or "")
+    if live.producer_error(out_dir):
+        return _live_restart(st, dev, target)
     want = target - base  # in the producer's playlist time
     tl = live.timeline(out_dir, gen, subs)
     kept = [

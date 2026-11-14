@@ -28,7 +28,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -306,6 +305,7 @@ def cast_via_mirror(
     audio_id: int | None = None,
     sub_id: int | str | None = None,
     follow: bool = True,
+    on_event: cast_delivery.EventCb | None = None,
 ) -> cast_delivery.CastResult:
     """Cast `url` to `device` (a TV IP) by mirroring a headless mpv. Returns a `CastResult`
     like `caster.cast` — `cast_flow` derives the advance (ADR 0029) and reads `started` to
@@ -382,7 +382,9 @@ def cast_via_mirror(
         state["sender_pid"] = sender_pid
         _write_state(state)
 
-        print(f"{ui.g().tv} {title} → {device} (mirror 1080p)", file=sys.stderr)
+        ui.status(f"{title} → {device} (mirror 1080p)", kind="tv")
+        if on_event:
+            on_event({"kind": "started", "delivery": "mirror", "title": title})
         if not follow:
             # Detached mirror: mpv is up and the sender is streaming to the TV — started.
             return cast_delivery.CastResult(0.0, 0.0, started=True)
@@ -394,10 +396,17 @@ def cast_via_mirror(
         )
         tracker.start()
         try:
-            proc.wait()
+            if on_event is None:
+                proc.wait()
+            else:
+                while proc.poll() is None:
+                    on_event({"kind": "playing", **holder, "delivery": "mirror"})
+                    time.sleep(0.5)
         except KeyboardInterrupt:
             _kill(proc.pid)
         tracker.join(timeout=player._TRACKER_JOIN_TIMEOUT)
+        if on_event:
+            on_event({"kind": "ended", **holder, "delivery": "mirror"})
         return cast_delivery.CastResult(holder["position"], holder["duration"], started=True)
     finally:
         if follow:

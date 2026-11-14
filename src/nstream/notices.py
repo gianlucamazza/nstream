@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
@@ -27,15 +27,28 @@ class Notice:
 
 _lock = threading.Lock()
 _bags: list[list[Notice]] = []
+_present: Callable[[str, str], bool] | None = None
 
 
 def emit(text: str, *, code: str = "", level: str = "warn", render: str | None = None) -> None:
     """Print `render` (default `nstream: <text>`) on stderr, and collect the notice for every
     active `capture()`."""
-    print(render if render is not None else f"nstream: {text}", file=sys.stderr)
+    if _present is None or not _present(text, level):
+        print(render if render is not None else f"nstream: {text}", file=sys.stderr)
     with _lock:
         for bag in _bags:
             bag.append(Notice(text, code, level))
+
+
+@contextmanager
+def presentation(sink: Callable[[str, str], bool]) -> Iterator[None]:
+    """Temporarily offer notices to a frontend without changing their capture contract."""
+    global _present
+    previous, _present = _present, sink
+    try:
+        yield
+    finally:
+        _present = previous
 
 
 @contextmanager

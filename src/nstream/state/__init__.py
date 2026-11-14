@@ -5,6 +5,7 @@ Public API is re-exported here so `from nstream import state` keeps a stable sur
 
 from __future__ import annotations
 
+from .active_cast import active_cast_info, clear_active_cast, track_cast
 from .breaker import (
     FAIL_THRESHOLD,
     OPEN_COOLDOWN_S,
@@ -64,6 +65,9 @@ from .history import (
 )
 
 __all__ = [
+    "active_cast_info",
+    "clear_active_cast",
+    "track_cast",
     "MAX_WATCHLIST",
     "MAX_RECENT_SEARCHES",
     "LIBRARY_VERSION",

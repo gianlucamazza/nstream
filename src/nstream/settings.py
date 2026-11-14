@@ -275,10 +275,10 @@ def _items(cfg: Config) -> list[tuple[str, str, str, str, str]]:
         ),
         (
             "home_continue_max",
-            "Home: max continua",
+            "Continua: max titoli",
             "int",
             str(cfg.home_continue_max) if cfg.home_continue_max else "tutti",
-            "Quante voci 'continua' in home prima del taglio. 0 = tutte.",
+            "Titoli iniziali nella lista Continua; Mostra tutti espande il resto. 0 = tutti.",
         ),
         (
             "mpv_quiet",

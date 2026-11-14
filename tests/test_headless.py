@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from dataclasses import replace
 
 import pytest
@@ -91,6 +92,61 @@ def _hns(**kw):
     }
     base.update(kw)
     return argparse.Namespace(**base)
+
+
+def test_history_is_local_bounded_and_descriptive(monkeypatch, capsys):
+    from nstream.cli_args import build_parser
+
+    for module, name in (
+        (headless.remux, "gc_stale"),
+        (headless.caster, "status"),
+        (headless.api, "episodes"),
+        (headless.state, "expire_cast_session"),
+    ):
+        monkeypatch.setattr(module, name, _boom("history must be a pure local read"))
+    entries = [
+        {
+            "title": f"Show {i}",
+            "type": "series",
+            "video_id": f"tt1:1:{i}",
+            "season": 1,
+            "episode": i,
+            "position": 990,
+            "duration": 1000,
+            "ts": i,
+            "url": "private-stream",
+            "token": "private-token",
+        }
+        for i in range(1, 36)
+    ]
+    monkeypatch.setattr(
+        headless.state.history, "load_history", lambda cfg: {e["video_id"]: e for e in entries}
+    )
+    monkeypatch.setattr(
+        headless.state,
+        "active_cast_info",
+        lambda: {"title": "Show", "device": "TV", "url": "private-stream"},
+    )
+    args = build_parser().parse_args(["--json", "--history"])
+    assert headless.run(CFG, args, _hopts()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["entries"]) == 30
+    assert out["entries"][0]["title"] == "Show 35"
+    assert out["entries"][0]["next"] is True
+    assert out["cast_session"] == {"title": "Show", "device": "TV"}
+    assert "private" not in json.dumps(out)
+
+
+def test_history_empty_and_legacy_session(monkeypatch, capsys):
+    from nstream.cli_args import build_parser
+
+    args = build_parser().parse_args(["--json", "--history"])
+    assert headless.run(CFG, args, _hopts()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["entries"] == [] and out["cast_session"] is None
+    state.remember_cast(CFG, {"title": "Movie", "video_id": "tt1", "ts": time.time()}, "TV")
+    assert headless.run(CFG, args, _hopts()) == 0
+    assert json.loads(capsys.readouterr().out)["cast_session"] == {"title": "Movie", "device": "TV"}
 
 
 def _hopts(cast=False, audio_lang=None):
@@ -816,7 +872,7 @@ def test_run_auto_mirror_action(monkeypatch, capsys):
 
 def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
     """Headless Tier-2 success: JSON says reencoded; fire-and-return uses cast_file with
-    follow=False and no event callback, while --follow wires the JSONL callback in."""
+    follow=False with presence observation; --follow also wires the JSONL callback in."""
     stream = _wire_movie(monkeypatch)
     monkeypatch.setattr(headless_play, "_resolve_device", lambda cfg, **k: "192.168.1.5")
     monkeypatch.setattr(headless, "_resolve_device", lambda cfg, **k: "192.168.1.5")
@@ -844,7 +900,7 @@ def test_run_auto_cast_remux_success_reencoded(monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert rc == 0 and out["reencoded"] is True and out["action"] == "cast"
     assert seen["path"] == "/tmp/out.mp4"
-    assert seen["follow"] is False and seen["on_event"] is None  # fire-and-return default
+    assert seen["follow"] is False and callable(seen["on_event"])
     assert seen["detached"] == 1  # handoff keeps a spawned TorrServer alive
     rc = headless.run_auto(CFG, _hns(query=["dune"], follow=True), _cast_opts())
     out = json.loads(capsys.readouterr().out)

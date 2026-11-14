@@ -35,6 +35,7 @@ from . import (
     cast_delivery,
     discovery,
     languages,
+    live,
     log,
     notices,
     serve,
@@ -995,7 +996,7 @@ def _discover(
     devices, state = discovery.get_devices(wait=0.0)
     if state == "pending":
         hint = "" if headless else " (Ctrl-C: riproduci in locale)"
-        print(f"{ui.g().search} cerco Chromecast…{hint}", file=sys.stderr)
+        ui.message(f"{ui.g().search} cerco Chromecast…{hint}")
         wait = None if headless else (_WAIT_CHOOSE if choose else _WAIT_RESOLVE)
         try:
             devices, state = discovery.get_devices(wait=wait)
@@ -1051,7 +1052,7 @@ def _cbreak(stream):
 def _poll_wait(timeout: float) -> str | None:
     """Wait up to `timeout` for a single keypress on stdin; return the char or None.
     On a non-interactive stdin it just sleeps (same effect as the old time.sleep)."""
-    if not sys.stdin.isatty():
+    if threading.current_thread() is not threading.main_thread() or not sys.stdin.isatty():
         time.sleep(timeout)
         return None
     with _cbreak(sys.stdin):
@@ -1080,12 +1081,12 @@ def _switch_cast_audio(
     lang = choose_lang(langs)
     if lang is None:  # ESC → keep the current cast
         return
-    print(f"{ui.g().tv} cambio audio: {languages.name(lang)}…", file=sys.stderr)
+    ui.message(f"{ui.g().tv} cambio audio: {languages.name(lang)}…")
     new = resolve_lang(lang)
     if not new:
         notices.emit(f"nessuno stream {lang} compatibile col Chromecast")
         return
-    print(f"{ui.g().tv} preparo il cast su {dest}…", file=sys.stderr)
+    ui.message(f"{ui.g().tv} preparo il cast su {dest}…")
     target = device or (None if dest == "Chromecast" else dest)
     if target:
         switched = catt_lib_outcome(target, new, title=title, meta=meta, start=pos)
@@ -1420,7 +1421,8 @@ def _cast_via_bridge(
     return cast_delivery.CastResult(
         out.pos, out.dur, cast_delivery.caption_active(kwargs, out.tracks),
         started=out.started,
-        error=None if out.started else (out.error or "cast_never_started"),
+        error=out.error or (None if out.started else "cast_never_started"),
+        end_reason=out.end_reason,
     )  # fmt: skip
 
 
@@ -1630,6 +1632,7 @@ def _cast_via_catt(
     idle = 0  # consecutive polls without progress before playback ever starts
     try:
         while True:
+            util.check_cancelled()
             if _poll_wait(_CAST_POLL) == "a" and can_switch:
                 _switch_cast_audio(
                     base, langs, resolve_lang, choose_lang, holder["position"], dest,
@@ -1681,6 +1684,13 @@ def _cast_via_catt(
                 if idle >= _CAST_GIVEUP:
                     notices.emit("il cast non è partito")
                     break
+            if started:
+                _emit(
+                    on_event,
+                    "paused" if pstate == "PAUSED" else "playing",
+                    position=holder["position"],
+                    duration=holder["duration"],
+                )
     except KeyboardInterrupt:
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             subprocess.run(
@@ -1837,7 +1847,7 @@ def status(device: str | None) -> dict:
     # on an unreachable TV, paid by every --status and --stop.
     vol, muted = _vol_muted(info)
     active_tracks, receiver_error = _bridge_track_info(device)
-    return {
+    result = {
         "player_state": state or "IDLE",
         "title": title,
         "position": round(pos, 1) if pos else 0.0,
@@ -1855,6 +1865,10 @@ def status(device: str | None) -> dict:
         "active_tracks": active_tracks,
         "receiver_error": receiver_error,
     }
+    delivery_error = live.session_error(device)
+    if delivery_error:
+        result["delivery_error"] = delivery_error
+    return result
 
 
 def _vol_muted(info: dict) -> tuple[float | None, bool]:

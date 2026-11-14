@@ -40,6 +40,7 @@ Always pass `--json`. Quote the title.
 | List episodes                     | `nstream --json --probe "Series"` (no `--episode`)    |
 | Explain ranking                   | `nstream --json --explain "X"`                        |
 | Continue / next                   | `nstream --json -c ["X"]`                             |
+| Continue-watching + cast presence | `nstream --json --history` (local read, no network) |
 | Browse catalog                    | `nstream --json --cast --browse popolari\|nuovi\|top` |
 | Stop / status / pause / resume    | `--stop` / `--status` / `--pause` / `--resume`        |
 | Seek / volume                     | `--seek SEC` / `--volume N`                           |
@@ -52,12 +53,23 @@ Incompatible with `--json`: interactive-only flags such as `--sub-menu` → `err
 
 ### Fire-and-return vs `--follow`
 
+`--json --history` returns `action: "history"`, up to 30 resumable `entries` (newest
+first) and `cast_session` (`{title, device}` or `null`). Entries contain only title,
+type, season/episode, position/duration and `next`: a completed series episode is
+marked `next` without fetching its successor. The actual continue command resolves
+that successor. Presence includes confirmed interactive casts and works with history
+disabled. Followed presence ends with its owner; detached presence expires after six
+hours or is cleared by a successful stop. See ADR 0054.
+
 - Default cast is **fire-and-return** (`--no-follow`): returns when the receiver has media.
   Prefer `--stop` later so position is persisted; `-c` also probes the receiver once.
 - `--follow` holds until end and emits JSONL events:
   `{"action":"cast","event":"started|playing|paused|ended|failed|disconnected", ...}` with
   `position`/`duration` on playing/ended/disconnected. Read until `ended` or `failed`.
   **`disconnected` ≠ `ended`**: telemetry lost; receiver may still play.
+  Bridge `ended` events carry `end_reason: finished|stopped|interrupted`; only a confirmed
+  `finished` may advance an episode. An unclassified idle event from an older daemon is
+  `disconnected`. Followed HLS keeps its detached server alive when observation disconnects.
 
 Local `--local` **blocks** until mpv closes (opens a window). For non-blocking local, run in
 the background. Series default to **S01E01** when season/episode omitted; no auto-binge in
@@ -88,6 +100,12 @@ Common fields:
 plus `volume_percent`, `volume_control_type`, `volume_step_interval`, `app_id`,
 `content_type`, `stream_type` (ADR 0045; each `null` when catt omitted it). Never
 `content_id`. Standalone `--volume N` emits `volume` (0–1) and `volume_percent`.
+
+On a failed live producer, `--status` also includes `delivery_error` (ADR 0053):
+`live_source_failed`, `live_source_incomplete`, `live_buffer_limit` or `live_disk_low`.
+The field is absent otherwise. It describes host delivery independently of
+`receiver_error`; the receiver may still be playing its buffered media. The status query's
+`ok` still describes the query. A followed delivery failure prevents episode advancement.
 
 ### Subtitle evidence tiers (ADR 0020)
 

@@ -350,7 +350,7 @@ def test_cast_load_follow_emits_started_playing_ended(monkeypatch):
             "data": {"state": "PLAYING", "title": "Dune", "position": 1.0, "duration": 100.0},
         },
         {"type": "media-status", "data": {"state": "PLAYING", "position": 50.0, "duration": 100.0}},
-        {"type": "media-status", "data": None},  # ended
+        {"type": "media-status", "data": {"state": "IDLE", "endReason": "finished"}},  # ended
     ]
     server = _fake_daemon(monkeypatch, frames)
     try:
@@ -375,6 +375,51 @@ def test_cast_load_no_follow_returns_after_started(monkeypatch):
     finally:
         server.close()
     assert [e["kind"] for e in events] == ["started"]
+
+
+def test_cast_load_checks_producer_on_quiet_receiver_timeouts(monkeypatch):
+    monkeypatch.setattr(bridge, "_FOLLOW_TIMEOUT", 0.01)
+    server = _fake_daemon(
+        monkeypatch,
+        [
+            {"id": 1, "action": "media-load", "ok": True},
+            {"type": "media-status", "data": {"state": "PAUSED"}},
+        ],
+    )
+    checks = iter([None, None, "live_source_failed"])
+    try:
+        events = list(bridge.cast_load("ip", "http://x", delivery_error=lambda: next(checks)))
+    finally:
+        server.close()
+    assert [e["kind"] for e in events] == ["started", "failed"]
+    assert events[-1]["error"] == "live_source_failed"
+
+
+@pytest.mark.parametrize("reason", ["finished", "stopped", "interrupted", "disconnected", None])
+def test_cast_load_distinguishes_terminal_reason_from_legacy_idle(monkeypatch, reason):
+    data: dict = {"session": "idle", "media": None}
+    if reason:
+        data["media"] = {"endReason": reason, "position": 219, "duration": 6000}
+    server = _fake_daemon(
+        monkeypatch,
+        [
+            {"id": 1, "action": "media-load", "ok": True},
+            {
+                "type": "media-status",
+                "data": {"state": "PLAYING", "position": 219, "duration": 6000},
+            },
+            {"type": "session", "data": data},
+        ],
+    )
+    try:
+        events = list(bridge.cast_load("ip", "http://x", follow=True))
+        sent = server.recv(65536).decode().splitlines()
+    finally:
+        server.close()
+    assert events[-1]["kind"] == ("disconnected" if reason in (None, "disconnected") else "ended")
+    assert events[-1]["end_reason"] == (reason or "disconnected")
+    assert events[-1]["position"] == 219
+    assert [json.loads(line)["action"] for line in sent] == ["media-load"]
 
 
 def test_cast_load_failed_load(monkeypatch):
@@ -442,7 +487,9 @@ def test_cast_load_survives_read_timeout(monkeypatch):
             }
         )
         time.sleep(0.25)
-        send({"type": "media-status", "data": None})  # real end
+        send(
+            {"type": "media-status", "data": {"state": "IDLE", "endReason": "finished"}}
+        )  # real end
 
     t = threading.Thread(target=later)
     t.start()
@@ -514,7 +561,7 @@ def test_cast_load_paused_then_resumed_transitions(monkeypatch):
         {"type": "media-status", "data": {"state": "PLAYING", "position": 10.0, "duration": 100.0}},
         {"type": "media-status", "data": {"state": "PAUSED", "position": 12.0, "duration": 100.0}},
         {"type": "media-status", "data": {"state": "PLAYING", "position": 12.0, "duration": 100.0}},
-        {"type": "media-status", "data": None},  # ended
+        {"type": "media-status", "data": {"state": "IDLE", "endReason": "finished"}},  # ended
     ]
     server = _fake_daemon(monkeypatch, frames)
     try:
@@ -554,7 +601,7 @@ def test_cast_load_events_carry_active_tracks(monkeypatch):
                 "activeTrackIds": [1],
             },
         },
-        {"type": "media-status", "data": None},
+        {"type": "media-status", "data": {"state": "IDLE", "endReason": "finished"}},
     ]
     server = _fake_daemon(monkeypatch, frames)
     try:

@@ -123,7 +123,7 @@ Full cast behaviour: [cast.md](cast.md).
 | `dedup` | bool | `true` | Collapse same release across trackers |
 | `max_streams` | int | `20` | Manual menu cap; `0` = none; bounds 0–500 |
 | `default_quality` | int\|null | `null` | `null` = TUI asks each title; `0` = Auto without picker; `N` = exact res (TUI + headless + binge) |
-| `home_continue_max` | int | `12` | Continue rows on home before “…altri”; `0` = all |
+| `home_continue_max` | int | `12` | Initial rows in Continua before “Mostra tutti”; `0` = all (legacy key name) |
 
 Per-invocation `--quality` is **not** a config default — use the CLI flag or TUI picker.
 Details: [../selection.md](../selection.md).

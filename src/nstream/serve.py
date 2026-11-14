@@ -443,6 +443,9 @@ class RangeFileHandler(BaseHTTPRequestHandler):
     def _serve_playlist(self, path: str, *, write_body: bool) -> None:
         """A live playlist, in film time (`live.film_time_playlist`): small and growing, so
         always whole (no Range) and never cached."""
+        if live.producer_error(os.path.dirname(path)):
+            self.send_error(HTTPStatus.SERVICE_UNAVAILABLE, "media producer failed")
+            return
         try:
             with open(path, encoding="utf-8") as f:
                 text = f.read()

@@ -39,6 +39,7 @@ _HEADLESS_ONLY: tuple[tuple[str, str], ...] = (
     ("probe", "--probe"),
     ("stop", "--stop"),
     ("status", "--status"),
+    ("history", "--history"),
     ("pause", "--pause"),
     ("resume", "--resume"),
     ("seek", "--seek"),
@@ -209,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--stop",
         action="store_true",
         help="ferma il cast in corso (richiede --json)",
+    )
+    parser.add_argument(
+        "--history",
+        action="store_true",
+        help="cronologia e sessione cast attiva, senza rete (richiede --json)",
     )
     parser.add_argument(
         "--status",

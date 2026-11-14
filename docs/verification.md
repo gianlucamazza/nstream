@@ -54,6 +54,14 @@ start at zero, resume, seeks within and beyond produced segments, subtitles, pau
 and serving after headless return. Keep production HLS castbridge-only until all pass.
 At this check, castbridge was unavailable through override, PATH and historical discovery.
 
+## Cast control lifetime
+
+`uv run python scripts/check-cast-lifecycle.py` requires FFmpeg and generates private
+synthetic media in a temporary directory. It simulates only the control disconnect;
+FFmpeg, HLS generation, the detached HTTP server and the observer's process exit are real.
+It verifies playlist/media HTTP 200 after observer exit, cleans up its server and never
+contacts a TV. This does not establish physical receiver or network stability (ADR 0056).
+
 ## Local diagnostics and recovery
 
 - Run `nstream --doctor` or `nstream --json --doctor` before changing configuration.

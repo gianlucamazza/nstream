@@ -133,9 +133,11 @@ def test_gather_progress_on_tty(monkeypatch):
 
     monkeypatch.setattr(api.sys, "stderr", _Stderr())
     # _gather imports ui lazily; patch the real ui module it binds.
-    monkeypatch.setattr(ui_mod, "status", lambda msg, *, kind="info": calls.append(f"status:{msg}"))
-    monkeypatch.setattr(ui_mod, "progress", lambda msg: calls.append(f"progress:{msg}"))
-    monkeypatch.setattr(ui_mod, "progress_done", lambda msg="": calls.append(f"done:{msg}"))
+    monkeypatch.setattr(
+        ui_mod, "status", lambda msg, *, kind="info", **kw: calls.append(f"status:{msg}")
+    )
+    monkeypatch.setattr(ui_mod, "progress", lambda msg, **kw: calls.append(f"progress:{msg}"))
+    monkeypatch.setattr(ui_mod, "progress_done", lambda msg="", **kw: calls.append(f"done:{msg}"))
 
     tasks = [lambda: [{"x": 1}], lambda: [{"y": 2}]]
     out = api._gather(tasks, labels=["Alpha", "Beta"])

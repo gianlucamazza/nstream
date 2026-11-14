@@ -15,7 +15,7 @@ src/nstream/
 │                    · remux · live · mirror · bridge · serve · urlproxy · discovery
 │                    · (_catt_load: catt.api helper on catt's interpreter)
 ├── subs             subs · subalign · srt · oshash · (_bench · _subalign_remote dev-only)
-├── playback         playback · player · labels · picker · preview · ui · explain
+├── playback         playback · player · labels · picker · preview · ui · tui_output · tui_cast · explain
 ├── discovery/API    api · addons · net
 └── foundation       config · types · state/ · log · util · languages · providers · notices
 ```
@@ -35,6 +35,9 @@ Also: `__main__.py` (module entry), `nstream.lua` (mpv next-episode overlay).
   (renders a `stream_select.StreamMenu`), `caster.resolve_device(confirm=, picker=)`,
   `caster.cast(choose_lang=)`. Domain modules never import `picker`/`labels`
   (`tests/test_architecture.py`, no exceptions left)
+- Terminal ownership: `tui_output` stays below frontend code and imports only foundation modules;
+  domains publish presentation updates through `ui`. `tui_cast` is frontend orchestration, never
+  imported by delivery domains. `util.cancel_scope` provides cooperative startup cancellation.
 - Machine output: every `--json` object goes through `log.emit_json` (scrubbed); domain
   notices go through `notices.emit` (stderr unchanged) and ride along as `notices` (ADR 0037)
 - Menus: `menus` (frontend tier) holds the TUI menus over domain data — `choose_tracks`,
@@ -117,12 +120,17 @@ cast_flow.run_cast                       ← decides `advance` (ADR 0029), once,
 | `bridge` | castbridge IPC client + daemon ensure; binary discovery: override → PATH → historical build |
 | `discovery` | Non-blocking Chromecast discovery |
 | `urlproxy` | Loopback proxy: ffmpeg/ffprobe read a debrid url without it in their argv. Probe/plan for the LAN Range-proxy (ADR 0045): proxy only when Range + length are known; else remux/live |
-| `live` | Live HLS-TS producer for Tier-2 (ADR 0039): ffmpeg argv, playlist timeline, pruning behind the play head, pausing far ahead |
+| `live` | Live HLS-TS producer (ADR 0039/0053): append-only EVENT retention, job byte budget, producer health, ahead pacing and restart generations |
 
 `remux.live_requirement_refusal` checks local HLS requirements without network or disk
 writes (also used by `doctor`). `remux.live_unavailable_reason` adds source and disk
 eligibility for selection, prefetch and delivery. Complete-file progress records processing
 metrics independently of the link-throughput store (ADR 0052).
+
+Cast lifecycle (ADR 0056): native `endReason` distinguishes completion, stop, replacement
+and transport loss. `bridge` normalizes it, `cast_delivery` preserves it and `cast_flow`
+allows bridge advancement only after confirmed completion. HLS always runs in a detached
+`serve` process; the observer's lifetime does not own the media lifetime.
 
 ### Subs
 
@@ -144,7 +152,9 @@ metrics independently of the link-throughput store (ADR 0052).
 | `labels` | fzf/mpv display strings |
 | `picker` | Shared fzf helpers |
 | `preview` | Poster + metadata card (`__preview`) |
-| `ui` | Caps, palette, glyphs, layout (`ui.Caps` ≠ `quality.HwCaps`) |
+| `ui` | Caps, terminal palette, glyphs, layout and presentation adapters (`ui.Caps` ≠ `quality.HwCaps`) |
+| `tui_output` | Serialized compact panels, worker context ownership, notice sink and terminal handoff (ADR 0055) |
+| `tui_cast` | Frontend keyboard/prompt ownership, cast monitor lifetime, controls and reopen without LOAD (ADR 0055) |
 | `explain` | `--explain` renderer |
 
 ### Discovery / API
@@ -177,6 +187,11 @@ cycles, no domain→TUI edge, and a bottom tier (`util`, `log`, `notices`, `lang
 | `types` | `Meta`, `Video`, `Stream`, `Subtitle`, `HistoryEntry` |
 | `config` | `Config`, `PlayOpts`, load/save, path helpers |
 | `state/` | history + library (`resumable`, `is_watched`, watchlist/recent), cast session, dead-sources, breaker |
+
+`state.active_cast` observes `cast_flow.run_cast` events and publishes history-independent
+playback presence in `$XDG_RUNTIME_DIR/nstream-active-cast.json` (ADR 0054).
+`headless --history` reads that presence, falling back to the legacy watch session,
+and projects resumable history without network or garbage collection.
 | `log` / `util` / `languages` | logging+redaction, atomic I/O + text folding, language tokens |
 | `providers` | Debrid provider keys (leaf: `log` builds its redaction from them) |
 

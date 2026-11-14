@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from nstream import cast_delivery, cast_flow, stream_select, subs, tracks, urlproxy, util
+from nstream import cast_delivery, cast_flow, state, stream_select, subs, tracks, urlproxy, util
 from nstream.config import Config, PlayOpts
 from nstream.types import Stream
 
@@ -107,6 +107,24 @@ def _run(opts, stream, *, start=None, results=None, **kw):
 # --- Tier-2 remux ------------------------------------------------------------
 
 
+def test_interactive_cast_presence_exists_before_backend_returns(monkeypatch):
+    stream = _STREAM.copy()
+    _wire(monkeypatch, _plan("direct", stream))
+
+    def play(*args, **kwargs):
+        assert kwargs["follow"] is True
+        assert state.active_cast_info() is None
+        kwargs["on_event"]({"kind": "started"})
+        session = state.active_cast_info()
+        assert session is not None
+        assert (session["title"], session["device"]) == ("Dune", "192.168.1.5")
+        return _ok(30, 100)
+
+    monkeypatch.setattr(cast_flow.caster, "cast", play)
+    assert _run(_opts(), stream).started  # history is disabled in _opts
+    assert state.active_cast_info() is None
+
+
 def test_remux_success_uses_cast_file(monkeypatch, capsys):
     """Tier-2 plan + remux OK → cast_file with start/follow/on_event threaded; the direct
     cast never runs and the outcome reports reencoded."""
@@ -119,7 +137,8 @@ def test_remux_success_uses_cast_file(monkeypatch, capsys):
             seen.update(remux_url=url, idx=audio_index) or "/tmp/out.mp4"
         ),
     )  # fmt: skip
-    cb = object()
+    events = []
+    cb = events.append
     monkeypatch.setattr(
         cast_flow.remux, "cast_file",
         lambda cfg, title, path, **k: (
@@ -136,7 +155,10 @@ def test_remux_success_uses_cast_file(monkeypatch, capsys):
     out = _run(_opts(), stream, start=42.0, follow=False, on_event=cb)
     assert seen["remux_url"] == stream["url"] and seen["idx"] == 1  # plan's track is mapped
     assert seen["path"] == "/tmp/out.mp4"
-    assert seen["follow"] is False and seen["start"] == 42.0 and seen["on_event"] is cb
+    assert seen["follow"] is False and seen["start"] == 42.0
+    assert callable(seen["on_event"])  # presence observer wraps the caller callback
+    seen["on_event"]({"kind": "paused"})
+    assert events == [{"kind": "paused"}]
     assert out.reencoded is True and out.action == "cast" and out.notice is None
     err = capsys.readouterr().err
     assert "castbridge assente" in err
@@ -978,6 +1000,28 @@ def test_no_advance_on_early_stop(monkeypatch, backend):
     opts = _opts(mirror=True) if backend == "mirror" else _opts()
     _wire_backend(monkeypatch, backend, stream, pos=50.0, dur=100.0)
     assert _run(opts, stream, next_label="S01E02").advance is False
+
+
+@pytest.mark.parametrize("reason", ["stopped", "interrupted", "disconnected"])
+def test_no_advance_after_transport_loss_or_stop_even_at_end_position(monkeypatch, reason):
+    stream: Stream = _STREAM.copy()
+    _wire_backend(monkeypatch, "direct", stream, pos=99, dur=100)
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: cast_delivery.CastResult(99, 100, started=True, end_reason=reason),
+    )  # fmt: skip
+    assert not _run(_opts(), stream, next_label="S01E02").advance
+
+
+def test_no_advance_on_delivery_failure_near_the_end(monkeypatch):
+    stream: Stream = _STREAM.copy()
+    _wire_backend(monkeypatch, "direct", stream, pos=99, dur=100)
+    monkeypatch.setattr(
+        cast_flow.caster, "cast",
+        lambda *a, **k: cast_delivery.CastResult(99, 100, started=True, error="live_source_failed"),
+    )  # fmt: skip
+    out = _run(_opts(), stream, next_label="S01E02")
+    assert not out.advance and out.cast_error == "live_source_failed"
 
 
 @pytest.mark.parametrize("backend", ["direct", "remux", "mirror"])

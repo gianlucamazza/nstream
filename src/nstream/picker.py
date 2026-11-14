@@ -20,19 +20,64 @@ import sys
 import tempfile
 from collections.abc import Callable
 
-from . import ui, util
+from . import tui_output, ui, util
 
 
 def _theme_args() -> list[str]:
-    """fzf flags applied to every menu: ANSI labels, the Netflix-red colour scheme, and
+    """fzf flags applied to every menu: ANSI labels, the terminal colour scheme, and
     the glyph pointer/marker plus rounded chrome."""
     caps = ui.active_caps()
     g = ui.glyphs(caps)
     return [
         "--ansi", "--border", "rounded", "--info", "inline",
-        "--pointer", g.play, "--marker", g.cached,
+        "--pointer", g.play, "--marker", g.cached, "--padding", "0,1",
         *ui.fzf_color_arg(caps),
     ]  # fmt: skip
+
+
+def _chrome_args(
+    prompt: str,
+    *,
+    expect: tuple[str, ...] = (),
+    preview: bool = False,
+    multi: bool = False,
+    help_text: str | None = None,
+) -> list[str]:
+    """Keep navigation hints independent of transient notices in every picker."""
+    hints = ["Invio: scegli", "Esc: indietro"]
+    actions = {
+        "tab": "Tab: manuale/auto",
+        "alt-c": "Alt-C: cast",
+        "alt-w": "Alt-W: watchlist",
+    }
+    hints.extend(actions[key] for key in expect if key in actions)
+    if multi:
+        hints.append("Tab: seleziona")
+    if preview:
+        hints.append("Ctrl-/: anteprima")
+    name = prompt.removesuffix("> ").strip()
+    title = {
+        "nstream": "Home",
+        "titolo": "Titoli",
+        "episodio": "Episodi",
+        "stream": "Sorgenti",
+        "continua": "Continua a guardare",
+        "serie": "Serie TV",
+    }.get(name, name.capitalize() or "Home")
+    return [
+        "--border-label",
+        f" nstream · {title} ",
+        "--border-label-pos",
+        "2",
+        "--footer",
+        help_text
+        or (ui.key_hint(*hints[:3]) + ("\n" + ui.key_hint(*hints[3:]) if hints[3:] else "")),
+    ]
+
+
+def _run_menu(cmd: list[str], **kwargs):
+    with tui_output.suspend():
+        return util.run_cmd(cmd, **kwargs)
 
 
 def _preview_exe() -> str:
@@ -99,14 +144,15 @@ def _run_fzf[T](
     # exit, so menus never pile up in the scrollback (clean TUI). --cycle wraps nav.
     cmd = ["fzf", "--prompt", prompt, "--with-nth", with_nth,
            "--delimiter", "\t", "--no-sort", "--reverse", "--cycle",
-           *_theme_args()]  # fmt: skip
+           *_theme_args(),
+           *_chrome_args(prompt, expect=expect, preview=preview_args is not None)]  # fmt: skip
     if header:
         cmd += ["--header", header]
     if expect:
         cmd += ["--expect", ",".join(expect)]
     if preview_args is not None:
         cmd += _preview_args(preview_args)
-    proc = util.run_cmd(cmd, input=lines)
+    proc = _run_menu(cmd, input=lines)
     if proc is None:
         _missing_fzf()
         return None
@@ -177,10 +223,10 @@ def fzf_multi[T](
     cmd = ["fzf", "--prompt", prompt, "--with-nth", "2..",
            "--delimiter", "\t", "--no-sort", "--reverse", "--cycle",
            "--multi", "--bind", "tab:toggle+down,shift-tab:toggle+up",
-           *_theme_args()]  # fmt: skip
+           *_theme_args(), *_chrome_args(prompt, multi=True)]  # fmt: skip
     if header:
         cmd += ["--header", header]
-    proc = util.run_cmd(cmd, input=lines)
+    proc = _run_menu(cmd, input=lines)
     if proc is None:
         _missing_fzf()
         return None
@@ -209,7 +255,7 @@ def fzf_index(
     lines = "".join(f"{i}\t{r}\n" for i, r in enumerate(rows))
     cmd = [
         "fzf", "--prompt", prompt, "--with-nth", "2..", "--delimiter", "\t",
-        "--no-sort", "--reverse", "--cycle", *_theme_args(),
+        "--no-sort", "--reverse", "--cycle", *_theme_args(), *_chrome_args(prompt),
     ]  # fmt: skip
     if header:
         cmd += ["--header", header]
@@ -223,7 +269,7 @@ def fzf_index(
                 "--preview", f'sed -n "$(({{n}}+1))p" {shlex.quote(pv_path)}',
                 "--preview-window", "down:3:wrap",
             ]  # fmt: skip
-        proc = util.run_cmd(cmd, input=lines)
+        proc = _run_menu(cmd, input=lines)
         if proc is None:
             _missing_fzf()
             return None
@@ -264,12 +310,12 @@ def ask_query(prompt: str = "cerca> ") -> str | None:
     cmd = [
         "fzf", "--prompt", prompt, "--print-query", "--no-sort", "--reverse",
         "--info", "hidden", "--disabled",  # focus the query box; list is just a hint
-        *_theme_args(),
+        *_theme_args(), *_chrome_args(prompt, help_text="Invio: cerca · Esc: indietro"),
         "--header", "digita e premi INVIO · ESC: indietro",
     ]  # fmt: skip
     # One hint row; with --disabled the user cannot select it, only submit the query.
     lines = "digita il titolo…\n"
-    proc = util.run_cmd(cmd, input=lines)
+    proc = _run_menu(cmd, input=lines)
     if proc is None:
         _missing_fzf()
         return None

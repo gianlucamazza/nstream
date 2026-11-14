@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import api, languages, log, notices, oshash, srt, subalign, tracks, util
+from . import api, languages, log, notices, oshash, srt, subalign, tracks, ui, util
 from .config import Config, PlayOpts
 from .types import Stream, Subtitle
 
@@ -376,6 +376,7 @@ def auto_subs(
             mode="auto", lang=safety_sub_lang, video_url=video_url, filename=filename,
         )  # fmt: skip
     elif not opts.sub_mode:
+        ui.activity("subs", "Disattivati", state="done")
         return SubsPick()
     else:
         pick = _pick(
@@ -391,4 +392,11 @@ def auto_subs(
             + (f", scala {opts.sub_scale:.4f}" if opts.sub_scale != 1.0 else "")
             + ")",
         )
+    ui.activity(
+        "subs",
+        (f"Trovati · {languages.name(pick.lang)}" if pick.lang else "Trovati")
+        if pick.paths
+        else "Non trovati",
+        state="done" if pick.paths else "warn",
+    )
     return pick

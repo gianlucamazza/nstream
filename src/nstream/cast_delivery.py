@@ -77,10 +77,11 @@ class CastResult(NamedTuple):
     error: str | None = None  # "catt_missing" | "cast_timeout" | "cast_failed" | …
     delivery: str = ""  # caster may set "lan" (ADR 0045 Range-proxy); else the caller names it
     unconfirmed: bool = False  # lib LOAD sent; not a --json field (ADR 0050)
+    end_reason: str = ""  # explicit bridge lifecycle; empty for legacy non-bridge backends
 
 
 class BridgeOutcome(NamedTuple):
-    """What one bridge cast did. `disconnected` means the daemon socket died mid-cast
+    """What one bridge cast did. `disconnected` means Cast control was lost mid-cast
     (NOT a playback end — the receiver may still be streaming); `tracks` are the active
     track ids the receiver last confirmed (ADR 0016, empty = not reported). The advance
     decision is `is_finished(pos, dur)`, taken by `cast_flow` (ADR 0029)."""
@@ -91,6 +92,7 @@ class BridgeOutcome(NamedTuple):
     disconnected: bool
     error: str | None = None  # "receiver_error" when the TV refused the media pre-start
     tracks: tuple[int, ...] = ()
+    end_reason: str = ""
 
 
 # castbridge gives the side-loaded caption track this id (cast repo,
@@ -117,6 +119,7 @@ def drive_bridge(
     on_started: Callable[[], None] | None = None,
     on_disconnect: Callable[[float], None] | None = None,
     on_interrupt: Callable[[bool], bool] | None = None,
+    delivery_error: Callable[[], str | None] | None = None,
 ) -> BridgeOutcome | None:
     """Consume one `bridge.cast_load` event stream and apply the shared policy.
 
@@ -129,9 +132,8 @@ def drive_bridge(
 
     Hooks (all optional):
     - `on_started()` — announce, fired once on the first `started` event;
-    - `on_disconnect(pos)` — when given, a `disconnected` event stops following (the
-      hook warns, the loop breaks and the outcome flags it); when None the event only
-      updates pos/dur and the stream is left to end on its own;
+    - `on_disconnect(pos)` — optional notice when control is lost. A disconnection always
+      ends observation with `disconnected=True`, never a synthetic playback end;
     - `on_interrupt(started) -> bool` — Ctrl-C policy. The driver always stops the
       receiver session first (`bridge.stop`); the hook does delivery-specific cleanup
       and returns True to re-raise (headless "user abort" semantics) or False to
@@ -141,10 +143,19 @@ def drive_bridge(
     started = False
     disconnected = False
     tracks: tuple[int, ...] = ()
+    error: str | None = None
+    end_reason = ""
     pos = dur = 0.0
-    events = bridge.cast_load(device, url, follow=follow, **load_kwargs)
+    health = {"delivery_error": delivery_error} if delivery_error else {}
+    events = bridge.cast_load(device, url, follow=follow, **load_kwargs, **health)
     try:
         for ev in events:
+            if delivery_error and (error := delivery_error()):
+                if on_event:
+                    on_event({"kind": "failed", "error": error})
+                if started:
+                    bridge.stop(device)
+                return BridgeOutcome(pos, dur, started, False, error=error, tracks=tracks)
             kind = ev.get("kind")
             if kind == "failed" and not started:
                 err = ev.get("error") or "?"
@@ -159,6 +170,11 @@ def drive_bridge(
                     ev.get("message") or "?",
                 )
                 return None
+            if kind == "failed" and started:
+                error = str(ev.get("error") or "cast_failed")
+                if on_event:
+                    on_event(ev)
+                break
             if kind == "started" and not started:
                 started = True
                 if on_started:
@@ -170,14 +186,21 @@ def drive_bridge(
             if kind in ("playing", "paused", "ended", "disconnected"):
                 pos = float(ev.get("position") or pos)
                 dur = float(ev.get("duration") or dur)
-            if kind == "disconnected" and on_disconnect is not None:
-                on_disconnect(pos)
+            if kind == "ended":
+                end_reason = str(ev.get("end_reason") or "finished")
+            if kind == "disconnected":
+                if on_disconnect is not None:
+                    on_disconnect(pos)
                 disconnected = True
+                end_reason = "disconnected"
                 break
     except KeyboardInterrupt:
+        end_reason = "stopped"
         bridge.stop(device)
         if on_interrupt is not None and on_interrupt(started):
             raise
     finally:
         events.close()
-    return BridgeOutcome(pos, dur, started, disconnected, tracks=tracks)
+    return BridgeOutcome(
+        pos, dur, started, disconnected, error=error, tracks=tracks, end_reason=end_reason
+    )

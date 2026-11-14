@@ -174,6 +174,9 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             }
         )
         return 2
+    # Desktop background polling is a pure local read, without GC or discovery.
+    if getattr(args, "history", False):
+        return _run_history(cfg, tfilter)
     # Opportunistic hygiene at every headless entry: a cast session whose TTL passed dies
     # even if --stop never came, and Tier-2 leftovers are collected not only when the
     # next remux happens to run.
@@ -439,11 +442,43 @@ def _run_auto_resume(
     )  # fmt: skip
 
 
+def _run_history(cfg: Config, typ: str | None = None) -> int:
+    """Bounded descriptive fields only; no receiver requests or next-episode lookup."""
+    entries = []
+    for entry in state.resumable(cfg, limit=30, typ=typ):
+        entries.append(
+            {
+                **{
+                    k: entry[k]
+                    for k in ("title", "type", "season", "episode", "position", "duration")
+                    if k in entry
+                },
+                "next": entry.get("type") == "series" and state.is_watched(entry),
+            }
+        )
+    session = state.active_cast_info() or state.cast_session_info()
+    _emit_json(
+        {
+            "ok": True,
+            "action": "history",
+            "entries": entries,
+            "cast_session": (
+                {"title": session.get("title", ""), "device": session.get("device", "")}
+                if session
+                else None
+            ),
+        }
+    )
+    return 0
+
+
 def _headless_device(cfg: Config, args: argparse.Namespace) -> str | None:
     """Resolve the cast device for a lifecycle action (--stop/--status), or None (emitting a
     device_not_found JSON) when no Chromecast can be resolved without a picker."""
     try:
-        return _resolve_device(cfg, headless=True, prefer=args.device)
+        session = state.active_cast_info() or state.cast_session_info()
+        prefer = args.device or (session.get("device") if session else None)
+        return _resolve_device(cfg, headless=True, prefer=prefer)
     except CastUnavailable as e:
         _emit_json({"ok": False, "error": "device_not_found", "message": str(e)})
         return None
@@ -455,7 +490,9 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     # tear it down first, independent of DMR device resolution.
     mirror_stopped = mirror.stop()
     try:
-        device = _resolve_device(cfg, headless=True, prefer=args.device)
+        session = state.active_cast_info() or state.cast_session_info()
+        prefer = args.device or (session.get("device") if session else None)
+        device = _resolve_device(cfg, headless=True, prefer=prefer)
     except CastUnavailable as e:
         # The TV is off/unreachable: still reclaim the local side (detached remux server,
         # its multi-GB temp file, a subtitle server) — it would otherwise pin disk forever.
@@ -477,6 +514,8 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     # multi-GB temp file is a real stop, not a failure.
     ok = remux.stop(device) or ok
     ok = ok or mirror_stopped
+    if ok:
+        state.clear_active_cast(device=device)
     state.update_from_receiver(
         cfg, device, st.get("position") or 0.0, st.get("duration") or 0.0,
         title=st.get("title"), clear=True,

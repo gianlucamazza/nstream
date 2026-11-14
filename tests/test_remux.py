@@ -406,7 +406,7 @@ def test_remux_metrics_eta_and_finalization_tail(monkeypatch, duration):
     measure = {}
     frames = []
     timings = []
-    monkeypatch.setattr(remux.ui, "progress", lambda _: None)
+    monkeypatch.setattr(remux.ui, "progress", lambda _, **kwargs: None)
     monkeypatch.setattr(remux._log, "info", lambda *args: timings.append(args))
 
     def frame(pct):
@@ -427,7 +427,7 @@ def test_remux_metrics_eta_and_finalization_tail(monkeypatch, duration):
 def test_remux_eta_absent_for_unstable_or_invalid_speed(monkeypatch, speeds):
     tick = iter(range(100))
     monkeypatch.setattr(remux.time, "monotonic", lambda: float(next(tick) * 3))
-    monkeypatch.setattr(remux.ui, "progress", lambda _: None)
+    monkeypatch.setattr(remux.ui, "progress", lambda _, **kwargs: None)
     lines = []
     for speed in speeds:
         lines += ["out_time_us=1000000\n", f"speed={speed}\n", "progress=continue\n"]
@@ -1470,7 +1470,7 @@ def test_run_ffmpeg_abort_terminates_child(monkeypatch):
         spawned.append(proc)
         return proc
 
-    def interrupt(_msg):
+    def interrupt(_msg, **kwargs):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(remux.subprocess, "Popen", popen)
@@ -1503,6 +1503,54 @@ def test_remux_argv_never_carries_the_debrid_url(monkeypatch, tmp_path):
 
 
 # --- live HLS-TS (ADR 0039) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(("rate", "elapsed"), [(6.0, 1.0), (1.0, 24.0)])
+def test_live_start_accumulates_more_buffer_for_slow_production(
+    monkeypatch, tmp_path, rate, elapsed
+):
+    clock = [0.0]
+    monkeypatch.setattr(remux.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(remux.time, "sleep", lambda _: clock.__setitem__(0, clock[0] + 1))
+    monkeypatch.setattr(remux.live, "produced_s", lambda *a: 6 + rate * clock[0])
+    assert remux._await_live(str(tmp_path), 12, failed=lambda: False, label="", adaptive=True)
+    assert clock[0] == elapsed
+
+
+def test_live_failure_wins_over_sufficient_partial_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(remux.live, "produced_s", lambda *a: 30.0)
+    assert not remux._await_live(str(tmp_path), 12, failed=lambda: True, label="")
+
+
+def test_short_completed_live_source_does_not_wait_for_twelve_seconds(tmp_path):
+    Path(tmp_path, "index.m3u8").write_text("#EXTM3U\n#EXTINF:3.0,\nindex0.ts\n#EXT-X-ENDLIST\n")
+    assert remux._await_live(str(tmp_path), 12, failed=lambda: False, label="", adaptive=True)
+
+
+def test_event_disk_check_reserves_complete_output(monkeypatch):
+    monkeypatch.setattr(remux, "_free_gb", lambda _: 10.0)
+    assert remux.live_refusal(11.3, 7200) is not None
+    assert remux.live_refusal(2.0, 7200) is None
+
+
+def test_event_disk_check_accounts_for_owned_prefetch_bytes(monkeypatch, tmp_path):
+    cached = tmp_path / "cast-prefetch.hls"
+    cached.mkdir()
+    with (cached / "index0.ts").open("wb") as f:
+        f.truncate(1024**3)  # sparse fixture: no actual GiB allocation
+    remux._prefetch_state().write({"pid": 123, "dir": str(cached)})
+    monkeypatch.setattr(remux, "_pid_alive", lambda pid: pid == 123)
+    monkeypatch.setattr(remux, "_free_gb", lambda _: 1.0)
+    assert remux._live_free_gb() == 2.0
+    assert remux.live_refusal(1.0, 7200) is None
+
+
+def test_prefetch_budget_differences_do_not_change_media_identity():
+    from nstream import live
+
+    assert remux._comparable(live.Job("a", max_bytes=100)) == remux._comparable(
+        live.Job("b", max_bytes=200)
+    )
 
 
 @pytest.mark.parametrize(
@@ -1599,6 +1647,39 @@ def test_cast_live_detached_loads_the_playlist_and_records_state(monkeypatch):
         "url": seen["url"], "title": "T", "base": 0.0, "duration": 6000.0,
         "subs": False, "text_language": "",
     }  # fmt: skip
+
+
+@pytest.mark.parametrize("reason", ["finished", "stopped", "interrupted", "disconnected"])
+def test_followed_live_always_detaches_and_only_reaps_on_confirmed_end(monkeypatch, reason):
+    seen = _live_wiring(monkeypatch, writes_segments=True)
+    monkeypatch.setattr(remux.live.Producer, "start", lambda *a: pytest.fail("must detach"))
+
+    def drive(*args, on_started=None, on_event=None, **kwargs):
+        assert on_started is not None
+        on_started()
+        if on_event:
+            on_event(
+                {
+                    "kind": "disconnected" if reason == "disconnected" else "ended",
+                    "end_reason": reason,
+                    "position": 219,
+                }
+            )
+        return cast_delivery.BridgeOutcome(
+            219, 6000, True, reason == "disconnected", end_reason=reason
+        )
+
+    monkeypatch.setattr(remux.cast_delivery, "drive_bridge", drive)
+    out = remux.cast_live(
+        _cfg(), "T", "http://source", device="10.0.0.5", audio_index=0, follow=True
+    )
+    assert out is not None and out.end_reason == reason
+    st = remux._read_state()
+    if reason == "disconnected":
+        assert Path(seen["dir"]).exists() and st and st["pid"] == 4242
+        assert not st.get("inproc")
+    else:
+        assert not Path(seen["dir"]).exists() and st is None
 
 
 def test_cast_live_without_segments_cleans_up_and_yields(monkeypatch):
@@ -1810,6 +1891,22 @@ def test_live_seek_loads_film_time_against_the_playlist_base(monkeypatch, tmp_pa
     assert remux.live_seek("10.0.0.5", 3110.0) is None  # short: the receiver's own seek
 
 
+def test_seek_restarts_a_failed_producer_even_inside_cached_media(monkeypatch, tmp_path):
+    from nstream import live
+
+    _live_state(monkeypatch, tmp_path, pos=3100.0)
+    st = remux._read_state() or {}
+    Path(st["file"], live.HEALTH_FILE).write_text(
+        json.dumps({"gen": 0, "state": "failed", "error": "live_source_failed"})
+    )
+    restarted = []
+    monkeypatch.setattr(
+        remux, "_live_restart", lambda st, dev, target: restarted.append(target) or True
+    )
+    assert remux.live_seek("10.0.0.5", 3110.0) is True
+    assert restarted == [3110.0]
+
+
 def test_cast_live_follow_events_carry_the_probed_duration(monkeypatch, tmp_path):
     """--follow JSONL: a growing playlist reports duration -1; events carry the runtime."""
     _live_wiring(monkeypatch, writes_segments=True)
@@ -1986,3 +2083,40 @@ def test_near_end_hook_fires_once(monkeypatch):
     )  # fmt: skip
     assert done.wait(2) and fired == [1]
     assert seen
+
+
+def test_prepare_cancellation_terminates_silent_ffmpeg(monkeypatch):
+    """Cancellation must also wake a stdout read when the child produces no progress."""
+    import subprocess
+    import sys
+    import threading
+
+    from nstream import util
+
+    cancelled, running = threading.Event(), threading.Event()
+    children = []
+    original = subprocess.Popen
+
+    def popen(*args, **kwargs):
+        child = original(*args, **kwargs)
+        children.append(child)
+        running.set()
+        return child
+
+    def abort():
+        assert running.wait(1)
+        cancelled.set()
+
+    monkeypatch.setattr(remux.subprocess, "Popen", popen)
+    aborter = threading.Thread(target=abort)
+    aborter.start()
+    try:
+        with util.cancel_scope(cancelled.is_set), pytest.raises(KeyboardInterrupt):
+            remux._run_ffmpeg([sys.executable, "-c", "import time; time.sleep(30)"], 10)
+        assert children[0].poll() is not None
+    finally:
+        aborter.join(timeout=1)
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait()

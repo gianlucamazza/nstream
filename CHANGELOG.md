@@ -7,6 +7,29 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+### Changed
+
+- **ADR 0055:** unify TUI menus around the terminal palette and persistent keyboard
+  hints; move continue-watching into a dedicated list. Serialize concurrent source,
+  audio and subtitle progress in a compact panel. Add direct cast controls and return
+  to home without stopping playback; reopening reuses the existing monitor.
+
+### Fixed
+
+- **ADR 0056:** Cast control disconnection no longer means playback ended. Preserve explicit
+  terminal reasons, prevent automatic advancement after stop/disconnect, and keep HLS
+  producer/server ownership detached from interactive observation. Requires the companion
+  castbridge update for verified, read-only control reattachment.
+
+- Restore the Omarchy plugin's `--json --history` interface and publish confirmed
+  interactive cast presence independently of watch-history preferences (ADR 0054).
+
+- **ADR 0053:** retain all segments advertised by progressive HLS EVENT playlists;
+  reserve full-generation disk space and monitor byte usage/free space while producing.
+  Report partial-output producer failures, expose optional `delivery_error` on status,
+  and prevent episode advancement after delivery errors. Increase initial buffering for
+  slow production without changing the selected quality or language.
+
 ## [1.44.0] — 2026-11-14
 
 ### Added

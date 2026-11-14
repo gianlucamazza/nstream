@@ -47,7 +47,7 @@ def test_producer_cmd_is_token_free_stereo_hls_ts(tmp_path):
 
 
 def test_job_roundtrip():
-    job = live.Job("http://x", "0:a:2", ("-c:a", "copy"), head_s=1036.0)
+    job = live.Job("http://x", "0:a:2", ("-c:a", "copy"), head_s=1036.0, max_bytes=123456)
     assert live.Job.from_dict(job.to_dict()) == job
 
 
@@ -58,15 +58,96 @@ def test_timeline_and_produced(tmp_path):
     assert live.produced_s(str(tmp_path / "missing")) == 0.0
 
 
-def test_on_request_prunes_behind_the_window(tmp_path, monkeypatch):
-    monkeypatch.setattr(live, "KEEP_BEHIND_S", 12.0)
-    _playlist(tmp_path, 10)
+def test_event_retains_every_advertised_segment(tmp_path):
+    _playlist(tmp_path, 103)
     p = live.Producer(str(tmp_path), cast(Any, _Proc()))
-    p.on_request("index5.ts")  # play head at 30 s → keep from 18 s
+    p.on_request("index102.ts")  # beyond the old ten-minute retention window
     left = sorted(int(f.stem[5:]) for f in tmp_path.glob("index*.ts"))
-    assert left == [3, 4, 5, 6, 7, 8, 9]
+    assert left == list(range(103))
+    for index, _, _ in live.timeline(str(tmp_path)):
+        assert (tmp_path / live.segment_name(0, index)).exists()
     p.on_request("index2.ts")  # a backward request never moves the head back
-    assert p.newest_s == 30.0
+    assert p.newest_s == 612.0
+
+
+def test_partial_output_does_not_mask_failed_producer(tmp_path):
+    _playlist(tmp_path, 2)
+    proc = _Proc()
+    proc.rc = 1
+    p = live.Producer(str(tmp_path), cast(Any, proc))
+    assert p.failed()
+    p.tick()
+    assert live.producer_error(str(tmp_path)) == "live_source_failed"
+
+
+def test_failed_health_write_is_best_effort_and_retried(tmp_path, monkeypatch):
+    proc = _Proc()
+    proc.rc = 1
+    p = live.Producer(str(tmp_path), cast(Any, proc))
+    write = live.util.atomic_write_bytes
+    attempts = []
+
+    def flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("read-only")
+        return write(*a, **k)
+
+    monkeypatch.setattr(live.util, "atomic_write_bytes", flaky)
+    p.tick()
+    assert p.failed() and live.producer_error(str(tmp_path)) is None
+    p.tick()
+    assert live.producer_error(str(tmp_path)) == "live_source_failed"
+
+
+def test_explicit_restart_clears_previous_generation_failure(tmp_path, monkeypatch):
+    _playlist(tmp_path, 2)
+    proc = _Proc()
+    proc.rc = 1
+    p = live.Producer(str(tmp_path), cast(Any, proc), job=live.Job("u"))
+    p.tick()
+    assert live.producer_error(str(tmp_path))
+    monkeypatch.setattr(live, "_spawn", lambda *a: _Proc())
+    monkeypatch.setattr(live, "_terminate", lambda proc: None)
+    assert p.restart(600, 1)
+    assert not p.error and not p.failed()
+    assert live.producer_error(str(tmp_path), 1) is None
+    assert json.loads((tmp_path / live.HEALTH_FILE).read_text())["gen"] == 1
+
+
+def test_completed_and_incomplete_exit_are_distinct(tmp_path):
+    _playlist(tmp_path, 2)
+    proc = _Proc()
+    proc.rc = 0
+    p = live.Producer(str(tmp_path), cast(Any, proc))
+    p.tick()
+    assert live.producer_error(str(tmp_path)) == "live_source_incomplete"
+    with (tmp_path / live.PLAYLIST).open("a") as f:
+        f.write("#EXT-X-ENDLIST\n")
+    p = live.Producer(str(tmp_path), cast(Any, proc))
+    p.tick()
+    data = json.loads((tmp_path / live.HEALTH_FILE).read_text())
+    assert data["state"] == "completed" and not data["error"]
+
+
+@pytest.mark.parametrize("low_disk", [True, False])
+def test_disk_guard_stops_without_deleting_advertised_segments(tmp_path, monkeypatch, low_disk):
+    _playlist(tmp_path, 2)
+    (tmp_path / "index2.ts.tmp").write_bytes(b"x" * 1024)
+    proc = _Proc()
+    p = live.Producer(
+        str(tmp_path), cast(Any, proc), job=live.Job("u", max_bytes=10_000 if low_disk else 1000)
+    )
+    monkeypatch.setattr(live.util, "free_gib", lambda _: 0.1 if low_disk else 10.0)
+    stopped = []
+    monkeypatch.setattr(live, "_terminate", lambda p: stopped.append(p))
+    p.tick()
+    assert stopped == [proc]
+    assert p.failed()
+    assert live.producer_error(str(tmp_path)) == (
+        "live_disk_low" if low_disk else "live_buffer_limit"
+    )
+    assert (tmp_path / "index0.ts").exists()
 
 
 def test_tick_pauses_far_ahead_and_resumes(tmp_path, monkeypatch):
@@ -121,6 +202,21 @@ def test_hls_route_serves_playlist_and_segments(hls_server):
     assert (
         seen[-1] == "index2.ts"
     )  # the segment request reached the producer (it ignores the playlist)
+
+
+def test_failed_live_producer_returns_503_not_an_endless_playlist(hls_server, tmp_path):
+    base, _ = hls_server
+    (tmp_path / live.HEALTH_FILE).write_text(
+        json.dumps({"gen": 0, "state": "failed", "error": "live_source_failed"})
+    )
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(base + live.PLAYLIST, timeout=5)
+    assert e.value.code == 503
+    with urllib.request.urlopen(base + "index0.ts", timeout=5) as r:
+        assert r.read()  # published segments remain available even after producer failure
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(base + live.HEALTH_FILE, timeout=5)
+    assert e.value.code == 404
 
 
 @pytest.mark.parametrize("name", ["ffmpeg.log", "../index0.ts", "index0.ts.tmp", "x.m3u8"])

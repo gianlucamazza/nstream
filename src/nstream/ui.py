@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import util
+from . import tui_output, util
 from .config import Config
 
 _CACHE_VERSION = 2  # v2: added the NO_COLOR-driven `color` capability
@@ -260,30 +260,30 @@ NERD = Glyphs(
     bar_empty="░",
 )
 
-# Portable variant keeps nstream's existing emoji/unicode so current users see no change.
+# Portable symbols occupy one cell and need no emoji or patched font.
 PORTABLE = Glyphs(
     star="★",
     play="▶",
-    movie="🎬",
-    series="📺",
-    search="🔍",
-    fire="🔥",
-    new="🆕",
+    movie="▣",
+    series="▤",
+    search="⌕",
+    fire="↑",
+    new="+",
     gear="⚙",
-    cast="📡",
+    cast="⇢",
     warn="⚠",
     cached="✓",
-    audio="🔊",
-    subs="💬",
-    globe="🌐",
-    tv="📺",
+    audio="♪",
+    subs="≡",
+    globe="◎",
+    tv="▤",
     fail="✗",
     down="↓",
-    clock="⏱",
-    calendar="📅",
-    people="👥",
-    folder="📁",
-    add="➕",
+    clock="◷",
+    calendar="□",
+    people="♟",
+    folder="▸",
+    add="+",
     bar_full="█",
     bar_empty="░",
 )
@@ -306,27 +306,15 @@ def g() -> Glyphs:
 class Palette:
     """SGR parameter strings (the bit between ESC[ and m) for the accent colours."""
 
-    accent: str  # Netflix red
+    accent: str  # terminal cyan
     secondary: str  # bright text
     dim: str  # muted grey
     good: str  # green
     warn: str  # amber
 
 
-_TRUECOLOR = Palette(
-    accent="38;2;229;9;20",
-    secondary="38;2;245;245;245",
-    dim="38;5;244",
-    good="38;2;46;204;113",
-    warn="38;2;241;196;15",
-)
-_256 = Palette(
-    accent="38;5;196",
-    secondary="38;5;255",
-    dim="38;5;244",
-    good="38;5;42",
-    warn="38;5;214",
-)
+_TRUECOLOR = Palette(accent="36", secondary="1", dim="90", good="32", warn="33")
+_256 = _TRUECOLOR
 # NO_COLOR: empty SGR strings make `ansi()` a no-op everywhere.
 _MONO = Palette(accent="", secondary="", dim="", good="", warn="")
 
@@ -337,16 +325,15 @@ def palette(caps: Caps) -> Palette:
     return _TRUECOLOR if caps.truecolor else _256
 
 
-# fzf interprets hex in --color and downgrades to 256 itself, so the spec is constant.
+# ANSI palette indices follow the terminal theme; default foreground/background are inherited.
 _FZF_COLOR_SPEC = (
-    "fg:-1,bg:-1,gutter:-1,hl:#e50914,fg+:#ffffff,bg+:#1a1a1a,hl+:#e50914,"
-    "pointer:#e50914,marker:#e50914,prompt:#e50914,header:#808080,info:#5f5f5f,"
-    "border:#303030,spinner:#e50914,query:#ffffff"
+    "fg:-1,bg:-1,gutter:-1,hl:6,fg+:reverse,bg+:-1,hl+:reverse,"
+    "pointer:6,marker:2,prompt:6,header:8,info:8,border:8,spinner:6,query:-1"
 )
 
 
 def fzf_color_arg(caps: Caps) -> list[str]:
-    """The `--color` flag pair giving fzf the Netflix-red-on-dark theme. `caps` is
+    """The `--color` flag pair inheriting the terminal palette. `caps` is
     accepted for symmetry/future tuning; the hex spec works on any colour depth.
     Under NO_COLOR, fzf's built-in monochrome theme (`bw`) replaces it."""
     return ["--color", _FZF_COLOR_SPEC if caps.color else "bw"]
@@ -385,9 +372,20 @@ _STATUS_GLYPH = {
 }
 
 
-def status(msg: str, *, kind: str = "info") -> None:
+def status(msg: str, *, kind: str = "info", activity: str | None = None) -> None:
     """One-shot status line on stderr: glyph + message. Readable without colour
     (glyph carries the kind; text is the state — never colour-only semantics)."""
+    activity = activity or {
+        "audio": "audio",
+        "subs": "subs",
+        "tv": "playback",
+        "cast": "playback",
+    }.get(kind, "activity")
+    state = kind if kind in {"warn", "fail"} else "working"
+    if tui_output.publish(tui_output.Update(activity, msg, state)):
+        if kind in {"warn", "fail"}:
+            tui_output.detail(msg, warning=True)
+        return
     g = glyphs(active_caps())
     icon = getattr(g, _STATUS_GLYPH.get(kind, "play"), g.play)
     print(f"{icon} {msg}", file=sys.stderr)
@@ -397,22 +395,48 @@ def status_detail(msg: str) -> None:
     """Secondary stderr line under a `status` banner (filter notices, hints).
     No glyph prefix — indented middle-dot so it reads as a child of the phase above,
     never as a hard `nstream:` error."""
+    if tui_output.detail(msg):
+        # Keep the count visible; the full filter reasons remain in Details.
+        summary = msg.split(" (", 1)[0]
+        tui_output.publish(tui_output.Update("activity", summary, "done"))
+        return
     print(f"  · {msg}", file=sys.stderr)
 
 
-def progress(msg: str) -> None:
+def message(msg: str) -> None:
+    """Coordinate legacy free-form stderr lines with an active interactive panel."""
+    if not tui_output.detail(msg, warning=True):
+        print(msg, file=sys.stderr)
+
+
+def activity(key: str, text: str, *, state: str = "working") -> None:
+    """Optional structured metadata for an interactive panel; silent in headless mode."""
+    tui_output.publish(tui_output.Update(key, text, state))
+
+
+def progress(
+    msg: str,
+    *,
+    activity: str = "activity",
+    completed: float | None = None,
+    total: float | None = None,
+) -> None:
     """In-place progress line (`\\r`) on a tty stderr; plain newline when not a tty
     so pipes/logs still see updates without control junk. Erases to EOL so a shorter
     update doesn't leave tails of a longer previous line."""
+    if tui_output.publish(tui_output.Update(activity, msg, "working", completed, total)):
+        return
     if sys.stderr.isatty():
         print(f"\r{msg}\x1b[K", end="", file=sys.stderr, flush=True)
     else:
         print(msg, file=sys.stderr)
 
 
-def progress_done(msg: str = "") -> None:
+def progress_done(msg: str = "", *, activity: str = "activity") -> None:
     """Finish a `progress` line: overwrite with `msg` (or just advance) on a tty.
     Uses CSI erase-to-EOL instead of space-padding so no trailing blanks remain."""
+    if tui_output.publish(tui_output.Update(activity, msg or "Pronto", "done")):
+        return
     if sys.stderr.isatty():
         if msg:
             print(f"\r{msg}\x1b[K", file=sys.stderr)
@@ -426,6 +450,8 @@ def progress_done(msg: str = "") -> None:
 def cast_live(device: str, *, follow: bool = False, title: str = "") -> None:
     """Single 'on air' line for an active cast. Omits the title when the play session
     already printed it as the banner (pass `title` for Alt-C / standalone paths)."""
+    if tui_output.publish(tui_output.Update("playback", "Attendo conferma dal ricevitore…")):
+        return  # the frontend's started event, not a successful LOAD command, confirms playback
     dest = f"{title} → {device}" if title else f"→ {device}"
     if follow:
         status(f"in onda {dest}  ·  Ctrl-C: esci dal follow", kind="tv")

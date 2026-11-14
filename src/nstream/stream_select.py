@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -632,8 +631,9 @@ def _reselect_for_primary(
         elif "multi" in langs:
             maybe.append(s)
     if tagged or maybe:
-        print(f"nstream: il pick migliore non ha audio {primary}, cerco una sorgente {primary}…",
-              file=sys.stderr)  # fmt: skip
+        ui.message(
+            f"nstream: il pick migliore non ha audio {primary}, cerco una sorgente {primary}…"
+        )
     tried = 0
     for s, trusted in [*((s, True) for s in tagged), *((s, False) for s in maybe)]:
         if tried >= limit:
@@ -647,8 +647,7 @@ def _reselect_for_primary(
             real = frozenset({primary})  # unverifiable + explicit tag → benefit of the doubt
         if real and primary in real:
             name_line = next(iter((ready.get("name") or "").splitlines()), "")
-            print(f"nstream: scelgo un'altra sorgente per l'audio {primary} — {name_line}",
-                  file=sys.stderr)  # fmt: skip
+            ui.message(f"nstream: scelgo un'altra sorgente per l'audio {primary} — {name_line}")
             return ready
     return None
 

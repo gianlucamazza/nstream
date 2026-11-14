@@ -19,6 +19,7 @@ import time
 import unicodedata
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import copy_context
 from pathlib import Path
 from typing import cast
 
@@ -107,6 +108,7 @@ def _gather(
     keys: list[str] | None = None,
     primary: list[bool] | None = None,
     outcome: dict | None = None,
+    activity: str = "streams",
 ) -> list:
     """Run per-addon/per-type fetch tasks concurrently, flattening results in task
     order (so the built-in providers keep priority for dedup). A task raising
@@ -203,10 +205,10 @@ def _gather(
         msg = f"interrogo {len(active)} fonti…"
         if skipped:
             msg += f" · {skipped} in breaker"
-        ui.status(msg, kind="search")
+        ui.status(msg, kind="search", activity=activity)
     ex = _addon_pool
     fut_map = {
-        ex.submit(_run, i, t, lab, probe): (i, lab, key, is_prim)
+        ex.submit(copy_context().run, _run, i, t, lab, probe): (i, lab, key, is_prim)
         for i, t, lab, key, probe in active
         for is_prim in (prim[i],)
     }
@@ -236,7 +238,7 @@ def _gather(
             _note(key, status)  # only the collector owns breaker effects
             done += 1
             if sys.stderr.isatty():
-                ui.progress(f"fonti {done}/{len(active)} · {lab}")
+                ui.progress(f"fonti {done}/{len(active)} · {lab}", activity=activity)
             if is_prim:
                 primary_ok += status == "ok"
                 primary_left -= 1
@@ -283,7 +285,7 @@ def _gather(
             msg += f" · {failed} errori"
         if skipped:
             msg += f" · {skipped} breaker"
-        ui.progress_done(msg)
+        ui.progress_done(msg, activity=activity)
 
     if outcome is not None:
         outcome["primary_ok"] = primary_ok
@@ -985,6 +987,6 @@ def subtitles(
         labels.append(addon.name)
         keys.append(addon.base)
     return _dedup(
-        _gather(tasks, labels=labels, keys=keys),
+        _gather(tasks, labels=labels, keys=keys, activity="subs"),
         lambda s: s.get("url") or s.get("id") or id(s),
     )

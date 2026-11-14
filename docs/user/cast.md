@@ -49,6 +49,15 @@ Casts target the device **IP** when needed (mDNS name flakiness). A saved `cast_
 honoured only if reachable. **No Chromecast on this network → local mpv fallback** with a
 notice. Note: `catt scan -j` is broken in current catt; nstream parses text `catt scan`.
 
+## Interactive controls
+
+The [compact TUI panel](tui.md#preparation-and-cast-panel) owns keyboard input while a
+worker monitors delivery. After startup, Esc/Ctrl-C returns home and leaves playback
+and its serving files alive; **s** explicitly stops it. Reopening the active-cast row
+issues no new LOAD. DMR controls include pause, seek, volume and managed-source audio
+reselection. Mirror exposes home, details and stop. This is independent of headless
+`--follow`/`--no-follow` behavior and does not extend service lifetime past process exit.
+
 ## Delivery backends
 
 ```mermaid
@@ -68,11 +77,19 @@ flowchart TD
 | ------- | ----- | -------- | ---- |
 | **Direct DMR** (castbridge/catt) | Instant stream | Full video (HEVC/4K/HDR) if codec ok | Needs DMR-decodable **audio** (AAC/…) |
 | **LAN Range-proxy** (ADR 0045) | Instant (same LOAD) | Native video; TV pulls the host | Default for a remote debrid url (`cast_lan_proxy`) |
-| **Tier-2 live** (ADR 0039) | Seconds (live HLS-TS) | Video copy; audio → AAC stereo | ~40 min window on disk |
+| **Tier-2 live** (ADR 0039/0053) | Progressive HLS-TS | Video copy; audio → AAC stereo | Retains the generation; disk budget checked before and during production |
 | **Tier-2 remux** (ADR 0005) | Prepare wait (download whole file) | Video copy; audio → AAC (multichannel) | Disk + time; fallback, or `cast_live: false` |
 | **Mirror** (ADR 0006/0015/0023) | Instant | 1080p SDR (HDR→SDR) | Needs openscreen sender + Hyprland/PipeWire |
 
 ### Tier-2 remux
+
+HLS delivery always owns a detached producer/server, including interactive playback.
+A lost Cast control connection does not end the film or remove its media. castbridge
+tries to reattach control after 1, 2 and 4 seconds using GET_STATUS, without LAUNCH/LOAD
+or resetting playback. It verifies the receiver app session, media session and content
+identity before accepting the connection. Stop/replacement cancels pending retries.
+If recovery fails, the media server remains available until explicit stop, replacement
+or its normal idle expiry. A real TV/network outage can still interrupt data delivery.
 
 castbridge discovery uses `CASTBRIDGE_BIN`, then `PATH`, then the historical
 `~/Workspace/tooling/openscreen-build/openscreen/out/Default/castbridge` build.
@@ -95,6 +112,28 @@ path requires the receiver to enter PLAYING/PAUSED/BUFFERING — a playlist GET 
 (ADR 0044). Dual-layer Dolby Vision (enhancement layer) and a first segment the DMR cannot
 decode skip live. The complete-file remux is the fallback when the live start fails. JSON
 `delivery` says which ran (`live` / `file`).
+
+HLS uses an append-only EVENT playlist: all advertised segments stay available until
+the generation is retired or the cast is stopped. Disk eligibility reserves the estimated
+full output (source size ×1.25 plus 512 MiB), rather than promising a 40-minute cache.
+Production pauses 30 minutes ahead of the fetch watermark and resumes below 15 minutes;
+HTTP fetch-ahead is not a measurement of the TV's exact playback position.
+
+A two-second watchdog checks retained output, partial files and remaining disk space.
+The session budget allows two generations plus overhead (source size ×2.5), bounded by
+initial free space minus 512 MiB. Unknown-size sources use `cast_remux_max_size_gb`, or
+20 GiB if that setting is zero. This is a sampled guard, not a filesystem quota: fast
+writes or other processes can overshoot it between checks. Stat/write failures remain
+best-effort. Disk/source failure is terminal and visible; it never deletes advertised
+segments to continue silently. A new seek can explicitly restart the producer after a
+source failure; disk failures require freeing space or choosing another source.
+
+Startup normally buffers 12 seconds. After at least three seconds of production near
+or below real time (<1.2×), it increases the target (30 / production rate, up to 60 seconds).
+A completed short source can start below the target. Sustained production below real time
+still cannot guarantee uninterrupted playback; `live_slow` warns without changing quality.
+`--status` exposes a terminal producer problem separately as optional `delivery_error`;
+the receiver may still be consuming its already downloaded buffer.
 
 stderr shows a prepare message during remux. JSON field `reencoded: true` when remux was used.
 Before a complete-file prepare, stderr explains why HLS is unavailable or did not start.
@@ -134,7 +173,7 @@ monotonic deadline when idle is unknown). The receiver probe (`skip_if`)
 runs once at that fire point and re-arms a full window if the TV still
 has our content — not on every poll. Headless leftover servers live
 until the detached idle limit (`IDLE_EXIT_S`, 3 h) or `--stop`. In-cast
-`a` (audio switch) reuses the same library/helper LOAD so title/artwork
+The legacy backend `a` (audio switch) reuses the same library/helper LOAD so title/artwork
 survive.
 
 | LOAD field | catt library (preferred fallback) | catt CLI (import miss) | castbridge |

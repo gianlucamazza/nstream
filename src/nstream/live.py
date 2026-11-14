@@ -6,9 +6,8 @@ instead of after the whole-file remux (ADR 0005). This module owns the ffmpeg pr
 the disk policy around it; `serve` serves the directory and reports which segment the
 receiver asked for, `remux.cast_live` wires it to a cast.
 
-Disk stays bounded without polling the receiver:
-- **behind**: segments older than `KEEP_BEHIND_S` before the newest one requested are
-  deleted (a backward seek past that window is not served);
+EVENT playlists retain all advertised segments until the generation is retired:
+- **disk**: a per-job byte budget and free-space reserve stop a producer before exhaustion;
 - **ahead**: the producer is paused (SIGSTOP) when it runs `AHEAD_MAX_S` past the newest
   request, and resumed (SIGCONT) below `AHEAD_RESUME_S`. A paused producer's upstream may
   time out; `urlproxy` resumes it with a Range.
@@ -38,9 +37,10 @@ _log = log.get_logger("live")
 
 PLAYLIST = "index.m3u8"  # generation 0 (the playlist a cast LOADs first)
 SEGMENT_S = 6
-KEEP_BEHIND_S = 600.0
 AHEAD_MAX_S = 1800.0
 AHEAD_RESUME_S = 900.0
+DISK_RESERVE_BYTES = 512 * 1024**2
+HEALTH_FILE = "producer.json"
 # Generation 0 keeps the historical names; a restart (seek anywhere) writes generation N
 # as `gN.m3u8` + `gN_<i>.ts`, so the receiver never mixes two producers' segments. A
 # generation that carries an embedded subtitle rendition (ADR 0042) is an HLS master:
@@ -132,7 +132,7 @@ _EXTINF = re.compile(r"#EXTINF:([0-9.]+)")
 class Job:
     """What to produce: the source url, the audio mapping/encoding (ffmpeg args) and the
     initial play head `head_s` (the resume point the LOAD will seek to: the pacing must let
-    the producer reach it, and nothing before it needs to stay on disk). `ss_s` > 0 starts
+    the producer reach it). `ss_s` > 0 starts
     the producer there instead (fast resume): the playlist then begins at that point and
     the receiver counts from 0 — callers add `first_pts` to what it reports."""
 
@@ -152,6 +152,7 @@ class Job:
     rms: bool = False
     rms_channels: int = 0
     sub_file: str = ""
+    max_bytes: int = 0  # session budget, including retained generations and partial segments
 
     @property
     def subs(self) -> bool:
@@ -163,6 +164,7 @@ class Job:
             "audio_args": list(self.audio_args), "head_s": self.head_s, "ss_s": self.ss_s,
             "sub_map": self.sub_map, "sub_lang": self.sub_lang, "sub_file": self.sub_file,
             "rms": self.rms, "rms_channels": self.rms_channels,
+            "max_bytes": self.max_bytes,
         }  # fmt: skip
 
     @classmethod
@@ -172,6 +174,7 @@ class Job:
             tuple(str(a) for a in d["audio_args"]), float(d.get("head_s") or 0.0),
             float(d.get("ss_s") or 0.0), str(d.get("sub_map") or ""), str(d.get("sub_lang") or ""),
             bool(d.get("rms")), int(d.get("rms_channels") or 0), str(d.get("sub_file") or ""),
+            max(0, int(d.get("max_bytes") or 0)),
         )  # fmt: skip
 
 
@@ -407,13 +410,37 @@ class Producer:
     _pending: tuple[float, int] | None = None
     # Generations a restart replaced, kept until the receiver asks for the new one.
     _retired: list[int] = field(default_factory=list)
+    error: str = ""
+    _state: str = ""
 
     @classmethod
     def start(cls, job: Job, out_dir: str, gen: int = 0) -> Producer | None:
         proc = _spawn(job, out_dir, gen)
         if proc is None:
             return None
-        return cls(out_dir, proc, newest_s=job.head_s, gen=gen, job=job)
+        producer = cls(out_dir, proc, newest_s=job.head_s, gen=gen, job=job)
+        producer._publish("running")
+        return producer
+
+    def _publish(self, state: str) -> None:
+        if self._state == state:
+            return
+        if state == "failed":
+            _log.warning("live: producer failed (%s)", self.error)
+        with contextlib.suppress(OSError):
+            util.atomic_write_bytes(
+                Path(self.out_dir, HEALTH_FILE),
+                json.dumps({"gen": self.gen, "state": state, "error": self.error}).encode(),
+                prefix=".producer-",
+            )
+            self._state = state
+
+    def _fail(self, error: str) -> None:
+        if self.error:
+            return
+        self.error = error
+        _terminate(self.proc)
+        self._publish("failed")
 
     def request_restart(self, ss_s: float, gen: int) -> None:
         """Queue a restart for the pacing thread. ffmpeg is spawned with PR_SET_PDEATHSIG,
@@ -440,12 +467,14 @@ class Producer:
             self.proc, self.gen, self.job = proc, gen, job
             self.newest_s, self.paused = 0.0, False
             self._retired.append(old_gen)
+            self.error, self._state = "", ""
         _terminate(old)
+        self._publish("running")
         return True
 
     def failed(self) -> bool:
-        """The producer exited without producing anything usable."""
-        return self.proc.poll() not in (None, 0) and not timeline(self.out_dir, self.gen, self.subs)
+        """An abnormal exit is a failure even when some segments remain playable."""
+        return bool(self.error) or self.proc.poll() not in (None, 0)
 
     @property
     def subs(self) -> bool:
@@ -461,7 +490,7 @@ class Producer:
             return ""
 
     def on_request(self, name: str) -> None:
-        """Segment `name` was requested: advance the play head, prune behind it, and drop
+        """Segment `name` was requested: advance the fetch watermark and drop
         the generations a restart replaced. Requests for another generation (a receiver
         still on the old playlist) are ignored."""
         sid = segment_id(name)
@@ -478,22 +507,33 @@ class Producer:
             return
         with self._lock:
             self.newest_s = max(self.newest_s, start)
-            floor = self.newest_s - KEEP_BEHIND_S
-        for i, t, d in tl:
-            if t + d > floor:
-                break
-            with contextlib.suppress(OSError):
-                os.unlink(os.path.join(self.out_dir, segment_name(gen, i, self.subs)))
-            if self.subs:  # the rendition's cue segments go with their media segment
-                with contextlib.suppress(OSError):
-                    os.unlink(os.path.join(self.out_dir, vtt_name(gen, i)))
 
     def tick(self) -> None:
         """Pause the producer far ahead of the play head, resume it when it catches up."""
         with self._lock:
             proc, gen = self.proc, self.gen
-        if proc.poll() is not None:
+        rc = proc.poll()
+        if rc is not None:
+            if rc != 0:
+                self.error = self.error or "live_source_failed"
+                self._publish("failed")
+            else:
+                complete = production_complete(self.out_dir, gen, self.subs)
+                if complete:
+                    self._publish("completed")
+                else:
+                    self.error = "live_source_incomplete"
+                    self._publish("failed")
             return
+        if self.job is not None and self.job.max_bytes:
+            used = directory_bytes(self.out_dir)
+            free = util.free_gib(Path(self.out_dir)) * 1024**3
+            if used >= self.job.max_bytes:
+                self._fail("live_buffer_limit")
+                return
+            if free and free < DISK_RESERVE_BYTES:
+                self._fail("live_disk_low")
+                return
         ahead = produced_s(self.out_dir, gen, self.subs) - self.newest_s
         with self._lock:
             if not self.paused and ahead > AHEAD_MAX_S:
@@ -502,6 +542,7 @@ class Producer:
             elif self.paused and ahead < AHEAD_RESUME_S:
                 self._signal(signal.SIGCONT)
                 self.paused = False
+        self._publish("paused" if self.paused else "running")
 
     def _signal(self, sig: int) -> None:
         with contextlib.suppress(ProcessLookupError, OSError):
@@ -529,6 +570,44 @@ class Producer:
         self._stopped = True
         _terminate(self.proc)
         shutil.rmtree(self.out_dir, ignore_errors=True)
+
+
+def directory_bytes(out_dir: str) -> int:
+    """Include partial segments and sidecars; a failed stat is best-effort."""
+    total = 0
+    with contextlib.suppress(OSError):
+        for entry in os.scandir(out_dir):
+            with contextlib.suppress(OSError):
+                if entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+    return total
+
+
+def producer_error(out_dir: str, gen: int | None = None) -> str | None:
+    data = util.load_json(Path(out_dir, HEALTH_FILE), {})
+    if not isinstance(data, dict) or (gen is not None and data.get("gen") != gen):
+        return None
+    error = data.get("error")
+    return (
+        error
+        if error
+        in {"live_source_failed", "live_source_incomplete", "live_buffer_limit", "live_disk_low"}
+        else None
+    )
+
+
+def production_complete(out_dir: str, gen: int = 0, subs: bool = False) -> bool:
+    try:
+        return "#EXT-X-ENDLIST" in Path(out_dir, playlist_name(gen, subs)).read_text()
+    except OSError:
+        return False
+
+
+def session_error(device: str | None) -> str | None:
+    st = util.RunState("remux").read()
+    if not st or st.get("mode") != "live" or (device and st.get("device") != device):
+        return None
+    return producer_error(str(st.get("file") or ""))
 
 
 ALIGN_FILE = "align.json"

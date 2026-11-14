@@ -16,6 +16,9 @@ def resolve_session_device(prefer: str | None = None) -> str | None:
     """Device IP/name for lifecycle actions: explicit prefer, else live session, else None."""
     if prefer:
         return prefer
+    active = state.active_cast_info()
+    if active and active.get("device"):
+        return active["device"]
     return state.cast_session_device()
 
 
@@ -37,6 +40,8 @@ def stop_cast(cfg: Config, *, device: str | None = None) -> tuple[bool, str]:
         ok = bridge.stop(dev) or ok
     ok = remux.stop(dev) or ok
     ok = ok or mirror_stopped
+    if ok:
+        state.clear_active_cast(device=dev)
     state.update_from_receiver(
         cfg,
         dev,
@@ -61,6 +66,15 @@ def cast_status(*, device: str | None = None) -> tuple[bool, str]:
     dur = float(st.get("duration") or 0.0)
     vol = st.get("volume")
     bits = [str(state_s), str(title)]
+    if st.get("delivery_error"):
+        bits.append(
+            {
+                "live_source_failed": "sorgente interrotta; riprova o scegli un'altra sorgente",
+                "live_source_incomplete": "sorgente incompleta; scegli un'altra sorgente",
+                "live_buffer_limit": "limite buffer raggiunto; scegli una sorgente più piccola",
+                "live_disk_low": "spazio disco insufficiente; libera spazio",
+            }.get(st["delivery_error"], "errore di riproduzione")
+        )
     if dur > 0:
         bits.append(f"{pos:.0f}/{dur:.0f}s")
     elif pos > 0:

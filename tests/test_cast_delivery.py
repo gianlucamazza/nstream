@@ -39,6 +39,24 @@ def test_failed_after_started_is_no_fallback(monkeypatch):
     )
     assert out is not None and out.started  # catt wouldn't fare better: no fallback
     assert (out.pos, out.dur) == (10.0, 100.0)
+    assert out.error == "media_error"
+
+
+def test_local_producer_failure_after_start_is_terminal(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(cast_delivery.bridge, "stop", lambda device: stopped.append(device))
+    checks = iter([None, None, "live_source_failed"])
+    out = _drive(
+        monkeypatch,
+        [
+            {"kind": "started"},
+            {"kind": "playing", "position": 98, "duration": 100},
+            {"kind": "playing", "position": 99, "duration": 100},
+        ],
+        delivery_error=lambda: next(checks),
+    )
+    assert out is not None and out.started and out.error == "live_source_failed"
+    assert out.pos == 98 and stopped == ["1.2.3.4"]
 
 
 def test_tracks_position_and_confirmed_tracks(monkeypatch):
@@ -51,7 +69,9 @@ def test_tracks_position_and_confirmed_tracks(monkeypatch):
         ],
     )
     # an empty echo never erases a confirmation already seen
-    assert out == cast_delivery.BridgeOutcome(98.0, 100.0, True, False, tracks=(1,))
+    assert out == cast_delivery.BridgeOutcome(
+        98.0, 100.0, True, False, tracks=(1,), end_reason="finished"
+    )
 
 
 @pytest.mark.parametrize(
@@ -105,7 +125,7 @@ def test_disconnect_hook_breaks_and_flags(monkeypatch):
     assert out.pos != 99.0  # the ended event after the break was not consumed
 
 
-def test_disconnect_without_hook_keeps_following(monkeypatch):
+def test_disconnect_without_hook_preserves_delivery(monkeypatch):
     out = _drive(
         monkeypatch,
         [
@@ -114,8 +134,8 @@ def test_disconnect_without_hook_keeps_following(monkeypatch):
             {"kind": "ended", "position": 99.0, "duration": 100.0},
         ],
     )
-    assert out is not None and out.disconnected is False  # stream left to end on its own
-    assert out.pos == 99.0 and cast_delivery.is_finished(out.pos, out.dur)
+    assert out is not None and out.disconnected
+    assert out.pos == 42.0 and out.end_reason == "disconnected"
 
 
 def _interrupting_load(events_before_interrupt):

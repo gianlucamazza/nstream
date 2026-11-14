@@ -189,8 +189,8 @@ class Config:
     # asking; N = hard exact resolution (same meaning as --quality N). Headless still
     # only filters when --quality is passed.
     default_quality: int | None = None
-    # Cap continue-watching rows on the home menu before a "…altri" expand is needed.
-    # 0 = no cap (show all resumable entries).
+    # Initial row cap in the dedicated continue-watching menu (legacy key name).
+    # 0 = no cap; a "show all" entry expands the remaining resumable titles.
     home_continue_max: int = 12
     mpv_args: list[str] = field(default_factory=list)
     # TUI appearance. nerd_font: "auto" (env opt-in) | "on" | "off"; posters: render
