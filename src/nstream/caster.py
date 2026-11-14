@@ -934,17 +934,17 @@ def resolve_device(
         _log.warning("catt non trovato nel PATH → cast non disponibile")
         raise CastUnavailable("catt non trovato nel PATH (pipx install catt)")
     devices = _discover(cfg, prefer=prefer, choose=choose, headless=headless)
-    by_name = dict(devices)
+    by_target = {target: ip for name, ip in devices for target in (name, ip)}
     # An explicit target (--device) wins, but only if actually on this LAN.
     if prefer:
-        ip = by_name.get(prefer)
+        ip = by_target.get(prefer)
         if ip:
             return ip
         raise CastUnavailable(f"dispositivo '{prefer}' non in rete")
     # A saved preference is honoured only if that device is actually on this LAN —
     # so after a network change a stale name doesn't pin us to an absent device.
     if cfg.cast_device and not choose:
-        ip = by_name.get(cfg.cast_device)
+        ip = by_target.get(cfg.cast_device)
         if ip:
             if confirm is not None and not confirm(cfg.cast_device, ip):
                 raise CastUnavailable(f"cast su '{cfg.cast_device}' rifiutato")
@@ -984,7 +984,7 @@ def _discover(
     cached = discovery.load_cache()
     target = prefer or cfg.cast_device
     if target:
-        ip = dict(cached).get(target)
+        ip = next((ip for name, ip in cached if target in (name, ip)), None)
         if ip and discovery.verify(ip):
             return [(target, ip)]
     elif not choose and len(cached) == 1 and discovery.verify(cached[0][1]):
@@ -1848,6 +1848,7 @@ def status(device: str | None) -> dict:
     vol, muted = _vol_muted(info)
     active_tracks, receiver_error = _bridge_track_info(device)
     result = {
+        "telemetry_connected": bool(info),
         "player_state": state or "IDLE",
         "title": title,
         "position": round(pos, 1) if pos else 0.0,

@@ -51,6 +51,43 @@ Always pass `--json`. Quote the title.
 
 Incompatible with `--json`: interactive-only flags such as `--sub-menu` → `error: usage`.
 
+### Desktop observation protocol v1
+
+`nstream --json --watch` is a dedicated, persistent JSONL command. It emits an initial
+snapshot and a heartbeat every second, including while receiver I/O is slow. Each object
+contains `ok`, `action: "watch"`, `api_version: 1`, `capabilities` (`watch`, `session_guard`,
+`receiver_interest`), increasing `sequence`, Unix `captured_at`, `entries`, `prefer_cast`,
+`cast_session` and `telemetry`. Unknown additive fields may be ignored; unsupported major
+versions or missing required capabilities must disable controls with a compatibility error.
+
+`cast_session` is null or `{session_id, title, device}`. Its identity changes when the
+cast is replaced, even on the same device. `--history` also exposes this identity and
+`prefer_cast` as additive fields. History is refreshed every five seconds; presence is read
+on each tick. All payloads use the normal secret-redacting JSON writer.
+
+`telemetry` contains `connection: idle|connecting|connected|disconnected`, `sampled_at`
+(Unix time of the last valid receiver sample, or null), and `status` (the last valid
+`--status` fields, or null). A failed sample preserves the previous status and time;
+clients must mark it stale when disconnected or older than ten seconds. Missing stream
+heartbeats for five seconds also makes the observation stale. Connection loss never means
+playback completed. `telemetry_connected` is also an additive field on `--status`.
+
+Receiver queries are opt-in: write `{"observe":true}\n` to stdin while the panel is open,
+and `{"observe":false}\n` when closed. Queries run at most once per three seconds, with
+at most one in flight. Closing interest does not cancel an already running request. Input
+must be newline-delimited JSON, with a Boolean `observe`, bounded to 4096 buffered bytes.
+Malformed input exits 2. EOF, Ctrl-C or closed stdout ends only observation, without
+STOP, media LOAD, delivery cleanup or ownership transfer. A client reconnects by starting
+a new watcher and consumes its fresh initial snapshot; sequence numbers are per process.
+
+For lifecycle commands append `--session-id ID --device IP` from the displayed snapshot.
+An absent/replaced session or mismatched device returns `ok:false, error:"session_changed"`
+before dispatch. The guard requires a lifecycle action and is best-effort across processes,
+not an atomic transaction with the receiver. Discard command responses if the displayed
+session changed while awaiting the result. `ok:true` acknowledges backend acceptance;
+subsequent telemetry describes the observed effect. Existing unguarded CLI commands remain
+compatible. See ADR 0057.
+
 ### Fire-and-return vs `--follow`
 
 `--json --history` returns `action: "history"`, up to 30 resumable `entries` (newest

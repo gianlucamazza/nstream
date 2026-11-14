@@ -7,6 +7,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+## [1.46.0] — 2026-11-14
+
+### Added
+
+- Versioned desktop JSONL observation (`--json --watch`), opt-in receiver telemetry,
+  stable session identities and guarded lifecycle commands (`--session-id`, ADR 0057).
+  Preserve the last valid reading on disconnect and reject results from replaced casts.
+
+### Fixed
+
+- Resolve cast devices by IP as well as name, including verified cached targets, so
+  desktop status and controls can use the address recorded by an active cast.
+
 ## [1.45.0] — 2026-11-14
 
 ### Changed

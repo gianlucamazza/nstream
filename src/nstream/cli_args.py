@@ -40,6 +40,8 @@ _HEADLESS_ONLY: tuple[tuple[str, str], ...] = (
     ("stop", "--stop"),
     ("status", "--status"),
     ("history", "--history"),
+    ("watch", "--watch"),
+    ("session_id", "--session-id"),
     ("pause", "--pause"),
     ("resume", "--resume"),
     ("seek", "--seek"),
@@ -210,6 +212,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--stop",
         action="store_true",
         help="ferma il cast in corso (richiede --json)",
+    )
+    parser.add_argument(
+        "--watch", action="store_true", help="snapshot desktop JSONL (richiede --json)"
+    )
+    parser.add_argument(
+        "--session-id", help="esegui il controllo solo sulla sessione cast indicata"
     )
     parser.add_argument(
         "--history",

@@ -197,6 +197,25 @@ def test_resolve_device_cached_target_instant(monkeypatch):
     assert caster.resolve_device(cfg) == "192.168.1.5"
 
 
+@pytest.mark.parametrize("explicit", [True, False])
+def test_resolve_device_cached_ip_instant(monkeypatch, explicit):
+    monkeypatch.setattr(caster.discovery, "load_cache", lambda: [("Salotto", "192.168.1.5")])
+    monkeypatch.setattr(caster.discovery, "verify", lambda ip, **k: ip == "192.168.1.5")
+    monkeypatch.setattr(caster.discovery, "get_devices", _must_not_wait)
+    cfg = Config(torrentio_base="tb", cast_device="" if explicit else "192.168.1.5")
+    assert (
+        caster.resolve_device(cfg, headless=True, prefer="192.168.1.5" if explicit else None)
+        == "192.168.1.5"
+    )
+
+
+def test_resolve_device_dead_cached_ip_rejected_after_address_change(monkeypatch):
+    monkeypatch.setattr(caster.discovery, "load_cache", lambda: [("Salotto", "192.168.1.5")])
+    monkeypatch.setattr(caster.discovery, "get_devices", _scan([("Salotto", "192.168.1.99")]))
+    with pytest.raises(caster.CastUnavailable):
+        caster.resolve_device(CFG, headless=True, prefer="192.168.1.5")
+
+
 def test_resolve_device_cached_single_instant(monkeypatch):
     # The common single-TV home: the lone cached device, verified, is used right away.
     monkeypatch.setattr(caster.discovery, "load_cache", lambda: [("TV1", "10.0.0.9")])
@@ -566,6 +585,18 @@ def test_resolve_device_headless_prefers_named(monkeypatch):
         caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("Salotto", "10.0.0.2")])
     )
     assert caster.resolve_device(CFG, headless=True, prefer="Salotto") == "10.0.0.2"
+
+
+@pytest.mark.parametrize("explicit", [True, False])
+def test_resolve_device_headless_prefers_ip(monkeypatch, explicit):
+    monkeypatch.setattr(
+        caster.discovery, "get_devices", _scan([("TV1", "10.0.0.1"), ("Salotto", "10.0.0.2")])
+    )
+    cfg = Config(torrentio_base="tb", cast_device="" if explicit else "10.0.0.2")
+    assert (
+        caster.resolve_device(cfg, headless=True, prefer="10.0.0.2" if explicit else None)
+        == "10.0.0.2"
+    )
 
 
 def test_resolve_device_prefer_absent_raises(monkeypatch):

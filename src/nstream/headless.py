@@ -23,6 +23,7 @@ from . import (
     api,
     bridge,
     caster,
+    desktop,
     explain,
     failures,
     headless_play,
@@ -174,6 +175,55 @@ def run_auto(cfg: Config, args: argparse.Namespace, opts: PlayOpts) -> int:
             }
         )
         return 2
+    if getattr(args, "watch", False):
+        conflicts = (
+            "stop",
+            "status",
+            "pause",
+            "resume",
+            "cont",
+            "cast",
+            "local",
+            "mirror",
+            "probe",
+            "history",
+            "browse",
+            "device",
+            "session_id",
+            "explain",
+        )
+        values = ("volume", "seek", "sub_shift", "follow", "season", "episode", "year")
+        if (
+            args.query
+            or any(getattr(args, key, None) for key in conflicts)
+            or any(getattr(args, key, None) is not None for key in values)
+        ):
+            _emit_json(
+                {"ok": False, "error": "usage", "message": "--watch richiede un comando separato"}
+            )
+            return 2
+        return desktop.watch(cfg)
+    if getattr(args, "session_id", None) and (
+        args.query
+        or not (
+            args.stop
+            or args.status
+            or args.pause
+            or args.resume
+            or args.seek is not None
+            or args.volume is not None
+            or getattr(args, "sub_shift", None) is not None
+        )
+    ):
+        _emit_json(
+            {"ok": False, "error": "usage", "message": "--session-id richiede un controllo cast"}
+        )
+        return 2
+    if getattr(args, "session_id", None) and not _session_matches(args):
+        _emit_json(
+            {"ok": False, "error": "session_changed", "message": "la sessione cast è cambiata"}
+        )
+        return 1
     # Desktop background polling is a pure local read, without GC or discovery.
     if getattr(args, "history", False):
         return _run_history(cfg, tfilter)
@@ -444,38 +494,36 @@ def _run_auto_resume(
 
 def _run_history(cfg: Config, typ: str | None = None) -> int:
     """Bounded descriptive fields only; no receiver requests or next-episode lookup."""
-    entries = []
-    for entry in state.resumable(cfg, limit=30, typ=typ):
-        entries.append(
-            {
-                **{
-                    k: entry[k]
-                    for k in ("title", "type", "season", "episode", "position", "duration")
-                    if k in entry
-                },
-                "next": entry.get("type") == "series" and state.is_watched(entry),
-            }
-        )
-    session = state.active_cast_info() or state.cast_session_info()
-    _emit_json(
-        {
-            "ok": True,
-            "action": "history",
-            "entries": entries,
-            "cast_session": (
-                {"title": session.get("title", ""), "device": session.get("device", "")}
-                if session
-                else None
-            ),
-        }
-    )
+    _emit_json({"ok": True, "action": "history", **desktop.history_payload(cfg, typ)})
     return 0
+
+
+def _session_matches(args: argparse.Namespace) -> bool:
+    expected = getattr(args, "session_id", None)
+    session = desktop.session_info()
+    return not expected or bool(
+        session
+        and session["session_id"] == expected
+        and (not args.device or args.device == session["device"])
+    )
 
 
 def _headless_device(cfg: Config, args: argparse.Namespace) -> str | None:
     """Resolve the cast device for a lifecycle action (--stop/--status), or None (emitting a
     device_not_found JSON) when no Chromecast can be resolved without a picker."""
     try:
+        if getattr(args, "session_id", None):
+            if not _session_matches(args):
+                _emit_json(
+                    {
+                        "ok": False,
+                        "error": "session_changed",
+                        "message": "la sessione cast è cambiata",
+                    }
+                )
+                return None
+            session = desktop.session_info()
+            return session["device"] if session else None
         session = state.active_cast_info() or state.cast_session_info()
         prefer = args.device or (session.get("device") if session else None)
         return _resolve_device(cfg, headless=True, prefer=prefer)
@@ -488,11 +536,16 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     """`--json --stop`: stop the cast on the resolved device."""
     # A mirror cast is self-contained (sender + headless mpv + null sink, no DMR session):
     # tear it down first, independent of DMR device resolution.
+    if getattr(args, "session_id", None):
+        device = _headless_device(cfg, args)
+        if device is None:
+            return 1
     mirror_stopped = mirror.stop()
     try:
         session = state.active_cast_info() or state.cast_session_info()
         prefer = args.device or (session.get("device") if session else None)
-        device = _resolve_device(cfg, headless=True, prefer=prefer)
+        if not getattr(args, "session_id", None):
+            device = _resolve_device(cfg, headless=True, prefer=prefer)
     except CastUnavailable as e:
         # The TV is off/unreachable: still reclaim the local side (detached remux server,
         # its multi-GB temp file, a subtitle server) — it would otherwise pin disk forever.
@@ -505,6 +558,12 @@ def _run_stop(cfg: Config, args: argparse.Namespace) -> int:
     # Read the receiver position BEFORE stopping: it's the resume point of a
     # fire-and-return cast, merged into history via the cast session below.
     st = caster.status(device)
+    # Status can block while another process replaces playback. Recheck before STOP.
+    if getattr(args, "session_id", None) and not _session_matches(args):
+        _emit_json(
+            {"ok": False, "error": "session_changed", "message": "la sessione cast è cambiata"}
+        )
+        return 1
     ok = caster.stop(device)
     # A castbridge cast lives in the daemon (not in catt), so stop that session too.
     if bridge.bridge_available():

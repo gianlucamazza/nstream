@@ -84,5 +84,7 @@ fixtures may live under `NNNN-phase*/` next to the ADR (pattern: ADR 0020).
 | [0055](0055-terminal-ownership-and-cast-panel.md) | Terminal ownership independent of cast monitoring | Accepted | 2026-11-14 |
 | [0056](0056-control-loss-is-not-playback-end.md) | Control loss is not playback completion | Accepted | 2026-11-14 |
 
+| [0057](0057-desktop-observation-protocol.md) | Versioned desktop observation without playback ownership | Accepted | 2026-11-14 |
+
 New ADR: copy [`0000-template.md`](0000-template.md), take the next number, add a row above,
 and update [docs/roadmap.md](../roadmap.md) if Status is Proposed.

@@ -9,7 +9,7 @@ because it owns independent stores. Domains below are logical clusters (not impo
 
 ```
 src/nstream/
-├── orchestration    cli · cli_args · headless · headless_play · application · series · settings · doctor
+├── orchestration    cli · cli_args · headless · headless_play · desktop · application · series · settings · doctor
 ├── selection        stream_select · availability · quality · tracks · sources · debrid · engine
 ├── cast             cast_flow · cast_vet · cast_delivery · cast_control · caster
 │                    · remux · live · mirror · bridge · serve · urlproxy · discovery
@@ -80,6 +80,7 @@ flowchart BT
 | `cli` | TUI flow + `main` dispatch (not argparse construction) |
 | `cli_args` | `build_parser()` — flag surface for TUI and `--json` |
 | `headless` | `--json` entry: title select, lifecycle (`--stop`/`--status`/…), delegates play |
+| `desktop` | Versioned desktop snapshots, session identity and opt-in receiver observation (ADR 0057) |
 | `headless_play` | One-title resolve → prepare_stream → play/cast → success JSON |
 | `application` | Shared local subtitle/track preparation and verified playback for both frontends |
 | `doctor` | Read-only installation/config diagnostics; no network or backend effects |

@@ -133,6 +133,7 @@ def test_history_is_local_bounded_and_descriptive(monkeypatch, capsys):
     assert len(out["entries"]) == 30
     assert out["entries"][0]["title"] == "Show 35"
     assert out["entries"][0]["next"] is True
+    assert out["cast_session"].pop("session_id")
     assert out["cast_session"] == {"title": "Show", "device": "TV"}
     assert "private" not in json.dumps(out)
 
@@ -146,7 +147,9 @@ def test_history_empty_and_legacy_session(monkeypatch, capsys):
     assert out["entries"] == [] and out["cast_session"] is None
     state.remember_cast(CFG, {"title": "Movie", "video_id": "tt1", "ts": time.time()}, "TV")
     assert headless.run(CFG, args, _hopts()) == 0
-    assert json.loads(capsys.readouterr().out)["cast_session"] == {"title": "Movie", "device": "TV"}
+    session = json.loads(capsys.readouterr().out)["cast_session"]
+    assert session.pop("session_id")
+    assert session == {"title": "Movie", "device": "TV"}
 
 
 def _hopts(cast=False, audio_lang=None):
