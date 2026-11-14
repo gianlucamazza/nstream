@@ -112,6 +112,7 @@ def test_remux_success_uses_cast_file(monkeypatch, capsys):
     cast never runs and the outcome reports reencoded."""
     stream: Stream = _STREAM.copy()
     seen = _wire(monkeypatch, _plan("remux", stream, audio_index=1))
+    monkeypatch.setattr(cast_flow.remux, "available", lambda: True)
     monkeypatch.setattr(
         cast_flow.remux, "remux_for_cast",
         lambda url, cfg, *, audio_index, size_gb=0.0, **_k: (

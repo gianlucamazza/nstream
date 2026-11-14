@@ -1614,7 +1614,7 @@ def test_cast_live_without_segments_cleans_up_and_yields(monkeypatch):
 
 
 def test_live_feasible_false_for_dual_layer(monkeypatch):
-    monkeypatch.setattr(remux, "live_available", lambda cfg: True)
+    monkeypatch.setattr(remux, "available", lambda: True)
     monkeypatch.setattr(remux.bridge, "bridge_available", lambda: True)
     monkeypatch.setattr(remux, "live_refusal", lambda *a: None)
     monkeypatch.setattr(remux, "_probe_meta", lambda u: _meta(n_video=2, duration=100.0))
